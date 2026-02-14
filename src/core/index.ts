@@ -20,5 +20,8 @@ export { ConversationHistoryWriter } from './conversation-history-writer.js';
 
 export { SessionManager } from './session-manager.js';
 
+export { InMemorySessionStore } from './session-store.js';
+export type { SessionStore } from './session-store.js';
+
 export { VoiceSession } from './voice-session.js';
 export type { VoiceSessionConfig } from './voice-session.js';
