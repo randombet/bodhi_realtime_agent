@@ -15,3 +15,5 @@ export type { EventHandler, IEventBus } from './event-bus.js';
 export { HooksManager } from './hooks.js';
 
 export { ConversationContext } from './conversation-context.js';
+
+export { SessionManager } from './session-manager.js';
