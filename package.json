@@ -37,13 +37,14 @@
     "@ai-sdk/google": "^1.2.0",
     "@google/genai": "^0.9.0",
     "ai": "^4.3.0",
-    "ws": "^8.18.0",
     "write-file-atomic": "^6.0.0",
+    "ws": "^8.18.0",
     "zod": "^3.24.0"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.0",
     "@types/node": "^22.0.0",
+    "@types/write-file-atomic": "^4.0.3",
     "@types/ws": "^8.5.0",
     "tsup": "^8.4.0",
     "typescript": "^5.7.0",

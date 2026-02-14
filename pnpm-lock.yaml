@@ -33,6 +33,9 @@ importers:
       '@types/node':
         specifier: ^22.0.0
         version: 22.19.11
+      '@types/write-file-atomic':
+        specifier: ^4.0.3
+        version: 4.0.3
       '@types/ws':
         specifier: ^8.5.0
         version: 8.18.1
@@ -449,6 +452,9 @@ packages:
 
   '@types/node@22.19.11':
     resolution: {integrity: sha512-BH7YwL6rA93ReqeQS1c4bsPpcfOmJasG+Fkr6Y59q83f9M1WcBRHR2vM+P9eOisYRcN3ujQoiZY8uk5W+1WL8w==}
+
+  '@types/write-file-atomic@4.0.3':
+    resolution: {integrity: sha512-qdo+vZRchyJIHNeuI1nrpsLw+hnkgqP/8mlaN6Wle/NKhydHmUN9l4p3ZE8yP90AJNJW4uB8HQhedb4f1vNayQ==}
 
   '@types/ws@8.18.1':
     resolution: {integrity: sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg==}
@@ -1268,6 +1274,10 @@ snapshots:
   '@types/node@22.19.11':
     dependencies:
       undici-types: 6.21.0
+
+  '@types/write-file-atomic@4.0.3':
+    dependencies:
+      '@types/node': 22.19.11
 
   '@types/ws@8.18.1':
     dependencies:
