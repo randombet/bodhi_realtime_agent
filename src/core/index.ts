@@ -8,3 +8,6 @@ export {
 	ValidationError,
 } from './errors.js';
 export type { ErrorSeverity } from './errors.js';
+
+export { EventBus } from './event-bus.js';
+export type { EventHandler, IEventBus } from './event-bus.js';
