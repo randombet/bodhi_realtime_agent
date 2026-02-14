@@ -17,3 +17,6 @@ export { HooksManager } from './hooks.js';
 export { ConversationContext } from './conversation-context.js';
 
 export { SessionManager } from './session-manager.js';
+
+export { VoiceSession } from './voice-session.js';
+export type { VoiceSessionConfig } from './voice-session.js';
