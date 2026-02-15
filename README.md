@@ -283,7 +283,7 @@ src/
     prompts.ts                # Extraction/consolidation prompt templates
   types/             # TypeScript interfaces and type definitions
 test/                # Unit and integration tests (mirrors src/ structure)
-examples/            # Usage examples
+app/                 # Usage examples
 ```
 
 ## Development
@@ -302,7 +302,7 @@ pnpm typecheck      # TypeScript type checking
 
 ```bash
 export GOOGLE_API_KEY=your_api_key
-pnpm tsx examples/gemini-realtime-tools.ts
+pnpm tsx app/gemini-realtime-tools.ts
 ```
 
 Then connect a WebSocket audio client to `ws://localhost:9900` sending PCM 16-bit 16kHz mono audio.
