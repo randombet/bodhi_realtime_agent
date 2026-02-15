@@ -1,9 +1,214 @@
 # Agents
 
-::: warning COMING SOON
-This page is under construction. See the [Quick Start](/guide/quickstart) to get started.
+Agents are the "personalities" of your voice application. Each agent has its own name, system instructions, tool set, and lifecycle hooks. The framework routes user conversations to the active agent and handles transfers between agents seamlessly.
+
+## Defining an Agent
+
+A `MainAgent` is a plain object — no classes, no inheritance:
+
+```typescript
+import type { MainAgent } from '@bodhi/realtime-agent-framework';
+
+const assistant: MainAgent = {
+  name: 'assistant',
+  instructions: 'You are a friendly voice assistant. Keep answers concise.',
+  tools: [],
+};
+```
+
+That's all you need to get started. Register it with `VoiceSession` and it becomes the voice your users hear.
+
+## Agent Properties
+
+| Property | Type | Required | Description |
+|----------|------|----------|-------------|
+| `name` | `string` | Yes | Unique identifier used for routing and transfers |
+| `instructions` | `string \| () => string` | Yes | System prompt sent to Gemini |
+| `tools` | `ToolDefinition[]` | Yes | Tools available when this agent is active |
+| `googleSearch` | `boolean` | No | Enable Gemini's built-in Google Search grounding |
+| `language` | `string` | No | BCP 47 language tag (e.g. `'zh-CN'`, `'es-ES'`) |
+| `onEnter` | `(ctx) => Promise<void>` | No | Called when this agent becomes active |
+| `onExit` | `(ctx) => Promise<void>` | No | Called when this agent is replaced |
+| `onTurnCompleted` | `(ctx, transcript) => Promise<void>` | No | Called after each completed turn |
+
+## Dynamic Instructions
+
+Instructions can be a function that returns a string. This is useful when instructions depend on runtime state:
+
+```typescript
+const agent: MainAgent = {
+  name: 'assistant',
+  instructions: () => {
+    const now = new Date().toLocaleTimeString();
+    return `You are a helpful assistant. The current time is ${now}.`;
+  },
+  tools: [],
+};
+```
+
+The function is called each time the agent connects to Gemini (on start, after transfers, and on reconnection).
+
+## Agent Transfers
+
+The framework includes a built-in `transferToAgent` tool that Gemini can call to switch agents. When you register multiple agents, the framework automatically makes this tool available:
+
+```typescript
+const mainAgent: MainAgent = {
+  name: 'main',
+  instructions: `You are a general assistant.
+    If the user asks about math, transfer to the math_expert agent.
+    If the user asks in Spanish, transfer to the spanish agent.`,
+  tools: [],
+};
+
+const mathAgent: MainAgent = {
+  name: 'math_expert',
+  instructions: `You are a math tutor. Explain concepts step by step.
+    When done, transfer back to the main agent.`,
+  tools: [],
+};
+
+const session = new VoiceSession({
+  agents: [mainAgent, mathAgent],
+  initialAgent: 'main',
+  // ...other config
+});
+```
+
+During a transfer, the framework:
+
+1. Calls `onExit` on the current agent
+2. Buffers client audio (so nothing is lost)
+3. Disconnects from the current Gemini session
+4. Connects a new Gemini session with the new agent's instructions and tools
+5. Replays buffered audio
+6. Calls `onEnter` on the new agent
+
+::: tip
+Transfers are seamless to the user — they hear continuous audio. The framework manages the Gemini reconnection behind the scenes.
 :::
 
-Agents are personas with distinct instructions, tools, and lifecycle hooks. You can define multiple agents and transfer between them mid-conversation.
+## Multilingual Agents
 
-For now, refer to the [API Reference](/api/) for `MainAgent`.
+Set the `language` property to a BCP 47 tag and the framework prepends a language directive to the system instruction:
+
+```typescript
+const spanishAgent: MainAgent = {
+  name: 'spanish',
+  language: 'es-ES',
+  instructions: 'Eres un asistente amigable. Responde siempre en español.',
+  tools: [],
+};
+```
+
+This tells Gemini to respond in the specified language. Combine with agent transfers for a multilingual experience:
+
+```typescript
+const mainAgent: MainAgent = {
+  name: 'main',
+  instructions: `You are a multilingual receptionist.
+    If the user speaks Spanish, transfer to the spanish agent.
+    If the user speaks Japanese, transfer to the japanese agent.`,
+  tools: [],
+};
+```
+
+## Lifecycle Hooks
+
+Agent lifecycle hooks let you run logic at key moments. They receive an `AgentContext` with access to session state:
+
+```typescript
+const agent: MainAgent = {
+  name: 'support',
+  instructions: 'You are a customer support agent.',
+  tools: [],
+
+  async onEnter(ctx) {
+    // Load user context when agent activates
+    const facts = ctx.getMemoryFacts();
+    if (facts.length > 0) {
+      const summary = facts.map(f => f.content).join('; ');
+      ctx.injectSystemMessage(`Known about this user: ${summary}`);
+    }
+  },
+
+  async onExit(ctx) {
+    // Cleanup when agent deactivates
+    console.log(`Agent ${ctx.agentName} exiting session ${ctx.sessionId}`);
+  },
+
+  async onTurnCompleted(ctx, transcript) {
+    // React to each completed turn
+    console.log(`Turn transcript: ${transcript}`);
+
+    const recent = ctx.getRecentTurns(3);
+    // Analyze recent turns for escalation triggers, etc.
+  },
+};
+```
+
+### AgentContext API
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `injectSystemMessage(text)` | `void` | Add a system message visible to the model on the next turn |
+| `getRecentTurns(count?)` | `ConversationItem[]` | Get the last N conversation turns (default 10) |
+| `getMemoryFacts()` | `MemoryFact[]` | Get all stored memory facts for this user |
+
+::: warning
+Lifecycle hooks are async but should complete quickly — they run inline during agent transitions. Heavy work should be delegated to background tools or subagents.
+:::
+
+## Google Search Grounding
+
+Enable Gemini's built-in Google Search to give an agent access to real-time information:
+
+```typescript
+const newsAgent: MainAgent = {
+  name: 'news',
+  instructions: 'You are a news reporter. Use Google Search to find current events.',
+  tools: [],
+  googleSearch: true,
+};
+```
+
+When `googleSearch` is enabled, Gemini can ground its responses in live search results. This is handled natively by the Gemini API — no additional tool setup needed.
+
+## Multiple Agents Example
+
+Here's a complete multi-agent setup:
+
+```typescript
+import { VoiceSession } from '@bodhi/realtime-agent-framework';
+import type { MainAgent } from '@bodhi/realtime-agent-framework';
+
+const receptionist: MainAgent = {
+  name: 'receptionist',
+  instructions: `You are a friendly receptionist.
+    Route users to the right specialist:
+    - Technical questions → transfer to "tech_support"
+    - Billing questions → transfer to "billing"`,
+  tools: [],
+};
+
+const techSupport: MainAgent = {
+  name: 'tech_support',
+  instructions: `You are a technical support specialist.
+    Help users debug issues. When done, transfer back to "receptionist".`,
+  tools: [/* diagnostic tools */],
+  googleSearch: true,
+};
+
+const billing: MainAgent = {
+  name: 'billing',
+  instructions: `You are a billing specialist.
+    Help with invoices and payments. Transfer back to "receptionist" when done.`,
+  tools: [/* billing tools */],
+};
+
+const session = new VoiceSession({
+  agents: [receptionist, techSupport, billing],
+  initialAgent: 'receptionist',
+  // ...other config
+});
+```
