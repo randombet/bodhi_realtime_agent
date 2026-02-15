@@ -187,6 +187,33 @@ describe('ToolExecutor', () => {
 		await promise;
 	});
 
+	it('passes sendJsonToClient to tool context when provided', async () => {
+		const hooks = new HooksManager();
+		const eventBus = new EventBus();
+		const mockSend = vi.fn();
+		const executor = new ToolExecutor(hooks, eventBus, 'sess_1', 'main', mockSend);
+
+		let receivedCtx: { sendJsonToClient?: (msg: Record<string, unknown>) => void } | null = null;
+		executor.register([
+			createTestTool({
+				execute: vi.fn(async (_args, ctx) => {
+					receivedCtx = ctx;
+					ctx.sendJsonToClient?.({ type: 'test', data: 'hello' });
+					return 'ok';
+				}),
+			}),
+		]);
+
+		await executor.handleToolCall({
+			toolCallId: 'tc_1',
+			toolName: 'test_tool',
+			args: { query: 'test' },
+		});
+
+		expect(receivedCtx?.sendJsonToClient).toBe(mockSend);
+		expect(mockSend).toHaveBeenCalledWith({ type: 'test', data: 'hello' });
+	});
+
 	it('tracks pending count', async () => {
 		const { executor } = setup();
 		executor.register([

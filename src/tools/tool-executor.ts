@@ -27,6 +27,7 @@ export class ToolExecutor {
 		private eventBus: IEventBus,
 		private sessionId: string,
 		private agentName: string,
+		private sendJsonToClient?: (message: Record<string, unknown>) => void,
 	) {}
 
 	register(tools: ToolDefinition[]): void {
@@ -89,6 +90,7 @@ export class ToolExecutor {
 			agentName: this.agentName,
 			sessionId: this.sessionId,
 			abortSignal: controller.signal,
+			sendJsonToClient: this.sendJsonToClient,
 		};
 
 		let result: ToolResult;

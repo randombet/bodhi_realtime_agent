@@ -160,6 +160,7 @@ export class VoiceSession {
 			this.eventBus,
 			config.sessionId,
 			config.initialAgent,
+			(msg) => this.clientTransport.sendJsonToClient(msg),
 		);
 
 		if (initialAgent?.tools.length) {
@@ -218,6 +219,7 @@ export class VoiceSession {
 			this.eventBus,
 			this.config.sessionId,
 			agent.name,
+			(msg) => this.clientTransport.sendJsonToClient(msg),
 		);
 		this.toolExecutor.register(agent.tools);
 	}

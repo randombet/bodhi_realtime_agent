@@ -166,6 +166,24 @@ Use this when the user specifically asks for a "slow search" demo.`,
 };
 
 /**
+ * Speech speed control — sends playback rate change to the web client.
+ */
+const setSpeechSpeed: ToolDefinition = {
+	name: 'set_speech_speed',
+	description: `Change the speech speed. Call this when the user asks you to speak slower, faster, or at normal speed.`,
+	parameters: z.object({
+		speed: z.enum(['slow', 'normal', 'fast']).describe('The desired speech speed'),
+	}),
+	execution: 'inline',
+	execute: async (args, ctx: ToolContext) => {
+		const { speed } = args as { speed: 'slow' | 'normal' | 'fast' };
+		console.log(`[Tool] set_speech_speed: ${speed}`);
+		ctx.sendJsonToClient?.({ type: 'speech_speed', speed });
+		return { speed, status: 'applied' };
+	},
+};
+
+/**
  * Transfer-to-agent tool — used by Gemini to trigger agent transfers.
  * The framework intercepts calls to 'transfer_to_agent' automatically.
  */
@@ -208,7 +226,8 @@ You have access to:
 2. **Calculator**: Evaluate math expressions (sqrt, sin, cos, log, pi, etc.)
 3. **Current Time**: Get the current date and time in any timezone
 4. **Slow Web Search**: Demo tool that takes 3 seconds — shows how the framework handles slow operations
-5. **Agent Transfers**: Transfer to math expert or Spanish assistant
+5. **Speech Speed**: Change speech speed (slow/normal/fast) when the user asks
+6. **Agent Transfers**: Transfer to math expert or Spanish assistant
 
 Guidelines:
 - ALWAYS speak in English, regardless of what language the user speaks
@@ -217,8 +236,9 @@ Guidelines:
 - Use calculator for simple math
 - For COMPLEX math questions, use transfer_to_agent with agent_name "math_expert"
 - When the user wants to speak Spanish or practice Spanish, use transfer_to_agent with agent_name "spanish_agent"
+- When the user asks you to speak slower or faster, call set_speech_speed
 - When using slow_web_search, tell the user you're searching while you wait for results`,
-	tools: [calculate, getCurrentTime, slowWebSearch, transferFromMain],
+	tools: [calculate, getCurrentTime, slowWebSearch, setSpeechSpeed, transferFromMain],
 	googleSearch: true,
 	onEnter: async () => {
 		console.log('[Agent] Main agent entered');
@@ -360,6 +380,7 @@ async function main() {
 	console.log("  - 'I need help with complex math' (transfers to math expert)");
 	console.log("  - 'What's the weather in San Francisco?' (uses Google Search)");
 	console.log("  - 'Use slow search for AI news'");
+	console.log("  - 'Speak slower please' (changes speech speed)");
 	console.log("  - 'I want to practice Spanish' (transfers to Spanish agent)");
 	console.log();
 	console.log('Press Ctrl+C to stop.');

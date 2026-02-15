@@ -42,4 +42,6 @@ export interface ToolContext {
 	sessionId: string;
 	/** Aborted when the tool call is cancelled (user interruption or timeout). */
 	abortSignal: AbortSignal;
+	/** Send a JSON message to the connected client (delivered as a WebSocket text frame). */
+	sendJsonToClient?(message: Record<string, unknown>): void;
 }

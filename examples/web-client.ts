@@ -135,6 +135,7 @@ let processor = null;
 let recognition = null;
 let connected = false;
 let nextPlayTime = 0;
+let playbackRate = 1.0;
 let bytesSent = 0;
 let bytesRecv = 0;
 let audioChunksRecv = 0;
@@ -300,6 +301,7 @@ function playChunk(arrayBuf) {
 
     const src = audioCtx.createBufferSource();
     src.buffer = audioBuf;
+    src.playbackRate.value = playbackRate;
     src.connect(audioCtx.destination);
 
     const now = audioCtx.currentTime;
@@ -307,7 +309,7 @@ function playChunk(arrayBuf) {
       nextPlayTime = now + 0.05;
     }
     src.start(nextPlayTime);
-    nextPlayTime += audioBuf.duration;
+    nextPlayTime += audioBuf.duration / playbackRate;
     playChunkCount++;
 
     if (playChunkCount <= 5) {
@@ -486,6 +488,10 @@ function connectWs() {
           addSystem('[gui] ' + JSON.stringify(msg.payload?.data));
         } else if (msg.type === 'gui.notification') {
           addSystem('[notification] ' + (msg.payload?.message || ''));
+        } else if (msg.type === 'speech_speed') {
+          const speeds = { slow: 0.85, normal: 1.0, fast: 1.2 };
+          playbackRate = speeds[msg.speed] || 1.0;
+          addSystem('[speed] Speech speed set to ' + msg.speed + ' (' + playbackRate + 'x)');
         } else if (msg.type === 'grounding') {
           const chunks = msg.payload?.groundingChunks;
           if (Array.isArray(chunks) && chunks.length > 0) {
