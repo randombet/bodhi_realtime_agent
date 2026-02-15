@@ -201,48 +201,62 @@ The image will appear in the web client while you describe it.`,
 		const { prompt } = args as { prompt: string };
 		console.log(`[Tool] generate_image: ${prompt}`);
 
+		const ai = new GoogleGenAI({ apiKey: API_KEY });
+
+		// Try Imagen API first (dedicated image generation), then fall back to Gemini multimodal
 		try {
-			const ai = new GoogleGenAI({ apiKey: API_KEY });
+			const response = await ai.models.generateImages({
+				model: 'imagen-3.0-generate-002',
+				prompt,
+				config: { numberOfImages: 1 },
+			});
+
+			const imageBytes = response?.generatedImages?.[0]?.image?.imageBytes;
+			if (imageBytes) {
+				const mimeType = response.generatedImages[0].image?.mimeType ?? 'image/png';
+				ctx.sendJsonToClient?.({
+					type: 'image',
+					data: { base64: imageBytes, mimeType, description: prompt },
+				});
+				console.log(`[Tool] Image generated via Imagen for: ${prompt}`);
+				return { status: 'success', description: `Image generated: ${prompt}` };
+			}
+
+			const raiReason = response?.generatedImages?.[0]?.raiFilteredReason;
+			if (raiReason) {
+				console.log(`[Tool] Image filtered: ${raiReason}`);
+				return { error: `Image was filtered by safety: ${raiReason}` };
+			}
+		} catch (imagenError) {
+			console.log(`[Tool] Imagen failed, trying Gemini: ${imagenError}`);
+		}
+
+		// Fallback: use Gemini multimodal model
+		try {
 			const response = await ai.models.generateContent({
 				model: 'gemini-2.0-flash-exp',
 				contents: prompt,
-				config: { responseModalities: ['TEXT', 'IMAGE'] },
+				config: { responseModalities: ['IMAGE', 'TEXT'] },
 			});
 
-			// biome-ignore lint/suspicious/noExplicitAny: Gemini response parts have dynamic shape
-			const parts = (response as any).candidates?.[0]?.content?.parts ?? [];
-			let imageData: { base64: string; mimeType: string } | null = null;
-			let textDescription = '';
-
+			const parts = response.candidates?.[0]?.content?.parts ?? [];
 			for (const part of parts) {
 				if (part.inlineData?.data) {
-					imageData = {
-						base64: part.inlineData.data,
-						mimeType: part.inlineData.mimeType ?? 'image/png',
-					};
-				}
-				if (part.text) {
-					textDescription += part.text;
+					ctx.sendJsonToClient?.({
+						type: 'image',
+						data: {
+							base64: part.inlineData.data,
+							mimeType: part.inlineData.mimeType ?? 'image/png',
+							description: prompt,
+						},
+					});
+					console.log(`[Tool] Image generated via Gemini for: ${prompt}`);
+					return { status: 'success', description: `Image generated: ${prompt}` };
 				}
 			}
 
-			if (imageData) {
-				ctx.sendJsonToClient?.({
-					type: 'image',
-					data: {
-						base64: imageData.base64,
-						mimeType: imageData.mimeType,
-						description: prompt,
-					},
-				});
-				console.log(`[Tool] Image generated for: ${prompt}`);
-				return {
-					status: 'success',
-					description: textDescription || `Image generated: ${prompt}`,
-				};
-			}
-
-			return { status: 'no_image', description: textDescription || 'No image was generated' };
+			const text = response.text ?? '';
+			return { status: 'no_image', description: text || 'No image was generated' };
 		} catch (error) {
 			const msg = error instanceof Error ? error.message : String(error);
 			console.error(`[Tool] generate_image error: ${msg}`);
