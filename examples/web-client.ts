@@ -486,6 +486,12 @@ function connectWs() {
           addSystem('[gui] ' + JSON.stringify(msg.payload?.data));
         } else if (msg.type === 'gui.notification') {
           addSystem('[notification] ' + (msg.payload?.message || ''));
+        } else if (msg.type === 'grounding') {
+          const chunks = msg.payload?.groundingChunks;
+          if (Array.isArray(chunks) && chunks.length > 0) {
+            const sources = chunks.map(c => c.web?.title || c.web?.uri || '').filter(Boolean).join(', ');
+            if (sources) addSystem('[sources] ' + sources);
+          }
         }
       } catch {
         dbg('Bad JSON text frame', 'warn');

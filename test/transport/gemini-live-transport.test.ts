@@ -81,6 +81,43 @@ describe('GeminiLiveTransport', () => {
 			expect(tools[0].functionDeclarations[0].description).toBe('Search the web');
 		});
 
+		it('includes googleSearch when enabled', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', googleSearch: true, tools: [createTestTool()] },
+				{},
+			);
+			await transport.connect();
+
+			const config = capturedConnectConfig.config as Record<string, unknown>;
+			const tools = config.tools as Array<Record<string, unknown>>;
+			expect(tools).toHaveLength(2);
+			expect(tools[0]).toEqual({ googleSearch: {} });
+			expect(tools[1]).toHaveProperty('functionDeclarations');
+		});
+
+		it('omits googleSearch when not set', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', tools: [createTestTool()] },
+				{},
+			);
+			await transport.connect();
+
+			const config = capturedConnectConfig.config as Record<string, unknown>;
+			const tools = config.tools as Array<Record<string, unknown>>;
+			expect(tools).toHaveLength(1);
+			expect(tools[0]).toHaveProperty('functionDeclarations');
+		});
+
+		it('supports googleSearch without function declarations', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key', googleSearch: true }, {});
+			await transport.connect();
+
+			const config = capturedConnectConfig.config as Record<string, unknown>;
+			const tools = config.tools as Array<Record<string, unknown>>;
+			expect(tools).toHaveLength(1);
+			expect(tools[0]).toEqual({ googleSearch: {} });
+		});
+
 		it('includes resumption handle', async () => {
 			const transport = new GeminiLiveTransport(
 				{ apiKey: 'test-key', resumptionHandle: 'handle_abc' },
@@ -238,6 +275,27 @@ describe('GeminiLiveTransport', () => {
 			});
 
 			expect(onResumptionUpdate).toHaveBeenCalledWith('h_new', true);
+		});
+
+		it('dispatches groundingMetadata', async () => {
+			const onGroundingMetadata = vi.fn();
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, { onGroundingMetadata });
+			await transport.connect();
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({
+				serverContent: {
+					groundingMetadata: {
+						searchEntryPoint: { renderedContent: '<div>results</div>' },
+						groundingChunks: [{ web: { uri: 'https://example.com', title: 'Example' } }],
+					},
+				},
+			});
+
+			expect(onGroundingMetadata).toHaveBeenCalledWith({
+				searchEntryPoint: { renderedContent: '<div>results</div>' },
+				groundingChunks: [{ web: { uri: 'https://example.com', title: 'Example' } }],
+			});
 		});
 
 		it('dispatches transcriptions', async () => {

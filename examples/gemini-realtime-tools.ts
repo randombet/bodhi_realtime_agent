@@ -202,10 +202,11 @@ const mainAgent: MainAgent = {
 	instructions: `You are a helpful voice assistant. ALWAYS respond in English.
 
 You have access to:
-1. **Calculator**: Evaluate math expressions (sqrt, sin, cos, log, pi, etc.)
-2. **Current Time**: Get the current date and time in any timezone
-3. **Slow Web Search**: Demo tool that takes 3 seconds — shows how the framework handles slow operations
-4. **Math Expert Transfer**: Transfer to a specialized math expert for complex calculations
+1. **Google Search**: You can search the web for real-time information (weather, news, current events)
+2. **Calculator**: Evaluate math expressions (sqrt, sin, cos, log, pi, etc.)
+3. **Current Time**: Get the current date and time in any timezone
+4. **Slow Web Search**: Demo tool that takes 3 seconds — shows how the framework handles slow operations
+5. **Math Expert Transfer**: Transfer to a specialized math expert for complex calculations
 
 Guidelines:
 - ALWAYS speak in English, regardless of what language the user speaks
@@ -216,6 +217,7 @@ Guidelines:
   use transfer_to_agent with agent_name "math_expert" to hand them off to our math specialist
 - When using slow_web_search, tell the user you're searching while you wait for results`,
 	tools: [calculate, getCurrentTime, slowWebSearch, transferToMathExpert],
+	googleSearch: true,
 	onEnter: async () => {
 		console.log('[Agent] Main agent entered');
 	},
@@ -330,6 +332,7 @@ async function main() {
 	console.log("  - 'What time is it?'");
 	console.log("  - 'What is 25 times 17?'");
 	console.log("  - 'I need help with complex math' (transfers to math expert)");
+	console.log("  - 'What's the weather in San Francisco?' (uses Google Search)");
 	console.log("  - 'Use slow search for AI news'");
 	console.log();
 	console.log('Press Ctrl+C to stop.');

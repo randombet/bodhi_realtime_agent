@@ -102,6 +102,7 @@ export class AgentRouter {
 			typeof toAgent.instructions === 'function' ? toAgent.instructions() : toAgent.instructions;
 		this.geminiTransport.updateSystemInstruction(instructions);
 		this.geminiTransport.updateTools(toAgent.tools);
+		this.geminiTransport.updateGoogleSearch(toAgent.googleSearch ?? false);
 		await this.geminiTransport.reconnect(handle ?? undefined);
 
 		// 7. Stop buffering and replay

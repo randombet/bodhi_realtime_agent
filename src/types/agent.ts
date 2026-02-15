@@ -31,6 +31,8 @@ export interface MainAgent {
 	instructions: string | (() => string);
 	/** Tools available to Gemini when this agent is active. */
 	tools: ToolDefinition[];
+	/** Enable Gemini's built-in Google Search grounding for this agent. */
+	googleSearch?: boolean;
 	/** Called when this agent becomes the active agent (after a transfer or initial start). */
 	onEnter?(ctx: AgentContext): Promise<void>;
 	/** Called when this agent is being replaced by another agent. */

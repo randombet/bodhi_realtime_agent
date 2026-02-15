@@ -18,6 +18,8 @@ export interface GeminiTransportConfig {
 	speechConfig?: { voiceName?: string };
 	/** Context window compression settings (trigger and target token counts). */
 	compressionConfig?: { triggerTokens: number; targetTokens: number };
+	/** Enable Gemini's built-in Google Search grounding. */
+	googleSearch?: boolean;
 }
 
 /** Callbacks fired by GeminiLiveTransport when server messages arrive. */
@@ -42,6 +44,8 @@ export interface GeminiTransportCallbacks {
 	onGoAway?(timeLeft: string): void;
 	/** New session resumption handle available. */
 	onResumptionUpdate?(handle: string, resumable: boolean): void;
+	/** Grounding metadata from Google Search results. */
+	onGroundingMetadata?(metadata: Record<string, unknown>): void;
 	/** Transport-level error. */
 	onError?(error: Error): void;
 	/** WebSocket connection closed. */
@@ -82,8 +86,15 @@ export class GeminiLiveTransport {
 			connectConfig.systemInstruction = this.config.systemInstruction;
 		}
 
+		const toolEntries: Record<string, unknown>[] = [];
+		if (this.config.googleSearch) {
+			toolEntries.push({ googleSearch: {} });
+		}
 		if (this.config.tools?.length) {
-			connectConfig.tools = [{ functionDeclarations: this.config.tools.map(toolToDeclaration) }];
+			toolEntries.push({ functionDeclarations: this.config.tools.map(toolToDeclaration) });
+		}
+		if (toolEntries.length > 0) {
+			connectConfig.tools = toolEntries;
 		}
 
 		if (this.config.resumptionHandle) {
@@ -177,6 +188,11 @@ export class GeminiLiveTransport {
 		this.config.systemInstruction = instruction;
 	}
 
+	/** Update Google Search grounding flag (applied on next reconnect). */
+	updateGoogleSearch(enabled: boolean): void {
+		this.config.googleSearch = enabled;
+	}
+
 	get isConnected(): boolean {
 		return this.session !== null;
 	}
@@ -198,6 +214,11 @@ export class GeminiLiveTransport {
 						this.callbacks.onAudioOutput?.(part.inlineData.data);
 					}
 				}
+			}
+
+			// Grounding metadata (Google Search results)
+			if (content.groundingMetadata) {
+				this.callbacks.onGroundingMetadata?.(content.groundingMetadata);
 			}
 
 			// Transcriptions

@@ -30,6 +30,7 @@ function createMockGeminiTransport() {
 		sendClientContent: vi.fn(),
 		updateTools: vi.fn(),
 		updateSystemInstruction: vi.fn(),
+		updateGoogleSearch: vi.fn(),
 		isConnected: true,
 	};
 }

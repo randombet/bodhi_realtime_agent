@@ -114,6 +114,7 @@ export class VoiceSession {
 				model: config.geminiModel,
 				systemInstruction: instructions,
 				tools: initialAgent?.tools,
+				googleSearch: initialAgent?.googleSearch,
 				speechConfig: config.speechConfig,
 				compressionConfig: config.compressionConfig,
 			},
@@ -126,6 +127,7 @@ export class VoiceSession {
 				onInterrupted: () => this.handleInterrupted(),
 				onInputTranscription: (text) => this.handleInputTranscription(text),
 				onOutputTranscription: (text) => this.handleOutputTranscription(text),
+				onGroundingMetadata: (metadata) => this.handleGroundingMetadata(metadata),
 				onGoAway: (timeLeft) => this.handleGoAway(timeLeft),
 				onResumptionUpdate: (handle, resumable) => this.handleResumptionUpdate(handle, resumable),
 				onError: (error) => this.handleTransportError(error),
@@ -403,6 +405,10 @@ export class VoiceSession {
 				text: text.trim(),
 			});
 		}
+	}
+
+	private handleGroundingMetadata(metadata: Record<string, unknown>): void {
+		this.clientTransport.sendJsonToClient({ type: 'grounding', payload: metadata });
 	}
 
 	private handleGoAway(timeLeft: string): void {
