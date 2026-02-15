@@ -4,6 +4,7 @@ export default defineConfig({
 	title: 'Bodhi Realtime Agent Framework',
 	description: 'TypeScript framework for real-time voice agents using Google Gemini Live API',
 	base: '/realtime_agent_framework/',
+	ignoreDeadLinks: [/^http:\/\/localhost/],
 
 	themeConfig: {
 		nav: [
