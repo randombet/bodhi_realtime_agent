@@ -175,6 +175,29 @@ session.eventBus.subscribe('tool.result', (payload) => {
 
 Available events: `session.start`, `session.close`, `session.stateChange`, `session.goaway`, `turn.start`, `turn.end`, `turn.interrupted`, `agent.enter`, `agent.exit`, `agent.transfer`, `agent.handoff`, `tool.call`, `tool.result`, `tool.cancel`, `gui.update`, `gui.notification`.
 
+### GUI Events
+
+The client WebSocket carries both audio and GUI events on the same connection using the native binary/text frame distinction:
+
+- **Binary frames**: Raw PCM audio (16-bit, 16 kHz, mono)
+- **Text frames**: JSON messages for GUI events
+
+**Server → Client** (text frames):
+
+```json
+{ "type": "gui.update",       "payload": { "sessionId": "...", "data": { ... } } }
+{ "type": "gui.notification",  "payload": { "sessionId": "...", "message": "..." } }
+{ "type": "ui.payload",       "payload": { "type": "choice", "requestId": "...", "data": { ... } } }
+```
+
+**Client → Server** (text frames):
+
+```json
+{ "type": "ui.response", "payload": { "requestId": "...", "selectedOptionId": "..." } }
+```
+
+GUI events published on the EventBus (`gui.update`, `gui.notification`, `subagent.ui.send`) are automatically forwarded to the connected client. Client `ui.response` messages are published back to the EventBus as `subagent.ui.response` events, closing the loop for interactive subagent UIs.
+
 ### Hooks
 
 Lifecycle hooks for observability (logging, metrics, alerting):

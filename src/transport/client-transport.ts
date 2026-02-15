@@ -3,8 +3,10 @@ import { AudioBuffer } from './audio-buffer.js';
 
 /** Callbacks fired by ClientTransport when client events occur. */
 export interface ClientTransportCallbacks {
-	/** Raw PCM audio data received from the client WebSocket. */
+	/** Raw PCM audio data received from the client WebSocket (binary frames). */
 	onAudioFromClient?(data: Buffer): void;
+	/** A JSON message received from the client WebSocket (text frames). */
+	onJsonFromClient?(message: Record<string, unknown>): void;
 	/** A client WebSocket connection was established. */
 	onClientConnected?(): void;
 	/** The client WebSocket disconnected. */
@@ -16,12 +18,12 @@ export interface ClientTransportCallbacks {
 /**
  * WebSocket server that bridges a client audio app to the framework.
  *
- * Accepts a single WebSocket connection on the configured port.
- * Audio from the client is forwarded via callbacks (or buffered during transfers).
- * Audio for the client is sent via `sendAudioToClient()`.
+ * Multiplexes two message types on the same WebSocket connection:
+ * - **Binary frames**: Raw PCM audio (forwarded via `onAudioFromClient` or buffered during transfers).
+ * - **Text frames**: JSON messages for GUI events (`onJsonFromClient`).
  *
- * Buffering mode (`startBuffering`/`stopBuffering`) captures incoming audio
- * during agent transfers so it can be replayed after reconnection.
+ * Buffering mode (`startBuffering`/`stopBuffering`) only affects binary audio frames.
+ * Text frames are always delivered immediately.
  */
 export class ClientTransport {
 	private wss: WebSocketServer | null = null;
@@ -44,11 +46,20 @@ export class ClientTransport {
 				this.client = ws;
 				this.callbacks.onClientConnected?.();
 
-				ws.on('message', (data: Buffer) => {
-					if (this._buffering) {
-						this.audioBuffer.push(data);
+				ws.on('message', (data: Buffer, isBinary: boolean) => {
+					if (isBinary) {
+						if (this._buffering) {
+							this.audioBuffer.push(data);
+						} else {
+							this.callbacks.onAudioFromClient?.(data);
+						}
 					} else {
-						this.callbacks.onAudioFromClient?.(data);
+						try {
+							const message = JSON.parse(data.toString()) as Record<string, unknown>;
+							this.callbacks.onJsonFromClient?.(message);
+						} catch {
+							// Ignore malformed JSON
+						}
 					}
 				});
 
@@ -75,9 +86,17 @@ export class ClientTransport {
 		}
 	}
 
+	/** Send raw PCM audio to the client as a binary frame. */
 	sendAudioToClient(data: Buffer): void {
 		if (this.client?.readyState === 1) {
 			this.client.send(data);
+		}
+	}
+
+	/** Send a JSON message to the client as a text frame. */
+	sendJsonToClient(message: Record<string, unknown>): void {
+		if (this.client?.readyState === 1) {
+			this.client.send(JSON.stringify(message));
 		}
 	}
 

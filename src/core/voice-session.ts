@@ -136,8 +136,20 @@ export class VoiceSession {
 		// Set up client transport
 		this.clientTransport = new ClientTransport(config.port, {
 			onAudioFromClient: (data) => this.handleAudioFromClient(data),
+			onJsonFromClient: (message) => this.handleJsonFromClient(message),
 			onClientConnected: () => this.handleClientConnected(),
 			onClientDisconnected: () => this.handleClientDisconnected(),
+		});
+
+		// Forward GUI events from EventBus to the client as JSON text frames
+		this.eventBus.subscribe('gui.update', (payload) => {
+			this.clientTransport.sendJsonToClient({ type: 'gui.update', payload });
+		});
+		this.eventBus.subscribe('gui.notification', (payload) => {
+			this.clientTransport.sendJsonToClient({ type: 'gui.notification', payload });
+		});
+		this.eventBus.subscribe('subagent.ui.send', (payload) => {
+			this.clientTransport.sendJsonToClient({ type: 'ui.payload', payload: payload.payload });
 		});
 
 		// Set up tool executor
@@ -409,6 +421,19 @@ export class VoiceSession {
 	}
 
 	// --- Client transport handlers ---
+
+	private handleJsonFromClient(message: Record<string, unknown>): void {
+		if (message.type === 'ui.response' && message.payload) {
+			this.eventBus.publish('subagent.ui.response', {
+				sessionId: this.config.sessionId,
+				response: message.payload as {
+					requestId: string;
+					selectedOptionId?: string;
+					formData?: Record<string, unknown>;
+				},
+			});
+		}
+	}
 
 	private handleClientConnected(): void {
 		// Client connected, nothing to do here (audio relay is direct)
