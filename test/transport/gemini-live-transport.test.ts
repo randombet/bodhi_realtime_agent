@@ -53,6 +53,7 @@ describe('GeminiLiveTransport', () => {
 			const config = capturedConnectConfig.config as Record<string, unknown>;
 			expect(config.responseModalities).toEqual(['AUDIO']);
 			expect(config.sessionResumption).toEqual({});
+			expect(config.inputAudioTranscription).toEqual({});
 		});
 
 		it('includes system instruction when provided', async () => {
@@ -116,6 +117,25 @@ describe('GeminiLiveTransport', () => {
 			const tools = config.tools as Array<Record<string, unknown>>;
 			expect(tools).toHaveLength(1);
 			expect(tools[0]).toEqual({ googleSearch: {} });
+		});
+
+		it('includes inputAudioTranscription by default', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			const config = capturedConnectConfig.config as Record<string, unknown>;
+			expect(config.inputAudioTranscription).toEqual({});
+		});
+
+		it('omits inputAudioTranscription when explicitly disabled', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', inputAudioTranscription: false },
+				{},
+			);
+			await transport.connect();
+
+			const config = capturedConnectConfig.config as Record<string, unknown>;
+			expect(config.inputAudioTranscription).toBeUndefined();
 		});
 
 		it('includes resumption handle', async () => {

@@ -39,6 +39,8 @@ export interface VoiceSessionConfig {
 	speechConfig?: { voiceName?: string };
 	/** Context window compression thresholds. */
 	compressionConfig?: { triggerTokens: number; targetTokens: number };
+	/** Enable server-side transcription of user audio input (default: true). */
+	inputAudioTranscription?: boolean;
 }
 
 /**
@@ -117,6 +119,7 @@ export class VoiceSession {
 				googleSearch: initialAgent?.googleSearch,
 				speechConfig: config.speechConfig,
 				compressionConfig: config.compressionConfig,
+				inputAudioTranscription: config.inputAudioTranscription,
 			},
 			{
 				onSetupComplete: (sessionId) => this.handleSetupComplete(sessionId),

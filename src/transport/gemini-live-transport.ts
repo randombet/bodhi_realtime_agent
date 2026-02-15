@@ -20,6 +20,8 @@ export interface GeminiTransportConfig {
 	compressionConfig?: { triggerTokens: number; targetTokens: number };
 	/** Enable Gemini's built-in Google Search grounding. */
 	googleSearch?: boolean;
+	/** Enable server-side transcription of user audio input (default: true). */
+	inputAudioTranscription?: boolean;
 }
 
 /** Callbacks fired by GeminiLiveTransport when server messages arrive. */
@@ -78,9 +80,11 @@ export class GeminiLiveTransport {
 		const connectConfig: Record<string, unknown> = {
 			responseModalities: ['AUDIO'],
 			outputAudioTranscription: {},
-			// NOTE: inputAudioTranscription is only supported on Vertex AI, not the Gemini API.
-			// User input transcription is unavailable when connecting directly to Gemini.
 		};
+
+		if (this.config.inputAudioTranscription !== false) {
+			connectConfig.inputAudioTranscription = {};
+		}
 
 		if (this.config.systemInstruction) {
 			connectConfig.systemInstruction = this.config.systemInstruction;
