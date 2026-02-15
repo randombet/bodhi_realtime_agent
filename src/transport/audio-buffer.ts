@@ -1,7 +1,13 @@
 import { AUDIO_FORMAT } from '../types/audio.js';
 
+/** Default buffer capacity: 2 seconds of audio. */
 const DEFAULT_MAX_DURATION_MS = 2000;
 
+/**
+ * Bounded ring buffer for PCM audio chunks.
+ * When the buffer exceeds its capacity, the oldest chunks are dropped first.
+ * Used by ClientTransport to buffer audio during agent transfers and reconnections.
+ */
 export class AudioBuffer {
 	private buffer: Buffer[] = [];
 	private totalBytes = 0;
@@ -11,6 +17,7 @@ export class AudioBuffer {
 		this.maxBytes = Math.ceil((maxDurationMs / 1000) * AUDIO_FORMAT.bytesPerSecond);
 	}
 
+	/** Add an audio chunk, dropping oldest chunks if the buffer is full. */
 	push(chunk: Buffer): void {
 		this.buffer.push(chunk);
 		this.totalBytes += chunk.length;
@@ -24,6 +31,7 @@ export class AudioBuffer {
 		}
 	}
 
+	/** Remove and return all buffered chunks, resetting the buffer to empty. */
 	drain(): Buffer[] {
 		const chunks = this.buffer;
 		this.buffer = [];

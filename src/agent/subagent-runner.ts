@@ -4,14 +4,24 @@ import type { HooksManager } from '../core/hooks.js';
 import type { SubagentConfig } from '../types/agent.js';
 import type { SubagentContextSnapshot, SubagentResult } from '../types/conversation.js';
 
+/** Options for running a background subagent via the Vercel AI SDK. */
 export interface RunSubagentOptions {
+	/** Subagent configuration (instructions, tools, maxSteps). */
 	config: SubagentConfig;
+	/** Conversation snapshot providing context for the subagent. */
 	context: SubagentContextSnapshot;
+	/** Hook manager for onSubagentStep notifications. */
 	hooks: HooksManager;
+	/** Language model to use for the subagent's generateText call. */
 	model: LanguageModelV1;
+	/** Signal to abort the subagent execution (e.g. on tool cancellation). */
 	abortSignal?: AbortSignal;
 }
 
+/**
+ * Assemble a system prompt from the conversation snapshot.
+ * Includes agent instructions, task description, summary, recent turns, and memory facts.
+ */
 function buildSystemPrompt(context: SubagentContextSnapshot): string {
 	const parts: string[] = [];
 
@@ -35,6 +45,11 @@ function buildSystemPrompt(context: SubagentContextSnapshot): string {
 	return parts.join('\n');
 }
 
+/**
+ * Execute a background subagent using the Vercel AI SDK's generateText.
+ * Fires onSubagentStep hooks after each LLM step.
+ * Returns the final text result and step count.
+ */
 export async function runSubagent(options: RunSubagentOptions): Promise<SubagentResult> {
 	const { config, context, hooks, model, abortSignal } = options;
 	const maxSteps = config.maxSteps ?? 5;

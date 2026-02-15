@@ -4,13 +4,31 @@ import type { HooksManager } from '../core/hooks.js';
 import type { MemoryCategory, MemoryFact, MemoryStore } from '../types/memory.js';
 import { MEMORY_CONSOLIDATION_PROMPT, MEMORY_EXTRACTION_PROMPT } from './prompts.js';
 
+/** Configuration for the MemoryDistiller. */
 export interface MemoryDistillerConfig {
+	/** User whose memory to manage. */
 	userId: string;
+	/** Session ID for error reporting. */
 	sessionId: string;
+	/** Extract every N turns (default 5). */
 	turnFrequency?: number;
+	/** Timeout for each extraction LLM call in milliseconds (default 30 000). */
 	extractionTimeoutMs?: number;
 }
 
+/**
+ * Extracts durable user facts from conversation and persists them to a MemoryStore.
+ *
+ * **Extraction triggers:**
+ * - `onTurnEnd()`: Every `turnFrequency` turns (default 5th turn).
+ * - `onCheckpoint()`: Immediately (e.g. on agent transfer, tool result, session close).
+ * - `forceExtract()`: Awaitable on-demand extraction.
+ *
+ * **Coalescing:** Only one extraction runs at a time (`extractionInFlight` flag).
+ * Additional triggers while an extraction is running are silently skipped.
+ *
+ * **Consolidation:** `consolidate()` merges duplicate/contradictory facts via an LLM call.
+ */
 export class MemoryDistiller {
 	private turnCount = 0;
 	private extractionInFlight = false;

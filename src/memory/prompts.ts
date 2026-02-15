@@ -1,3 +1,7 @@
+/**
+ * LLM prompt template for extracting durable facts from a conversation transcript.
+ * Placeholders: `{existingMemory}`, `{recentTranscript}`.
+ */
 export const MEMORY_EXTRACTION_PROMPT = `You are a memory extraction agent for a voice assistant.
 Analyze the conversation transcript and extract key facts about the user.
 
@@ -20,6 +24,10 @@ RECENT CONVERSATION:
 
 Return JSON: { "facts": [{ "content": "...", "category": "preference|entity|decision|requirement" }] }`;
 
+/**
+ * LLM prompt template for consolidating (deduplicating/merging) existing memory facts.
+ * Placeholder: `{memoryContent}`.
+ */
 export const MEMORY_CONSOLIDATION_PROMPT = `You are consolidating a user's memory file.
 
 RULES:

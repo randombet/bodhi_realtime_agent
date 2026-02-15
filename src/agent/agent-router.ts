@@ -11,12 +11,25 @@ import type { SubagentResult, ToolCall } from '../types/conversation.js';
 import { createAgentContext } from './agent-context.js';
 import { runSubagent } from './subagent-runner.js';
 
+/** Tracks a running background subagent so it can be cancelled. */
 interface ActiveSubagent {
 	controller: AbortController;
 	toolCallId: string;
 	configName: string;
 }
 
+/**
+ * Manages agent lifecycle: transfers between MainAgents and handoffs to background subagents.
+ *
+ * **Transfer flow** (agent → agent):
+ *   onExit → agent.exit event → TRANSFERRING → buffer audio → disconnect →
+ *   reconnect with new agent config → replay context + buffered audio →
+ *   ACTIVE → onEnter → agent.enter event → agent.transfer event
+ *
+ * **Handoff flow** (background tool → subagent):
+ *   Create AbortController → build context snapshot → agent.handoff event →
+ *   runSubagent() async → return SubagentResult
+ */
 export class AgentRouter {
 	private agents = new Map<string, MainAgent>();
 	private _activeAgent: MainAgent;
@@ -52,6 +65,10 @@ export class AgentRouter {
 		return this._activeAgent;
 	}
 
+	/**
+	 * Transfer the active Gemini session to a different agent.
+	 * Disconnects, reconnects with new system instructions and tools, and replays context.
+	 */
 	async transfer(toAgentName: string): Promise<void> {
 		const toAgent = this.agents.get(toAgentName);
 		if (!toAgent) {
@@ -121,6 +138,7 @@ export class AgentRouter {
 		});
 	}
 
+	/** Spawn a background subagent to handle a tool call asynchronously. */
 	async handoff(toolCall: ToolCall, subagentConfig: SubagentConfig): Promise<SubagentResult> {
 		const controller = new AbortController();
 		this.activeSubagents.set(toolCall.toolCallId, {
@@ -164,6 +182,7 @@ export class AgentRouter {
 		}
 	}
 
+	/** Abort a running background subagent by its originating tool call ID. */
 	cancelSubagent(toolCallId: string): void {
 		const sub = this.activeSubagents.get(toolCallId);
 		if (sub) {

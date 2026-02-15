@@ -4,6 +4,10 @@ import type { AgentContext } from '../types/agent.js';
 import type { ConversationItem } from '../types/conversation.js';
 import type { MemoryFact } from '../types/memory.js';
 
+/**
+ * Factory that builds an AgentContext object for agent lifecycle hooks.
+ * Wires `injectSystemMessage` and `getRecentTurns` to the live ConversationContext.
+ */
 export function createAgentContext(options: {
 	sessionId: string;
 	agentName: string;

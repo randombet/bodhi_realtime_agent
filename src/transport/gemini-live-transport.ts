@@ -2,31 +2,59 @@ import { GoogleGenAI, type LiveServerMessage, type Session } from '@google/genai
 import type { ToolDefinition } from '../types/tool.js';
 import { zodToJsonSchema } from './zod-to-schema.js';
 
+/** Configuration for connecting to the Gemini Live API. */
 export interface GeminiTransportConfig {
+	/** Google API key for authentication. */
 	apiKey: string;
+	/** Gemini model name (default: "gemini-live-2.5-flash-preview"). */
 	model?: string;
+	/** System instruction sent to the model at connection time. */
 	systemInstruction?: string;
+	/** Tool definitions to register with the model (converted to Gemini function declarations). */
 	tools?: ToolDefinition[];
+	/** Opaque handle from a previous session, used to resume an existing Gemini session. */
 	resumptionHandle?: string;
+	/** Voice configuration for Gemini's speech synthesis. */
 	speechConfig?: { voiceName?: string };
+	/** Context window compression settings (trigger and target token counts). */
 	compressionConfig?: { triggerTokens: number; targetTokens: number };
 }
 
+/** Callbacks fired by GeminiLiveTransport when server messages arrive. */
 export interface GeminiTransportCallbacks {
+	/** Gemini session setup is complete and ready for audio. */
 	onSetupComplete?(sessionId: string): void;
+	/** Base64-encoded PCM audio output from the model. */
 	onAudioOutput?(data: string): void;
+	/** Model is requesting one or more tool invocations. */
 	onToolCall?(calls: Array<{ id: string; name: string; args: Record<string, unknown> }>): void;
+	/** Model is cancelling previously requested tool calls. */
 	onToolCallCancellation?(ids: string[]): void;
+	/** Model has finished its response turn. */
 	onTurnComplete?(): void;
+	/** Model's response was interrupted by user speech. */
 	onInterrupted?(): void;
+	/** Transcription of user's spoken input. */
 	onInputTranscription?(text: string): void;
+	/** Transcription of model's spoken output. */
 	onOutputTranscription?(text: string): void;
+	/** Server is shutting down — reconnect before timeLeft expires. */
 	onGoAway?(timeLeft: string): void;
+	/** New session resumption handle available. */
 	onResumptionUpdate?(handle: string, resumable: boolean): void;
+	/** Transport-level error. */
 	onError?(error: Error): void;
+	/** WebSocket connection closed. */
 	onClose?(): void;
 }
 
+/**
+ * WebSocket transport layer for the Gemini Live API.
+ *
+ * Wraps the `@google/genai` SDK's live.connect() to manage the bidirectional
+ * audio stream. Handles connection setup, message routing, tool declaration
+ * conversion (Zod → JSON Schema), and session resumption.
+ */
 export class GeminiLiveTransport {
 	private session: Session | null = null;
 	private ai: GoogleGenAI;
@@ -39,6 +67,7 @@ export class GeminiLiveTransport {
 		this.callbacks = callbacks;
 	}
 
+	/** Establish a WebSocket connection to the Gemini Live API. */
 	async connect(): Promise<void> {
 		const model = this.config.model ?? 'gemini-live-2.5-flash-preview';
 
@@ -91,6 +120,7 @@ export class GeminiLiveTransport {
 		});
 	}
 
+	/** Disconnect and reconnect, optionally with a new resumption handle. */
 	async reconnect(handle?: string): Promise<void> {
 		await this.disconnect();
 		if (handle) {
@@ -110,6 +140,7 @@ export class GeminiLiveTransport {
 		}
 	}
 
+	/** Send base64-encoded PCM audio to Gemini as realtime input. */
 	sendAudio(base64Data: string): void {
 		if (!this.session) return;
 		this.session.sendRealtimeInput({
@@ -117,6 +148,7 @@ export class GeminiLiveTransport {
 		});
 	}
 
+	/** Send tool execution results back to Gemini. */
 	sendToolResponse(
 		responses: Array<{ id?: string; name?: string; response?: Record<string, unknown> }>,
 		_scheduling?: 'SILENT' | 'WHEN_IDLE' | 'INTERRUPT',
@@ -125,6 +157,7 @@ export class GeminiLiveTransport {
 		this.session.sendToolResponse({ functionResponses: responses });
 	}
 
+	/** Send text-based conversation turns to Gemini (used for context replay). */
 	sendClientContent(
 		turns: Array<{ role: string; parts: Array<{ text: string }> }>,
 		turnComplete = true,
@@ -133,10 +166,12 @@ export class GeminiLiveTransport {
 		this.session.sendClientContent({ turns, turnComplete });
 	}
 
+	/** Update the tool declarations (applied on next reconnect). */
 	updateTools(tools: ToolDefinition[]): void {
 		this.config.tools = tools;
 	}
 
+	/** Update the system instruction (applied on next reconnect). */
 	updateSystemInstruction(instruction: string): void {
 		this.config.systemInstruction = instruction;
 	}
@@ -206,6 +241,7 @@ export class GeminiLiveTransport {
 	}
 }
 
+/** Convert a ToolDefinition to a Gemini function declaration (name + description + JSON Schema). */
 function toolToDeclaration(tool: ToolDefinition): Record<string, unknown> {
 	return {
 		name: tool.name,

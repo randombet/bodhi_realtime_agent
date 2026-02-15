@@ -3,8 +3,10 @@ import { dirname, join } from 'node:path';
 import writeFileAtomic from 'write-file-atomic';
 import type { MemoryCategory, MemoryFact, MemoryStore } from '../types/memory.js';
 
+/** Canonical ordering for category sections in the markdown file. */
 const CATEGORY_ORDER: MemoryCategory[] = ['preference', 'entity', 'decision', 'requirement'];
 
+/** Human-readable headings for each category. */
 const CATEGORY_HEADINGS: Record<MemoryCategory, string> = {
 	preference: 'Preferences',
 	entity: 'Entities',
@@ -12,6 +14,23 @@ const CATEGORY_HEADINGS: Record<MemoryCategory, string> = {
 	requirement: 'Requirements',
 };
 
+/**
+ * File-based MemoryStore that persists facts as a Markdown file per user.
+ *
+ * File layout:
+ * ```
+ * ## Preferences
+ * - Prefers dark mode
+ * - Likes concise answers
+ *
+ * ## Entities
+ * - Works at Acme Corp
+ * ```
+ *
+ * - `addFacts()`: Appends new facts (rewrites the file when inserting into existing categories).
+ * - `replaceAll()`: Atomically overwrites using `write-file-atomic` (safe for concurrent access).
+ * - Files are stored at `{baseDir}/{userId}.md`.
+ */
 export class MarkdownMemoryStore implements MemoryStore {
 	constructor(private baseDir: string) {}
 

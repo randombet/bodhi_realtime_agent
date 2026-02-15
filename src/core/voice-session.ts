@@ -11,21 +11,60 @@ import { EventBus } from './event-bus.js';
 import { HooksManager } from './hooks.js';
 import { SessionManager } from './session-manager.js';
 
+/**
+ * Configuration for creating a VoiceSession.
+ */
 export interface VoiceSessionConfig {
+	/** Unique session identifier. */
 	sessionId: string;
+	/** User identifier (used for memory storage and history). */
 	userId: string;
+	/** Google API key for the Gemini Live API. */
 	apiKey: string;
+	/** All agents available in this session. */
 	agents: MainAgent[];
+	/** Name of the agent to activate on start. */
 	initialAgent: string;
+	/** Background subagent configs keyed by tool name. */
 	subagentConfigs?: Record<string, SubagentConfig>;
+	/** Lifecycle hooks for observability. */
 	hooks?: FrameworkHooks;
+	/** Port for the client WebSocket server. */
 	port: number;
+	/** Gemini model name (e.g. "gemini-2.0-flash-live-001"). */
 	geminiModel?: string;
+	/** Vercel AI SDK model for subagent text generation. */
 	model: LanguageModelV1;
+	/** Voice configuration for Gemini's speech output. */
 	speechConfig?: { voiceName?: string };
+	/** Context window compression thresholds. */
 	compressionConfig?: { triggerTokens: number; targetTokens: number };
 }
 
+/**
+ * Top-level integration hub that wires all framework components together.
+ *
+ * Manages the full lifecycle of a real-time voice session:
+ * - **Audio fast-path**: Client audio → Gemini (and back) without touching the EventBus.
+ * - **Tool routing**: Inline tools execute synchronously; background tools hand off to subagents.
+ * - **Agent transfers**: Intercepts `transfer_to_agent` tool calls and delegates to AgentRouter.
+ * - **Reconnection**: Handles GoAway signals and unexpected disconnects via session resumption.
+ * - **Conversation tracking**: Transcriptions populate ConversationContext automatically.
+ *
+ * @example
+ * ```ts
+ * const session = new VoiceSession({
+ *   sessionId: 'session_1',
+ *   userId: 'user_1',
+ *   apiKey: process.env.GOOGLE_API_KEY,
+ *   agents: [mainAgent, expertAgent],
+ *   initialAgent: 'main',
+ *   port: 9900,
+ *   model: google('gemini-2.0-flash'),
+ * });
+ * await session.start();
+ * ```
+ */
 export class VoiceSession {
 	readonly eventBus: EventBus;
 	readonly sessionManager: SessionManager;
@@ -127,12 +166,14 @@ export class VoiceSession {
 		this.agentRouter.setInitialAgent(config.initialAgent);
 	}
 
+	/** Start the client WebSocket server and connect to Gemini. */
 	async start(): Promise<void> {
 		await this.clientTransport.start();
 		this.sessionManager.transitionTo('CONNECTING');
 		await this.geminiTransport.connect();
 	}
 
+	/** Gracefully shut down: disconnect Gemini, stop the WebSocket server, transition to CLOSED. */
 	async close(_reason = 'normal'): Promise<void> {
 		// Fire turn end if we're mid-turn
 		if (this.turnId > 0) {
@@ -152,6 +193,7 @@ export class VoiceSession {
 		this.eventBus.clear();
 	}
 
+	/** Transfer the active session to a different agent (reconnects with new config). */
 	async transfer(toAgent: string): Promise<void> {
 		await this.agentRouter.transfer(toAgent);
 

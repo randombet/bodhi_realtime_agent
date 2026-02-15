@@ -4,12 +4,20 @@ import type { HooksManager } from '../core/hooks.js';
 import type { ToolCall, ToolResult } from '../types/conversation.js';
 import type { ToolContext, ToolDefinition } from '../types/tool.js';
 
+/** Internal tracking for an in-flight tool execution. */
 interface PendingExecution {
 	controller: AbortController;
 	toolName: string;
 	startedAt: number;
 }
 
+/**
+ * Executes inline tool calls requested by Gemini.
+ *
+ * For each tool call: validates arguments via Zod, creates an AbortController,
+ * fires onToolCall/onToolResult hooks, publishes EventBus events, and enforces timeouts.
+ * Multiple tool calls can run concurrently — each is tracked in the `pending` map.
+ */
 export class ToolExecutor {
 	private tools = new Map<string, ToolDefinition>();
 	private pending = new Map<string, PendingExecution>();
@@ -27,6 +35,7 @@ export class ToolExecutor {
 		}
 	}
 
+	/** Execute a tool call: validate args, run with timeout, fire hooks, return result. */
 	async handleToolCall(call: ToolCall): Promise<ToolResult> {
 		const tool = this.tools.get(call.toolName);
 		if (!tool) {
@@ -124,6 +133,7 @@ export class ToolExecutor {
 		return result;
 	}
 
+	/** Abort one or more pending tool executions and fire cancellation hooks/events. */
 	cancel(toolCallIds: string[]): void {
 		for (const id of toolCallIds) {
 			const pending = this.pending.get(id);
