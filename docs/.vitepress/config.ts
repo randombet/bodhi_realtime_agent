@@ -26,6 +26,7 @@ export default defineConfig({
 				{
 					text: 'Core Concepts',
 					items: [
+						{ text: 'Architecture Overview', link: '/guide/architecture' },
 						{ text: 'VoiceSession', link: '/guide/voice-session' },
 						{ text: 'Agents', link: '/guide/agents' },
 						{ text: 'Tools', link: '/guide/tools' },
