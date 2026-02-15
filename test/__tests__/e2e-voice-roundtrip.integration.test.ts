@@ -1,6 +1,6 @@
 import { google } from '@ai-sdk/google';
 import { afterEach, describe, expect, it } from 'vitest';
-import { VoiceSession } from '../core/voice-session.js';
+import { VoiceSession } from '../../src/core/voice-session.js';
 import { createEchoAgent } from './helpers/test-agents.js';
 import { generateSilence } from './helpers/test-audio.js';
 import { TestClient } from './helpers/test-client.js';

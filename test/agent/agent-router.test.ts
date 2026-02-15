@@ -1,14 +1,14 @@
 import type { LanguageModelV1 } from 'ai';
 import { describe, expect, it, vi } from 'vitest';
-import { ConversationContext } from '../core/conversation-context.js';
-import { AgentError } from '../core/errors.js';
-import { EventBus } from '../core/event-bus.js';
-import { HooksManager } from '../core/hooks.js';
-import { SessionManager } from '../core/session-manager.js';
-import type { ClientTransport } from '../transport/client-transport.js';
-import type { GeminiLiveTransport } from '../transport/gemini-live-transport.js';
-import type { MainAgent } from '../types/agent.js';
-import { AgentRouter } from './agent-router.js';
+import { AgentRouter } from '../../src/agent/agent-router.js';
+import { ConversationContext } from '../../src/core/conversation-context.js';
+import { AgentError } from '../../src/core/errors.js';
+import { EventBus } from '../../src/core/event-bus.js';
+import { HooksManager } from '../../src/core/hooks.js';
+import { SessionManager } from '../../src/core/session-manager.js';
+import type { ClientTransport } from '../../src/transport/client-transport.js';
+import type { GeminiLiveTransport } from '../../src/transport/gemini-live-transport.js';
+import type { MainAgent } from '../../src/types/agent.js';
 
 // Mock the ai module
 vi.mock('ai', () => ({

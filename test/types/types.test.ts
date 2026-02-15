@@ -14,7 +14,7 @@ import type {
 	UIPayload,
 	UIResponse,
 	Unsubscribe,
-} from './index.js';
+} from '../../src/types/index.js';
 
 describe('type definitions', () => {
 	it('EventType is a union of all event keys', () => {

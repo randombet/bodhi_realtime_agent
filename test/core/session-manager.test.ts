@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import { SessionError } from './errors.js';
-import { EventBus } from './event-bus.js';
-import { HooksManager } from './hooks.js';
-import { SessionManager } from './session-manager.js';
+import { SessionError } from '../../src/core/errors.js';
+import { EventBus } from '../../src/core/event-bus.js';
+import { HooksManager } from '../../src/core/hooks.js';
+import { SessionManager } from '../../src/core/session-manager.js';
 
 function createManager() {
 	const eventBus = new EventBus();

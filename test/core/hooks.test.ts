@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { HooksManager } from './hooks.js';
+import { HooksManager } from '../../src/core/hooks.js';
 
 describe('HooksManager', () => {
 	it('returns undefined for unregistered hooks', () => {

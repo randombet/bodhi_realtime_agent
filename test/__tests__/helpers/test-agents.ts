@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { MainAgent } from '../../types/agent.js';
+import type { MainAgent } from '../../../src/types/agent.js';
 
 export function createEchoAgent(): MainAgent {
 	return {

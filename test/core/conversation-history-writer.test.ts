@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { ConversationHistoryStore } from '../types/history.js';
-import { ConversationContext } from './conversation-context.js';
-import { ConversationHistoryWriter } from './conversation-history-writer.js';
-import { EventBus } from './event-bus.js';
+import { ConversationContext } from '../../src/core/conversation-context.js';
+import { ConversationHistoryWriter } from '../../src/core/conversation-history-writer.js';
+import { EventBus } from '../../src/core/event-bus.js';
+import type { ConversationHistoryStore } from '../../src/types/history.js';
 
 function createMockStore(): ConversationHistoryStore & {
 	createSession: ReturnType<typeof vi.fn>;

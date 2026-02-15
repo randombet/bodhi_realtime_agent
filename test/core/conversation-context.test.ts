@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ConversationContext } from './conversation-context.js';
+import { ConversationContext } from '../../src/core/conversation-context.js';
 
 describe('ConversationContext', () => {
 	it('starts empty', () => {

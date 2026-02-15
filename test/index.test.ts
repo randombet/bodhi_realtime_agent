@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 describe('module smoke test', () => {
 	it('imports without throwing and exports key APIs', async () => {
-		const mod = await import('./index.js');
+		const mod = await import('../src/index.js');
 		expect(mod).toBeDefined();
 
 		// Core

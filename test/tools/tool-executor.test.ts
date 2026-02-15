@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
-import { EventBus } from '../core/event-bus.js';
-import { HooksManager } from '../core/hooks.js';
-import type { ToolDefinition } from '../types/tool.js';
-import { ToolExecutor } from './tool-executor.js';
+import { EventBus } from '../../src/core/event-bus.js';
+import { HooksManager } from '../../src/core/hooks.js';
+import { ToolExecutor } from '../../src/tools/tool-executor.js';
+import type { ToolDefinition } from '../../src/types/tool.js';
 
 function createTestTool(overrides?: Partial<ToolDefinition>): ToolDefinition {
 	return {

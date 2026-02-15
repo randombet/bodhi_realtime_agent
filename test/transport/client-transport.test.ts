@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import WebSocket from 'ws';
-import { ClientTransport } from './client-transport.js';
+import { ClientTransport } from '../../src/transport/client-transport.js';
 
 const TEST_PORT = 9876;
 

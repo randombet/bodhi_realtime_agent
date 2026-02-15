@@ -1,9 +1,9 @@
 import type { LanguageModelV1 } from 'ai';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ConversationContext } from '../core/conversation-context.js';
-import { HooksManager } from '../core/hooks.js';
-import type { MemoryFact, MemoryStore } from '../types/memory.js';
-import { MemoryDistiller } from './memory-distiller.js';
+import { ConversationContext } from '../../src/core/conversation-context.js';
+import { HooksManager } from '../../src/core/hooks.js';
+import { MemoryDistiller } from '../../src/memory/memory-distiller.js';
+import type { MemoryFact, MemoryStore } from '../../src/types/memory.js';
 
 vi.mock('ai', () => ({
 	generateText: vi.fn(async () => ({

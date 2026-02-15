@@ -2,8 +2,8 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { MemoryFact } from '../types/memory.js';
-import { MarkdownMemoryStore } from './markdown-memory-store.js';
+import { MarkdownMemoryStore } from '../../src/memory/markdown-memory-store.js';
+import type { MemoryFact } from '../../src/types/memory.js';
 
 describe('MarkdownMemoryStore', () => {
 	let tmpDir: string;

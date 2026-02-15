@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AudioBuffer } from './audio-buffer.js';
+import { AudioBuffer } from '../../src/transport/audio-buffer.js';
 
 describe('AudioBuffer', () => {
 	it('starts empty', () => {

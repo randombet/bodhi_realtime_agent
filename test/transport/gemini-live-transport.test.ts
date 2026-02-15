@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
-import type { ToolDefinition } from '../types/tool.js';
-import { GeminiLiveTransport } from './gemini-live-transport.js';
+import { GeminiLiveTransport } from '../../src/transport/gemini-live-transport.js';
+import type { ToolDefinition } from '../../src/types/tool.js';
 
 // Mock @google/genai
 let capturedConnectConfig: Record<string, unknown> = {};

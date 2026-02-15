@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { zodToJsonSchema } from './zod-to-schema.js';
+import { zodToJsonSchema } from '../../src/transport/zod-to-schema.js';
 
 describe('zodToJsonSchema', () => {
 	it('converts simple object with string and number', () => {

@@ -1,8 +1,8 @@
 import type { LanguageModelV1 } from 'ai';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
-import type { MainAgent } from '../types/agent.js';
-import { VoiceSession } from './voice-session.js';
+import { VoiceSession } from '../../src/core/voice-session.js';
+import type { MainAgent } from '../../src/types/agent.js';
 
 // Mock the external deps
 vi.mock('@google/genai', () => {

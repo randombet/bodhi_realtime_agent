@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { SessionCheckpoint } from '../types/session.js';
-import { InMemorySessionStore } from './session-store.js';
+import { InMemorySessionStore } from '../../src/core/session-store.js';
+import type { SessionCheckpoint } from '../../src/types/session.js';
 
 function createCheckpoint(overrides?: Partial<SessionCheckpoint>): SessionCheckpoint {
 	return {

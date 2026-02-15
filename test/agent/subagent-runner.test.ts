@@ -1,8 +1,8 @@
 import type { LanguageModelV1 } from 'ai';
 import { describe, expect, it, vi } from 'vitest';
-import { HooksManager } from '../core/hooks.js';
-import type { SubagentContextSnapshot } from '../types/conversation.js';
-import { _buildSystemPromptForTest, runSubagent } from './subagent-runner.js';
+import { _buildSystemPromptForTest, runSubagent } from '../../src/agent/subagent-runner.js';
+import { HooksManager } from '../../src/core/hooks.js';
+import type { SubagentContextSnapshot } from '../../src/types/conversation.js';
 
 // Mock the ai module
 vi.mock('ai', () => ({

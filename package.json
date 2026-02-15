@@ -25,7 +25,7 @@
     "build": "tsup",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "biome check src/",
+    "lint": "biome check src/ test/",
     "lint:fix": "biome check --fix src/",
     "typecheck": "tsc --noEmit"
   },

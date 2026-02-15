@@ -7,7 +7,7 @@ import {
 	ToolExecutionError,
 	TransportError,
 	ValidationError,
-} from './errors.js';
+} from '../../src/core/errors.js';
 
 describe('FrameworkError', () => {
 	it('sets message, component, and default severity', () => {
