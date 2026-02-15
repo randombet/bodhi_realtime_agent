@@ -488,6 +488,19 @@ function connectWs() {
           addSystem('[gui] ' + JSON.stringify(msg.payload?.data));
         } else if (msg.type === 'gui.notification') {
           addSystem('[notification] ' + (msg.payload?.message || ''));
+        } else if (msg.type === 'image') {
+          const imgEl = document.createElement('div');
+          imgEl.className = 't-entry t-system';
+          const img = document.createElement('img');
+          img.src = 'data:' + (msg.data.mimeType || 'image/png') + ';base64,' + msg.data.base64;
+          img.alt = msg.data.description || 'Generated image';
+          img.style.maxWidth = '100%';
+          img.style.borderRadius = '8px';
+          img.style.marginTop = '8px';
+          imgEl.appendChild(img);
+          $('transcript').appendChild(imgEl);
+          $('transcript').scrollTop = $('transcript').scrollHeight;
+          dbg('Image received: ' + (msg.data.description || '').slice(0, 50), 'event');
         } else if (msg.type === 'speech_speed') {
           const speeds = { slow: 0.85, normal: 1.0, fast: 1.2 };
           playbackRate = speeds[msg.speed] || 1.0;

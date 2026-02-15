@@ -18,6 +18,7 @@
  */
 
 import { google } from '@ai-sdk/google';
+import { GoogleGenAI } from '@google/genai';
 import { z } from 'zod';
 import { VoiceSession } from '../src/core/voice-session.js';
 import type { MainAgent } from '../src/types/agent.js';
@@ -184,6 +185,73 @@ const setSpeechSpeed: ToolDefinition = {
 };
 
 /**
+ * Image generation tool — generates images using Gemini and sends them to the web client.
+ * Uses @google/genai SDK directly for image output capabilities.
+ */
+const generateImage: ToolDefinition = {
+	name: 'generate_image',
+	description: `Generate an image based on a text description.
+Use this when the user asks you to create, draw, or generate an image.
+The image will appear in the web client while you describe it.`,
+	parameters: z.object({
+		prompt: z.string().describe('Detailed description of the image to generate'),
+	}),
+	execution: 'inline',
+	execute: async (args, ctx: ToolContext) => {
+		const { prompt } = args as { prompt: string };
+		console.log(`[Tool] generate_image: ${prompt}`);
+
+		try {
+			const ai = new GoogleGenAI({ apiKey: API_KEY });
+			const response = await ai.models.generateContent({
+				model: 'gemini-2.0-flash-exp',
+				contents: prompt,
+				config: { responseModalities: ['TEXT', 'IMAGE'] },
+			});
+
+			// biome-ignore lint/suspicious/noExplicitAny: Gemini response parts have dynamic shape
+			const parts = (response as any).candidates?.[0]?.content?.parts ?? [];
+			let imageData: { base64: string; mimeType: string } | null = null;
+			let textDescription = '';
+
+			for (const part of parts) {
+				if (part.inlineData?.data) {
+					imageData = {
+						base64: part.inlineData.data,
+						mimeType: part.inlineData.mimeType ?? 'image/png',
+					};
+				}
+				if (part.text) {
+					textDescription += part.text;
+				}
+			}
+
+			if (imageData) {
+				ctx.sendJsonToClient?.({
+					type: 'image',
+					data: {
+						base64: imageData.base64,
+						mimeType: imageData.mimeType,
+						description: prompt,
+					},
+				});
+				console.log(`[Tool] Image generated for: ${prompt}`);
+				return {
+					status: 'success',
+					description: textDescription || `Image generated: ${prompt}`,
+				};
+			}
+
+			return { status: 'no_image', description: textDescription || 'No image was generated' };
+		} catch (error) {
+			const msg = error instanceof Error ? error.message : String(error);
+			console.error(`[Tool] generate_image error: ${msg}`);
+			return { error: msg };
+		}
+	},
+};
+
+/**
  * Transfer-to-agent tool — used by Gemini to trigger agent transfers.
  * The framework intercepts calls to 'transfer_to_agent' automatically.
  */
@@ -227,7 +295,8 @@ You have access to:
 3. **Current Time**: Get the current date and time in any timezone
 4. **Slow Web Search**: Demo tool that takes 3 seconds — shows how the framework handles slow operations
 5. **Speech Speed**: Change speech speed (slow/normal/fast) when the user asks
-6. **Agent Transfers**: Transfer to math expert or Spanish assistant
+6. **Image Generation**: Generate images from text descriptions
+7. **Agent Transfers**: Transfer to math expert or Spanish assistant
 
 Guidelines:
 - ALWAYS speak in English, regardless of what language the user speaks
@@ -237,8 +306,9 @@ Guidelines:
 - For COMPLEX math questions, use transfer_to_agent with agent_name "math_expert"
 - When the user wants to speak Spanish or practice Spanish, use transfer_to_agent with agent_name "spanish_agent"
 - When the user asks you to speak slower or faster, call set_speech_speed
+- When the user asks you to generate or draw an image, use generate_image and describe what you created
 - When using slow_web_search, tell the user you're searching while you wait for results`,
-	tools: [calculate, getCurrentTime, slowWebSearch, setSpeechSpeed, transferFromMain],
+	tools: [calculate, getCurrentTime, slowWebSearch, setSpeechSpeed, generateImage, transferFromMain],
 	googleSearch: true,
 	onEnter: async () => {
 		console.log('[Agent] Main agent entered');
@@ -381,6 +451,7 @@ async function main() {
 	console.log("  - 'What's the weather in San Francisco?' (uses Google Search)");
 	console.log("  - 'Use slow search for AI news'");
 	console.log("  - 'Speak slower please' (changes speech speed)");
+	console.log("  - 'Generate an image of a sunset' (creates and displays image)");
 	console.log("  - 'I want to practice Spanish' (transfers to Spanish agent)");
 	console.log();
 	console.log('Press Ctrl+C to stop.');
