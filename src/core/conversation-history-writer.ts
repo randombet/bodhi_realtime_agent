@@ -3,6 +3,15 @@ import type { ConversationHistoryStore, SessionAnalytics } from '../types/histor
 import type { ConversationContext } from './conversation-context.js';
 import type { IEventBus } from './event-bus.js';
 
+/**
+ * EventBus-driven writer that persists conversation items to a ConversationHistoryStore.
+ *
+ * Subscribes to session lifecycle events and flushes incremental batches of conversation
+ * items (since the last checkpoint) to the store. Tracks session analytics counters
+ * and writes a final SessionReport on session close.
+ *
+ * Call `dispose()` to unsubscribe from all events.
+ */
 export class ConversationHistoryWriter {
 	private unsubscribers: Array<() => void> = [];
 	private analytics: SessionAnalytics = {

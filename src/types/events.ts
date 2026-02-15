@@ -3,11 +3,19 @@ import type { SubagentResult, ToolCall, ToolResult, UIPayload } from './conversa
 import type { SessionState } from './session.js';
 import type { UIResponse } from './ui.js';
 
+/** Function returned by EventBus.subscribe() — call it to remove the subscription. */
 export type Unsubscribe = () => void;
 
 /**
- * Maps each event type to its payload shape.
- * EventBus uses this for compile-time type safety.
+ * Maps each event type string to its payload shape.
+ * EventBus uses this mapped type for compile-time type safety on publish/subscribe.
+ *
+ * @example
+ * ```ts
+ * eventBus.subscribe('agent.transfer', (payload) => {
+ *   // payload is typed as { sessionId: string; fromAgent: string; toAgent: string }
+ * });
+ * ```
  */
 export interface EventPayloadMap {
 	// Agent events
@@ -57,6 +65,8 @@ export interface EventPayloadMap {
 	};
 }
 
+/** Union of all valid event type strings (e.g. "agent.enter", "tool.call"). */
 export type EventType = keyof EventPayloadMap;
 
+/** Resolves the payload type for a given event type string. */
 export type EventPayload<T extends EventType> = EventPayloadMap[T];

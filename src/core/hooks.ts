@@ -1,8 +1,13 @@
 import type { FrameworkHooks } from '../types/hooks.js';
 
+/**
+ * Manages registered lifecycle hooks and exposes them as getter accessors.
+ * Zero-overhead pattern: callers check `if (hooks.onX) hooks.onX(event)`.
+ */
 export class HooksManager {
 	private hooks: FrameworkHooks = {};
 
+	/** Register (or overwrite) hook callbacks. Merges with any previously registered hooks. */
 	register(hooks: FrameworkHooks): void {
 		Object.assign(this.hooks, hooks);
 	}

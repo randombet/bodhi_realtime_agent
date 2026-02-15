@@ -7,6 +7,17 @@ import type {
 } from '../types/conversation.js';
 import type { MemoryFact } from '../types/memory.js';
 
+/**
+ * In-memory conversation timeline that tracks all messages, tool calls, and agent transfers.
+ *
+ * Key concepts:
+ * - **Items**: Append-only list of ConversationItems (user messages, assistant messages, tool events, transfers).
+ * - **Checkpoint**: A cursor into the items list. `getItemsSinceCheckpoint()` returns only new items since the last checkpoint.
+ *   Used by ConversationHistoryWriter and MemoryDistiller to process incremental batches.
+ * - **Summary**: A compressed representation of older conversation turns. When set via `setSummary()`,
+ *   items before the checkpoint are evicted (they're captured in the summary).
+ * - **Token estimate**: Rough heuristic (`content.length / 4`) used to decide when to trigger summarization.
+ */
 export class ConversationContext {
 	private _items: ConversationItem[] = [];
 	private _summary: string | null = null;
@@ -20,6 +31,7 @@ export class ConversationContext {
 		return this._summary;
 	}
 
+	/** Rough token count estimate for all items + summary (content.length / 4). */
 	get tokenEstimate(): number {
 		let total = 0;
 		for (const item of this._items) {
@@ -63,14 +75,17 @@ export class ConversationContext {
 		});
 	}
 
+	/** Return all items added since the last checkpoint (or all items if no checkpoint set). */
 	getItemsSinceCheckpoint(): ConversationItem[] {
 		return this._items.slice(this.checkpointIndex);
 	}
 
+	/** Advance the checkpoint cursor to the current end of the items list. */
 	markCheckpoint(): void {
 		this.checkpointIndex = this._items.length;
 	}
 
+	/** Store a compressed summary and evict all items before the current checkpoint. */
 	setSummary(summary: string): void {
 		this._summary = summary;
 		// Evict items before checkpoint — they're now captured in the summary
@@ -78,6 +93,7 @@ export class ConversationContext {
 		this.checkpointIndex = 0;
 	}
 
+	/** Build a snapshot of conversation state for a subagent (summary + recent turns + memory). */
 	getSubagentContext(
 		task: SubagentTask,
 		agentInstructions: string,
@@ -94,6 +110,7 @@ export class ConversationContext {
 		};
 	}
 
+	/** Format the conversation as Gemini-compatible Content array for replay after reconnection. */
 	toReplayContent(): Array<{ role: string; parts: Array<{ text: string }> }> {
 		const content: Array<{ role: string; parts: Array<{ text: string }> }> = [];
 

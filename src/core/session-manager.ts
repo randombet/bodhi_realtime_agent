@@ -4,6 +4,7 @@ import { SessionError } from './errors.js';
 import type { IEventBus } from './event-bus.js';
 import type { HooksManager } from './hooks.js';
 
+/** Legal state transitions — any unlisted transition throws SessionError. */
 const VALID_TRANSITIONS: Record<SessionState, SessionState[]> = {
 	CREATED: ['CONNECTING', 'CLOSED'],
 	CONNECTING: ['ACTIVE', 'CLOSED'],
@@ -13,6 +14,11 @@ const VALID_TRANSITIONS: Record<SessionState, SessionState[]> = {
 	CLOSED: [],
 };
 
+/**
+ * Manages the session state machine and resumption handle.
+ * Publishes state-change events to the EventBus and fires lifecycle hooks.
+ * Also buffers client messages during disconnected states (RECONNECTING/TRANSFERRING).
+ */
 export class SessionManager {
 	private _state: SessionState = 'CREATED';
 	private _resumptionHandle: string | null = null;
