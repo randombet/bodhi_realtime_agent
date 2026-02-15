@@ -93,6 +93,23 @@ const HTML = /* html */ `<!DOCTYPE html>
   .d-entry.err { color: #ef5350; }
   .d-entry.event { color: #9575cd; }
   .d-entry.audio { color: #4db6ac; }
+  .input-row {
+    width: 100%; max-width: 700px;
+    display: flex; gap: 8px; margin-bottom: 12px;
+  }
+  .input-row input[type=text] {
+    flex: 1; padding: 9px 12px; border-radius: 8px;
+    border: 1px solid #333; background: #12122a; color: #fff; font-size: 13px;
+    outline: none;
+  }
+  .input-row input:focus { border-color: #4a6fa5; }
+  .btn-upload {
+    padding: 9px 12px; border-radius: 8px; border: none;
+    background: #2a2a4e; color: #aaa; font-size: 16px; cursor: pointer;
+  }
+  .btn-upload:hover { background: #3a3a5e; color: #fff; }
+  .btn-send { background: #1e3a5f; color: #fff; }
+  .btn-send:hover { background: #2a4a6f; }
 </style>
 </head>
 <body>
@@ -116,6 +133,13 @@ const HTML = /* html */ `<!DOCTYPE html>
 <div class="pane-label">Conversation</div>
 <div id="transcript">
   <div class="t-entry t-system">Click Connect to start a conversation.</div>
+</div>
+
+<div class="input-row">
+  <input type="text" id="textInput" placeholder="Type a message..." onkeydown="if(event.key==='Enter')sendText()" />
+  <button class="btn-send" onclick="sendText()">Send</button>
+  <button class="btn-upload" onclick="$('fileInput').click()" title="Upload file">&#x1F4CE;</button>
+  <input type="file" id="fileInput" accept="image/png,image/jpeg,image/webp,image/gif,application/pdf" style="display:none" onchange="uploadFile(this)" />
 </div>
 
 <div class="pane-label">Debug Log</div>
@@ -567,6 +591,64 @@ function toggle() {
     $('btn').className = 'btn-disconnect';
     connectWs();
   }
+}
+
+// ─── Text input ──────────────────────────────────────────
+function sendText() {
+  const input = $('textInput');
+  const text = input.value.trim();
+  if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+  ws.send(JSON.stringify({ type: 'text_input', text }));
+  input.value = '';
+  dbg('Sent text: "' + text.slice(0, 50) + '"', 'event');
+}
+
+// ─── File upload ─────────────────────────────────────────
+function uploadFile(input) {
+  const file = input.files?.[0];
+  if (!file || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+  if (file.size > 20 * 1024 * 1024) {
+    addSystem('File too large (max 20MB)');
+    input.value = '';
+    return;
+  }
+
+  const reader = new FileReader();
+  reader.onload = () => {
+    const dataUrl = reader.result;
+    const [header, base64] = dataUrl.split(',');
+    const mimeType = header.match(/:(.*?);/)?.[1] || file.type;
+
+    ws.send(JSON.stringify({
+      type: 'file_upload',
+      data: { base64, mimeType, fileName: file.name }
+    }));
+
+    // Show thumbnail preview
+    if (mimeType.startsWith('image/')) {
+      const imgEl = document.createElement('div');
+      imgEl.className = 't-entry t-system';
+      const img = document.createElement('img');
+      img.src = dataUrl;
+      img.alt = file.name;
+      img.style.maxWidth = '200px';
+      img.style.borderRadius = '8px';
+      img.style.marginTop = '4px';
+      imgEl.textContent = 'Uploaded: ' + file.name + ' ';
+      imgEl.appendChild(img);
+      $('transcript').appendChild(imgEl);
+    } else {
+      addSystem('Uploaded: ' + file.name + ' (' + (file.size / 1024).toFixed(1) + ' KB)');
+    }
+
+    dbg('Uploaded file: ' + file.name + ' (' + mimeType + ', ' + base64.length + ' chars)', 'event');
+    $('transcript').scrollTop = $('transcript').scrollHeight;
+  };
+
+  reader.readAsDataURL(file);
+  input.value = '';
 }
 </script>
 </body>

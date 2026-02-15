@@ -306,6 +306,82 @@ describe('VoiceSession', () => {
 		await new Promise<void>((r) => ws.on('close', r));
 	});
 
+	it('handles text_input from client and records in conversation', async () => {
+		session = new VoiceSession({
+			sessionId: 'sess_1',
+			userId: 'user_1',
+			apiKey: 'test-key',
+			agents: [createEchoAgent()],
+			initialAgent: 'echo',
+			port: 9881,
+			model: mockModel,
+		});
+
+		await session.start();
+		await new Promise((r) => setTimeout(r, 50));
+
+		const WebSocket = (await import('ws')).default;
+		const ws = new WebSocket('ws://localhost:9881');
+		await new Promise<void>((r) => ws.on('open', r));
+
+		const received: string[] = [];
+		ws.on('message', (data, isBinary) => {
+			if (!isBinary) received.push(data.toString());
+		});
+
+		// Send text input
+		ws.send(JSON.stringify({ type: 'text_input', text: 'Hello agent' }));
+
+		await new Promise((r) => setTimeout(r, 100));
+
+		// Check conversation context has the user message
+		const items = session.conversationContext.items;
+		expect(items.some((i) => i.content === 'Hello agent' && i.role === 'user')).toBe(true);
+
+		// Check transcript was sent back to client
+		const transcripts = received.map((r) => JSON.parse(r)).filter((m) => m.type === 'transcript');
+		expect(transcripts.some((t) => t.role === 'user' && t.text === 'Hello agent')).toBe(true);
+
+		ws.close();
+		await new Promise<void>((r) => ws.on('close', r));
+	});
+
+	it('handles file_upload from client and records in conversation', async () => {
+		session = new VoiceSession({
+			sessionId: 'sess_1',
+			userId: 'user_1',
+			apiKey: 'test-key',
+			agents: [createEchoAgent()],
+			initialAgent: 'echo',
+			port: 9882,
+			model: mockModel,
+		});
+
+		await session.start();
+		await new Promise((r) => setTimeout(r, 50));
+
+		const WebSocket = (await import('ws')).default;
+		const ws = new WebSocket('ws://localhost:9882');
+		await new Promise<void>((r) => ws.on('open', r));
+
+		// Send file upload
+		ws.send(
+			JSON.stringify({
+				type: 'file_upload',
+				data: { base64: 'aW1hZ2VkYXRh', mimeType: 'image/png', fileName: 'test.png' },
+			}),
+		);
+
+		await new Promise((r) => setTimeout(r, 100));
+
+		// Check conversation context has the upload
+		const items = session.conversationContext.items;
+		expect(items.some((i) => i.content.includes('Uploaded file: test.png'))).toBe(true);
+
+		ws.close();
+		await new Promise<void>((r) => ws.on('close', r));
+	});
+
 	it('publishes turn events on EventBus', async () => {
 		session = new VoiceSession({
 			sessionId: 'sess_1',

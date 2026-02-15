@@ -451,7 +451,45 @@ export class VoiceSession {
 					formData?: Record<string, unknown>;
 				},
 			});
+		} else if (message.type === 'file_upload' && message.data) {
+			const data = message.data as { base64: string; mimeType: string; fileName?: string };
+			this.handleFileUpload(data.base64, data.mimeType, data.fileName);
+		} else if (message.type === 'text_input' && typeof message.text === 'string') {
+			this.handleTextInput(message.text);
 		}
+	}
+
+	private handleFileUpload(base64: string, mimeType: string, fileName?: string): void {
+		if (!this.sessionManager.isActive) return;
+
+		// Send image/document to Gemini as inline data
+		this.geminiTransport.sendClientContent(
+			[{ role: 'user', parts: [{ inlineData: { data: base64, mimeType } }] as never[] }],
+			false,
+		);
+
+		// Record in conversation context
+		this.conversationContext.addUserMessage(`[Uploaded file: ${fileName ?? 'file'}]`);
+	}
+
+	private handleTextInput(text: string): void {
+		if (!this.sessionManager.isActive || !text.trim()) return;
+
+		// Send text to Gemini
+		this.geminiTransport.sendClientContent(
+			[{ role: 'user', parts: [{ text: text.trim() }] }],
+			true,
+		);
+
+		// Record in conversation context
+		this.conversationContext.addUserMessage(text.trim());
+
+		// Forward transcript to client for display
+		this.clientTransport.sendJsonToClient({
+			type: 'transcript',
+			role: 'user',
+			text: text.trim(),
+		});
 	}
 
 	private handleClientConnected(): void {
