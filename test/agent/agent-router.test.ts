@@ -128,6 +128,26 @@ describe('AgentRouter', () => {
 			);
 		});
 
+		it('prepends language directive on transfer when agent has language', async () => {
+			const { router, sessionMgr, gemini } = setup();
+			router.registerAgents([
+				createTestAgent('general'),
+				createTestAgent('spanish', { language: 'es-ES' }),
+			]);
+			router.setInitialAgent('general');
+			sessionMgr.transitionTo('CONNECTING');
+			sessionMgr.transitionTo('ACTIVE');
+
+			await router.transfer('spanish');
+
+			expect(gemini.updateSystemInstruction).toHaveBeenCalledWith(
+				expect.stringContaining('You MUST respond in Spanish'),
+			);
+			expect(gemini.updateSystemInstruction).toHaveBeenCalledWith(
+				expect.stringContaining('You are spanish'),
+			);
+		});
+
 		it('throws for unknown target agent', async () => {
 			const { router } = setup();
 			router.registerAgents([createTestAgent('general')]);

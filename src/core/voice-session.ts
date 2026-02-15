@@ -1,4 +1,5 @@
 import type { LanguageModelV1 } from 'ai';
+import { resolveInstructions } from '../agent/agent-context.js';
 import { AgentRouter } from '../agent/agent-router.js';
 import { ToolExecutor } from '../tools/tool-executor.js';
 import { ClientTransport } from '../transport/client-transport.js';
@@ -104,11 +105,7 @@ export class VoiceSession {
 
 		// Set up Gemini transport
 		const initialAgent = config.agents.find((a) => a.name === config.initialAgent);
-		const instructions = initialAgent
-			? typeof initialAgent.instructions === 'function'
-				? initialAgent.instructions()
-				: initialAgent.instructions
-			: '';
+		const instructions = initialAgent ? resolveInstructions(initialAgent) : '';
 
 		this.geminiTransport = new GeminiLiveTransport(
 			{

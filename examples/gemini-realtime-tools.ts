@@ -169,13 +169,15 @@ Use this when the user specifically asks for a "slow search" demo.`,
  * Transfer-to-agent tool — used by Gemini to trigger agent transfers.
  * The framework intercepts calls to 'transfer_to_agent' automatically.
  */
-const transferToMathExpert: ToolDefinition = {
+const transferFromMain: ToolDefinition = {
 	name: 'transfer_to_agent',
-	description: `Transfer the conversation to a math specialist.
-Use this when the user has complex math questions or needs
-detailed mathematical explanations beyond simple calculations.`,
+	description: `Transfer the conversation to a specialist agent.
+- "math_expert": For complex math questions or detailed mathematical explanations.
+- "spanish_agent": When the user wants to speak in Spanish or practice Spanish.`,
 	parameters: z.object({
-		agent_name: z.literal('math_expert').describe('The agent to transfer to'),
+		agent_name: z
+			.enum(['math_expert', 'spanish_agent'])
+			.describe('The agent to transfer to'),
 	}),
 	execution: 'inline',
 	execute: async () => ({ status: 'transferred' }),
@@ -206,17 +208,17 @@ You have access to:
 2. **Calculator**: Evaluate math expressions (sqrt, sin, cos, log, pi, etc.)
 3. **Current Time**: Get the current date and time in any timezone
 4. **Slow Web Search**: Demo tool that takes 3 seconds — shows how the framework handles slow operations
-5. **Math Expert Transfer**: Transfer to a specialized math expert for complex calculations
+5. **Agent Transfers**: Transfer to math expert or Spanish assistant
 
 Guidelines:
 - ALWAYS speak in English, regardless of what language the user speaks
 - Be conversational and friendly
 - Keep responses concise (this is voice)
 - Use calculator for simple math
-- For COMPLEX math questions or when the user wants detailed mathematical explanations,
-  use transfer_to_agent with agent_name "math_expert" to hand them off to our math specialist
+- For COMPLEX math questions, use transfer_to_agent with agent_name "math_expert"
+- When the user wants to speak Spanish or practice Spanish, use transfer_to_agent with agent_name "spanish_agent"
 - When using slow_web_search, tell the user you're searching while you wait for results`,
-	tools: [calculate, getCurrentTime, slowWebSearch, transferToMathExpert],
+	tools: [calculate, getCurrentTime, slowWebSearch, transferFromMain],
 	googleSearch: true,
 	onEnter: async () => {
 		console.log('[Agent] Main agent entered');
@@ -254,6 +256,30 @@ You have a more serious, professorial tone compared to the main assistant.`,
 	},
 };
 
+const spanishAgent: MainAgent = {
+	name: 'spanish_agent',
+	instructions: `Eres un asistente amigable que habla en español.
+
+Tus capacidades:
+- Conversación general en español
+- Ayuda con traducciones entre inglés y español
+- Práctica de conversación para estudiantes de español
+- Calculadora y hora actual
+
+Directrices:
+- Sé amigable y paciente
+- Si el usuario comete errores en español, corrígelos amablemente
+- Cuando el usuario quiera volver al asistente principal en inglés, usa transfer_to_agent con agent_name "main"`,
+	tools: [calculate, getCurrentTime, transferToMain],
+	language: 'es-ES',
+	onEnter: async () => {
+		console.log('[Agent] Spanish agent entered');
+	},
+	onExit: async () => {
+		console.log('[Agent] Spanish agent exited');
+	},
+};
+
 // =============================================================================
 // Start the Voice Session
 // =============================================================================
@@ -263,7 +289,7 @@ async function main() {
 		sessionId: SESSION_ID,
 		userId: 'demo_user',
 		apiKey: API_KEY,
-		agents: [mainAgent, mathExpertAgent],
+		agents: [mainAgent, mathExpertAgent, spanishAgent],
 		initialAgent: 'main',
 		port: PORT,
 		model: google('gemini-2.0-flash'),
@@ -334,6 +360,7 @@ async function main() {
 	console.log("  - 'I need help with complex math' (transfers to math expert)");
 	console.log("  - 'What's the weather in San Francisco?' (uses Google Search)");
 	console.log("  - 'Use slow search for AI news'");
+	console.log("  - 'I want to practice Spanish' (transfers to Spanish agent)");
 	console.log();
 	console.log('Press Ctrl+C to stop.');
 	console.log('============================================================');
