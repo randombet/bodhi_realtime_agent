@@ -1,5 +1,6 @@
 import { defineConfig } from 'vitepress';
 import { withMermaid } from 'vitepress-plugin-mermaid';
+import typedocSidebar from '../api/typedoc-sidebar.json';
 
 export default withMermaid(
 	defineConfig({
@@ -49,6 +50,7 @@ export default withMermaid(
 						],
 					},
 				],
+				'/api/': typedocSidebar,
 			},
 
 			socialLinks: [

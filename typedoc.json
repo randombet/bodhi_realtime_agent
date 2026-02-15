@@ -9,5 +9,6 @@
 	"excludeExternals": true,
 	"hideGenerator": true,
 	"readme": "none",
-	"githubPages": false
+	"githubPages": false,
+	"docsRoot": "./docs"
 }
