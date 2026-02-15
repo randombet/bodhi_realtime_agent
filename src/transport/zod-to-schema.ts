@@ -58,6 +58,17 @@ function convertDef(def: any): Record<string, unknown> {
 				items: convertDef(def.type._def),
 			};
 
+		case 'ZodLiteral':
+			return {
+				type:
+					typeof def.value === 'number'
+						? 'NUMBER'
+						: typeof def.value === 'boolean'
+							? 'BOOLEAN'
+							: 'STRING',
+				enum: [def.value],
+			};
+
 		case 'ZodEnum':
 			return {
 				type: 'STRING',

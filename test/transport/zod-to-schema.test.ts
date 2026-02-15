@@ -47,6 +47,26 @@ describe('zodToJsonSchema', () => {
 		});
 	});
 
+	it('converts literal string type', () => {
+		const schema = z.object({
+			agent_name: z.literal('math_expert'),
+		});
+		const result = zodToJsonSchema(schema);
+		expect((result.properties as Record<string, unknown>).agent_name).toEqual({
+			type: 'STRING',
+			enum: ['math_expert'],
+		});
+	});
+
+	it('converts literal number type', () => {
+		const schema = z.object({ version: z.literal(1) });
+		const result = zodToJsonSchema(schema);
+		expect((result.properties as Record<string, unknown>).version).toEqual({
+			type: 'NUMBER',
+			enum: [1],
+		});
+	});
+
 	it('converts enum type', () => {
 		const schema = z.object({
 			priority: z.enum(['low', 'medium', 'high']),
