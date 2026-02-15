@@ -73,8 +73,9 @@ export class GeminiLiveTransport {
 
 		const connectConfig: Record<string, unknown> = {
 			responseModalities: ['AUDIO'],
-			inputAudioTranscription: {},
 			outputAudioTranscription: {},
+			// NOTE: inputAudioTranscription is only supported on Vertex AI, not the Gemini API.
+			// User input transcription is unavailable when connecting directly to Gemini.
 		};
 
 		if (this.config.systemInstruction) {

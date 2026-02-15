@@ -7,7 +7,7 @@
  * - Multi-agent: Agent transfer between main assistant and math expert
  *
  * Usage:
- *   1. Set GOOGLE_API_KEY environment variable
+ *   1. Set GEMINI_API_KEY environment variable
  *   2. Run: pnpm tsx examples/gemini-realtime-tools.ts
  *   3. Connect a WebSocket audio client to ws://localhost:9900
  *   4. Try saying:
@@ -27,9 +27,9 @@ import type { ToolContext, ToolDefinition } from '../src/types/tool.js';
 // Configuration
 // =============================================================================
 
-const API_KEY = process.env.GOOGLE_API_KEY ?? '';
+const API_KEY = process.env.GEMINI_API_KEY ?? '';
 if (API_KEY.length === 0) {
-	console.error('Error: GOOGLE_API_KEY environment variable is required');
+	console.error('Error: GEMINI_API_KEY environment variable is required');
 	process.exit(1);
 }
 
@@ -265,7 +265,7 @@ async function main() {
 		initialAgent: 'main',
 		port: PORT,
 		model: google('gemini-2.0-flash'),
-		geminiModel: 'gemini-2.0-flash-live-001',
+		geminiModel: 'gemini-2.5-flash-native-audio-preview-12-2025',
 		speechConfig: { voiceName: 'Puck' },
 		hooks: {
 			onSessionStart: (event) => {
@@ -294,6 +294,12 @@ async function main() {
 	// Subscribe to events for logging
 	session.eventBus.subscribe('turn.end', (payload) => {
 		console.log(`[Event] Turn ended: ${payload.turnId}`);
+		// Print recent transcripts
+		const items = session.conversationContext.items;
+		const recent = items.slice(-2);
+		for (const item of recent) {
+			console.log(`  [${item.role}] ${item.content}`);
+		}
 	});
 
 	session.eventBus.subscribe('agent.transfer', (payload) => {

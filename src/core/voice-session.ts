@@ -352,6 +352,7 @@ export class VoiceSession {
 			sessionId: this.config.sessionId,
 			turnId: turnIdStr,
 		});
+		this.clientTransport.sendJsonToClient({ type: 'turn.end', turnId: turnIdStr });
 
 		// Notify active agent
 		const agent = this.agentRouter.activeAgent;
@@ -385,12 +386,22 @@ export class VoiceSession {
 	private handleInputTranscription(text: string): void {
 		if (text.trim()) {
 			this.conversationContext.addUserMessage(text);
+			this.clientTransport.sendJsonToClient({
+				type: 'transcript',
+				role: 'user',
+				text: text.trim(),
+			});
 		}
 	}
 
 	private handleOutputTranscription(text: string): void {
 		if (text.trim()) {
 			this.conversationContext.addAssistantMessage(text);
+			this.clientTransport.sendJsonToClient({
+				type: 'transcript',
+				role: 'assistant',
+				text: text.trim(),
+			});
 		}
 	}
 
