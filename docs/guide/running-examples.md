@@ -36,7 +36,7 @@ Connect a WebSocket audio client and try saying:
   - 'Use slow search for AI news'
   - 'Speak slower please' (changes speech speed)
   - 'Generate an image of a sunset' (creates and displays image)
-  - 'I want to practice Spanish' (transfers to Spanish agent)
+  - Try speaking in any language — the assistant replies in kind
 
 Press Ctrl+C to stop.
 ============================================================
@@ -63,8 +63,8 @@ Open [http://localhost:8080](http://localhost:8080) in Chrome and click **Connec
 | "What's the weather in Tokyo?" | Uses Google Search grounding for real-time data |
 | "Generate an image of a sunset" | Calls Imagen API, image appears in browser |
 | "Speak slower please" | Adjusts playback rate via `set_speech_speed` tool |
-| "I want to practice Spanish" | Transfers to `spanish_agent` (responds in Spanish) |
 | "Use slow search for AI news" | Demonstrates 3-second slow tool (agent keeps talking) |
+| Speak in any language | The assistant automatically replies in the same language |
 
 ## Agents in the Demo
 
@@ -76,9 +76,9 @@ The default agent with access to all tools. Handles general conversation and rou
 
 A specialist with a professorial tone. Activated when you ask for help with complex math. Has the calculator tool and can transfer back to main.
 
-### Spanish Agent
+### Multilingual
 
-Speaks Spanish and helps with conversation practice. Activated when you want to practice Spanish. Configured with `language: 'es-ES'`.
+The main assistant is multilingual by default — speak in any language and it replies in kind. No separate agent needed; Gemini's native audio model handles language detection and response automatically.
 
 ## Environment Variables
 

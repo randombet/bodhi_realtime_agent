@@ -56,8 +56,7 @@ The framework includes a built-in `transferToAgent` tool that Gemini can call to
 const mainAgent: MainAgent = {
   name: 'main',
   instructions: `You are a general assistant.
-    If the user asks about math, transfer to the math_expert agent.
-    If the user asks in Spanish, transfer to the spanish agent.`,
+    If the user asks about math, transfer to the math_expert agent.`,
   tools: [],
 };
 
@@ -88,27 +87,28 @@ During a transfer, the framework:
 Transfers are seamless to the user — they hear continuous audio. The framework manages the Gemini reconnection behind the scenes.
 :::
 
-## Multilingual Agents
+## Multilingual Support
 
-Set the `language` property to a BCP 47 tag and the framework prepends a language directive to the system instruction:
+Gemini's native audio model automatically detects the user's language and can respond in kind. The simplest approach is to instruct the agent to be multilingual:
 
 ```typescript
-const spanishAgent: MainAgent = {
-  name: 'spanish',
-  language: 'es-ES',
-  instructions: 'Eres un asistente amigable. Responde siempre en español.',
+const assistant: MainAgent = {
+  name: 'assistant',
+  instructions: `You are a helpful, multilingual voice assistant.
+    ALWAYS respond in the same language the user speaks.`,
   tools: [],
 };
 ```
 
-This tells Gemini to respond in the specified language. Combine with agent transfers for a multilingual experience:
+### Language-Specific Agents
+
+For cases where you need a dedicated agent with a fixed language (e.g. a localized specialist), set the `language` property to a BCP 47 tag. The framework prepends a language directive to the system instruction:
 
 ```typescript
-const mainAgent: MainAgent = {
-  name: 'main',
-  instructions: `You are a multilingual receptionist.
-    If the user speaks Spanish, transfer to the spanish agent.
-    If the user speaks Japanese, transfer to the japanese agent.`,
+const japaneseSupport: MainAgent = {
+  name: 'jp_support',
+  language: 'ja-JP',
+  instructions: '日本語のカスタマーサポート担当です。丁寧に対応してください。',
   tools: [],
 };
 ```
