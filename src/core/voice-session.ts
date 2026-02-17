@@ -80,6 +80,8 @@ export class VoiceSession {
 	private subagentConfigs: Record<string, SubagentConfig>;
 	private turnId = 0;
 	private config: VoiceSessionConfig;
+	private inputTranscriptBuffer = '';
+	private outputTranscriptBuffer = '';
 
 	constructor(config: VoiceSessionConfig) {
 		this.config = config;
@@ -190,6 +192,9 @@ export class VoiceSession {
 
 	/** Gracefully shut down: disconnect Gemini, stop the WebSocket server, transition to CLOSED. */
 	async close(_reason = 'normal'): Promise<void> {
+		// Flush any buffered transcription before closing
+		this.flushTranscriptBuffers();
+
 		// Fire turn end if we're mid-turn
 		if (this.turnId > 0) {
 			this.eventBus.publish('turn.end', {
@@ -350,6 +355,7 @@ export class VoiceSession {
 	}
 
 	private handleTurnComplete(): void {
+		this.flushTranscriptBuffers();
 		this.turnId++;
 		const turnIdStr = `turn_${this.turnId}`;
 		this.eventBus.publish('turn.end', {
@@ -381,6 +387,7 @@ export class VoiceSession {
 	}
 
 	private handleInterrupted(): void {
+		this.flushTranscriptBuffers();
 		this.eventBus.publish('turn.interrupted', {
 			sessionId: this.config.sessionId,
 			turnId: `turn_${this.turnId}`,
@@ -389,24 +396,49 @@ export class VoiceSession {
 
 	private handleInputTranscription(text: string): void {
 		if (text.trim()) {
-			this.conversationContext.addUserMessage(text);
+			this.inputTranscriptBuffer += text;
 			this.clientTransport.sendJsonToClient({
 				type: 'transcript',
 				role: 'user',
-				text: text.trim(),
+				text: this.inputTranscriptBuffer.trim(),
+				partial: true,
 			});
 		}
 	}
 
 	private handleOutputTranscription(text: string): void {
 		if (text.trim()) {
-			this.conversationContext.addAssistantMessage(text);
+			this.outputTranscriptBuffer += text;
 			this.clientTransport.sendJsonToClient({
 				type: 'transcript',
 				role: 'assistant',
-				text: text.trim(),
+				text: this.outputTranscriptBuffer.trim(),
+				partial: true,
 			});
 		}
+	}
+
+	private flushTranscriptBuffers(): void {
+		if (this.inputTranscriptBuffer.trim()) {
+			this.conversationContext.addUserMessage(this.inputTranscriptBuffer.trim());
+			this.clientTransport.sendJsonToClient({
+				type: 'transcript',
+				role: 'user',
+				text: this.inputTranscriptBuffer.trim(),
+				partial: false,
+			});
+		}
+		if (this.outputTranscriptBuffer.trim()) {
+			this.conversationContext.addAssistantMessage(this.outputTranscriptBuffer.trim());
+			this.clientTransport.sendJsonToClient({
+				type: 'transcript',
+				role: 'assistant',
+				text: this.outputTranscriptBuffer.trim(),
+				partial: false,
+			});
+		}
+		this.inputTranscriptBuffer = '';
+		this.outputTranscriptBuffer = '';
 	}
 
 	private handleGroundingMetadata(metadata: Record<string, unknown>): void {
