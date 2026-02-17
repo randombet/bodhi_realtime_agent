@@ -21,7 +21,7 @@ TypeScript framework for building real-time voice agent applications using the G
 ## Installation
 
 ```bash
-pnpm add @bodhi/realtime-agent-framework
+pnpm add @bodhi_agent/realtime-agent-framework
 ```
 
 ## Quick Start
@@ -29,8 +29,8 @@ pnpm add @bodhi/realtime-agent-framework
 ```typescript
 import { google } from '@ai-sdk/google';
 import { z } from 'zod';
-import { VoiceSession } from '@bodhi/realtime-agent-framework';
-import type { MainAgent, ToolDefinition } from '@bodhi/realtime-agent-framework';
+import { VoiceSession } from '@bodhi_agent/realtime-agent-framework';
+import type { MainAgent, ToolDefinition } from '@bodhi_agent/realtime-agent-framework';
 
 // 1. Define tools
 const getCurrentTime: ToolDefinition = {
@@ -221,7 +221,7 @@ const session = new VoiceSession({
 The memory system automatically extracts durable facts about the user from conversation:
 
 ```typescript
-import { MarkdownMemoryStore, MemoryDistiller } from '@bodhi/realtime-agent-framework';
+import { MarkdownMemoryStore, MemoryDistiller } from '@bodhi_agent/realtime-agent-framework';
 
 const memoryStore = new MarkdownMemoryStore('./memory');
 const distiller = new MemoryDistiller(

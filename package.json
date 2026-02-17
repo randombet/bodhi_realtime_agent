@@ -1,6 +1,7 @@
 {
-  "name": "@bodhi/realtime-agent-framework",
+  "name": "@bodhi_agent/realtime-agent-framework",
   "version": "0.1.0",
+  "private": true,
   "description": "TypeScript framework for real-time voice agent applications using Google Gemini Live API",
   "type": "module",
   "main": "./dist/index.cjs",
