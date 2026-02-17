@@ -7,6 +7,7 @@ import type { MainAgent } from '../../src/types/agent.js';
 // Mock the external deps
 vi.mock('@google/genai', () => {
 	let messageHandler: ((msg: unknown) => void) | null = null;
+	let mockSession: Record<string, ReturnType<typeof vi.fn>> | null = null;
 
 	return {
 		GoogleGenAI: vi.fn().mockImplementation(() => ({
@@ -16,16 +17,18 @@ vi.mock('@google/genai', () => {
 					messageHandler = cbs.onmessage as (msg: unknown) => void;
 					// Simulate setup complete
 					setTimeout(() => messageHandler?.({ setupComplete: { sessionId: 'gs_1' } }), 5);
-					return {
+					mockSession = {
 						sendRealtimeInput: vi.fn(),
 						sendToolResponse: vi.fn(),
 						sendClientContent: vi.fn(),
 						close: vi.fn(),
 					};
+					return mockSession;
 				}),
 			},
 		})),
 		_getMessageHandler: () => messageHandler,
+		_getMockSession: () => mockSession,
 	};
 });
 
@@ -57,6 +60,41 @@ function createToolAgent(): MainAgent {
 				parameters: z.object({ city: z.string() }),
 				execution: 'inline',
 				execute: async () => ({ temp: 72, unit: 'F' }),
+			},
+		],
+	};
+}
+
+function createFailingToolAgent(): MainAgent {
+	return {
+		name: 'failing-tool-agent',
+		instructions: 'Agent with a tool that throws',
+		tools: [
+			{
+				name: 'broken_tool',
+				description: 'A tool that always throws',
+				parameters: z.object({ input: z.string() }),
+				execution: 'inline',
+				execute: async () => {
+					throw new Error('Tool execution failed');
+				},
+			},
+		],
+	};
+}
+
+function createBackgroundToolAgent(): MainAgent {
+	return {
+		name: 'bg-tool-agent',
+		instructions: 'Agent with background tool',
+		tools: [
+			{
+				name: 'slow_task',
+				description: 'A slow background task',
+				parameters: z.object({ task: z.string() }),
+				execution: 'background',
+				pendingMessage: 'Working on it...',
+				execute: async () => ({ done: true }),
 			},
 		],
 	};
@@ -404,5 +442,428 @@ describe('VoiceSession', () => {
 		// Since we haven't had any turns, turnId is 0, so no turn.end
 		// This tests that the EventBus is properly wired
 		expect(session.sessionManager.state).toBe('CLOSED');
+	});
+
+	// =========================================================================
+	// Transcript buffering tests
+	// =========================================================================
+
+	describe('transcript buffering', () => {
+		it('accumulates input transcription chunks and sends partial updates to client', async () => {
+			session = new VoiceSession({
+				sessionId: 'sess_1',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9883,
+				model: mockModel,
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const WebSocket = (await import('ws')).default;
+			const ws = new WebSocket('ws://localhost:9883');
+			await new Promise<void>((r) => ws.on('open', r));
+
+			const received: string[] = [];
+			ws.on('message', (data, isBinary) => {
+				if (!isBinary) received.push(data.toString());
+			});
+
+			// Simulate Gemini sending transcription chunks
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+			fire({ serverContent: { inputTranscription: { text: 'sear' } } });
+			fire({ serverContent: { inputTranscription: { text: 'ch the ' } } });
+			fire({ serverContent: { inputTranscription: { text: 'weather' } } });
+
+			await new Promise((r) => setTimeout(r, 50));
+
+			// Each chunk should send a partial transcript with accumulated text
+			const transcripts = received
+				.map((r) => JSON.parse(r))
+				.filter((m: Record<string, unknown>) => m.type === 'transcript');
+
+			expect(transcripts).toHaveLength(3);
+			expect(transcripts[0]).toEqual({
+				type: 'transcript',
+				role: 'user',
+				text: 'sear',
+				partial: true,
+			});
+			expect(transcripts[1]).toEqual({
+				type: 'transcript',
+				role: 'user',
+				text: 'search the',
+				partial: true,
+			});
+			expect(transcripts[2]).toEqual({
+				type: 'transcript',
+				role: 'user',
+				text: 'search the weather',
+				partial: true,
+			});
+
+			ws.close();
+			await new Promise<void>((r) => ws.on('close', r));
+		});
+
+		it('accumulates output transcription chunks and sends partial updates', async () => {
+			session = new VoiceSession({
+				sessionId: 'sess_1',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9884,
+				model: mockModel,
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const WebSocket = (await import('ws')).default;
+			const ws = new WebSocket('ws://localhost:9884');
+			await new Promise<void>((r) => ws.on('open', r));
+
+			const received: string[] = [];
+			ws.on('message', (data, isBinary) => {
+				if (!isBinary) received.push(data.toString());
+			});
+
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+			fire({ serverContent: { outputTranscription: { text: 'The weather ' } } });
+			fire({ serverContent: { outputTranscription: { text: 'is sunny today.' } } });
+
+			await new Promise((r) => setTimeout(r, 50));
+
+			const transcripts = received
+				.map((r) => JSON.parse(r))
+				.filter((m: Record<string, unknown>) => m.type === 'transcript');
+
+			expect(transcripts).toHaveLength(2);
+			expect(transcripts[0]).toEqual({
+				type: 'transcript',
+				role: 'assistant',
+				text: 'The weather',
+				partial: true,
+			});
+			expect(transcripts[1]).toEqual({
+				type: 'transcript',
+				role: 'assistant',
+				text: 'The weather is sunny today.',
+				partial: true,
+			});
+
+			ws.close();
+			await new Promise<void>((r) => ws.on('close', r));
+		});
+
+		it('flushes buffers on turnComplete with partial: false and adds to ConversationContext', async () => {
+			session = new VoiceSession({
+				sessionId: 'sess_1',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9885,
+				model: mockModel,
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const WebSocket = (await import('ws')).default;
+			const ws = new WebSocket('ws://localhost:9885');
+			await new Promise<void>((r) => ws.on('open', r));
+
+			const received: string[] = [];
+			ws.on('message', (data, isBinary) => {
+				if (!isBinary) received.push(data.toString());
+			});
+
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+			// Send input + output transcription chunks
+			fire({ serverContent: { inputTranscription: { text: 'Hello ' } } });
+			fire({ serverContent: { inputTranscription: { text: 'there' } } });
+			fire({ serverContent: { outputTranscription: { text: 'Hi! How ' } } });
+			fire({ serverContent: { outputTranscription: { text: 'can I help?' } } });
+
+			// Fire turn complete to flush
+			fire({ serverContent: { turnComplete: true } });
+
+			await new Promise((r) => setTimeout(r, 100));
+
+			const transcripts = received
+				.map((r) => JSON.parse(r))
+				.filter((m: Record<string, unknown>) => m.type === 'transcript');
+
+			// Should have 4 partials + 2 finals
+			const userPartials = transcripts.filter(
+				(t: Record<string, unknown>) => t.role === 'user' && t.partial === true,
+			);
+			const userFinals = transcripts.filter(
+				(t: Record<string, unknown>) => t.role === 'user' && t.partial === false,
+			);
+			const assistantPartials = transcripts.filter(
+				(t: Record<string, unknown>) => t.role === 'assistant' && t.partial === true,
+			);
+			const assistantFinals = transcripts.filter(
+				(t: Record<string, unknown>) => t.role === 'assistant' && t.partial === false,
+			);
+
+			expect(userPartials).toHaveLength(2);
+			expect(userFinals).toHaveLength(1);
+			expect(userFinals[0].text).toBe('Hello there');
+			expect(assistantPartials).toHaveLength(2);
+			expect(assistantFinals).toHaveLength(1);
+			expect(assistantFinals[0].text).toBe('Hi! How can I help?');
+
+			// Verify ConversationContext has the messages
+			const items = session.conversationContext.items;
+			expect(items.some((i) => i.role === 'user' && i.content === 'Hello there')).toBe(true);
+			expect(items.some((i) => i.role === 'assistant' && i.content === 'Hi! How can I help?')).toBe(
+				true,
+			);
+
+			ws.close();
+			await new Promise<void>((r) => ws.on('close', r));
+		});
+
+		it('flushes buffers on interrupted', async () => {
+			session = new VoiceSession({
+				sessionId: 'sess_1',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9886,
+				model: mockModel,
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+			fire({ serverContent: { outputTranscription: { text: 'Let me tell you about ' } } });
+			fire({ serverContent: { outputTranscription: { text: 'the wea—' } } });
+
+			// Interrupted by user
+			fire({ serverContent: { interrupted: true } });
+
+			await new Promise((r) => setTimeout(r, 50));
+
+			const items = session.conversationContext.items;
+			expect(
+				items.some((i) => i.role === 'assistant' && i.content === 'Let me tell you about the wea—'),
+			).toBe(true);
+		});
+
+		it('flushes buffers on session close', async () => {
+			session = new VoiceSession({
+				sessionId: 'sess_1',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9887,
+				model: mockModel,
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+			fire({ serverContent: { inputTranscription: { text: 'Good' } } });
+			fire({ serverContent: { inputTranscription: { text: 'bye' } } });
+
+			// Close without turnComplete — close() should flush
+			await session.close();
+
+			const items = session.conversationContext.items;
+			expect(items.some((i) => i.role === 'user' && i.content === 'Goodbye')).toBe(true);
+		});
+
+		it('resets buffers after flush so next turn starts fresh', async () => {
+			session = new VoiceSession({
+				sessionId: 'sess_1',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9888,
+				model: mockModel,
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const WebSocket = (await import('ws')).default;
+			const ws = new WebSocket('ws://localhost:9888');
+			await new Promise<void>((r) => ws.on('open', r));
+
+			const received: string[] = [];
+			ws.on('message', (data, isBinary) => {
+				if (!isBinary) received.push(data.toString());
+			});
+
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+			// First turn
+			fire({ serverContent: { inputTranscription: { text: 'Hello' } } });
+			fire({ serverContent: { turnComplete: true } });
+			await new Promise((r) => setTimeout(r, 50));
+
+			// Second turn — should NOT contain "Hello" from first turn
+			received.length = 0;
+			fire({ serverContent: { inputTranscription: { text: 'World' } } });
+
+			await new Promise((r) => setTimeout(r, 50));
+
+			const transcripts = received
+				.map((r) => JSON.parse(r))
+				.filter((m: Record<string, unknown>) => m.type === 'transcript' && m.role === 'user');
+
+			// Should be "World", not "HelloWorld"
+			expect(transcripts[0].text).toBe('World');
+
+			ws.close();
+			await new Promise<void>((r) => ws.on('close', r));
+		});
+	});
+
+	// =========================================================================
+	// Tool call error handling tests
+	// =========================================================================
+
+	describe('tool call error handling', () => {
+		it('sends error response to Gemini when inline tool throws', async () => {
+			session = new VoiceSession({
+				sessionId: 'sess_1',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createFailingToolAgent()],
+				initialAgent: 'failing-tool-agent',
+				port: 9889,
+				model: mockModel,
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const { _getMessageHandler, _getMockSession } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+			const mockSess = (
+				_getMockSession as unknown as () => Record<string, ReturnType<typeof vi.fn>>
+			)();
+
+			// Fire a tool call for the broken tool
+			fire({
+				toolCall: {
+					functionCalls: [{ id: 'tc_err', name: 'broken_tool', args: { input: 'test' } }],
+				},
+			});
+
+			// Wait for the async .catch() to fire
+			await new Promise((r) => setTimeout(r, 100));
+
+			// Verify sendToolResponse was called with an error (not left hanging)
+			expect(mockSess.sendToolResponse).toHaveBeenCalled();
+			const lastCall = mockSess.sendToolResponse.mock.calls.at(-1);
+			const response = lastCall[0].functionResponses[0];
+			expect(response.id).toBe('tc_err');
+			expect(response.name).toBe('broken_tool');
+			expect(response.response).toHaveProperty('error');
+			expect(response.response.error).toContain('Tool execution failed');
+		});
+
+		it('sends error response to Gemini when background tool has no subagent config (falls back to inline)', async () => {
+			session = new VoiceSession({
+				sessionId: 'sess_1',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createBackgroundToolAgent()],
+				initialAgent: 'bg-tool-agent',
+				port: 9890,
+				model: mockModel,
+				// No subagentConfigs — will fall back to inline execution
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const { _getMessageHandler, _getMockSession } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+			const mockSess = (
+				_getMockSession as unknown as () => Record<string, ReturnType<typeof vi.fn>>
+			)();
+
+			// Fire a background tool call (no subagent config → inline fallback)
+			fire({
+				toolCall: {
+					functionCalls: [{ id: 'tc_bg', name: 'slow_task', args: { task: 'do stuff' } }],
+				},
+			});
+
+			await new Promise((r) => setTimeout(r, 200));
+
+			// Should get a pending message response first, then the inline result
+			expect(mockSess.sendToolResponse).toHaveBeenCalled();
+			// The last call should contain the actual result (from fallback inline execution)
+			const calls = mockSess.sendToolResponse.mock.calls;
+			const lastResponse = calls.at(-1)[0].functionResponses[0];
+			expect(lastResponse.id).toBe('tc_bg');
+			// Should not have hung — a response was sent
+			expect(lastResponse.response).toBeDefined();
+		});
+
+		it('fires onToolResult hook with error status when tool throws', async () => {
+			const onToolResult = vi.fn();
+			session = new VoiceSession({
+				sessionId: 'sess_1',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createFailingToolAgent()],
+				initialAgent: 'failing-tool-agent',
+				port: 9891,
+				model: mockModel,
+				hooks: { onToolResult },
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+			fire({
+				toolCall: {
+					functionCalls: [{ id: 'tc_hook', name: 'broken_tool', args: { input: 'test' } }],
+				},
+			});
+
+			await new Promise((r) => setTimeout(r, 100));
+
+			expect(onToolResult).toHaveBeenCalled();
+			expect(onToolResult).toHaveBeenCalledWith(
+				expect.objectContaining({
+					toolCallId: 'tc_hook',
+					status: 'error',
+					error: 'Tool execution failed',
+				}),
+			);
+		});
 	});
 });
