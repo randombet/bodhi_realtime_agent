@@ -289,20 +289,33 @@ export class VoiceSession {
 		toolName: string;
 		args: Record<string, unknown>;
 	}): void {
-		this.toolExecutor.handleToolCall(call).then((result) => {
-			this.conversationContext.addToolCall(call);
-			this.conversationContext.addToolResult(result);
+		this.toolExecutor
+			.handleToolCall(call)
+			.then((result) => {
+				this.conversationContext.addToolCall(call);
+				this.conversationContext.addToolResult(result);
 
-			this.geminiTransport.sendToolResponse([
-				{
-					id: result.toolCallId,
-					name: result.toolName,
-					response: result.error
-						? { error: result.error }
-						: (result.result as Record<string, unknown>),
-				},
-			]);
-		});
+				this.geminiTransport.sendToolResponse([
+					{
+						id: result.toolCallId,
+						name: result.toolName,
+						response: result.error
+							? { error: result.error }
+							: (result.result as Record<string, unknown>),
+					},
+				]);
+			})
+			.catch((err) => {
+				this.reportError('tool-executor', err);
+				// Always send a response so Gemini doesn't hang
+				this.geminiTransport.sendToolResponse([
+					{
+						id: call.toolCallId,
+						name: call.toolName,
+						response: { error: err instanceof Error ? err.message : String(err) },
+					},
+				]);
+			});
 	}
 
 	private handleBackgroundToolCall(
@@ -329,22 +342,34 @@ export class VoiceSession {
 		}
 
 		// Handoff to subagent
-		this.agentRouter.handoff(call, subagentConfig).then((result) => {
-			this.conversationContext.addToolCall(call);
-			this.conversationContext.addToolResult({
-				toolCallId: call.toolCallId,
-				toolName: call.toolName,
-				result: result.text,
-			});
+		this.agentRouter
+			.handoff(call, subagentConfig)
+			.then((result) => {
+				this.conversationContext.addToolCall(call);
+				this.conversationContext.addToolResult({
+					toolCallId: call.toolCallId,
+					toolName: call.toolName,
+					result: result.text,
+				});
 
-			this.geminiTransport.sendToolResponse([
-				{
-					id: call.toolCallId,
-					name: call.toolName,
-					response: { result: result.text },
-				},
-			]);
-		});
+				this.geminiTransport.sendToolResponse([
+					{
+						id: call.toolCallId,
+						name: call.toolName,
+						response: { result: result.text },
+					},
+				]);
+			})
+			.catch((err) => {
+				this.reportError('subagent-runner', err);
+				this.geminiTransport.sendToolResponse([
+					{
+						id: call.toolCallId,
+						name: call.toolName,
+						response: { error: err instanceof Error ? err.message : String(err) },
+					},
+				]);
+			});
 	}
 
 	private handleToolCallCancellation(ids: string[]): void {
