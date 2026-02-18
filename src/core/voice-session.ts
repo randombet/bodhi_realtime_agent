@@ -86,6 +86,8 @@ export class VoiceSession {
 	private outputTranscriptPrefix = '';
 	/** Active directives keyed by category — reinforced every turn via sendClientContent. */
 	private activeDirectives = new Map<string, string>();
+	/** Whether a client WebSocket connection is currently active. */
+	private clientConnected = false;
 
 	constructor(config: VoiceSessionConfig) {
 		this.config = config;
@@ -242,6 +244,11 @@ export class VoiceSession {
 
 		// Clear directives on agent transfer — directives are agent-scoped
 		this.activeDirectives.clear();
+
+		// Send the new agent's greeting if configured
+		if (this.clientConnected) {
+			this.sendGreeting();
+		}
 	}
 
 	// --- Audio fast-path (no EventBus) ---
@@ -262,6 +269,9 @@ export class VoiceSession {
 	private handleSetupComplete(_sessionId: string): void {
 		if (this.sessionManager.state === 'CONNECTING') {
 			this.sessionManager.transitionTo('ACTIVE');
+		}
+		if (this.clientConnected) {
+			this.sendGreeting();
 		}
 	}
 
@@ -466,6 +476,16 @@ export class VoiceSession {
 		);
 	}
 
+	/** Send the active agent's greeting prompt to Gemini to trigger a spoken greeting. */
+	private sendGreeting(): void {
+		const agent = this.agentRouter.activeAgent;
+		if (!agent.greeting) return;
+		this.geminiTransport.sendClientContent(
+			[{ role: 'user', parts: [{ text: agent.greeting }] }],
+			true,
+		);
+	}
+
 	private handleInterrupted(): void {
 		this.flushTranscriptBuffers();
 		this.eventBus.publish('turn.interrupted', {
@@ -640,11 +660,14 @@ export class VoiceSession {
 	}
 
 	private handleClientConnected(): void {
-		// Client connected, nothing to do here (audio relay is direct)
+		this.clientConnected = true;
+		if (this.sessionManager.isActive) {
+			this.sendGreeting();
+		}
 	}
 
 	private handleClientDisconnected(): void {
-		// Client disconnected — could trigger session close
+		this.clientConnected = false;
 	}
 
 	// --- Error handling ---

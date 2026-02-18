@@ -49,6 +49,15 @@ function createEchoAgent(): MainAgent {
 	};
 }
 
+function createGreetingAgent(): MainAgent {
+	return {
+		name: 'greeter',
+		instructions: 'You are a greeting agent',
+		greeting: '[System: Greet the user warmly.]',
+		tools: [],
+	};
+}
+
 function createToolAgent(): MainAgent {
 	return {
 		name: 'tool-agent',
@@ -883,7 +892,9 @@ describe('VoiceSession', () => {
 
 			// Check that user message appears before tool call in conversation context
 			const items = session.conversationContext.items;
-			const userIdx = items.findIndex((i) => i.role === 'user' && i.content === 'What is the weather?');
+			const userIdx = items.findIndex(
+				(i) => i.role === 'user' && i.content === 'What is the weather?',
+			);
 			const toolIdx = items.findIndex(
 				(i) => i.role === 'tool_call' && i.content.includes('get_weather'),
 			);
@@ -1189,6 +1200,145 @@ describe('VoiceSession', () => {
 				return arg.turns?.some((t) => t.parts?.some((p) => p.text?.includes('SYSTEM DIRECTIVES')));
 			});
 			expect(hasDirective).toBe(false);
+		});
+	});
+
+	describe('agent greeting', () => {
+		it('sends greeting when client connects after Gemini is active', async () => {
+			session = new VoiceSession({
+				sessionId: 'sess_1',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createGreetingAgent()],
+				initialAgent: 'greeter',
+				port: 9895,
+				model: mockModel,
+			});
+
+			await session.start();
+			// Wait for setupComplete (Gemini becomes ACTIVE)
+			await new Promise((r) => setTimeout(r, 50));
+
+			const { _getMockSession } = await import('@google/genai');
+			const mockGeminiSession = (
+				_getMockSession as unknown as () => Record<string, ReturnType<typeof vi.fn>>
+			)();
+
+			mockGeminiSession.sendClientContent.mockClear();
+
+			// Connect a client — should trigger greeting
+			const WebSocket = (await import('ws')).default;
+			const ws = new WebSocket('ws://localhost:9895');
+			await new Promise<void>((r) => ws.on('open', r));
+
+			await new Promise((r) => setTimeout(r, 50));
+
+			expect(mockGeminiSession.sendClientContent).toHaveBeenCalledWith(
+				expect.objectContaining({
+					turns: expect.arrayContaining([
+						expect.objectContaining({
+							role: 'user',
+							parts: expect.arrayContaining([
+								expect.objectContaining({
+									text: '[System: Greet the user warmly.]',
+								}),
+							]),
+						}),
+					]),
+					turnComplete: true,
+				}),
+			);
+
+			ws.close();
+			await new Promise<void>((r) => ws.on('close', r));
+		});
+
+		it('does not send greeting when agent has no greeting configured', async () => {
+			session = new VoiceSession({
+				sessionId: 'sess_1',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9896,
+				model: mockModel,
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const { _getMockSession } = await import('@google/genai');
+			const mockGeminiSession = (
+				_getMockSession as unknown as () => Record<string, ReturnType<typeof vi.fn>>
+			)();
+
+			mockGeminiSession.sendClientContent.mockClear();
+
+			// Connect a client
+			const WebSocket = (await import('ws')).default;
+			const ws = new WebSocket('ws://localhost:9896');
+			await new Promise<void>((r) => ws.on('open', r));
+
+			await new Promise((r) => setTimeout(r, 50));
+
+			// Should NOT have called sendClientContent with any greeting
+			const calls = mockGeminiSession.sendClientContent.mock.calls;
+			const hasGreeting = calls.some((call: unknown[]) => {
+				const arg = call[0] as { turnComplete?: boolean };
+				return arg.turnComplete === true;
+			});
+			expect(hasGreeting).toBe(false);
+
+			ws.close();
+			await new Promise<void>((r) => ws.on('close', r));
+		});
+
+		it('sends greeting when Gemini becomes active after client is already connected', async () => {
+			// Use a longer setup delay to ensure client connects before Gemini is ACTIVE
+			// The mock fires setupComplete after 5ms, and we connect the client immediately
+			// after start() (which calls connect). The greeting should fire from handleSetupComplete.
+			session = new VoiceSession({
+				sessionId: 'sess_1',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createGreetingAgent()],
+				initialAgent: 'greeter',
+				port: 9897,
+				model: mockModel,
+			});
+
+			// Start the session (WS server starts, Gemini connect begins)
+			await session.start();
+
+			// Connect client immediately — before setupComplete fires (5ms delay in mock)
+			const WebSocket = (await import('ws')).default;
+			const ws = new WebSocket('ws://localhost:9897');
+			await new Promise<void>((r) => ws.on('open', r));
+
+			// Wait for setupComplete to fire and greeting to be sent
+			await new Promise((r) => setTimeout(r, 100));
+
+			const { _getMockSession } = await import('@google/genai');
+			const mockGeminiSession = (
+				_getMockSession as unknown as () => Record<string, ReturnType<typeof vi.fn>>
+			)();
+
+			// Greeting should have been sent (from either handleClientConnected or handleSetupComplete)
+			const calls = mockGeminiSession.sendClientContent.mock.calls;
+			const greetingCall = calls.find((call: unknown[]) => {
+				const arg = call[0] as {
+					turns?: Array<{ parts?: Array<{ text?: string }> }>;
+					turnComplete?: boolean;
+				};
+				return (
+					arg.turnComplete === true &&
+					arg.turns?.some((t) => t.parts?.some((p) => p.text?.includes('Greet the user warmly')))
+				);
+			});
+			expect(greetingCall).toBeDefined();
+
+			ws.close();
+			await new Promise<void>((r) => ws.on('close', r));
 		});
 	});
 });

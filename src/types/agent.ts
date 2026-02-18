@@ -41,6 +41,9 @@ export interface MainAgent {
 	onExit?(ctx: AgentContext): Promise<void>;
 	/** Called after each completed turn while this agent is active. */
 	onTurnCompleted?(ctx: AgentContext, transcript: string): Promise<void>;
+	/** Optional greeting prompt sent to Gemini when this agent activates and a client is connected.
+	 *  Gemini will generate a spoken response based on this prompt. */
+	greeting?: string;
 }
 
 /**
