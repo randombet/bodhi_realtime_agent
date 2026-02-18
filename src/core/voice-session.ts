@@ -84,6 +84,8 @@ export class VoiceSession {
 	private outputTranscriptBuffer = '';
 	/** Pre-tool-call output text, saved when a tool call splits a turn. */
 	private outputTranscriptPrefix = '';
+	/** Directive queued by a tool — triggers reconnect after tool response is sent. */
+	private pendingDirective: string | null | undefined;
 
 	constructor(config: VoiceSessionConfig) {
 		this.config = config;
@@ -165,6 +167,9 @@ export class VoiceSession {
 			config.sessionId,
 			config.initialAgent,
 			(msg) => this.clientTransport.sendJsonToClient(msg),
+			(directive) => {
+				this.pendingDirective = directive;
+			},
 		);
 
 		if (initialAgent?.tools.length) {
@@ -227,8 +232,51 @@ export class VoiceSession {
 			this.config.sessionId,
 			agent.name,
 			(msg) => this.clientTransport.sendJsonToClient(msg),
+			(directive) => {
+				this.pendingDirective = directive;
+			},
 		);
 		this.toolExecutor.register(agent.tools);
+	}
+
+	/**
+	 * Reconnect the Gemini session with an updated system instruction.
+	 * Appends the directive to the active agent's base instructions (or resets if null).
+	 * Follows the same pattern as agent transfer: buffer → disconnect → reconnect → replay.
+	 */
+	private async reconnectWithUpdatedInstruction(directive: string | null): Promise<void> {
+		console.log('[VoiceSession] reconnectWithUpdatedInstruction: START');
+		const agent = this.agentRouter.activeAgent;
+		let instructions = resolveInstructions(agent);
+		if (directive) {
+			instructions += `\n\n${directive}`;
+		}
+		console.log(`[VoiceSession] reconnectWithUpdatedInstruction: instruction length=${instructions.length}, hasDirective=${!!directive}`);
+
+		this.clientTransport.startBuffering();
+		const handle = this.sessionManager.resumptionHandle;
+		console.log(`[VoiceSession] reconnectWithUpdatedInstruction: handle=${handle ? `"${handle.slice(0, 20)}..."` : 'null'}`);
+
+		this.sessionManager.transitionTo('RECONNECTING');
+		this.geminiTransport.updateSystemInstruction(instructions);
+		await this.geminiTransport.reconnect(handle ?? undefined);
+		console.log('[VoiceSession] reconnectWithUpdatedInstruction: reconnect() resolved');
+
+		const buffered = this.clientTransport.stopBuffering();
+		console.log(`[VoiceSession] reconnectWithUpdatedInstruction: replaying ${buffered.length} buffered audio chunks`);
+
+		const replayContent = this.conversationContext.toReplayContent();
+		if (replayContent.length > 0) {
+			console.log(`[VoiceSession] reconnectWithUpdatedInstruction: replaying ${replayContent.length} conversation turns`);
+			this.geminiTransport.sendClientContent(replayContent, false);
+		}
+
+		for (const chunk of buffered) {
+			this.geminiTransport.sendAudio(chunk.toString('base64'));
+		}
+
+		this.sessionManager.transitionTo('ACTIVE');
+		console.log('[VoiceSession] reconnectWithUpdatedInstruction: DONE — session ACTIVE with updated instruction');
 	}
 
 	// --- Audio fast-path (no EventBus) ---
@@ -317,6 +365,7 @@ export class VoiceSession {
 			})
 			.catch((err) => {
 				this.reportError('tool-executor', err);
+				this.pendingDirective = undefined;
 				// Always send a response so Gemini doesn't hang
 				this.geminiTransport.sendToolResponse([
 					{
@@ -418,6 +467,18 @@ export class VoiceSession {
 				},
 				transcript,
 			);
+		}
+
+		// If a tool requested a reconnect with updated system instruction, do it now
+		// (after the turn is fully complete so Gemini has processed the tool result)
+		if (this.pendingDirective !== undefined) {
+			const directive = this.pendingDirective;
+			this.pendingDirective = undefined;
+			console.log(`[VoiceSession] handleTurnComplete: pendingDirective found, triggering reconnect with directive=${directive ? `"${directive.slice(0, 40)}..."` : 'null (reset)'}`);
+			this.reconnectWithUpdatedInstruction(directive).catch((err) => {
+				console.error('[VoiceSession] reconnectWithUpdatedInstruction FAILED:', err);
+				this.reportError('voice-session', err);
+			});
 		}
 	}
 

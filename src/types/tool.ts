@@ -44,4 +44,11 @@ export interface ToolContext {
 	abortSignal: AbortSignal;
 	/** Send a JSON message to the connected client (delivered as a WebSocket text frame). */
 	sendJsonToClient?(message: Record<string, unknown>): void;
+	/**
+	 * Reconnect the Gemini session with an updated system instruction.
+	 * Pass a directive string to append to the agent's base instructions,
+	 * or null to reset to original instructions. The reconnect happens
+	 * after the tool result is sent back to Gemini.
+	 */
+	reconnectWithDirective?(directive: string | null): void;
 }
