@@ -28,7 +28,7 @@ export class ToolExecutor {
 		private sessionId: string,
 		private agentName: string,
 		private sendJsonToClient?: (message: Record<string, unknown>) => void,
-		private reconnectWithDirective?: (directive: string | null) => void,
+		private setDirective?: (key: string, value: string | null) => void,
 	) {}
 
 	register(tools: ToolDefinition[]): void {
@@ -92,7 +92,7 @@ export class ToolExecutor {
 			sessionId: this.sessionId,
 			abortSignal: controller.signal,
 			sendJsonToClient: this.sendJsonToClient,
-			reconnectWithDirective: this.reconnectWithDirective,
+			setDirective: this.setDirective,
 		};
 
 		let result: ToolResult;

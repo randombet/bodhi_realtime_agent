@@ -976,4 +976,179 @@ describe('VoiceSession', () => {
 			);
 		});
 	});
+
+	describe('active directives', () => {
+		it('tool can set directive via setDirective and it is injected on turn complete', async () => {
+			let capturedSetDirective: ((key: string, value: string | null) => void) | undefined;
+			session = new VoiceSession({
+				sessionId: 'sess_1',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [
+					{
+						name: 'directive-agent',
+						instructions: 'Agent with directive tool',
+						tools: [
+							{
+								name: 'set_pace',
+								description: 'Set pacing',
+								parameters: z.object({ speed: z.string() }),
+								execution: 'inline',
+								execute: async (_args, ctx) => {
+									capturedSetDirective = ctx.setDirective;
+									ctx.setDirective?.('pacing', 'Speak slowly');
+									return { ok: true };
+								},
+							},
+						],
+					},
+				],
+				initialAgent: 'directive-agent',
+				port: 9892,
+				model: mockModel,
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const { _getMessageHandler, _getMockSession } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+			const mockGeminiSession = (
+				_getMockSession as unknown as () => Record<string, ReturnType<typeof vi.fn>>
+			)();
+
+			// Fire tool call
+			fire({
+				toolCall: {
+					functionCalls: [{ id: 'tc_d1', name: 'set_pace', args: { speed: 'slow' } }],
+				},
+			});
+
+			await new Promise((r) => setTimeout(r, 100));
+
+			expect(capturedSetDirective).toBeDefined();
+
+			// Fire turn complete — should inject directive
+			mockGeminiSession.sendClientContent.mockClear();
+			fire({ serverContent: { turnComplete: true } });
+
+			await new Promise((r) => setTimeout(r, 50));
+
+			expect(mockGeminiSession.sendClientContent).toHaveBeenCalledWith(
+				expect.objectContaining({
+					turns: expect.arrayContaining([
+						expect.objectContaining({
+							role: 'user',
+							parts: expect.arrayContaining([
+								expect.objectContaining({
+									text: expect.stringContaining('Speak slowly'),
+								}),
+							]),
+						}),
+					]),
+					turnComplete: false,
+				}),
+			);
+		});
+
+		it('clearing a directive stops injection on next turn', async () => {
+			session = new VoiceSession({
+				sessionId: 'sess_1',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [
+					{
+						name: 'clear-agent',
+						instructions: 'Agent that clears directive',
+						tools: [
+							{
+								name: 'toggle_pace',
+								description: 'Toggle pacing',
+								parameters: z.object({ on: z.boolean() }),
+								execution: 'inline',
+								execute: async (args, ctx) => {
+									const { on } = args as { on: boolean };
+									ctx.setDirective?.('pacing', on ? 'Speak slowly' : null);
+									return { ok: true };
+								},
+							},
+						],
+					},
+				],
+				initialAgent: 'clear-agent',
+				port: 9893,
+				model: mockModel,
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const { _getMessageHandler, _getMockSession } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+			const mockGeminiSession = (
+				_getMockSession as unknown as () => Record<string, ReturnType<typeof vi.fn>>
+			)();
+
+			// Set directive
+			fire({
+				toolCall: {
+					functionCalls: [{ id: 'tc_t1', name: 'toggle_pace', args: { on: true } }],
+				},
+			});
+			await new Promise((r) => setTimeout(r, 100));
+
+			// Clear directive
+			fire({
+				toolCall: {
+					functionCalls: [{ id: 'tc_t2', name: 'toggle_pace', args: { on: false } }],
+				},
+			});
+			await new Promise((r) => setTimeout(r, 100));
+
+			// Fire turn complete — should NOT inject (directive was cleared)
+			mockGeminiSession.sendClientContent.mockClear();
+			fire({ serverContent: { turnComplete: true } });
+			await new Promise((r) => setTimeout(r, 50));
+
+			// sendClientContent should not be called with directive text
+			const calls = mockGeminiSession.sendClientContent.mock.calls;
+			const hasDirective = calls.some((call: unknown[]) => {
+				const arg = call[0] as { turns?: Array<{ parts?: Array<{ text?: string }> }> };
+				return arg.turns?.some((t) => t.parts?.some((p) => p.text?.includes('SYSTEM DIRECTIVES')));
+			});
+			expect(hasDirective).toBe(false);
+		});
+
+		it('no directives means no injection on turn complete', async () => {
+			session = new VoiceSession({
+				sessionId: 'sess_1',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9894,
+				model: mockModel,
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const { _getMessageHandler, _getMockSession } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+			const mockGeminiSession = (
+				_getMockSession as unknown as () => Record<string, ReturnType<typeof vi.fn>>
+			)();
+
+			mockGeminiSession.sendClientContent.mockClear();
+			fire({ serverContent: { turnComplete: true } });
+			await new Promise((r) => setTimeout(r, 50));
+
+			const calls = mockGeminiSession.sendClientContent.mock.calls;
+			const hasDirective = calls.some((call: unknown[]) => {
+				const arg = call[0] as { turns?: Array<{ parts?: Array<{ text?: string }> }> };
+				return arg.turns?.some((t) => t.parts?.some((p) => p.text?.includes('SYSTEM DIRECTIVES')));
+			});
+			expect(hasDirective).toBe(false);
+		});
+	});
 });

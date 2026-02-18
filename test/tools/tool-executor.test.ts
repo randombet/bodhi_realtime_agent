@@ -214,6 +214,40 @@ describe('ToolExecutor', () => {
 		expect(mockSend).toHaveBeenCalledWith({ type: 'test', data: 'hello' });
 	});
 
+	it('passes setDirective to tool context when provided', async () => {
+		const hooks = new HooksManager();
+		const eventBus = new EventBus();
+		const mockSetDirective = vi.fn();
+		const executor = new ToolExecutor(
+			hooks,
+			eventBus,
+			'sess_1',
+			'main',
+			undefined,
+			mockSetDirective,
+		);
+
+		executor.register([
+			createTestTool({
+				execute: vi.fn(async (_args, ctx) => {
+					ctx.setDirective?.('pacing', 'speak slowly');
+					ctx.setDirective?.('language', null);
+					return 'ok';
+				}),
+			}),
+		]);
+
+		await executor.handleToolCall({
+			toolCallId: 'tc_1',
+			toolName: 'test_tool',
+			args: { query: 'test' },
+		});
+
+		expect(mockSetDirective).toHaveBeenCalledTimes(2);
+		expect(mockSetDirective).toHaveBeenCalledWith('pacing', 'speak slowly');
+		expect(mockSetDirective).toHaveBeenCalledWith('language', null);
+	});
+
 	it('tracks pending count', async () => {
 		const { executor } = setup();
 		executor.register([

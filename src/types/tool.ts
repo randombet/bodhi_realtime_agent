@@ -45,10 +45,10 @@ export interface ToolContext {
 	/** Send a JSON message to the connected client (delivered as a WebSocket text frame). */
 	sendJsonToClient?(message: Record<string, unknown>): void;
 	/**
-	 * Reconnect the Gemini session with an updated system instruction.
-	 * Pass a directive string to append to the agent's base instructions,
-	 * or null to reset to original instructions. The reconnect happens
-	 * after the tool result is sent back to Gemini.
+	 * Set an active directive by category key.
+	 * Directives are reinforced every turn via sendClientContent injection,
+	 * keeping them fresh in Gemini's context to prevent behavioral drift.
+	 * Pass null to clear a directive.
 	 */
-	reconnectWithDirective?(directive: string | null): void;
+	setDirective?(key: string, value: string | null): void;
 }
