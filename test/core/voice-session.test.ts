@@ -852,6 +852,46 @@ describe('VoiceSession', () => {
 			const assistantItems = items.filter((i) => i.role === 'assistant');
 			expect(assistantItems[0]?.content).toBe('Let me check. It is 72 degrees.');
 		});
+		it('flushes user input transcript before tool calls', async () => {
+			session = new VoiceSession({
+				sessionId: 'sess_1',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createToolAgent()],
+				initialAgent: 'tool-agent',
+				port: 9892,
+				model: mockModel,
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+			// User speaks
+			fire({ serverContent: { inputTranscription: { text: 'What is the weather?' } } });
+
+			// Gemini calls a tool — user input should be flushed to context BEFORE tool call
+			fire({
+				toolCall: {
+					functionCalls: [{ id: 'tc_flush', name: 'get_weather', args: { city: 'SF' } }],
+				},
+			});
+
+			await new Promise((r) => setTimeout(r, 100));
+
+			// Check that user message appears before tool call in conversation context
+			const items = session.conversationContext.items;
+			const userIdx = items.findIndex((i) => i.role === 'user' && i.content === 'What is the weather?');
+			const toolIdx = items.findIndex(
+				(i) => i.role === 'tool_call' && i.content.includes('get_weather'),
+			);
+
+			expect(userIdx).toBeGreaterThanOrEqual(0);
+			expect(toolIdx).toBeGreaterThanOrEqual(0);
+			expect(userIdx).toBeLessThan(toolIdx);
+		});
 	});
 
 	// =========================================================================

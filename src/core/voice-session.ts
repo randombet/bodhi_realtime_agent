@@ -268,6 +268,20 @@ export class VoiceSession {
 	private handleToolCalls(
 		calls: Array<{ id: string; name: string; args: Record<string, unknown> }>,
 	): void {
+		// Flush user's input transcript before tool calls so it appears first
+		// in conversation context and logs. Safe because Gemini only calls tools
+		// after processing the user's complete utterance.
+		if (this.inputTranscriptBuffer.trim()) {
+			this.conversationContext.addUserMessage(this.inputTranscriptBuffer.trim());
+			this.clientTransport.sendJsonToClient({
+				type: 'transcript',
+				role: 'user',
+				text: this.inputTranscriptBuffer.trim(),
+				partial: false,
+			});
+			this.inputTranscriptBuffer = '';
+		}
+
 		// Save output transcript accumulated before tool call to avoid
 		// duplication: Gemini transcribes ahead of tool calls, then
 		// re-transcribes the same text after receiving the tool result.
