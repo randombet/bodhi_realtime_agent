@@ -677,6 +677,44 @@ describe('VoiceSession', () => {
 			).toBe(true);
 		});
 
+		it('sends turn.interrupted JSON to client on interrupt', async () => {
+			session = new VoiceSession({
+				sessionId: 'sess_1',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9898,
+				model: mockModel,
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const WebSocket = (await import('ws')).default;
+			const ws = new WebSocket('ws://localhost:9898');
+			await new Promise<void>((r) => ws.on('open', r));
+
+			const received: string[] = [];
+			ws.on('message', (data, isBinary) => {
+				if (!isBinary) received.push(data.toString());
+			});
+
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+			fire({ serverContent: { outputTranscription: { text: 'Hello there—' } } });
+			fire({ serverContent: { interrupted: true } });
+
+			await new Promise((r) => setTimeout(r, 50));
+
+			const messages = received.map((r) => JSON.parse(r));
+			expect(messages.some((m) => m.type === 'turn.interrupted')).toBe(true);
+
+			ws.close();
+			await new Promise<void>((r) => ws.on('close', r));
+		});
+
 		it('flushes buffers on session close', async () => {
 			session = new VoiceSession({
 				sessionId: 'sess_1',

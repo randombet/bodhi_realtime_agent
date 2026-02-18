@@ -492,6 +492,7 @@ export class VoiceSession {
 			sessionId: this.config.sessionId,
 			turnId: `turn_${this.turnId}`,
 		});
+		this.clientTransport.sendJsonToClient({ type: 'turn.interrupted' });
 	}
 
 	private handleInputTranscription(text: string): void {
