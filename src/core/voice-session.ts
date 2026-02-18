@@ -82,6 +82,8 @@ export class VoiceSession {
 	private config: VoiceSessionConfig;
 	private inputTranscriptBuffer = '';
 	private outputTranscriptBuffer = '';
+	/** Pre-tool-call output text, saved when a tool call splits a turn. */
+	private outputTranscriptPrefix = '';
 
 	constructor(config: VoiceSessionConfig) {
 		this.config = config;
@@ -253,6 +255,14 @@ export class VoiceSession {
 	private handleToolCalls(
 		calls: Array<{ id: string; name: string; args: Record<string, unknown> }>,
 	): void {
+		// Save output transcript accumulated before tool call to avoid
+		// duplication: Gemini transcribes ahead of tool calls, then
+		// re-transcribes the same text after receiving the tool result.
+		if (this.outputTranscriptBuffer.trim()) {
+			this.outputTranscriptPrefix += this.outputTranscriptBuffer;
+			this.outputTranscriptBuffer = '';
+		}
+
 		for (const call of calls) {
 			const toolCall = {
 				toolCallId: call.id,
@@ -434,10 +444,11 @@ export class VoiceSession {
 	private handleOutputTranscription(text: string): void {
 		if (text.trim()) {
 			this.outputTranscriptBuffer += text;
+			const combined = this.combineOutputTranscript();
 			this.clientTransport.sendJsonToClient({
 				type: 'transcript',
 				role: 'assistant',
-				text: this.outputTranscriptBuffer.trim(),
+				text: combined,
 				partial: true,
 			});
 		}
@@ -453,17 +464,51 @@ export class VoiceSession {
 				partial: false,
 			});
 		}
-		if (this.outputTranscriptBuffer.trim()) {
-			this.conversationContext.addAssistantMessage(this.outputTranscriptBuffer.trim());
+		const outputText = this.combineOutputTranscript();
+		if (outputText) {
+			this.conversationContext.addAssistantMessage(outputText);
 			this.clientTransport.sendJsonToClient({
 				type: 'transcript',
 				role: 'assistant',
-				text: this.outputTranscriptBuffer.trim(),
+				text: outputText,
 				partial: false,
 			});
 		}
 		this.inputTranscriptBuffer = '';
 		this.outputTranscriptBuffer = '';
+		this.outputTranscriptPrefix = '';
+	}
+
+	/**
+	 * Combine pre-tool prefix and post-tool buffer, deduplicating any overlap.
+	 *
+	 * Gemini's outputTranscription can "leak" post-tool text into the pre-tool
+	 * stream, then re-send it after the tool result. This finds the longest
+	 * suffix of prefix that matches a prefix of buffer and removes the overlap.
+	 */
+	private combineOutputTranscript(): string {
+		const prefix = this.outputTranscriptPrefix.trim();
+		const buffer = this.outputTranscriptBuffer.trim();
+
+		if (!prefix) return buffer;
+		if (!buffer) return prefix;
+
+		// If post-tool buffer is entirely contained in the prefix tail, skip it
+		if (prefix.endsWith(buffer)) return prefix;
+
+		// Find the longest suffix of prefix that matches a prefix of buffer
+		const maxOverlap = Math.min(prefix.length, buffer.length);
+		let overlap = 0;
+		for (let i = 1; i <= maxOverlap; i++) {
+			if (prefix.slice(-i) === buffer.slice(0, i)) {
+				overlap = i;
+			}
+		}
+
+		if (overlap > 0) {
+			return prefix + buffer.slice(overlap);
+		}
+		return `${prefix} ${buffer}`;
 	}
 
 	private handleGroundingMetadata(metadata: Record<string, unknown>): void {

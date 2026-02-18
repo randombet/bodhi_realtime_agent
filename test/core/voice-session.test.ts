@@ -742,6 +742,116 @@ describe('VoiceSession', () => {
 			ws.close();
 			await new Promise<void>((r) => ws.on('close', r));
 		});
+
+		it('deduplicates output transcription across tool call boundary', async () => {
+			session = new VoiceSession({
+				sessionId: 'sess_1',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createToolAgent()],
+				initialAgent: 'tool-agent',
+				port: 9892,
+				model: mockModel,
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const WebSocket = (await import('ws')).default;
+			const ws = new WebSocket('ws://localhost:9892');
+			await new Promise<void>((r) => ws.on('open', r));
+
+			const received: string[] = [];
+			ws.on('message', (data, isBinary) => {
+				if (!isBinary) received.push(data.toString());
+			});
+
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+			// Simulate Gemini transcription that leaks post-tool text pre-tool
+			fire({ serverContent: { outputTranscription: { text: 'Sure. ' } } });
+			fire({ serverContent: { outputTranscription: { text: 'The answer is 42.' } } });
+
+			// Tool call arrives — buffer is saved and cleared
+			fire({
+				toolCall: {
+					functionCalls: [{ id: 'tc_1', name: 'get_weather', args: { city: 'SF' } }],
+				},
+			});
+
+			// Wait for tool result to be sent back
+			await new Promise((r) => setTimeout(r, 100));
+
+			// Post-tool transcription re-sends overlapping text
+			fire({ serverContent: { outputTranscription: { text: 'The answer is 42.' } } });
+			fire({ serverContent: { outputTranscription: { text: ' Is that helpful?' } } });
+
+			// Turn complete
+			fire({ serverContent: { turnComplete: true } });
+
+			await new Promise((r) => setTimeout(r, 100));
+
+			// Find the final (partial: false) assistant transcript
+			const finals = received
+				.map((r) => JSON.parse(r))
+				.filter(
+					(m: Record<string, unknown>) =>
+						m.type === 'transcript' && m.role === 'assistant' && m.partial === false,
+				);
+
+			expect(finals).toHaveLength(1);
+			// Should NOT have "The answer is 42." duplicated
+			expect(finals[0].text).toBe('Sure. The answer is 42. Is that helpful?');
+
+			// ConversationContext should also have deduplicated text
+			const items = session.conversationContext.items;
+			const assistantItems = items.filter((i) => i.role === 'assistant');
+			expect(assistantItems[0]?.content).toBe('Sure. The answer is 42. Is that helpful?');
+
+			ws.close();
+			await new Promise<void>((r) => ws.on('close', r));
+		});
+
+		it('handles tool call with no overlapping transcription', async () => {
+			session = new VoiceSession({
+				sessionId: 'sess_1',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createToolAgent()],
+				initialAgent: 'tool-agent',
+				port: 9893,
+				model: mockModel,
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+			// Pre-tool transcription
+			fire({ serverContent: { outputTranscription: { text: 'Let me check. ' } } });
+
+			// Tool call
+			fire({
+				toolCall: {
+					functionCalls: [{ id: 'tc_2', name: 'get_weather', args: { city: 'NY' } }],
+				},
+			});
+
+			await new Promise((r) => setTimeout(r, 100));
+
+			// Post-tool transcription — completely new text, no overlap
+			fire({ serverContent: { outputTranscription: { text: 'It is 72 degrees.' } } });
+
+			fire({ serverContent: { turnComplete: true } });
+			await new Promise((r) => setTimeout(r, 50));
+
+			const items = session.conversationContext.items;
+			const assistantItems = items.filter((i) => i.role === 'assistant');
+			expect(assistantItems[0]?.content).toBe('Let me check. It is 72 degrees.');
+		});
 	});
 
 	// =========================================================================
