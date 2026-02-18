@@ -88,6 +88,8 @@ export class VoiceSession {
 	private activeDirectives = new Map<string, string>();
 	/** Whether a client WebSocket connection is currently active. */
 	private clientConnected = false;
+	/** Whether the first audio chunk from Gemini has been received this turn (for TTFB logging). */
+	private firstAudioReceived = false;
 
 	constructor(config: VoiceSessionConfig) {
 		this.config = config;
@@ -195,9 +197,12 @@ export class VoiceSession {
 
 	/** Start the client WebSocket server and connect to Gemini. */
 	async start(): Promise<void> {
+		this.log('Starting WS server...');
 		await this.clientTransport.start();
+		this.log('WS server ready. Connecting to Gemini...');
 		this.sessionManager.transitionTo('CONNECTING');
 		await this.geminiTransport.connect();
+		this.log('Gemini connect() returned (setup may still be in progress)');
 	}
 
 	/** Gracefully shut down: disconnect Gemini, stop the WebSocket server, transition to CLOSED. */
@@ -225,7 +230,9 @@ export class VoiceSession {
 
 	/** Transfer the active session to a different agent (reconnects with new config). */
 	async transfer(toAgent: string): Promise<void> {
+		this.log(`Transferring to agent "${toAgent}"...`);
 		await this.agentRouter.transfer(toAgent);
+		this.log(`Transfer to "${toAgent}" complete`);
 
 		// Update tool executor with new agent's tools
 		const agent = this.agentRouter.activeAgent;
@@ -260,6 +267,10 @@ export class VoiceSession {
 	}
 
 	private handleAudioOutput(data: string): void {
+		if (!this.firstAudioReceived) {
+			this.firstAudioReceived = true;
+			this.log('First audio chunk from Gemini (TTFB)');
+		}
 		const buffer = Buffer.from(data, 'base64');
 		this.clientTransport.sendAudioToClient(buffer);
 	}
@@ -267,6 +278,7 @@ export class VoiceSession {
 	// --- Gemini event handlers ---
 
 	private handleSetupComplete(_sessionId: string): void {
+		this.log(`Gemini setup complete (clientConnected=${this.clientConnected})`);
 		if (this.sessionManager.state === 'CONNECTING') {
 			this.sessionManager.transitionTo('ACTIVE');
 		}
@@ -278,6 +290,8 @@ export class VoiceSession {
 	private handleToolCalls(
 		calls: Array<{ id: string; name: string; args: Record<string, unknown> }>,
 	): void {
+		const names = calls.map((c) => c.name).join(', ');
+		this.log(`Tool calls from Gemini: [${names}]`);
 		// Flush user's input transcript before tool calls so it appears first
 		// in conversation context and logs. Safe because Gemini only calls tools
 		// after processing the user's complete utterance.
@@ -429,7 +443,9 @@ export class VoiceSession {
 	private handleTurnComplete(): void {
 		this.flushTranscriptBuffers();
 		this.turnId++;
+		this.firstAudioReceived = false;
 		const turnIdStr = `turn_${this.turnId}`;
+		this.log(`Turn complete: ${turnIdStr}`);
 		this.eventBus.publish('turn.end', {
 			sessionId: this.config.sessionId,
 			turnId: turnIdStr,
@@ -480,6 +496,8 @@ export class VoiceSession {
 	private sendGreeting(): void {
 		const agent = this.agentRouter.activeAgent;
 		if (!agent.greeting) return;
+		this.log(`Sending greeting for agent "${agent.name}"`);
+		this.firstAudioReceived = false;
 		this.geminiTransport.sendClientContent(
 			[{ role: 'user', parts: [{ text: agent.greeting }] }],
 			true,
@@ -487,6 +505,8 @@ export class VoiceSession {
 	}
 
 	private handleInterrupted(): void {
+		this.log('Interrupted by user');
+		this.firstAudioReceived = false;
 		this.flushTranscriptBuffers();
 		this.eventBus.publish('turn.interrupted', {
 			sessionId: this.config.sessionId,
@@ -582,6 +602,7 @@ export class VoiceSession {
 	}
 
 	private handleGoAway(timeLeft: string): void {
+		this.log(`GoAway from Gemini (timeLeft=${timeLeft})`);
 		this.eventBus.publish('session.goaway', {
 			sessionId: this.config.sessionId,
 			timeLeft,
@@ -661,6 +682,7 @@ export class VoiceSession {
 	}
 
 	private handleClientConnected(): void {
+		this.log(`Client connected (geminiActive=${this.sessionManager.isActive})`);
 		this.clientConnected = true;
 		if (this.sessionManager.isActive) {
 			this.sendGreeting();
@@ -668,16 +690,19 @@ export class VoiceSession {
 	}
 
 	private handleClientDisconnected(): void {
+		this.log('Client disconnected');
 		this.clientConnected = false;
 	}
 
 	// --- Error handling ---
 
 	private handleTransportError(error: Error): void {
+		this.log(`Transport error: ${error.message}`);
 		this.reportError('gemini-transport', error);
 	}
 
 	private handleTransportClose(): void {
+		this.log(`Transport closed (state=${this.sessionManager.state})`);
 		if (this.sessionManager.state === 'ACTIVE') {
 			// Unexpected close — try to reconnect
 			const handle = this.sessionManager.resumptionHandle;
@@ -702,5 +727,11 @@ export class VoiceSession {
 				severity: 'error',
 			});
 		}
+	}
+
+	/** Compact diagnostic log: HH:MM:SS.mmm [VoiceSession] message */
+	private log(msg: string): void {
+		const t = new Date().toISOString().slice(11, 23);
+		console.log(`${t} [VoiceSession] ${msg}`);
 	}
 }
