@@ -1,0 +1,14 @@
+{
+	"$schema": "https://typedoc.org/schema.json",
+	"entryPoints": ["src/index.ts"],
+	"out": "docs/api",
+	"plugin": ["typedoc-plugin-markdown", "typedoc-vitepress-theme"],
+	"tsconfig": "tsconfig.json",
+	"excludePrivate": true,
+	"excludeInternal": true,
+	"excludeExternals": true,
+	"hideGenerator": true,
+	"readme": "none",
+	"githubPages": false,
+	"docsRoot": "./docs"
+}

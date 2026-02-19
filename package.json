@@ -1,0 +1,70 @@
+{
+  "name": "@bodhi_agent/realtime-agent-framework",
+  "version": "0.1.0",
+  "private": false,
+  "description": "TypeScript framework for real-time voice agent applications using Google Gemini Live API",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "biome check src/ test/",
+    "lint:fix": "biome check --fix src/",
+    "typecheck": "tsc --noEmit",
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "typedoc && vitepress build docs",
+    "docs:preview": "vitepress preview docs"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "author": "Yixuan Zhai",
+  "license": "MIT",
+  "dependencies": {
+    "@ai-sdk/google": "^1.2.0",
+    "@google/genai": "^1.41.0",
+    "ai": "^4.3.0",
+    "write-file-atomic": "^6.0.0",
+    "ws": "^8.18.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.0",
+    "@types/node": "^22.0.0",
+    "@types/write-file-atomic": "^4.0.3",
+    "@types/ws": "^8.5.0",
+    "mermaid": "^11.12.2",
+    "tsup": "^8.4.0",
+    "typedoc": "^0.28.17",
+    "typedoc-plugin-markdown": "^4.10.0",
+    "typedoc-vitepress-theme": "^1.1.2",
+    "typescript": "^5.7.0",
+    "vitepress": "^1.6.4",
+    "vitepress-plugin-mermaid": "^2.0.17",
+    "vitest": "^3.0.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@biomejs/biome",
+      "esbuild"
+    ]
+  }
+}
