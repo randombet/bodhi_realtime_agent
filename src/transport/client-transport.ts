@@ -34,11 +34,12 @@ export class ClientTransport {
 	constructor(
 		private port: number,
 		private callbacks: ClientTransportCallbacks,
+		private host: string = '0.0.0.0',
 	) {}
 
 	async start(): Promise<void> {
 		return new Promise((resolve) => {
-			this.wss = new WebSocketServer({ port: this.port });
+			this.wss = new WebSocketServer({ port: this.port, host: this.host });
 
 			this.wss.on('listening', () => resolve());
 

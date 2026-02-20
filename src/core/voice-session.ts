@@ -32,6 +32,8 @@ export interface VoiceSessionConfig {
 	hooks?: FrameworkHooks;
 	/** Port for the client WebSocket server. */
 	port: number;
+	/** Host for the client WebSocket server (default: '0.0.0.0' for all interfaces). */
+	host?: string;
 	/** Gemini model name (e.g. "gemini-2.0-flash-live-001"). */
 	geminiModel?: string;
 	/** Vercel AI SDK model for subagent text generation. */
@@ -151,7 +153,7 @@ export class VoiceSession {
 			onJsonFromClient: (message) => this.handleJsonFromClient(message),
 			onClientConnected: () => this.handleClientConnected(),
 			onClientDisconnected: () => this.handleClientDisconnected(),
-		});
+		}, config.host ?? '0.0.0.0');
 
 		// Forward GUI events from EventBus to the client as JSON text frames
 		this.eventBus.subscribe('gui.update', (payload) => {
