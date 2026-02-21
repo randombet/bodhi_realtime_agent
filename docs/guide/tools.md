@@ -108,10 +108,12 @@ const myTool: ToolDefinition = {
   parameters: z.object({ query: z.string() }),
   execution: 'inline',
   async execute(args, ctx) {
-    // ctx.toolCallId   — unique ID for this invocation
-    // ctx.agentName    — which agent owns this tool
-    // ctx.sessionId    — current session ID
-    // ctx.abortSignal  — aborted on timeout or user interruption
+    // ctx.toolCallId      — unique ID for this invocation
+    // ctx.agentName       — which agent owns this tool
+    // ctx.sessionId       — current session ID
+    // ctx.abortSignal     — aborted on timeout or user interruption
+    // ctx.sendJsonToClient — send JSON to the connected client
+    // ctx.setDirective    — set a per-turn directive (see below)
 
     const res = await fetch(`/api/search?q=${args.query}`, {
       signal: ctx.abortSignal,  // Automatically cancels if user interrupts
@@ -151,6 +153,20 @@ const processOrder: ToolDefinition = {
   },
 };
 ```
+
+### Setting Active Directives
+
+Tools can set **active directives** via `ctx.setDirective(key, value)` to influence the LLM's behavior across turns. Directives are automatically reinforced every turn by injecting them into Gemini's context via `sendClientContent`, preventing behavioral drift.
+
+```typescript
+// Set a directive — persists and reinforces every turn
+ctx.setDirective?.('pacing', 'Speak at a slow, measured pace.');
+
+// Clear a directive — pass null
+ctx.setDirective?.('pacing', null);
+```
+
+Directives are scoped to the current agent and cleared on agent transfer. See [Speech Speed Control](/advanced/multimodal#speech-speed-control) for a complete example.
 
 ## Zod Schemas
 

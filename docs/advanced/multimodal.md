@@ -126,6 +126,73 @@ See [Subagent Patterns](/advanced/subagents) for interactive subagent examples.
 
 ## Speech Speed Control
 
-::: warning COMING SOON
-Speech speed configuration is planned for a future release.
-:::
+Users can ask the voice agent to speak slower or faster during a conversation. This is implemented as a dual-layer system: **server-side directive reinforcement** controls how the LLM generates speech, while a **client-side playback rate** adjusts audio playback speed.
+
+### How It Works
+
+1. The user says something like "Can you speak slower?"
+2. The agent calls the `set_speech_speed` tool
+3. The tool sets an **active directive** via `ctx.setDirective()` — this injects pacing instructions into every subsequent turn, preventing Gemini from drifting back to its default pace
+4. The client receives a `speech_speed` JSON message and adjusts its audio `playbackRate`
+
+### Defining the Tool
+
+```typescript
+import { z } from 'zod';
+import type { ToolDefinition, ToolContext } from '@bodhi/realtime-agent-framework';
+
+const setSpeechSpeed: ToolDefinition = {
+  name: 'set_speech_speed',
+  description: 'Change the speech speed. Call this when the user asks to speak slower, faster, or at normal speed.',
+  parameters: z.object({
+    speed: z.enum(['slow', 'normal', 'fast']).describe('The desired speech speed'),
+  }),
+  execution: 'inline',
+  execute: async (args, ctx: ToolContext) => {
+    const { speed } = args as { speed: 'slow' | 'normal' | 'fast' };
+
+    // Server-side: set an active directive reinforced every turn
+    const paceDirectives: Record<string, string | null> = {
+      slow: 'IMPORTANT PACING OVERRIDE: Speak at a slow, measured pace. Use shorter sentences with brief pauses between them.',
+      normal: null,  // null clears the directive
+      fast: 'IMPORTANT PACING OVERRIDE: Speak at a brisk, efficient pace. Be concise and direct.',
+    };
+    ctx.setDirective?.('pacing', paceDirectives[speed]);
+
+    return { speed, status: 'applied' };
+  },
+};
+```
+
+### Active Directives
+
+`ctx.setDirective(key, value)` stores a directive by category key. The framework automatically reinjects all active directives into Gemini's context at the start of every turn via `sendClientContent`. This prevents behavioral drift — without reinforcement, Gemini tends to revert to its default pacing after a few turns.
+
+- Pass a string value to set or update a directive
+- Pass `null` to clear a directive (e.g., resetting speed to normal)
+- Directives are scoped to the current agent and cleared on agent transfer
+
+### Client-Side Playback Rate
+
+For immediate perceptual effect, the tool can also send a JSON message to the client to adjust audio playback speed:
+
+```javascript
+// Client-side handler
+ws.onmessage = (event) => {
+  const msg = JSON.parse(event.data);
+  if (msg.type === 'speech_speed') {
+    const speeds = { slow: 0.85, normal: 1.0, fast: 1.2 };
+    playbackRate = speeds[msg.speed] || 1.0;
+  }
+};
+```
+
+The client applies `playbackRate` to each `AudioBufferSourceNode` before scheduling playback. This gives an instant speed change for audio already being generated, while the directive ensures future turns are generated at the appropriate pace.
+
+### Speed Presets
+
+| Speed | Directive Effect | Client Playback Rate |
+|-------|-----------------|---------------------|
+| `slow` | Shorter sentences, pauses between them | 0.85x |
+| `normal` | Default behavior (directive cleared) | 1.0x |
+| `fast` | Concise and direct delivery | 1.2x |
