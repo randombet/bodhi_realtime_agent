@@ -66,6 +66,8 @@ export class GeminiLiveTransport {
 	private ai: GoogleGenAI;
 	private callbacks: GeminiTransportCallbacks;
 	private config: GeminiTransportConfig;
+	/** Resolves when setupComplete fires — used to make connect() await Gemini readiness. */
+	private setupResolver: (() => void) | null = null;
 
 	constructor(config: GeminiTransportConfig, callbacks: GeminiTransportCallbacks) {
 		this.ai = new GoogleGenAI({ apiKey: config.apiKey });
@@ -73,8 +75,15 @@ export class GeminiLiveTransport {
 		this.callbacks = callbacks;
 	}
 
-	/** Establish a WebSocket connection to the Gemini Live API. */
+	/** Establish a WebSocket connection to the Gemini Live API.
+	 *  Resolves only after Gemini sends `setupComplete`, so callers can safely
+	 *  send content immediately after awaiting this method.
+	 */
 	async connect(): Promise<void> {
+		const setupComplete = new Promise<void>((resolve) => {
+			this.setupResolver = resolve;
+		});
+
 		const model = this.config.model ?? 'gemini-live-2.5-flash-preview';
 
 		const connectConfig: Record<string, unknown> = {
@@ -134,6 +143,8 @@ export class GeminiLiveTransport {
 				},
 			},
 		});
+
+		await setupComplete;
 	}
 
 	/** Disconnect and reconnect, optionally with a new resumption handle. */
@@ -204,6 +215,11 @@ export class GeminiLiveTransport {
 	// biome-ignore lint/suspicious/noExplicitAny: LiveServerMessage is a complex union type
 	private handleMessage(msg: any): void {
 		if (msg.setupComplete) {
+			// Resolve the connect() promise so callers know Gemini is ready
+			if (this.setupResolver) {
+				this.setupResolver();
+				this.setupResolver = null;
+			}
 			this.callbacks.onSetupComplete?.(msg.setupComplete.sessionId ?? '');
 			return;
 		}

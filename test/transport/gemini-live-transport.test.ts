@@ -17,9 +17,10 @@ vi.mock('@google/genai', () => ({
 		live: {
 			connect: vi.fn(async (params: Record<string, unknown>) => {
 				capturedConnectConfig = params;
-				// Call onopen callback
 				const cbs = params.callbacks as Record<string, (...args: unknown[]) => void>;
 				cbs.onopen?.();
+				// Fire setupComplete so connect() resolves (it awaits this)
+				setTimeout(() => cbs.onmessage?.({ setupComplete: { sessionId: 'mock_sid' } }), 1);
 				return mockSession;
 			}),
 		},

@@ -28,7 +28,7 @@ export class ToolExecutor {
 		private sessionId: string,
 		private agentName: string,
 		private sendJsonToClient?: (message: Record<string, unknown>) => void,
-		private setDirective?: (key: string, value: string | null) => void,
+		private setDirective?: (key: string, value: string | null, scope?: 'session' | 'agent') => void,
 	) {}
 
 	register(tools: ToolDefinition[]): void {

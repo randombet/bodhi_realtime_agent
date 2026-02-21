@@ -49,6 +49,9 @@ export interface ToolContext {
 	 * Directives are reinforced every turn via sendClientContent injection,
 	 * keeping them fresh in Gemini's context to prevent behavioral drift.
 	 * Pass null to clear a directive.
+	 *
+	 * @param scope — `'session'` persists across agent transfers (e.g. pacing);
+	 *                `'agent'` (default) is cleared on agent transfer.
 	 */
-	setDirective?(key: string, value: string | null): void;
+	setDirective?(key: string, value: string | null, scope?: 'session' | 'agent'): void;
 }

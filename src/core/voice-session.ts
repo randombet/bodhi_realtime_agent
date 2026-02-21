@@ -86,8 +86,10 @@ export class VoiceSession {
 	private outputTranscriptBuffer = '';
 	/** Pre-tool-call output text, saved when a tool call splits a turn. */
 	private outputTranscriptPrefix = '';
-	/** Active directives keyed by category — reinforced every turn via sendClientContent. */
-	private activeDirectives = new Map<string, string>();
+	/** Agent-scoped directives — cleared on agent transfer. */
+	private agentDirectives = new Map<string, string>();
+	/** Session-scoped directives (e.g. pacing) — persist across agent transfers. */
+	private sessionDirectives = new Map<string, string>();
 	/** Whether a client WebSocket connection is currently active. */
 	private clientConnected = false;
 	/** Whether the first audio chunk from Gemini has been received this turn (for TTFB logging). */
@@ -173,9 +175,10 @@ export class VoiceSession {
 			config.sessionId,
 			config.initialAgent,
 			(msg) => this.clientTransport.sendJsonToClient(msg),
-			(key, value) => {
-				if (value === null) this.activeDirectives.delete(key);
-				else this.activeDirectives.set(key, value);
+			(key, value, scope) => {
+				const map = scope === 'session' ? this.sessionDirectives : this.agentDirectives;
+				if (value === null) map.delete(key);
+				else map.set(key, value);
 			},
 		);
 
@@ -192,6 +195,7 @@ export class VoiceSession {
 			this.geminiTransport,
 			this.clientTransport,
 			config.model,
+			() => this.getSessionDirectiveSuffix(),
 		);
 		this.agentRouter.registerAgents(config.agents);
 		this.agentRouter.setInitialAgent(config.initialAgent);
@@ -204,7 +208,7 @@ export class VoiceSession {
 		this.log('WS server ready. Connecting to Gemini...');
 		this.sessionManager.transitionTo('CONNECTING');
 		await this.geminiTransport.connect();
-		this.log('Gemini connect() returned (setup may still be in progress)');
+		this.log('Gemini connected and setup complete');
 	}
 
 	/** Gracefully shut down: disconnect Gemini, stop the WebSocket server, transition to CLOSED. */
@@ -244,15 +248,16 @@ export class VoiceSession {
 			this.config.sessionId,
 			agent.name,
 			(msg) => this.clientTransport.sendJsonToClient(msg),
-			(key, value) => {
-				if (value === null) this.activeDirectives.delete(key);
-				else this.activeDirectives.set(key, value);
+			(key, value, scope) => {
+				const map = scope === 'session' ? this.sessionDirectives : this.agentDirectives;
+				if (value === null) map.delete(key);
+				else map.set(key, value);
 			},
 		);
 		this.toolExecutor.register(agent.tools);
 
-		// Clear directives on agent transfer — directives are agent-scoped
-		this.activeDirectives.clear();
+		// Clear agent-scoped directives on transfer; session-scoped directives persist
+		this.agentDirectives.clear();
 
 		// Send the new agent's greeting if configured
 		if (this.clientConnected) {
@@ -283,6 +288,10 @@ export class VoiceSession {
 		this.log(`Gemini setup complete (clientConnected=${this.clientConnected})`);
 		if (this.sessionManager.state === 'CONNECTING') {
 			this.sessionManager.transitionTo('ACTIVE');
+		}
+		// During transfer, the transfer path handles greeting after context replay — skip here
+		if (this.sessionManager.state === 'TRANSFERRING') {
+			return;
 		}
 		if (this.clientConnected) {
 			this.sendGreeting();
@@ -479,10 +488,21 @@ export class VoiceSession {
 		this.reinforceDirectives();
 	}
 
+	/** Returns session-scoped directives formatted as a system instruction suffix (for agent transfers). */
+	private getSessionDirectiveSuffix(): string {
+		if (this.sessionDirectives.size === 0) return '';
+		const text = [...this.sessionDirectives.values()].join('\n\n');
+		return `\n\n[SESSION DIRECTIVES — user preferences that persist across agents]\n${text}`;
+	}
+
 	/** Inject all active directives into Gemini's context to prevent behavioral drift. */
 	private reinforceDirectives(): void {
-		if (this.activeDirectives.size === 0) return;
-		const text = [...this.activeDirectives.values()].join('\n\n');
+		if (this.sessionDirectives.size === 0 && this.agentDirectives.size === 0) return;
+		// Merge both maps — agent directives override session directives with same key
+		const merged = new Map([...this.sessionDirectives, ...this.agentDirectives]);
+		const keys = [...merged.keys()];
+		const text = [...merged.values()].join('\n\n');
+		this.log(`Reinforcing directives [${keys.join(', ')}]: ${text.slice(0, 120)}...`);
 		this.geminiTransport.sendClientContent(
 			[
 				{
@@ -490,7 +510,7 @@ export class VoiceSession {
 					parts: [{ text: `[SYSTEM DIRECTIVES — follow these instructions]\n${text}` }],
 				},
 			],
-			false,
+			true,
 		);
 	}
 
@@ -500,8 +520,13 @@ export class VoiceSession {
 		if (!agent.greeting) return;
 		this.log(`Sending greeting for agent "${agent.name}"`);
 		this.firstAudioReceived = false;
+		// Prepend session directives so the greeting response respects user preferences (e.g. pacing)
+		const directiveSuffix = this.getSessionDirectiveSuffix();
+		const greetingText = directiveSuffix
+			? `${directiveSuffix}\n\n${agent.greeting}`
+			: agent.greeting;
 		this.geminiTransport.sendClientContent(
-			[{ role: 'user', parts: [{ text: agent.greeting }] }],
+			[{ role: 'user', parts: [{ text: greetingText }] }],
 			true,
 		);
 	}

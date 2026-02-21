@@ -15,7 +15,7 @@ vi.mock('@google/genai', () => {
 				connect: vi.fn(async (params: Record<string, unknown>) => {
 					const cbs = params.callbacks as Record<string, (...args: unknown[]) => void>;
 					messageHandler = cbs.onmessage as (msg: unknown) => void;
-					// Simulate setup complete
+					// Fire setupComplete so connect() resolves (it awaits this)
 					setTimeout(() => messageHandler?.({ setupComplete: { sessionId: 'gs_1' } }), 5);
 					mockSession = {
 						sendRealtimeInput: vi.fn(),
@@ -146,10 +146,8 @@ describe('VoiceSession', () => {
 			model: mockModel,
 		});
 
+		// start() awaits connect(), which resolves after setupComplete
 		await session.start();
-
-		// Wait for setupComplete callback
-		await new Promise((r) => setTimeout(r, 50));
 
 		expect(session.sessionManager.state).toBe('ACTIVE');
 	});
@@ -1068,7 +1066,9 @@ describe('VoiceSession', () => {
 
 	describe('active directives', () => {
 		it('tool can set directive via setDirective and it is injected on turn complete', async () => {
-			let capturedSetDirective: ((key: string, value: string | null) => void) | undefined;
+			let capturedSetDirective:
+				| ((key: string, value: string | null, scope?: 'session' | 'agent') => void)
+				| undefined;
 			session = new VoiceSession({
 				sessionId: 'sess_1',
 				userId: 'user_1',
@@ -1135,7 +1135,7 @@ describe('VoiceSession', () => {
 							]),
 						}),
 					]),
-					turnComplete: false,
+					turnComplete: true,
 				}),
 			);
 		});
@@ -1253,9 +1253,8 @@ describe('VoiceSession', () => {
 				model: mockModel,
 			});
 
+			// start() awaits setupComplete — Gemini is ACTIVE on return
 			await session.start();
-			// Wait for setupComplete (Gemini becomes ACTIVE)
-			await new Promise((r) => setTimeout(r, 50));
 
 			const { _getMockSession } = await import('@google/genai');
 			const mockGeminiSession = (
@@ -1332,9 +1331,9 @@ describe('VoiceSession', () => {
 		});
 
 		it('sends greeting when Gemini becomes active after client is already connected', async () => {
-			// Use a longer setup delay to ensure client connects before Gemini is ACTIVE
-			// The mock fires setupComplete after 5ms, and we connect the client immediately
-			// after start() (which calls connect). The greeting should fire from handleSetupComplete.
+			// start() awaits connect(), which resolves after setupComplete.
+			// The client connects after start() returns, so Gemini is already ACTIVE.
+			// The greeting fires from handleClientConnected (Gemini already ready).
 			session = new VoiceSession({
 				sessionId: 'sess_1',
 				userId: 'user_1',
@@ -1345,15 +1344,15 @@ describe('VoiceSession', () => {
 				model: mockModel,
 			});
 
-			// Start the session (WS server starts, Gemini connect begins)
+			// Start the session (WS server + Gemini connect, awaits setupComplete)
 			await session.start();
 
-			// Connect client immediately — before setupComplete fires (5ms delay in mock)
+			// Connect client after Gemini is already ACTIVE
 			const WebSocket = (await import('ws')).default;
 			const ws = new WebSocket('ws://localhost:9897');
 			await new Promise<void>((r) => ws.on('open', r));
 
-			// Wait for setupComplete to fire and greeting to be sent
+			// Wait for greeting to be sent
 			await new Promise((r) => setTimeout(r, 100));
 
 			const { _getMockSession } = await import('@google/genai');

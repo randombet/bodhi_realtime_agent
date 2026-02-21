@@ -43,6 +43,7 @@ export class AgentRouter {
 		private geminiTransport: GeminiLiveTransport,
 		private clientTransport: ClientTransport,
 		private model: LanguageModelV1,
+		private getInstructionSuffix?: () => string,
 	) {
 		this._activeAgent = undefined as unknown as MainAgent;
 	}
@@ -98,7 +99,8 @@ export class AgentRouter {
 		const handle = this.sessionManager.resumptionHandle;
 
 		// 6. Disconnect and reconnect with new agent config
-		this.geminiTransport.updateSystemInstruction(resolveInstructions(toAgent));
+		const suffix = this.getInstructionSuffix?.() ?? '';
+		this.geminiTransport.updateSystemInstruction(resolveInstructions(toAgent) + suffix);
 		this.geminiTransport.updateTools(toAgent.tools);
 		this.geminiTransport.updateGoogleSearch(toAgent.googleSearch ?? false);
 		await this.geminiTransport.reconnect(handle ?? undefined);
