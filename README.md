@@ -5,12 +5,31 @@
 
 TypeScript framework for building real-time voice agent applications using the Google Gemini Live API.
 
+<p align="center">
+  <img src="docs/images/hero.png" alt="Bodhi voice agent demo — real-time web search, image generation, and voice pace control" width="700">
+</p>
+
+Build voice assistants that can search the web, generate images, transfer between specialist agents, and adjust their speech in real time — all through natural conversation over a single WebSocket connection.
+
+```
+ User speaks             Gemini responds
+      │                        ▲
+      ▼                        │
+  Client App ◄──WebSocket──► VoiceSession ◄──WebSocket──► Gemini Live API
+                                │
+                    ┌───────────┼───────────┐
+                AgentRouter   ToolExecutor   Memory
+```
+
 ## Features
 
 - **Real-time voice**: Bidirectional audio streaming with Gemini Live API and server-side turn detection
 - **Multi-agent**: Define multiple agents with distinct personas and tool sets; transfer between them mid-conversation
 - **Function tools**: Inline (blocking) and background (non-blocking) tool execution with Zod validation
+- **Behaviors**: Declarative presets for speech speed, verbosity, and language — auto-generates tools, manages state, syncs with client
 - **Background subagents**: Long-running tool calls hand off to Vercel AI SDK subagents while Gemini keeps talking
+- **Google Search**: Built-in grounded web search via Gemini with source citations
+- **Image generation**: Generate images with Gemini and push them to the client as base64
 - **Memory**: Automatic extraction and persistence of durable user facts across sessions
 - **Session resumption**: Transparent reconnection via Gemini resumption handles and audio buffering
 - **Observability**: Type-safe EventBus and lifecycle hooks for logging, metrics, and debugging
@@ -304,11 +323,10 @@ pnpm typecheck      # TypeScript type checking
 ### Running the Example
 
 ```bash
-export GOOGLE_API_KEY=your_api_key
-pnpm tsx app/gemini-realtime-tools.ts
+GEMINI_API_KEY=your_key pnpm tsx examples/hello_world/agent.ts
 ```
 
-Then connect a WebSocket audio client to `ws://localhost:9900` sending PCM 16-bit 16kHz mono audio.
+Then connect a WebSocket audio client to `ws://localhost:9900` sending PCM 16-bit 16kHz mono audio. See the [hello_world example](examples/hello_world/) for details.
 
 ### Integration Tests
 
