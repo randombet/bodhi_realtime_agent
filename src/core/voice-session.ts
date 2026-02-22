@@ -173,12 +173,16 @@ export class VoiceSession {
 		);
 
 		// Set up client transport
-		this.clientTransport = new ClientTransport(config.port, {
-			onAudioFromClient: (data) => this.handleAudioFromClient(data),
-			onJsonFromClient: (message) => this.handleJsonFromClient(message),
-			onClientConnected: () => this.handleClientConnected(),
-			onClientDisconnected: () => this.handleClientDisconnected(),
-		}, config.host ?? '0.0.0.0');
+		this.clientTransport = new ClientTransport(
+			config.port,
+			{
+				onAudioFromClient: (data) => this.handleAudioFromClient(data),
+				onJsonFromClient: (message) => this.handleJsonFromClient(message),
+				onClientConnected: () => this.handleClientConnected(),
+				onClientDisconnected: () => this.handleClientDisconnected(),
+			},
+			config.host ?? '0.0.0.0',
+		);
 
 		// Forward GUI events from EventBus to the client as JSON text frames
 		this.eventBus.subscribe('gui.update', (payload) => {
@@ -683,7 +687,11 @@ export class VoiceSession {
 	// --- Client transport handlers ---
 
 	private handleJsonFromClient(message: Record<string, unknown>): void {
-		if (message.type === 'behavior.set' && typeof message.key === 'string' && typeof message.preset === 'string') {
+		if (
+			message.type === 'behavior.set' &&
+			typeof message.key === 'string' &&
+			typeof message.preset === 'string'
+		) {
 			this.behaviorManager?.handleClientSet(message.key, message.preset);
 		} else if (message.type === 'ui.response' && message.payload) {
 			this.eventBus.publish('subagent.ui.response', {

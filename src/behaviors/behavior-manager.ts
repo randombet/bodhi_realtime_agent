@@ -16,7 +16,11 @@ export class BehaviorManager {
 	private readonly categories: BehaviorCategory[];
 	private readonly generatedTools: ToolDefinition[];
 	private readonly active = new Map<string, string>();
-	private readonly setDirective: (key: string, value: string | null, scope?: 'session' | 'agent') => void;
+	private readonly setDirective: (
+		key: string,
+		value: string | null,
+		scope?: 'session' | 'agent',
+	) => void;
 	private readonly sendJsonToClient?: (msg: Record<string, unknown>) => void;
 
 	constructor(

@@ -1,0 +1,10 @@
+#!/bin/sh
+# Pre-commit hook: lint and typecheck before committing
+
+echo "Running lint..."
+pnpm lint || exit 1
+
+echo "Running typecheck..."
+pnpm typecheck || exit 1
+
+echo "Pre-commit checks passed."
