@@ -3,10 +3,12 @@
 import type { LanguageModelV1 } from 'ai';
 import { resolveInstructions } from '../agent/agent-context.js';
 import { AgentRouter } from '../agent/agent-router.js';
+import { BehaviorManager } from '../behaviors/behavior-manager.js';
 import { ToolExecutor } from '../tools/tool-executor.js';
 import { ClientTransport } from '../transport/client-transport.js';
 import { GeminiLiveTransport } from '../transport/gemini-live-transport.js';
 import type { MainAgent, SubagentConfig } from '../types/agent.js';
+import type { BehaviorCategory } from '../types/behavior.js';
 import type { FrameworkHooks } from '../types/hooks.js';
 import type { ToolDefinition } from '../types/tool.js';
 import { ConversationContext } from './conversation-context.js';
@@ -46,6 +48,8 @@ export interface VoiceSessionConfig {
 	compressionConfig?: { triggerTokens: number; targetTokens: number };
 	/** Enable server-side transcription of user audio input (default: true). */
 	inputAudioTranscription?: boolean;
+	/** Behavior categories for dynamic runtime tuning (speech speed, verbosity, etc.). */
+	behaviors?: BehaviorCategory[];
 }
 
 /**
@@ -82,6 +86,7 @@ export class VoiceSession {
 	private agentRouter: AgentRouter;
 	private toolExecutor: ToolExecutor;
 	private subagentConfigs: Record<string, SubagentConfig>;
+	private behaviorManager?: BehaviorManager;
 	private turnId = 0;
 	private config: VoiceSessionConfig;
 	private inputTranscriptBuffer = '';
@@ -184,8 +189,22 @@ export class VoiceSession {
 			},
 		);
 
-		if (initialAgent?.tools.length) {
-			this.toolExecutor.register(initialAgent.tools);
+		// Set up BehaviorManager (auto-generates tools from declarative config)
+		if (config.behaviors?.length) {
+			this.behaviorManager = new BehaviorManager(
+				config.behaviors,
+				(key, value, scope) => {
+					const map = scope === 'session' ? this.sessionDirectives : this.agentDirectives;
+					if (value === null) map.delete(key);
+					else map.set(key, value);
+				},
+				(msg) => this.clientTransport.sendJsonToClient(msg),
+			);
+		}
+
+		const behaviorTools = this.behaviorManager?.tools ?? [];
+		if (initialAgent?.tools.length || behaviorTools.length) {
+			this.toolExecutor.register([...(initialAgent?.tools ?? []), ...behaviorTools]);
 		}
 
 		// Set up agent router
@@ -256,7 +275,8 @@ export class VoiceSession {
 				else map.set(key, value);
 			},
 		);
-		this.toolExecutor.register(agent.tools);
+		const behaviorTools = this.behaviorManager?.tools ?? [];
+		this.toolExecutor.register([...agent.tools, ...behaviorTools]);
 
 		// Clear agent-scoped directives on transfer; session-scoped directives persist
 		this.agentDirectives.clear();
@@ -660,7 +680,9 @@ export class VoiceSession {
 	// --- Client transport handlers ---
 
 	private handleJsonFromClient(message: Record<string, unknown>): void {
-		if (message.type === 'ui.response' && message.payload) {
+		if (message.type === 'behavior.set' && typeof message.key === 'string' && typeof message.preset === 'string') {
+			this.behaviorManager?.handleClientSet(message.key, message.preset);
+		} else if (message.type === 'ui.response' && message.payload) {
 			this.eventBus.publish('subagent.ui.response', {
 				sessionId: this.config.sessionId,
 				response: message.payload as {
@@ -713,6 +735,7 @@ export class VoiceSession {
 	private handleClientConnected(): void {
 		this.log(`Client connected (geminiActive=${this.sessionManager.isActive})`);
 		this.clientConnected = true;
+		this.behaviorManager?.sendCatalog();
 		if (this.sessionManager.isActive) {
 			this.sendGreeting();
 		}
