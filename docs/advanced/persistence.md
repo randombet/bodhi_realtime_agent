@@ -13,7 +13,7 @@ The framework supports three optional persistence stores, each handling a differ
 Persists user-specific facts extracted from conversation. See [Memory](/guide/memory) for a complete guide.
 
 ```typescript
-import { MarkdownMemoryStore } from '@bodhi_agent/realtime-agent-framework';
+import { MarkdownMemoryStore } from 'bodhi-realtime-agent';
 
 const session = new VoiceSession({
   memoryStore: new MarkdownMemoryStore('./memory'),

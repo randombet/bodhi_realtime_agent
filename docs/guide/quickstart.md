@@ -5,7 +5,7 @@ Build a working voice agent in 5 minutes. By the end, you'll have an agent that 
 ## Step 1: Install
 
 ```bash
-pnpm add @bodhi_agent/realtime-agent-framework @ai-sdk/google zod
+pnpm add bodhi-realtime-agent @ai-sdk/google zod
 ```
 
 ## Step 2: Get an API Key
@@ -23,7 +23,7 @@ export GEMINI_API_KEY="your-key-here"
 An agent is a persona with instructions and optional tools. Here's the simplest possible agent:
 
 ```typescript
-import type { MainAgent } from '@bodhi_agent/realtime-agent-framework';
+import type { MainAgent } from 'bodhi-realtime-agent';
 
 const assistant: MainAgent = {
   name: 'assistant',
@@ -38,7 +38,7 @@ A `VoiceSession` wires together the agent, Gemini connection, and client WebSock
 
 ```typescript
 import { google } from '@ai-sdk/google';
-import { VoiceSession } from '@bodhi_agent/realtime-agent-framework';
+import { VoiceSession } from 'bodhi-realtime-agent';
 
 const session = new VoiceSession({
   sessionId: `session_${Date.now()}`,
@@ -64,8 +64,8 @@ Create a file called `my-agent.ts`:
 
 ```typescript
 import { google } from '@ai-sdk/google';
-import { VoiceSession } from '@bodhi_agent/realtime-agent-framework';
-import type { MainAgent } from '@bodhi_agent/realtime-agent-framework';
+import { VoiceSession } from 'bodhi-realtime-agent';
+import type { MainAgent } from 'bodhi-realtime-agent';
 
 const assistant: MainAgent = {
   name: 'assistant',
@@ -112,7 +112,7 @@ Tools let your agent do things — check the time, calculate math, search the we
 
 ```typescript
 import { z } from 'zod';
-import type { ToolDefinition } from '@bodhi_agent/realtime-agent-framework';
+import type { ToolDefinition } from 'bodhi-realtime-agent';
 
 const getCurrentTime: ToolDefinition = {
   name: 'get_current_time',

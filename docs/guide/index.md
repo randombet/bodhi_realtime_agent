@@ -33,6 +33,14 @@ Audio flows on a **fast-path** directly between the client and Gemini transports
 | [Events & Hooks](/guide/events) | Type-safe EventBus and lifecycle callbacks for observability |
 | [Transport](/guide/transport) | WebSocket connections to Gemini and client applications |
 
+## Install
+
+```bash
+pnpm add bodhi-realtime-agent
+```
+
+[![npm version](https://img.shields.io/npm/v/bodhi-realtime-agent.svg)](https://www.npmjs.com/package/bodhi-realtime-agent)
+
 ## Prerequisites
 
 - **Node.js 22+** — The framework uses modern JavaScript features

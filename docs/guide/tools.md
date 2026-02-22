@@ -8,7 +8,7 @@ A tool is a plain object that implements `ToolDefinition`:
 
 ```typescript
 import { z } from 'zod';
-import type { ToolDefinition } from '@bodhi_agent/realtime-agent-framework';
+import type { ToolDefinition } from 'bodhi-realtime-agent';
 
 const getWeather: ToolDefinition = {
   name: 'get_weather',
@@ -231,7 +231,7 @@ Here's a realistic agent with multiple tools:
 
 ```typescript
 import { z } from 'zod';
-import type { MainAgent, ToolDefinition } from '@bodhi_agent/realtime-agent-framework';
+import type { MainAgent, ToolDefinition } from 'bodhi-realtime-agent';
 
 const searchProducts: ToolDefinition = {
   name: 'search_products',

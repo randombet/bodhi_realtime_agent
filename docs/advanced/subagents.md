@@ -33,7 +33,7 @@ Define a background tool and a `SubagentConfig`:
 
 ```typescript
 import { z } from 'zod';
-import type { ToolDefinition, SubagentConfig } from '@bodhi_agent/realtime-agent-framework';
+import type { ToolDefinition, SubagentConfig } from 'bodhi-realtime-agent';
 
 // The tool Gemini calls
 const generateReport: ToolDefinition = {
@@ -135,7 +135,7 @@ Service subagents monitor external systems and proactively notify the user. They
 ### Setup
 
 ```typescript
-import type { ServiceSubagentConfig, EventSourceConfig } from '@bodhi_agent/realtime-agent-framework';
+import type { ServiceSubagentConfig, EventSourceConfig } from 'bodhi-realtime-agent';
 
 // Define an event source (e.g. webhook listener)
 const orderEvents: EventSourceConfig = {

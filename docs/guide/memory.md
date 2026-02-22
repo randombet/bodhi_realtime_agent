@@ -17,7 +17,7 @@ Conversation → MemoryDistiller → MemoryStore → Agent Instructions
 ## Quick Setup
 
 ```typescript
-import { VoiceSession, MarkdownMemoryStore } from '@bodhi_agent/realtime-agent-framework';
+import { VoiceSession, MarkdownMemoryStore } from 'bodhi-realtime-agent';
 
 const session = new VoiceSession({
   // ...required config
@@ -63,7 +63,7 @@ Each file is organized by category:
 ### Usage
 
 ```typescript
-import { MarkdownMemoryStore } from '@bodhi_agent/realtime-agent-framework';
+import { MarkdownMemoryStore } from 'bodhi-realtime-agent';
 
 const store = new MarkdownMemoryStore('./memory');
 
@@ -190,7 +190,7 @@ const agent: MainAgent = {
 Implement the `MemoryStore` interface to use your own storage backend (database, Redis, cloud storage):
 
 ```typescript
-import type { MemoryStore, MemoryFact } from '@bodhi_agent/realtime-agent-framework';
+import type { MemoryStore, MemoryFact } from 'bodhi-realtime-agent';
 
 class PostgresMemoryStore implements MemoryStore {
   async addFacts(userId: string, facts: MemoryFact[]): Promise<void> {

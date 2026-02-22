@@ -8,8 +8,8 @@ It manages the Gemini connection, client WebSocket server, agent routing, tool e
 
 ```typescript
 import { google } from '@ai-sdk/google';
-import { VoiceSession } from '@bodhi_agent/realtime-agent-framework';
-import type { MainAgent } from '@bodhi_agent/realtime-agent-framework';
+import { VoiceSession } from 'bodhi-realtime-agent';
+import type { MainAgent } from 'bodhi-realtime-agent';
 
 const agent: MainAgent = {
   name: 'assistant',

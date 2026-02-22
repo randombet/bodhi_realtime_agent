@@ -1,5 +1,8 @@
 # Bodhi Realtime Agent Framework
 
+[![npm version](https://img.shields.io/npm/v/bodhi-realtime-agent.svg)](https://www.npmjs.com/package/bodhi-realtime-agent)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 TypeScript framework for building real-time voice agent applications using the Google Gemini Live API.
 
 ## Features
@@ -21,7 +24,7 @@ TypeScript framework for building real-time voice agent applications using the G
 ## Installation
 
 ```bash
-pnpm add @bodhi_agent/realtime-agent-framework
+pnpm add bodhi-realtime-agent
 ```
 
 ## Quick Start
@@ -29,8 +32,8 @@ pnpm add @bodhi_agent/realtime-agent-framework
 ```typescript
 import { google } from '@ai-sdk/google';
 import { z } from 'zod';
-import { VoiceSession } from '@bodhi_agent/realtime-agent-framework';
-import type { MainAgent, ToolDefinition } from '@bodhi_agent/realtime-agent-framework';
+import { VoiceSession } from 'bodhi-realtime-agent';
+import type { MainAgent, ToolDefinition } from 'bodhi-realtime-agent';
 
 // 1. Define tools
 const getCurrentTime: ToolDefinition = {
@@ -221,7 +224,7 @@ const session = new VoiceSession({
 The memory system automatically extracts durable facts about the user from conversation:
 
 ```typescript
-import { MarkdownMemoryStore, MemoryDistiller } from '@bodhi_agent/realtime-agent-framework';
+import { MarkdownMemoryStore, MemoryDistiller } from 'bodhi-realtime-agent';
 
 const memoryStore = new MarkdownMemoryStore('./memory');
 const distiller = new MemoryDistiller(

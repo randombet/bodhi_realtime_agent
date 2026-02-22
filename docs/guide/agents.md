@@ -7,7 +7,7 @@ Agents are the "personalities" of your voice application. Each agent has its own
 A `MainAgent` is a plain object — no classes, no inheritance:
 
 ```typescript
-import type { MainAgent } from '@bodhi_agent/realtime-agent-framework';
+import type { MainAgent } from 'bodhi-realtime-agent';
 
 const assistant: MainAgent = {
   name: 'assistant',
@@ -179,8 +179,8 @@ When `googleSearch` is enabled, Gemini can ground its responses in live search r
 Here's a complete multi-agent setup:
 
 ```typescript
-import { VoiceSession } from '@bodhi_agent/realtime-agent-framework';
-import type { MainAgent } from '@bodhi_agent/realtime-agent-framework';
+import { VoiceSession } from 'bodhi-realtime-agent';
+import type { MainAgent } from 'bodhi-realtime-agent';
 
 const receptionist: MainAgent = {
   name: 'receptionist',
