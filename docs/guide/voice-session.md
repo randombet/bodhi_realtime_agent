@@ -64,6 +64,9 @@ const session = new VoiceSession({
     onError: (e) => console.error(`[${e.component}] ${e.error.message}`),
   },
 
+  // --- Optional: Behaviors ---
+  // behaviors: [speechSpeed(), verbosity()],  // See /guide/behaviors
+
   // --- Optional: Persistence ---
   // memoryStore: new MarkdownMemoryStore('./memory'),
   // conversationHistoryStore: myHistoryStore,

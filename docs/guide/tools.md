@@ -166,7 +166,7 @@ ctx.setDirective?.('pacing', 'Speak at a slow, measured pace.');
 ctx.setDirective?.('pacing', null);
 ```
 
-Directives are scoped to the current agent and cleared on agent transfer. See [Speech Speed Control](/advanced/multimodal#speech-speed-control) for a complete example.
+Directives can be scoped to `'session'` (persists across agent transfers) or `'agent'` (cleared on transfer). For a declarative, zero-code approach to common behaviors like speech speed and verbosity, see [Behaviors](/guide/behaviors).
 
 ## Zod Schemas
 

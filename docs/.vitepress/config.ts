@@ -33,6 +33,7 @@ export default withMermaid(
 							{ text: 'VoiceSession', link: '/guide/voice-session' },
 							{ text: 'Agents', link: '/guide/agents' },
 							{ text: 'Tools', link: '/guide/tools' },
+							{ text: 'Behaviors', link: '/guide/behaviors' },
 							{ text: 'Memory', link: '/guide/memory' },
 							{ text: 'Events & Hooks', link: '/guide/events' },
 							{ text: 'Transport', link: '/guide/transport' },
