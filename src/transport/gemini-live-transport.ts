@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import { GoogleGenAI, type LiveServerMessage, type Session } from '@google/genai';
 import type { ToolDefinition } from '../types/tool.js';
 import { zodToJsonSchema } from './zod-to-schema.js';

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import type { ConversationItem } from '../types/conversation.js';
 import type { ConversationHistoryStore, SessionAnalytics } from '../types/history.js';
 import type { ConversationContext } from './conversation-context.js';

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import { AUDIO_FORMAT } from '../types/audio.js';
 
 /** Default buffer capacity: 2 seconds of audio. */

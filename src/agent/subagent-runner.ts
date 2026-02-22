@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import type { LanguageModelV1 } from 'ai';
 import { generateText } from 'ai';
 import type { HooksManager } from '../core/hooks.js';

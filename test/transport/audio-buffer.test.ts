@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import { describe, expect, it } from 'vitest';
 import { AudioBuffer } from '../../src/transport/audio-buffer.js';
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import type { ConversationItem } from './conversation.js';
 import type { PendingToolCall } from './session.js';
 

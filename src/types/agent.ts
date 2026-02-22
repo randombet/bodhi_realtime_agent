@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import type { ConversationItem } from './conversation.js';
 import type { MemoryFact } from './memory.js';
 import type { ToolDefinition } from './tool.js';

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import writeFileAtomic from 'write-file-atomic';

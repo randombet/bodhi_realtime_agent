@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 export {
 	AgentError,
 	FrameworkError,

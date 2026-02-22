@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import type { MemoryFact } from './memory.js';
 
 /** The role of a conversation item, used to distinguish message types in the context. */
