@@ -18,6 +18,91 @@ That's it. The user can now say "speak slower" and the framework:
 2. When Gemini calls it, sets a pacing directive that's reinforced every turn
 3. Notifies the client UI so it can update a speed indicator
 
+## Architecture
+
+BehaviorManager sits between the ToolExecutor and the directive system. It auto-generates tools that Gemini can call, and manages state that flows to both the Gemini context (via directives) and the client UI (via WebSocket JSON).
+
+```mermaid
+graph TB
+    subgraph VoiceSession
+        BM[BehaviorManager]
+        TE[ToolExecutor]
+        SD[(sessionDirectives)]
+        AD[(agentDirectives)]
+
+        BM -- "generates" --> Tools["set_speech_speed<br/>set_verbosity<br/>..."]
+        Tools -- "registered with" --> TE
+        BM -- "setDirective()" --> SD
+        BM -- "setDirective()" --> AD
+    end
+
+    subgraph Gemini
+        LLM[Gemini Live API]
+    end
+
+    subgraph Client
+        UI[Client UI]
+    end
+
+    LLM -- "calls tool" --> TE
+    TE -- "executes" --> BM
+    SD -- "reinforced every turn" --> LLM
+    BM -- "behavior.changed" --> UI
+    BM -- "behavior.catalog" --> UI
+    UI -- "behavior.set" --> BM
+```
+
+Changes can come from two directions — the user's voice (via Gemini tool call) or the client UI (via WebSocket message). Both paths converge on the same BehaviorManager state.
+
+## Data Flow: Voice Command
+
+When the user says "speak slower", the change flows through Gemini's tool calling:
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Gemini
+    participant ToolExecutor
+    participant BehaviorManager
+    participant Directives as sessionDirectives
+    participant Client as Client UI
+
+    User->>Gemini: "Speak slower"
+    Gemini->>ToolExecutor: set_speech_speed({ preset: "slow" })
+    ToolExecutor->>BehaviorManager: execute()
+    BehaviorManager->>Directives: setDirective("pacing", "PACING OVERRIDE: ...")
+    BehaviorManager->>Client: { type: "behavior.changed", preset: "slow" }
+    BehaviorManager-->>ToolExecutor: { status: "applied" }
+    ToolExecutor-->>Gemini: tool result
+    Gemini->>User: "I've slowed down for you."
+
+    Note over Directives,Gemini: Next turn
+    Directives->>Gemini: reinforceDirectives() via sendClientContent
+    Note over Gemini: Gemini maintains slow pacing
+```
+
+## Data Flow: Client UI Button
+
+When the user taps a speed button in the UI, the change bypasses Gemini entirely:
+
+```mermaid
+sequenceDiagram
+    participant Client as Client UI
+    participant VoiceSession
+    participant BehaviorManager
+    participant Directives as sessionDirectives
+    participant Gemini
+
+    Client->>VoiceSession: { type: "behavior.set", key: "pacing", preset: "slow" }
+    VoiceSession->>BehaviorManager: handleClientSet("pacing", "slow")
+    BehaviorManager->>Directives: setDirective("pacing", "PACING OVERRIDE: ...")
+    BehaviorManager->>Client: { type: "behavior.changed", preset: "slow" }
+
+    Note over Directives,Gemini: Next turn
+    Directives->>Gemini: reinforceDirectives() via sendClientContent
+    Note over Gemini: Gemini adopts slow pacing — no tool call needed
+```
+
 ## How It Works
 
 A **BehaviorCategory** declares a tunable behavior with named presets. Each preset maps to a directive string that gets injected into the model's context:
@@ -172,6 +257,27 @@ Each behavior declares a **scope** that controls what happens on agent transfer:
 
 - **`session`** (default): The directive persists across agent transfers via `sessionDirectives`. Use for user preferences like pacing or language.
 - **`agent`**: The directive is cleared when the user transfers to a new agent via `agentDirectives`. Use for agent-specific behaviors.
+
+```mermaid
+graph LR
+    subgraph "Agent: main"
+        S1["pacing = slow<br/>(session scope)"]
+        A1["formality = formal<br/>(agent scope)"]
+    end
+
+    S1 -- "persists" --> S2["pacing = slow ✓"]
+    A1 -. "cleared" .-> A2["formality = casual ✗"]
+
+    subgraph "Agent: math_expert"
+        S2
+        A2
+    end
+
+    style A1 fill:#fee,stroke:#c66
+    style A2 fill:#fee,stroke:#c66,stroke-dasharray: 5 5
+    style S1 fill:#efe,stroke:#6c6
+    style S2 fill:#efe,stroke:#6c6
+```
 
 ```typescript
 const formality: BehaviorCategory = {
