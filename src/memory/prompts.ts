@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * LLM prompt template for extracting durable facts from a conversation transcript.
  * Placeholders: `{existingMemory}`, `{recentTranscript}`.

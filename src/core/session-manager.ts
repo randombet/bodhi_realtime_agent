@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import type { ClientMessage } from '../types/audio.js';
 import type { SessionConfig, SessionState } from '../types/session.js';
 import { SessionError } from './errors.js';

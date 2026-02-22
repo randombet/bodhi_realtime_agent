@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { GeminiLiveTransport } from '../../src/transport/gemini-live-transport.js';

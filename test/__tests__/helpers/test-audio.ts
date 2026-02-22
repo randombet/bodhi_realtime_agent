@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Generate silence PCM audio data (16-bit, 16kHz, mono).
  * @param durationMs Duration of silence in milliseconds

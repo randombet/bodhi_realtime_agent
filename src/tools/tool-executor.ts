@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import { ToolExecutionError } from '../core/errors.js';
 import type { IEventBus } from '../core/event-bus.js';
 import type { HooksManager } from '../core/hooks.js';

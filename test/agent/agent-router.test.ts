@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import type { LanguageModelV1 } from 'ai';
 import { describe, expect, it, vi } from 'vitest';
 import { AgentRouter } from '../../src/agent/agent-router.js';

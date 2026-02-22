@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import { describe, expect, it, vi } from 'vitest';
 import { HooksManager } from '../../src/core/hooks.js';
 
