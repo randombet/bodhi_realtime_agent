@@ -1,0 +1,20 @@
+#!/bin/sh
+# Pre-commit checks: lint, typecheck, test
+# Fail fast — first failure aborts the commit.
+
+echo "Running pre-commit checks..."
+echo ""
+
+echo "→ Lint (biome)"
+pnpm lint || exit 1
+echo ""
+
+echo "→ Type check"
+pnpm typecheck || exit 1
+echo ""
+
+echo "→ Tests"
+pnpm test || exit 1
+echo ""
+
+echo "✓ All checks passed"

@@ -36,7 +36,7 @@ export class ClientTransport {
 	constructor(
 		private port: number,
 		private callbacks: ClientTransportCallbacks,
-		private host: string = '0.0.0.0',
+		private host = '0.0.0.0',
 	) {}
 
 	async start(): Promise<void> {

@@ -41,7 +41,15 @@ describe('BehaviorManager', () => {
 
 		it('generates multiple tools for multiple categories', () => {
 			const mgr = new BehaviorManager(
-				[createTestCategory(), { ...createTestCategory(), key: 'verbosity', toolName: 'set_verbosity', toolDescription: 'Set verbosity.' }],
+				[
+					createTestCategory(),
+					{
+						...createTestCategory(),
+						key: 'verbosity',
+						toolName: 'set_verbosity',
+						toolDescription: 'Set verbosity.',
+					},
+				],
 				vi.fn(),
 			);
 			expect(mgr.tools).toHaveLength(2);
