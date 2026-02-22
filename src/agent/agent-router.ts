@@ -10,6 +10,7 @@ import type { ClientTransport } from '../transport/client-transport.js';
 import type { GeminiLiveTransport } from '../transport/gemini-live-transport.js';
 import type { MainAgent, SubagentConfig } from '../types/agent.js';
 import type { SubagentResult, ToolCall } from '../types/conversation.js';
+import type { ToolDefinition } from '../types/tool.js';
 import { createAgentContext, resolveInstructions } from './agent-context.js';
 import { runSubagent } from './subagent-runner.js';
 
@@ -46,6 +47,7 @@ export class AgentRouter {
 		private clientTransport: ClientTransport,
 		private model: LanguageModelV1,
 		private getInstructionSuffix?: () => string,
+		private extraTools: ToolDefinition[] = [],
 	) {
 		this._activeAgent = undefined as unknown as MainAgent;
 	}
@@ -103,7 +105,7 @@ export class AgentRouter {
 		// 6. Disconnect and reconnect with new agent config
 		const suffix = this.getInstructionSuffix?.() ?? '';
 		this.geminiTransport.updateSystemInstruction(resolveInstructions(toAgent) + suffix);
-		this.geminiTransport.updateTools(toAgent.tools);
+		this.geminiTransport.updateTools([...toAgent.tools, ...this.extraTools]);
 		this.geminiTransport.updateGoogleSearch(toAgent.googleSearch ?? false);
 		await this.geminiTransport.reconnect(handle ?? undefined);
 

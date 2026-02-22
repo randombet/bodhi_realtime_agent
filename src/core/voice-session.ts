@@ -124,16 +124,32 @@ export class VoiceSession {
 
 		this.subagentConfigs = config.subagentConfigs ?? {};
 
+		// Set up BehaviorManager early — tools must be declared to Gemini at connect time.
+		// Callbacks capture `this` via closures and are only invoked at runtime (not during construction).
+		if (config.behaviors?.length) {
+			this.behaviorManager = new BehaviorManager(
+				config.behaviors,
+				(key, value, scope) => {
+					const map = scope === 'session' ? this.sessionDirectives : this.agentDirectives;
+					if (value === null) map.delete(key);
+					else map.set(key, value);
+				},
+				(msg) => this.clientTransport.sendJsonToClient(msg),
+			);
+		}
+
 		// Set up Gemini transport
 		const initialAgent = config.agents.find((a) => a.name === config.initialAgent);
 		const instructions = initialAgent ? resolveInstructions(initialAgent) : '';
+		const behaviorTools = this.behaviorManager?.tools ?? [];
+		const allInitialTools = [...(initialAgent?.tools ?? []), ...behaviorTools];
 
 		this.geminiTransport = new GeminiLiveTransport(
 			{
 				apiKey: config.apiKey,
 				model: config.geminiModel,
 				systemInstruction: instructions,
-				tools: initialAgent?.tools,
+				tools: allInitialTools.length ? allInitialTools : undefined,
 				googleSearch: initialAgent?.googleSearch,
 				speechConfig: config.speechConfig,
 				compressionConfig: config.compressionConfig,
@@ -189,22 +205,8 @@ export class VoiceSession {
 			},
 		);
 
-		// Set up BehaviorManager (auto-generates tools from declarative config)
-		if (config.behaviors?.length) {
-			this.behaviorManager = new BehaviorManager(
-				config.behaviors,
-				(key, value, scope) => {
-					const map = scope === 'session' ? this.sessionDirectives : this.agentDirectives;
-					if (value === null) map.delete(key);
-					else map.set(key, value);
-				},
-				(msg) => this.clientTransport.sendJsonToClient(msg),
-			);
-		}
-
-		const behaviorTools = this.behaviorManager?.tools ?? [];
-		if (initialAgent?.tools.length || behaviorTools.length) {
-			this.toolExecutor.register([...(initialAgent?.tools ?? []), ...behaviorTools]);
+		if (allInitialTools.length) {
+			this.toolExecutor.register(allInitialTools);
 		}
 
 		// Set up agent router
@@ -217,6 +219,7 @@ export class VoiceSession {
 			this.clientTransport,
 			config.model,
 			() => this.getSessionDirectiveSuffix(),
+			behaviorTools,
 		);
 		this.agentRouter.registerAgents(config.agents);
 		this.agentRouter.setInitialAgent(config.initialAgent);
