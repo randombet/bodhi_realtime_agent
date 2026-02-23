@@ -110,6 +110,12 @@ const HTML = /* html */ `<!DOCTYPE html>
   .btn-upload:hover { background: #3a3a5e; color: #fff; }
   .btn-send { background: #1e3a5f; color: #fff; }
   .btn-send:hover { background: #2a4a6f; }
+  .btn-download {
+    display: inline-block; margin-top: 6px; padding: 4px 10px;
+    border-radius: 6px; border: 1px solid #444; background: #1a1a2e;
+    color: #aaa; font-size: 11px; cursor: pointer; text-decoration: none;
+  }
+  .btn-download:hover { background: #2a2a4e; color: #fff; }
 </style>
 </head>
 <body>
@@ -523,20 +529,29 @@ function connectWs() {
             const imgEl = document.createElement('div');
             imgEl.className = 't-entry t-system';
             const img = document.createElement('img');
-            img.src = 'data:' + (guiData.mimeType || 'image/png') + ';base64,' + guiData.base64;
+            const imgDataUrl = 'data:' + (guiData.mimeType || 'image/png') + ';base64,' + guiData.base64;
+            img.src = imgDataUrl;
             img.alt = guiData.description || 'Generated image';
             img.style.maxWidth = '100%';
             img.style.borderRadius = '8px';
             img.style.marginTop = '8px';
             imgEl.appendChild(img);
+            const dlLink = document.createElement('a');
+            dlLink.className = 'btn-download';
+            dlLink.href = imgDataUrl;
+            const ext = (guiData.mimeType || 'image/png').split('/')[1] || 'png';
+            dlLink.download = 'generated-image-' + Date.now() + '.' + ext;
+            dlLink.textContent = 'Download image';
+            imgEl.appendChild(dlLink);
             $('transcript').appendChild(imgEl);
             $('transcript').scrollTop = $('transcript').scrollHeight;
             dbg('Image received via gui.update: ' + (guiData.description || '').slice(0, 50), 'event');
           } else if (guiData?.type === 'video' && guiData.base64) {
             const vidEl = document.createElement('div');
             vidEl.className = 't-entry t-system';
+            const vidDataUrl = 'data:' + (guiData.mimeType || 'video/mp4') + ';base64,' + guiData.base64;
             const video = document.createElement('video');
-            video.src = 'data:' + (guiData.mimeType || 'video/mp4') + ';base64,' + guiData.base64;
+            video.src = vidDataUrl;
             video.controls = true;
             video.autoplay = true;
             video.muted = true;
@@ -552,6 +567,13 @@ function connectWs() {
               vidEl.appendChild(caption);
             }
             vidEl.appendChild(video);
+            const dlLink = document.createElement('a');
+            dlLink.className = 'btn-download';
+            dlLink.href = vidDataUrl;
+            const vidExt = (guiData.mimeType || 'video/mp4').split('/')[1] || 'mp4';
+            dlLink.download = 'generated-video-' + Date.now() + '.' + vidExt;
+            dlLink.textContent = 'Download video';
+            vidEl.appendChild(dlLink);
             $('transcript').appendChild(vidEl);
             $('transcript').scrollTop = $('transcript').scrollHeight;
             dbg('Video received via gui.update: ' + (guiData.description || '').slice(0, 50), 'event');
@@ -564,12 +586,20 @@ function connectWs() {
           const imgEl = document.createElement('div');
           imgEl.className = 't-entry t-system';
           const img = document.createElement('img');
-          img.src = 'data:' + (msg.data.mimeType || 'image/png') + ';base64,' + msg.data.base64;
+          const legacyDataUrl = 'data:' + (msg.data.mimeType || 'image/png') + ';base64,' + msg.data.base64;
+          img.src = legacyDataUrl;
           img.alt = msg.data.description || 'Generated image';
           img.style.maxWidth = '100%';
           img.style.borderRadius = '8px';
           img.style.marginTop = '8px';
           imgEl.appendChild(img);
+          const dlLink2 = document.createElement('a');
+          dlLink2.className = 'btn-download';
+          dlLink2.href = legacyDataUrl;
+          const ext2 = (msg.data.mimeType || 'image/png').split('/')[1] || 'png';
+          dlLink2.download = 'generated-image-' + Date.now() + '.' + ext2;
+          dlLink2.textContent = 'Download image';
+          imgEl.appendChild(dlLink2);
           $('transcript').appendChild(imgEl);
           $('transcript').scrollTop = $('transcript').scrollHeight;
           dbg('Image received: ' + (msg.data.description || '').slice(0, 50), 'event');
@@ -649,6 +679,15 @@ function sendText() {
 
   ws.send(JSON.stringify({ type: 'text_input', text }));
   input.value = '';
+
+  // Show typed text in the conversation
+  currentUserEl = null; // finalize any in-progress user speech
+  const el = document.createElement('div');
+  el.className = 't-entry t-user';
+  el.textContent = text;
+  $('transcript').appendChild(el);
+  $('transcript').scrollTop = $('transcript').scrollHeight;
+
   dbg('Sent text: "' + text.slice(0, 50) + '"', 'event');
 }
 
