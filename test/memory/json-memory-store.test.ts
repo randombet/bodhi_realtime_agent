@@ -4,16 +4,16 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { MarkdownMemoryStore } from '../../src/memory/markdown-memory-store.js';
+import { JsonMemoryStore } from '../../src/memory/json-memory-store.js';
 import type { MemoryFact } from '../../src/types/memory.js';
 
-describe('MarkdownMemoryStore', () => {
+describe('JsonMemoryStore', () => {
 	let tmpDir: string;
-	let store: MarkdownMemoryStore;
+	let store: JsonMemoryStore;
 
 	beforeEach(async () => {
 		tmpDir = await mkdtemp(join(tmpdir(), 'memory-test-'));
-		store = new MarkdownMemoryStore(tmpDir);
+		store = new JsonMemoryStore(tmpDir);
 	});
 
 	afterEach(async () => {
@@ -41,7 +41,7 @@ describe('MarkdownMemoryStore', () => {
 		expect(retrieved[1].category).toBe('entity');
 	});
 
-	it('addFacts appends to existing categories', async () => {
+	it('addFacts appends to existing facts', async () => {
 		await store.addFacts('user1', [
 			{ content: 'Likes TypeScript', category: 'preference', timestamp: 1000 },
 		]);
@@ -73,11 +73,10 @@ describe('MarkdownMemoryStore', () => {
 
 		const retrieved = await store.getAll('user1');
 		expect(retrieved).toHaveLength(4);
-		// Should be ordered by category (preference, entity, decision, requirement)
-		expect(retrieved[0].category).toBe('preference');
-		expect(retrieved[1].category).toBe('entity');
-		expect(retrieved[2].category).toBe('decision');
-		expect(retrieved[3].category).toBe('requirement');
+		expect(retrieved[0].content).toBe('Prefers dark mode');
+		expect(retrieved[1].content).toBe('Uses Node 22');
+		expect(retrieved[2].content).toBe('Chose pnpm');
+		expect(retrieved[3].content).toBe('John is the PM');
 	});
 
 	it('replaceAll atomically overwrites all facts', async () => {
@@ -95,6 +94,20 @@ describe('MarkdownMemoryStore', () => {
 		expect(facts[0].content).toBe('New consolidated fact');
 	});
 
+	it('replaceAll preserves directives', async () => {
+		await store.setDirectives('user1', { pacing: 'slow' });
+		await store.addFacts('user1', [
+			{ content: 'Old fact', category: 'preference', timestamp: 1000 },
+		]);
+
+		await store.replaceAll('user1', [
+			{ content: 'New fact', category: 'preference', timestamp: 2000 },
+		]);
+
+		const directives = await store.getDirectives('user1');
+		expect(directives).toEqual({ pacing: 'slow' });
+	});
+
 	it('replaceAll creates file if missing', async () => {
 		await store.replaceAll('user1', [
 			{ content: 'Brand new', category: 'decision', timestamp: 1000 },
@@ -104,19 +117,6 @@ describe('MarkdownMemoryStore', () => {
 		expect(facts).toHaveLength(1);
 		expect(facts[0].content).toBe('Brand new');
 		expect(facts[0].category).toBe('decision');
-	});
-
-	it('getAll returns parsed facts with correct categories', async () => {
-		await store.addFacts('user1', [
-			{ content: 'Fact A', category: 'preference', timestamp: 1000 },
-			{ content: 'Fact B', category: 'entity', timestamp: 1001 },
-			{ content: 'Fact C', category: 'decision', timestamp: 1002 },
-			{ content: 'Fact D', category: 'requirement', timestamp: 1003 },
-		]);
-
-		const facts = await store.getAll('user1');
-		const categories = facts.map((f) => f.category);
-		expect(categories).toEqual(['preference', 'entity', 'decision', 'requirement']);
 	});
 
 	it('isolates users from each other', async () => {
@@ -134,5 +134,46 @@ describe('MarkdownMemoryStore', () => {
 		expect(facts1[0].content).toBe('User 1 fact');
 		expect(facts2).toHaveLength(1);
 		expect(facts2[0].content).toBe('User 2 fact');
+	});
+
+	describe('directives', () => {
+		it('returns empty object for non-existent user', async () => {
+			const directives = await store.getDirectives('unknown-user');
+			expect(directives).toEqual({});
+		});
+
+		it('persists and retrieves directives', async () => {
+			await store.setDirectives('user1', { pacing: 'slow', verbosity: 'concise' });
+
+			const directives = await store.getDirectives('user1');
+			expect(directives).toEqual({ pacing: 'slow', verbosity: 'concise' });
+		});
+
+		it('overwrites existing directives', async () => {
+			await store.setDirectives('user1', { pacing: 'slow' });
+			await store.setDirectives('user1', { pacing: 'fast' });
+
+			const directives = await store.getDirectives('user1');
+			expect(directives).toEqual({ pacing: 'fast' });
+		});
+
+		it('preserves facts when setting directives', async () => {
+			await store.addFacts('user1', [
+				{ content: 'Some fact', category: 'preference', timestamp: 1000 },
+			]);
+			await store.setDirectives('user1', { pacing: 'slow' });
+
+			const facts = await store.getAll('user1');
+			expect(facts).toHaveLength(1);
+			expect(facts[0].content).toBe('Some fact');
+		});
+
+		it('preserves directives when adding facts', async () => {
+			await store.setDirectives('user1', { pacing: 'slow' });
+			await store.addFacts('user1', [{ content: 'New fact', category: 'entity', timestamp: 1000 }]);
+
+			const directives = await store.getDirectives('user1');
+			expect(directives).toEqual({ pacing: 'slow' });
+		});
 	});
 });

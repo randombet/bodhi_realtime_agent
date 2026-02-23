@@ -22,15 +22,18 @@ export class BehaviorManager {
 		scope?: 'session' | 'agent',
 	) => void;
 	private readonly sendJsonToClient?: (msg: Record<string, unknown>) => void;
+	private readonly onPresetChange?: (key: string, presetName: string) => void;
 
 	constructor(
 		categories: BehaviorCategory[],
 		setDirective: (key: string, value: string | null, scope?: 'session' | 'agent') => void,
 		sendJsonToClient?: (msg: Record<string, unknown>) => void,
+		onPresetChange?: (key: string, presetName: string) => void,
 	) {
 		this.categories = categories;
 		this.setDirective = setDirective;
 		this.sendJsonToClient = sendJsonToClient;
+		this.onPresetChange = onPresetChange;
 
 		// Initialize active presets to defaults (first preset in each category)
 		for (const cat of categories) {
@@ -71,6 +74,23 @@ export class BehaviorManager {
 		this.applyPreset(key, preset);
 	}
 
+	/**
+	 * Restore a previously active preset (e.g. from persisted memory).
+	 * Sets the directive and updates internal state but does NOT notify the client
+	 * (the client will receive the correct state via `sendCatalog()` on connect).
+	 */
+	restorePreset(key: string, presetName: string): boolean {
+		const category = this.categories.find((c) => c.key === key);
+		if (!category) return false;
+		const preset = category.presets.find((p) => p.name === presetName);
+		if (!preset) return false;
+
+		const scope = category.scope ?? 'session';
+		this.setDirective(key, preset.directive, scope);
+		this.active.set(key, presetName);
+		return true;
+	}
+
 	/** Reset all categories to their default preset (first in list). */
 	reset(): void {
 		for (const cat of this.categories) {
@@ -80,7 +100,7 @@ export class BehaviorManager {
 		}
 	}
 
-	/** Apply a preset: set directive, update state, notify client. */
+	/** Apply a preset: set directive, update state, notify client, fire callback. */
 	private applyPreset(key: string, presetName: string): void {
 		const category = this.categories.find((c) => c.key === key);
 		if (!category) return;
@@ -97,6 +117,8 @@ export class BehaviorManager {
 			key,
 			preset: presetName,
 		});
+
+		this.onPresetChange?.(key, presetName);
 	}
 
 	/** Build a ToolDefinition for a single BehaviorCategory. */

@@ -14,9 +14,9 @@ export interface MemoryFact {
 }
 
 /**
- * Persistence interface for per-user memory facts.
+ * Persistence interface for per-user memory facts and directives.
  * Implementations must be safe for concurrent reads and writes.
- * See MarkdownMemoryStore for the built-in file-based implementation.
+ * See JsonMemoryStore for the built-in file-based implementation.
  */
 export interface MemoryStore {
 	/** Append new facts to the user's memory (creates the store entry if needed). */
@@ -25,4 +25,8 @@ export interface MemoryStore {
 	getAll(userId: string): Promise<MemoryFact[]>;
 	/** Atomically replace all facts for a user (used by consolidation). */
 	replaceAll(userId: string, facts: MemoryFact[]): Promise<void>;
+	/** Retrieve structured directives (e.g. behavior presets) for a user. */
+	getDirectives(userId: string): Promise<Record<string, string>>;
+	/** Persist structured directives for a user (preserves existing facts). */
+	setDirectives(userId: string, directives: Record<string, string>): Promise<void>;
 }

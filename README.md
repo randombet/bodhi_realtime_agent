@@ -218,39 +218,29 @@ const session = new VoiceSession({
 
 ### Memory
 
-The memory system automatically extracts durable facts about the user from conversation:
+The memory system automatically extracts durable facts about the user from conversation using a merge-on-write strategy — each extraction produces the complete updated fact list (deduped, contradictions resolved):
 
 ```typescript
-import { MarkdownMemoryStore, MemoryDistiller } from '@bodhi_agent/realtime-agent-framework';
+import { JsonMemoryStore } from '@bodhi_agent/realtime-agent-framework';
 
-const memoryStore = new MarkdownMemoryStore('./memory');
-const distiller = new MemoryDistiller(
-  conversationContext,
-  memoryStore,
-  hooksManager,
-  model,
-  { userId: 'user_1', sessionId: 'session_1' },
-);
-
-// Triggers extraction every 5 turns
-distiller.onTurnEnd();
-
-// Force extraction at checkpoints (agent transfer, session close)
-distiller.onCheckpoint();
-
-// Merge duplicate/contradictory facts
-await distiller.consolidate();
+const session = new VoiceSession({
+  // ...required config
+  memory: {
+    store: new JsonMemoryStore('./memory'),
+  },
+});
 ```
 
-Facts are persisted as Markdown files (`memory/{userId}.md`) organized by category:
+Facts are persisted as JSON files (`memory/{userId}.json`) with structured directives and categorized facts:
 
-```markdown
-## Preferences
-- Prefers dark mode
-- Likes concise answers
-
-## Entities
-- Works at Acme Corp
+```json
+{
+  "directives": { "pacing": "slow" },
+  "facts": [
+    { "content": "Prefers dark mode", "category": "preference" },
+    { "content": "Works at Acme Corp", "category": "entity" }
+  ]
+}
 ```
 
 ## Project Structure
@@ -278,9 +268,9 @@ src/
     audio-buffer.ts           # Bounded ring buffer for audio
     zod-to-schema.ts          # Zod → Gemini JSON Schema converter
   memory/            # User memory
-    markdown-memory-store.ts  # File-based memory persistence
-    memory-distiller.ts       # LLM-powered fact extraction
-    prompts.ts                # Extraction/consolidation prompt templates
+    json-memory-store.ts      # JSON file-based memory persistence
+    memory-distiller.ts       # LLM-powered fact extraction (merge-on-write)
+    prompts.ts                # Extraction prompt template
   types/             # TypeScript interfaces and type definitions
 test/                # Unit and integration tests (mirrors src/ structure)
 app/                 # Usage examples

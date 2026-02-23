@@ -68,7 +68,7 @@ const session = new VoiceSession({
   // behaviors: [speechSpeed(), verbosity()],  // See /guide/behaviors
 
   // --- Optional: Persistence ---
-  // memoryStore: new MarkdownMemoryStore('./memory'),
+  // memory: { store: new JsonMemoryStore('./memory') },
   // conversationHistoryStore: myHistoryStore,
   // sessionStore: new InMemorySessionStore(),
 });

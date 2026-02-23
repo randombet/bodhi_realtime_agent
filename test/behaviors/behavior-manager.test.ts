@@ -183,6 +183,64 @@ describe('BehaviorManager', () => {
 		});
 	});
 
+	describe('restorePreset', () => {
+		it('restores a known preset without notifying client', () => {
+			const setDirective = vi.fn();
+			const sendJson = vi.fn();
+			const mgr = new BehaviorManager([createTestCategory()], setDirective, sendJson);
+
+			const result = mgr.restorePreset('pacing', 'slow');
+			expect(result).toBe(true);
+			expect(mgr.activePresets.get('pacing')).toBe('slow');
+			expect(setDirective).toHaveBeenCalledWith('pacing', 'Speak slowly.', 'session');
+			expect(sendJson).not.toHaveBeenCalled();
+		});
+
+		it('returns false for unknown category', () => {
+			const mgr = new BehaviorManager([createTestCategory()], vi.fn());
+			expect(mgr.restorePreset('nonexistent', 'slow')).toBe(false);
+		});
+
+		it('returns false for unknown preset', () => {
+			const mgr = new BehaviorManager([createTestCategory()], vi.fn());
+			expect(mgr.restorePreset('pacing', 'turbo')).toBe(false);
+		});
+	});
+
+	describe('onPresetChange callback', () => {
+		it('fires on tool-initiated preset change', async () => {
+			const onPresetChange = vi.fn();
+			const mgr = new BehaviorManager([createTestCategory()], vi.fn(), undefined, onPresetChange);
+
+			await mgr.tools[0].execute({ preset: 'slow' }, {} as never);
+			expect(onPresetChange).toHaveBeenCalledWith('pacing', 'slow');
+		});
+
+		it('fires on client-initiated preset change', () => {
+			const onPresetChange = vi.fn();
+			const mgr = new BehaviorManager([createTestCategory()], vi.fn(), undefined, onPresetChange);
+
+			mgr.handleClientSet('pacing', 'fast');
+			expect(onPresetChange).toHaveBeenCalledWith('pacing', 'fast');
+		});
+
+		it('does NOT fire on restorePreset (avoids write loop)', () => {
+			const onPresetChange = vi.fn();
+			const mgr = new BehaviorManager([createTestCategory()], vi.fn(), undefined, onPresetChange);
+
+			mgr.restorePreset('pacing', 'slow');
+			expect(onPresetChange).not.toHaveBeenCalled();
+		});
+
+		it('fires on reset', () => {
+			const onPresetChange = vi.fn();
+			const mgr = new BehaviorManager([createTestCategory()], vi.fn(), undefined, onPresetChange);
+
+			mgr.reset();
+			expect(onPresetChange).toHaveBeenCalledWith('pacing', 'normal');
+		});
+	});
+
 	describe('scope', () => {
 		it('uses agent scope when category declares it', async () => {
 			const setDirective = vi.fn();

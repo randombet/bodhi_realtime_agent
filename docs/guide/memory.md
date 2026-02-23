@@ -17,64 +17,62 @@ Conversation → MemoryDistiller → MemoryStore → Agent Instructions
 ## Quick Setup
 
 ```typescript
-import { VoiceSession, MarkdownMemoryStore } from '@bodhi_agent/realtime-agent-framework';
+import { VoiceSession, JsonMemoryStore } from '@bodhi_agent/realtime-agent-framework';
 
 const session = new VoiceSession({
   // ...required config
-  memoryStore: new MarkdownMemoryStore('./memory'),
+  memory: {
+    store: new JsonMemoryStore('./memory'),
+  },
 });
 ```
 
 That's it. The framework handles extraction, storage, and retrieval automatically.
 
-## MarkdownMemoryStore
+## JsonMemoryStore
 
-The built-in `MarkdownMemoryStore` persists facts as human-readable Markdown files, one per user:
+The built-in `JsonMemoryStore` persists facts and directives as JSON files, one per user:
 
 ```
 memory/
-  user_1.md
-  user_2.md
+  user_1.json
+  user_2.json
 ```
 
-Each file is organized by category:
+Each file contains directives (behavior presets) and categorized facts:
 
-```markdown
-## Preferences
-
-- Prefers dark mode
-- Likes concise answers
-- Speaks Spanish and English
-
-## Entities
-
-- Works at Acme Corp
-- Manager's name is Sarah
-
-## Decisions
-
-- Chose the Pro plan over Enterprise
-
-## Requirements
-
-- Needs HIPAA-compliant storage
+```json
+{
+  "directives": {
+    "pacing": "slow",
+    "verbosity": "concise"
+  },
+  "facts": [
+    { "content": "Prefers dark mode", "category": "preference" },
+    { "content": "Works at Acme Corp", "category": "entity" },
+    { "content": "Chose the Pro plan over Enterprise", "category": "decision" },
+    { "content": "Needs HIPAA-compliant storage", "category": "requirement" }
+  ]
+}
 ```
 
 ### Usage
 
 ```typescript
-import { MarkdownMemoryStore } from '@bodhi_agent/realtime-agent-framework';
+import { JsonMemoryStore } from '@bodhi_agent/realtime-agent-framework';
 
-const store = new MarkdownMemoryStore('./memory');
+const store = new JsonMemoryStore('./memory');
 
-// Reads are simple
+// Read facts
 const facts = await store.getAll('user_1');
 // → [{ content: 'Prefers dark mode', category: 'preference', timestamp: 0 }, ...]
 
+// Read/write directives (behavior presets)
+const directives = await store.getDirectives('user_1');
+await store.setDirectives('user_1', { pacing: 'slow' });
+
 // Writes are atomic (safe for concurrent access)
-await store.addFacts('user_1', [
-  { content: 'Prefers dark mode', category: 'preference', timestamp: Date.now() },
-]);
+await store.replaceAll('user_1', updatedFacts);
 ```
 
 ## Memory Categories
@@ -118,28 +116,9 @@ const session = new VoiceSession({
 
 Only one extraction runs at a time. If multiple triggers fire while an extraction is in progress, they are silently skipped. This prevents redundant LLM calls during rapid conversation.
 
-### Consolidation
+### Merge-on-Write
 
-Over time, a user's memory file may accumulate duplicate or contradictory facts. The `consolidate()` method merges them using an LLM call:
-
-```typescript
-// Periodic maintenance (e.g. in a cron job)
-await distiller.consolidate();
-```
-
-Before:
-```markdown
-## Preferences
-- Likes dark mode
-- Prefers dark theme
-- Changed to light mode
-```
-
-After consolidation:
-```markdown
-## Preferences
-- Prefers light mode (previously preferred dark mode)
-```
+Each extraction produces the **complete updated fact list** — existing facts plus newly extracted facts, with duplicates removed and contradictions resolved. The LLM sees both the existing memory and recent conversation, then outputs the merged result which replaces all stored facts. This eliminates the need for a separate consolidation step.
 
 ## Using Memory in Agents
 
@@ -219,11 +198,26 @@ class PostgresMemoryStore implements MemoryStore {
       }
     });
   }
+
+  async getDirectives(userId: string): Promise<Record<string, string>> {
+    const row = await db.query(
+      'SELECT directives FROM memory_directives WHERE user_id = $1',
+      [userId]
+    );
+    return row?.directives ?? {};
+  }
+
+  async setDirectives(userId: string, directives: Record<string, string>): Promise<void> {
+    await db.query(
+      'INSERT INTO memory_directives (user_id, directives) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET directives = $2',
+      [userId, directives]
+    );
+  }
 }
 ```
 
 ::: tip
-Implementations must be safe for concurrent reads and writes. The built-in `MarkdownMemoryStore` uses `write-file-atomic` for this.
+Implementations must be safe for concurrent reads and writes. The built-in `JsonMemoryStore` uses `write-file-atomic` for this.
 :::
 
 ## Observability

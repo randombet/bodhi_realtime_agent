@@ -138,6 +138,16 @@ export class VoiceSession {
 		// Set up BehaviorManager early — tools must be declared to Gemini at connect time.
 		// Callbacks capture `this` via closures and are only invoked at runtime (not during construction).
 		if (config.behaviors?.length) {
+			const memoryStore = config.memory?.store;
+			const onPresetChange = memoryStore
+				? () => {
+						const presets = Object.fromEntries(this.behaviorManager?.activePresets ?? []);
+						memoryStore.setDirectives(config.userId, presets).catch(() => {
+							// Best-effort — directive persistence failure is non-fatal
+						});
+					}
+				: undefined;
+
 			this.behaviorManager = new BehaviorManager(
 				config.behaviors,
 				(key, value, scope) => {
@@ -146,6 +156,7 @@ export class VoiceSession {
 					else map.set(key, value);
 				},
 				(msg) => this.clientTransport.sendJsonToClient(msg),
+				onPresetChange,
 			);
 		}
 
@@ -260,6 +271,25 @@ export class VoiceSession {
 	/** Start the client WebSocket server and connect to Gemini. */
 	async start(): Promise<void> {
 		await this.refreshMemoryCache();
+
+		// Restore behavior presets from structured directives (deterministic lookup)
+		if (this.config.memory && this.behaviorManager) {
+			try {
+				const directives = await this.config.memory.store.getDirectives(this.config.userId);
+				const restored: string[] = [];
+				for (const [key, presetName] of Object.entries(directives)) {
+					if (this.behaviorManager.restorePreset(key, presetName)) {
+						restored.push(key);
+					}
+				}
+				if (restored.length > 0) {
+					this.log(`Restored behavior presets from directives: ${restored.join(', ')}`);
+				}
+			} catch {
+				// Best-effort — directive loading failure is non-fatal
+			}
+		}
+
 		this.log('Starting WS server...');
 		await this.clientTransport.start();
 		this.log('WS server ready. Connecting to Gemini...');
@@ -595,6 +625,18 @@ export class VoiceSession {
 		if (!agent.greeting) return;
 		this.log(`Sending greeting for agent "${agent.name}"`);
 		this.firstAudioReceived = false;
+
+		// Inject stored memory facts so Gemini knows the user from the first turn
+		if (this.memoryFactsCache.length > 0) {
+			const summary = this.memoryFactsCache.map((f) => `- ${f.content}`).join('\n');
+			const memoryText = `[MEMORY — what you already know about this user from previous sessions]\n${summary}`;
+			this.geminiTransport.sendClientContent(
+				[{ role: 'user', parts: [{ text: memoryText }] }],
+				true,
+			);
+			this.log(`Injected ${this.memoryFactsCache.length} memory facts`);
+		}
+
 		// Prepend session directives so the greeting response respects user preferences (e.g. pacing)
 		const directiveSuffix = this.getSessionDirectiveSuffix();
 		const greetingText = directiveSuffix
