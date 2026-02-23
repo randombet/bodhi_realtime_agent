@@ -10,4 +10,4 @@ coverage/
 docs/.vitepress/cache/
 docs/.vitepress/dist/
 docs/api/
-memory/
+/memory/

@@ -111,10 +111,15 @@ export class MemoryDistiller {
 
 			const recentTranscript = recentItems.map((i) => `[${i.role}]: ${i.content}`).join('\n');
 
-			const prompt = MEMORY_EXTRACTION_PROMPT.replace('{existingMemory}', existingMemory).replace(
-				'{recentTranscript}',
-				recentTranscript,
-			);
+			const prompt = MEMORY_EXTRACTION_PROMPT.replace(
+				'{currentDateTime}',
+				new Date().toLocaleString('en-US', {
+					dateStyle: 'full',
+					timeStyle: 'short',
+				}),
+			)
+				.replace('{existingMemory}', existingMemory)
+				.replace('{recentTranscript}', recentTranscript);
 
 			const controller = new AbortController();
 			const timeout = setTimeout(() => controller.abort(), this.extractionTimeoutMs);
