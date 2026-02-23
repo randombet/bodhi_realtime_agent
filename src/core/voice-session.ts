@@ -112,6 +112,13 @@ export class VoiceSession {
 	private clientConnected = false;
 	/** Whether the first audio chunk from Gemini has been received this turn (for TTFB logging). */
 	private firstAudioReceived = false;
+	/** Whether the most recent turn ended via interruption (user started speaking). */
+	private lastTurnInterrupted = false;
+	/** Queued background tool completion notifications waiting for Gemini to finish generating. */
+	private pendingBackgroundNotifications: Array<{
+		turns: Array<{ role: string; parts: Array<{ text: string }> }>;
+		turnComplete: boolean;
+	}> = [];
 
 	constructor(config: VoiceSessionConfig) {
 		this.config = config;
@@ -300,6 +307,9 @@ export class VoiceSession {
 
 	/** Gracefully shut down: disconnect Gemini, stop the WebSocket server, transition to CLOSED. */
 	async close(_reason = 'normal'): Promise<void> {
+		// Drop any queued background notifications — session is ending
+		this.pendingBackgroundNotifications = [];
+
 		// Flush any buffered transcription before closing
 		this.flushTranscriptBuffers();
 
@@ -493,13 +503,21 @@ export class VoiceSession {
 		call: { toolCallId: string; toolName: string; args: Record<string, unknown> },
 		toolDef: ToolDefinition,
 	): void {
-		// Inject pending message
-		if (toolDef.pendingMessage) {
+		const hasPendingMessage = !!toolDef.pendingMessage;
+
+		// Send a tool response to unblock Gemini (it stops generating until a response arrives).
+		// Explicitly mark the task as still in progress so Gemini doesn't claim it's done.
+		if (hasPendingMessage) {
 			this.geminiTransport.sendToolResponse([
 				{
 					id: call.toolCallId,
 					name: call.toolName,
-					response: { status: 'pending', message: toolDef.pendingMessage },
+					response: {
+						status: 'still_in_progress',
+						message: toolDef.pendingMessage,
+						important:
+							'This task is NOT complete yet. Do NOT tell the user it is ready. You will receive a notification when it finishes.',
+					},
 				},
 			]);
 		}
@@ -523,23 +541,58 @@ export class VoiceSession {
 					result: result.text,
 				});
 
-				this.geminiTransport.sendToolResponse([
-					{
-						id: call.toolCallId,
-						name: call.toolName,
-						response: { result: result.text },
-					},
-				]);
+				if (hasPendingMessage) {
+					// The pending message already satisfied the tool call from Gemini's perspective.
+					// Inject the completion as a context message so Gemini naturally informs the user.
+					// If Gemini is mid-generation, queue it until the current turn ends.
+					this.sendOrQueueNotification(
+						[
+							{
+								role: 'user',
+								parts: [
+									{
+										text: `[SYSTEM: Background task "${call.toolName}" completed successfully. Result: ${result.text}. Please inform the user their content is ready now.]`,
+									},
+								],
+							},
+						],
+						true,
+					);
+				} else {
+					this.geminiTransport.sendToolResponse([
+						{
+							id: call.toolCallId,
+							name: call.toolName,
+							response: { result: result.text },
+						},
+					]);
+				}
 			})
 			.catch((err) => {
 				this.reportError('subagent-runner', err);
-				this.geminiTransport.sendToolResponse([
-					{
-						id: call.toolCallId,
-						name: call.toolName,
-						response: { error: err instanceof Error ? err.message : String(err) },
-					},
-				]);
+				if (hasPendingMessage) {
+					this.sendOrQueueNotification(
+						[
+							{
+								role: 'user',
+								parts: [
+									{
+										text: `[SYSTEM: Background task "${call.toolName}" failed: ${err instanceof Error ? err.message : String(err)}. Please apologize to the user and let them know.]`,
+									},
+								],
+							},
+						],
+						true,
+					);
+				} else {
+					this.geminiTransport.sendToolResponse([
+						{
+							id: call.toolCallId,
+							name: call.toolName,
+							response: { error: err instanceof Error ? err.message : String(err) },
+						},
+					]);
+				}
 			});
 	}
 
@@ -554,6 +607,8 @@ export class VoiceSession {
 		this.flushTranscriptBuffers();
 		this.turnId++;
 		this.firstAudioReceived = false;
+		const wasInterrupted = this.lastTurnInterrupted;
+		this.lastTurnInterrupted = false;
 		const turnIdStr = `turn_${this.turnId}`;
 		this.log(`Turn complete: ${turnIdStr}`);
 		this.eventBus.publish('turn.end', {
@@ -591,6 +646,13 @@ export class VoiceSession {
 
 		// Reinforce active directives so Gemini doesn't drift
 		this.reinforceDirectives();
+
+		// Flush one queued background notification now that Gemini finished generating.
+		// Skip after interruptions — the user is speaking and the next natural turn
+		// completion will flush instead.
+		if (!wasInterrupted) {
+			this.flushOneBackgroundNotification();
+		}
 	}
 
 	/** Returns session-scoped directives formatted as a system instruction suffix (for agent transfers). */
@@ -617,6 +679,33 @@ export class VoiceSession {
 			],
 			true,
 		);
+	}
+
+	/**
+	 * Send a background tool completion notification to Gemini, or queue it
+	 * if Gemini is currently generating audio (where it would be silently absorbed).
+	 */
+	private sendOrQueueNotification(
+		turns: Array<{ role: string; parts: Array<{ text: string }> }>,
+		turnComplete: boolean,
+	): void {
+		if (this.firstAudioReceived) {
+			this.log('Gemini is generating — queuing background notification');
+			this.pendingBackgroundNotifications.push({ turns, turnComplete });
+		} else {
+			this.geminiTransport.sendClientContent(turns, turnComplete);
+		}
+	}
+
+	/** Flush one queued background notification now that Gemini is idle. */
+	private flushOneBackgroundNotification(): void {
+		const notification = this.pendingBackgroundNotifications.shift();
+		if (notification) {
+			this.log(
+				`Flushing queued background notification (${this.pendingBackgroundNotifications.length} remaining)`,
+			);
+			this.geminiTransport.sendClientContent(notification.turns, notification.turnComplete);
+		}
 	}
 
 	/** Send the active agent's greeting prompt to Gemini to trigger a spoken greeting. */
@@ -651,6 +740,7 @@ export class VoiceSession {
 	private handleInterrupted(): void {
 		this.log('Interrupted by user');
 		this.firstAudioReceived = false;
+		this.lastTurnInterrupted = true;
 		this.flushTranscriptBuffers();
 		this.eventBus.publish('turn.interrupted', {
 			sessionId: this.config.sessionId,

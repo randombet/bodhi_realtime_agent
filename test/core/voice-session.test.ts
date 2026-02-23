@@ -1380,4 +1380,245 @@ describe('VoiceSession', () => {
 			await new Promise<void>((r) => ws.on('close', r));
 		});
 	});
+
+	describe('background tool notification queuing', () => {
+		// Helper: create a controllable generateText mock.
+		// Returns { resolve, reject } to complete the subagent at will.
+		async function installControllableGenerateText() {
+			let resolve!: (val: { text: string }) => void;
+			let reject!: (err: Error) => void;
+			const promise = new Promise<{ text: string }>((res, rej) => {
+				resolve = res;
+				reject = rej;
+			});
+			const { generateText } = (await import('ai')) as unknown as {
+				generateText: ReturnType<typeof vi.fn>;
+			};
+			generateText.mockImplementationOnce(
+				async (opts: { onStepFinish?: (step: unknown) => void }) => {
+					const result = await promise;
+					opts.onStepFinish?.({ toolCalls: [], usage: { totalTokens: 10 } });
+					return result;
+				},
+			);
+			return { resolve, reject };
+		}
+
+		async function setupBgSession(port: number) {
+			const s = new VoiceSession({
+				sessionId: 'sess_bg',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createBackgroundToolAgent()],
+				initialAgent: 'bg-tool-agent',
+				port,
+				model: mockModel,
+				subagentConfigs: {
+					slow_task: {
+						name: 'slow_runner',
+						instructions: 'Run the slow task',
+						tools: {},
+						maxSteps: 1,
+					},
+				},
+			});
+			await s.start();
+			await new Promise((r) => setTimeout(r, 50));
+			return s;
+		}
+
+		async function getFireAndMock() {
+			const { _getMessageHandler, _getMockSession } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+			const mockSess = (
+				_getMockSession as unknown as () => Record<string, ReturnType<typeof vi.fn>>
+			)();
+			return { fire, mockSess };
+		}
+
+		it('queues notification when Gemini is generating, flushes on natural turnComplete', async () => {
+			const ctrl = await installControllableGenerateText();
+			session = await setupBgSession(9900);
+			const { fire, mockSess } = await getFireAndMock();
+
+			// Simulate Gemini actively generating audio (sets firstAudioReceived = true)
+			fire({
+				serverContent: {
+					modelTurn: { parts: [{ inlineData: { data: 'AAAA' } }] },
+				},
+			});
+
+			// Fire background tool call
+			fire({
+				toolCall: {
+					functionCalls: [{ id: 'tc_q1', name: 'slow_task', args: { task: 'make video' } }],
+				},
+			});
+			await new Promise((r) => setTimeout(r, 50));
+
+			// Resolve the subagent while Gemini is still generating
+			ctrl.resolve({ text: 'video generated' });
+			await new Promise((r) => setTimeout(r, 100));
+
+			// The completion notification should be QUEUED, not sent yet.
+			const contentCallsBefore = mockSess.sendClientContent.mock.calls;
+			const completionBefore = contentCallsBefore.find((c: unknown[]) => {
+				const arg = c[0] as { turns?: Array<{ parts?: Array<{ text?: string }> }> };
+				return arg.turns?.some((t) =>
+					t.parts?.some((p) => p.text?.includes('completed successfully')),
+				);
+			});
+			expect(completionBefore).toBeUndefined();
+
+			// Now simulate Gemini finishing its turn (natural completion, no interruption)
+			fire({ serverContent: { turnComplete: true } });
+			await new Promise((r) => setTimeout(r, 100));
+
+			// Now the queued notification should have been flushed
+			const contentCallsAfter = mockSess.sendClientContent.mock.calls;
+			const completionAfter = contentCallsAfter.find((c: unknown[]) => {
+				const arg = c[0] as { turns?: Array<{ parts?: Array<{ text?: string }> }> };
+				return arg.turns?.some((t) =>
+					t.parts?.some((p) => p.text?.includes('completed successfully')),
+				);
+			});
+			expect(completionAfter).toBeDefined();
+		});
+
+		it('sends notification immediately when Gemini is idle', async () => {
+			const ctrl = await installControllableGenerateText();
+			session = await setupBgSession(9901);
+			const { fire, mockSess } = await getFireAndMock();
+
+			// Do NOT send any audio output — Gemini is idle (firstAudioReceived = false)
+
+			// Fire background tool call
+			fire({
+				toolCall: {
+					functionCalls: [{ id: 'tc_q2', name: 'slow_task', args: { task: 'idle task' } }],
+				},
+			});
+			await new Promise((r) => setTimeout(r, 50));
+
+			// Resolve subagent while Gemini is idle
+			ctrl.resolve({ text: 'task done' });
+			await new Promise((r) => setTimeout(r, 100));
+
+			// Notification should be sent immediately (not queued)
+			const contentCalls = mockSess.sendClientContent.mock.calls;
+			const completion = contentCalls.find((c: unknown[]) => {
+				const arg = c[0] as { turns?: Array<{ parts?: Array<{ text?: string }> }> };
+				return arg.turns?.some((t) =>
+					t.parts?.some((p) => p.text?.includes('completed successfully')),
+				);
+			});
+			expect(completion).toBeDefined();
+		});
+
+		it('does NOT flush on interrupted turn — stays queued until natural completion', async () => {
+			const ctrl = await installControllableGenerateText();
+			session = await setupBgSession(9902);
+			const { fire, mockSess } = await getFireAndMock();
+
+			// Simulate Gemini generating audio
+			fire({
+				serverContent: {
+					modelTurn: { parts: [{ inlineData: { data: 'AAAA' } }] },
+				},
+			});
+
+			// Fire background tool call
+			fire({
+				toolCall: {
+					functionCalls: [{ id: 'tc_q3', name: 'slow_task', args: { task: 'interrupted task' } }],
+				},
+			});
+			await new Promise((r) => setTimeout(r, 50));
+
+			// Resolve subagent while generating
+			ctrl.resolve({ text: 'done but interrupted' });
+			await new Promise((r) => setTimeout(r, 100));
+
+			// Simulate interruption (user starts speaking)
+			fire({ serverContent: { interrupted: true } });
+			await new Promise((r) => setTimeout(r, 50));
+
+			// Simulate interrupted turnComplete
+			fire({ serverContent: { turnComplete: true } });
+			await new Promise((r) => setTimeout(r, 100));
+
+			// Notification should still be queued (not flushed after interrupted turn)
+			const contentCallsAfterInterrupt = mockSess.sendClientContent.mock.calls;
+			const completionAfterInterrupt = contentCallsAfterInterrupt.find((c: unknown[]) => {
+				const arg = c[0] as { turns?: Array<{ parts?: Array<{ text?: string }> }> };
+				return arg.turns?.some((t) =>
+					t.parts?.some((p) => p.text?.includes('completed successfully')),
+				);
+			});
+			expect(completionAfterInterrupt).toBeUndefined();
+
+			// Now simulate a natural (non-interrupted) turn completion
+			fire({
+				serverContent: {
+					modelTurn: { parts: [{ inlineData: { data: 'BBBB' } }] },
+				},
+			});
+			fire({ serverContent: { turnComplete: true } });
+			await new Promise((r) => setTimeout(r, 100));
+
+			// NOW it should be flushed
+			const contentCallsFinal = mockSess.sendClientContent.mock.calls;
+			const completionFinal = contentCallsFinal.find((c: unknown[]) => {
+				const arg = c[0] as { turns?: Array<{ parts?: Array<{ text?: string }> }> };
+				return arg.turns?.some((t) =>
+					t.parts?.some((p) => p.text?.includes('completed successfully')),
+				);
+			});
+			expect(completionFinal).toBeDefined();
+		});
+
+		it('error path also queues and flushes correctly', async () => {
+			const ctrl = await installControllableGenerateText();
+			session = await setupBgSession(9903);
+			const { fire, mockSess } = await getFireAndMock();
+
+			// Simulate Gemini generating audio
+			fire({
+				serverContent: {
+					modelTurn: { parts: [{ inlineData: { data: 'AAAA' } }] },
+				},
+			});
+
+			// Fire background tool call
+			fire({
+				toolCall: {
+					functionCalls: [{ id: 'tc_q4', name: 'slow_task', args: { task: 'fail task' } }],
+				},
+			});
+			await new Promise((r) => setTimeout(r, 50));
+
+			// Reject the subagent while generating
+			ctrl.reject(new Error('generation failed'));
+			await new Promise((r) => setTimeout(r, 100));
+
+			// Error notification should be queued, not sent
+			const contentCallsBefore = mockSess.sendClientContent.mock.calls;
+			const errorBefore = contentCallsBefore.find((c: unknown[]) => {
+				const arg = c[0] as { turns?: Array<{ parts?: Array<{ text?: string }> }> };
+				return arg.turns?.some((t) => t.parts?.some((p) => p.text?.includes('failed')));
+			});
+			expect(errorBefore).toBeUndefined();
+
+			// Natural turn completion flushes the error notification
+			fire({ serverContent: { turnComplete: true } });
+			await new Promise((r) => setTimeout(r, 100));
+
+			const contentCallsAfter = mockSess.sendClientContent.mock.calls;
+			const errorAfter = contentCallsAfter.find((c: unknown[]) => {
+				const arg = c[0] as { turns?: Array<{ parts?: Array<{ text?: string }> }> };
+				return arg.turns?.some((t) => t.parts?.some((p) => p.text?.includes('failed')));
+			});
+			expect(errorAfter).toBeDefined();
+		});
+	});
 });
