@@ -35,7 +35,7 @@ interface ActiveSubagent {
  */
 export class AgentRouter {
 	private agents = new Map<string, MainAgent>();
-	private _activeAgent: MainAgent;
+	private _activeAgent: MainAgent | null = null;
 	private activeSubagents = new Map<string, ActiveSubagent>();
 
 	constructor(
@@ -48,9 +48,7 @@ export class AgentRouter {
 		private model: LanguageModelV1,
 		private getInstructionSuffix?: () => string,
 		private extraTools: ToolDefinition[] = [],
-	) {
-		this._activeAgent = undefined as unknown as MainAgent;
-	}
+	) {}
 
 	registerAgents(agents: MainAgent[]): void {
 		for (const agent of agents) {
@@ -67,6 +65,9 @@ export class AgentRouter {
 	}
 
 	get activeAgent(): MainAgent {
+		if (!this._activeAgent) {
+			throw new AgentError('No active agent — call setInitialAgent() first');
+		}
 		return this._activeAgent;
 	}
 
@@ -80,7 +81,7 @@ export class AgentRouter {
 			throw new AgentError(`Unknown agent: ${toAgentName}`);
 		}
 
-		const fromAgent = this._activeAgent;
+		const fromAgent = this.activeAgent;
 		const ctx = this.createContext(fromAgent.name);
 
 		// 1. onExit current agent
@@ -146,9 +147,18 @@ export class AgentRouter {
 			// Reconnect failed — session is broken, clean up and transition to CLOSED
 			this.clientTransport.stopBuffering();
 			this.sessionManager.transitionTo('CLOSED');
-			throw new AgentError(
+			const error = new AgentError(
 				`Transfer to "${toAgentName}" failed: ${err instanceof Error ? err.message : String(err)}`,
 			);
+			if (this.hooks.onError) {
+				this.hooks.onError({
+					sessionId: this.sessionManager.sessionId,
+					component: 'agent-router',
+					error,
+					severity: 'fatal',
+				});
+			}
+			throw error;
 		}
 	}
 
@@ -163,7 +173,7 @@ export class AgentRouter {
 
 		this.eventBus.publish('agent.handoff', {
 			sessionId: this.sessionManager.sessionId,
-			agentName: this._activeAgent.name,
+			agentName: this.activeAgent.name,
 			subagentName: subagentConfig.name,
 			toolCallId: toolCall.toolCallId,
 		});
@@ -176,7 +186,7 @@ export class AgentRouter {
 					toolName: toolCall.toolName,
 					args: toolCall.args,
 				},
-				resolveInstructions(this._activeAgent),
+				resolveInstructions(this.activeAgent),
 				[],
 			);
 

@@ -12,7 +12,6 @@ import type { MainAgent, SubagentConfig } from '../types/agent.js';
 import type { BehaviorCategory } from '../types/behavior.js';
 import type { FrameworkHooks } from '../types/hooks.js';
 import type { MemoryStore } from '../types/memory.js';
-import type { ToolDefinition } from '../types/tool.js';
 import { BackgroundNotificationQueue } from './background-notification-queue.js';
 import { ConversationContext } from './conversation-context.js';
 import { DirectiveManager } from './directive-manager.js';
@@ -20,6 +19,7 @@ import { EventBus } from './event-bus.js';
 import { HooksManager } from './hooks.js';
 import { MemoryCacheManager } from './memory-cache-manager.js';
 import { SessionManager } from './session-manager.js';
+import { ToolCallRouter } from './tool-call-router.js';
 import { TranscriptManager } from './transcript-manager.js';
 
 /**
@@ -98,6 +98,7 @@ export class VoiceSession {
 	private clientTransport: ClientTransport;
 	private agentRouter: AgentRouter;
 	private toolExecutor: ToolExecutor;
+	private toolCallRouter!: ToolCallRouter;
 	private subagentConfigs: Record<string, SubagentConfig>;
 	private behaviorManager?: BehaviorManager;
 	private memoryDistiller?: MemoryDistiller;
@@ -200,8 +201,8 @@ export class VoiceSession {
 			{
 				onSetupComplete: (sessionId) => this.handleSetupComplete(sessionId),
 				onAudioOutput: (data) => this.handleAudioOutput(data),
-				onToolCall: (calls) => this.handleToolCalls(calls),
-				onToolCallCancellation: (ids) => this.handleToolCallCancellation(ids),
+				onToolCall: (calls) => this.toolCallRouter.handleToolCalls(calls),
+				onToolCallCancellation: (ids) => this.toolCallRouter.handleToolCallCancellation(ids),
 				onTurnComplete: () => this.handleTurnComplete(),
 				onInterrupted: () => this.handleInterrupted(),
 				onInputTranscription: (text) => this.transcriptManager.handleInput(text),
@@ -258,6 +259,20 @@ export class VoiceSession {
 		);
 		this.agentRouter.registerAgents(config.agents);
 		this.agentRouter.setInitialAgent(config.initialAgent);
+
+		// Set up tool call router
+		this.toolCallRouter = new ToolCallRouter({
+			toolExecutor: this.toolExecutor,
+			agentRouter: this.agentRouter,
+			conversationContext: this.conversationContext,
+			notificationQueue: this.notificationQueue,
+			transcriptManager: this.transcriptManager,
+			subagentConfigs: this.subagentConfigs,
+			sendToolResponse: (responses) => this.geminiTransport.sendToolResponse(responses),
+			transfer: (toAgent) => this.transfer(toAgent),
+			reportError: (component, error) => this.reportError(component, error),
+			log: (msg) => this.log(msg),
+		});
 	}
 
 	/** Start the client WebSocket server and connect to Gemini. */
@@ -338,6 +353,7 @@ export class VoiceSession {
 		this.toolExecutor = this.createToolExecutor(agent.name);
 		const behaviorTools = this.behaviorManager?.tools ?? [];
 		this.toolExecutor.register([...agent.tools, ...behaviorTools]);
+		this.toolCallRouter.toolExecutor = this.toolExecutor;
 
 		// Clear agent-scoped directives on transfer; session-scoped directives persist
 		this.directiveManager.clearAgent();
@@ -386,190 +402,6 @@ export class VoiceSession {
 		}
 		if (this.clientConnected) {
 			this.sendGreeting();
-		}
-	}
-
-	private handleToolCalls(
-		calls: Array<{ id: string; name: string; args: Record<string, unknown> }>,
-	): void {
-		const names = calls.map((c) => c.name).join(', ');
-		this.log(`Tool calls from Gemini: [${names}]`);
-		// Flush user's input transcript before tool calls so it appears first
-		// in conversation context and logs. Safe because Gemini only calls tools
-		// after processing the user's complete utterance.
-		this.transcriptManager.flushInput();
-
-		// Save output transcript accumulated before tool call to avoid
-		// duplication: Gemini transcribes ahead of tool calls, then
-		// re-transcribes the same text after receiving the tool result.
-		this.transcriptManager.saveOutputPrefix();
-
-		for (const call of calls) {
-			const toolCall = {
-				toolCallId: call.id,
-				toolName: call.name,
-				args: call.args,
-			};
-
-			// Check if this is a transfer tool
-			if (call.name === 'transfer_to_agent' && call.args.agent_name) {
-				this.transfer(call.args.agent_name as string).catch((err) => {
-					this.reportError('agent-router', err);
-				});
-				// Send empty response to acknowledge
-				this.geminiTransport.sendToolResponse([
-					{ id: call.id, name: call.name, response: { status: 'transferred' } },
-				]);
-				return;
-			}
-
-			// Find tool definition to determine execution type
-			const agent = this.agentRouter.activeAgent;
-			const toolDef = agent.tools.find((t: ToolDefinition) => t.name === call.name);
-
-			if (toolDef?.execution === 'background') {
-				this.handleBackgroundToolCall(toolCall, toolDef);
-			} else {
-				this.handleInlineToolCall(toolCall);
-			}
-		}
-	}
-
-	private handleInlineToolCall(call: {
-		toolCallId: string;
-		toolName: string;
-		args: Record<string, unknown>;
-	}): void {
-		this.toolExecutor
-			.handleToolCall(call)
-			.then((result) => {
-				this.conversationContext.addToolCall(call);
-				this.conversationContext.addToolResult(result);
-
-				this.geminiTransport.sendToolResponse([
-					{
-						id: result.toolCallId,
-						name: result.toolName,
-						response: result.error
-							? { error: result.error }
-							: (result.result as Record<string, unknown>),
-					},
-				]);
-			})
-			.catch((err) => {
-				this.reportError('tool-executor', err);
-				// Always send a response so Gemini doesn't hang
-				this.geminiTransport.sendToolResponse([
-					{
-						id: call.toolCallId,
-						name: call.toolName,
-						response: { error: err instanceof Error ? err.message : String(err) },
-					},
-				]);
-			});
-	}
-
-	private handleBackgroundToolCall(
-		call: { toolCallId: string; toolName: string; args: Record<string, unknown> },
-		toolDef: ToolDefinition,
-	): void {
-		const hasPendingMessage = !!toolDef.pendingMessage;
-
-		// Send a tool response to unblock Gemini (it stops generating until a response arrives).
-		// Explicitly mark the task as still in progress so Gemini doesn't claim it's done.
-		if (hasPendingMessage) {
-			this.geminiTransport.sendToolResponse([
-				{
-					id: call.toolCallId,
-					name: call.toolName,
-					response: {
-						status: 'still_in_progress',
-						message: toolDef.pendingMessage,
-						important:
-							'This task is NOT complete yet. Do NOT tell the user it is ready. You will receive a notification when it finishes.',
-					},
-				},
-			]);
-		}
-
-		// Find subagent config
-		const subagentConfig = this.subagentConfigs[call.toolName];
-		if (!subagentConfig) {
-			// Fallback: run as inline tool
-			this.handleInlineToolCall(call);
-			return;
-		}
-
-		// Handoff to subagent
-		this.agentRouter
-			.handoff(call, subagentConfig)
-			.then((result) => {
-				this.conversationContext.addToolCall(call);
-				this.conversationContext.addToolResult({
-					toolCallId: call.toolCallId,
-					toolName: call.toolName,
-					result: result.text,
-				});
-
-				if (hasPendingMessage) {
-					// The pending message already satisfied the tool call from Gemini's perspective.
-					// Inject the completion as a context message so Gemini naturally informs the user.
-					// If Gemini is mid-generation, queue it until the current turn ends.
-					this.notificationQueue.sendOrQueue(
-						[
-							{
-								role: 'user',
-								parts: [
-									{
-										text: `[SYSTEM: Background task "${call.toolName}" completed successfully. Result: ${result.text}. Please inform the user their content is ready now.]`,
-									},
-								],
-							},
-						],
-						true,
-					);
-				} else {
-					this.geminiTransport.sendToolResponse([
-						{
-							id: call.toolCallId,
-							name: call.toolName,
-							response: { result: result.text },
-						},
-					]);
-				}
-			})
-			.catch((err) => {
-				this.reportError('subagent-runner', err);
-				if (hasPendingMessage) {
-					this.notificationQueue.sendOrQueue(
-						[
-							{
-								role: 'user',
-								parts: [
-									{
-										text: `[SYSTEM: Background task "${call.toolName}" failed: ${err instanceof Error ? err.message : String(err)}. Please apologize to the user and let them know.]`,
-									},
-								],
-							},
-						],
-						true,
-					);
-				} else {
-					this.geminiTransport.sendToolResponse([
-						{
-							id: call.toolCallId,
-							name: call.toolName,
-							response: { error: err instanceof Error ? err.message : String(err) },
-						},
-					]);
-				}
-			});
-	}
-
-	private handleToolCallCancellation(ids: string[]): void {
-		this.toolExecutor.cancel(ids);
-		for (const id of ids) {
-			this.agentRouter.cancelSubagent(id);
 		}
 	}
 

@@ -78,6 +78,10 @@ export class ClientTransport {
 					this.callbacks.onClientDisconnected?.();
 				});
 
+				ws.on('error', () => {
+					// Prevent unhandled error crash — 'close' event will follow
+				});
+
 				this.client = ws;
 				this.callbacks.onClientConnected?.();
 			});
@@ -88,6 +92,7 @@ export class ClientTransport {
 		this._buffering = false;
 		this.audioBuffer.clear();
 		if (this.client) {
+			this.client.removeAllListeners();
 			this.client.close();
 			this.client = null;
 		}

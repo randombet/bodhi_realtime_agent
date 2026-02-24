@@ -16,6 +16,8 @@ export { BackgroundNotificationQueue } from './background-notification-queue.js'
 export {
 	DEFAULT_CONNECT_TIMEOUT_MS,
 	DEFAULT_EXTRACTION_TIMEOUT_MS,
+	DEFAULT_RECONNECT_TIMEOUT_MS,
+	DEFAULT_SUBAGENT_TIMEOUT_MS,
 	DEFAULT_TOOL_TIMEOUT_MS,
 } from './constants.js';
 
@@ -36,6 +38,9 @@ export { InMemorySessionStore } from './session-store.js';
 export type { SessionStore } from './session-store.js';
 
 export { MemoryCacheManager } from './memory-cache-manager.js';
+
+export { ToolCallRouter } from './tool-call-router.js';
+export type { ToolCallRouterDeps } from './tool-call-router.js';
 
 export { TranscriptManager } from './transcript-manager.js';
 export type { TranscriptSink } from './transcript-manager.js';

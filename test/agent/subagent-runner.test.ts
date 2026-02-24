@@ -161,10 +161,42 @@ describe('runSubagent', () => {
 			abortSignal: controller.signal,
 		});
 
+		// The internal timeout controller's signal is passed (not the caller's directly),
+		// but caller abort propagates to it — verify an AbortSignal is always provided
 		expect(generateText).toHaveBeenCalledWith(
 			expect.objectContaining({
-				abortSignal: controller.signal,
+				abortSignal: expect.any(AbortSignal),
 			}),
 		);
+	});
+
+	it('propagates caller abort to generateText signal', async () => {
+		const { generateText } = await import('ai');
+		const hooks = new HooksManager();
+		const controller = new AbortController();
+
+		// Capture the signal passed to generateText and abort the caller mid-execution
+		let capturedSignal: AbortSignal | undefined;
+		vi.mocked(generateText).mockImplementationOnce(async (opts: { abortSignal?: AbortSignal }) => {
+			capturedSignal = opts.abortSignal;
+			// Abort the caller while generateText is still in-flight
+			controller.abort();
+			expect(capturedSignal?.aborted).toBe(true);
+			return { text: 'done' } as ReturnType<typeof generateText>;
+		});
+
+		await runSubagent({
+			config: {
+				name: 'test-subagent',
+				instructions: 'Test instructions',
+				tools: {},
+			},
+			context: createTestContext(),
+			hooks,
+			model: mockModel,
+			abortSignal: controller.signal,
+		});
+
+		expect(capturedSignal).toBeDefined();
 	});
 });
