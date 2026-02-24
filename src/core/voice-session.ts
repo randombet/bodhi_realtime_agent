@@ -848,13 +848,20 @@ export class VoiceSession {
 			this.sessionManager.transitionTo('RECONNECTING');
 			this.clientTransport.startBuffering();
 
-			this.geminiTransport.reconnect(handle).then(() => {
-				const buffered = this.clientTransport.stopBuffering();
-				for (const chunk of buffered) {
-					this.geminiTransport.sendAudio(chunk.toString('base64'));
-				}
-				this.sessionManager.transitionTo('ACTIVE');
-			});
+			this.geminiTransport
+				.reconnect(handle)
+				.then(() => {
+					const buffered = this.clientTransport.stopBuffering();
+					for (const chunk of buffered) {
+						this.geminiTransport.sendAudio(chunk.toString('base64'));
+					}
+					this.sessionManager.transitionTo('ACTIVE');
+				})
+				.catch((err) => {
+					this.clientTransport.stopBuffering();
+					this.reportError('reconnect', err);
+					this.sessionManager.transitionTo('CLOSED');
+				});
 		}
 	}
 
@@ -949,9 +956,15 @@ export class VoiceSession {
 			const handle = this.sessionManager.resumptionHandle;
 			if (handle) {
 				this.sessionManager.transitionTo('RECONNECTING');
-				this.geminiTransport.reconnect(handle).then(() => {
-					this.sessionManager.transitionTo('ACTIVE');
-				});
+				this.geminiTransport
+					.reconnect(handle)
+					.then(() => {
+						this.sessionManager.transitionTo('ACTIVE');
+					})
+					.catch((err) => {
+						this.reportError('reconnect', err);
+						this.sessionManager.transitionTo('CLOSED');
+					});
 			} else {
 				this.sessionManager.transitionTo('CLOSED');
 			}

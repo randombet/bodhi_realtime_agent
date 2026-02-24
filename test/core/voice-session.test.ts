@@ -1381,6 +1381,89 @@ describe('VoiceSession', () => {
 		});
 	});
 
+	describe('reconnect error handling', () => {
+		it('transitions to CLOSED when goAway reconnect fails', async () => {
+			const onError = vi.fn();
+			session = new VoiceSession({
+				sessionId: 'sess_1',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9904,
+				model: mockModel,
+				hooks: { onError },
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			// Set a resumption handle so reconnect path is taken
+			session.sessionManager.updateResumptionHandle('handle_1');
+
+			// Spy on geminiTransport.reconnect to make it reject
+			const transport = (
+				session as unknown as { geminiTransport: { reconnect: () => Promise<void> } }
+			).geminiTransport;
+			vi.spyOn(transport, 'reconnect').mockRejectedValueOnce(new Error('reconnect failed'));
+
+			// Fire goAway — triggers handleGoAway which calls reconnect
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+			fire({ goAway: { timeLeft: '30s' } });
+
+			await new Promise((r) => setTimeout(r, 100));
+
+			expect(session.sessionManager.state).toBe('CLOSED');
+			expect(onError).toHaveBeenCalledWith(
+				expect.objectContaining({
+					component: 'reconnect',
+					error: expect.objectContaining({ message: 'reconnect failed' }),
+				}),
+			);
+		});
+
+		it('transitions to CLOSED when unexpected-close reconnect fails', async () => {
+			const onError = vi.fn();
+			session = new VoiceSession({
+				sessionId: 'sess_1',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9905,
+				model: mockModel,
+				hooks: { onError },
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			// Set a resumption handle so reconnect path is taken
+			session.sessionManager.updateResumptionHandle('handle_2');
+
+			// Spy on geminiTransport.reconnect to make it reject
+			const transport = (
+				session as unknown as { geminiTransport: { reconnect: () => Promise<void> } }
+			).geminiTransport;
+			vi.spyOn(transport, 'reconnect').mockRejectedValueOnce(new Error('reconnect failed'));
+
+			// Directly invoke the private handleTransportClose since the WebSocket onclose
+			// callback is internal to the transport and not exposed through the mock
+			(session as unknown as { handleTransportClose: () => void }).handleTransportClose();
+
+			await new Promise((r) => setTimeout(r, 100));
+
+			expect(session.sessionManager.state).toBe('CLOSED');
+			expect(onError).toHaveBeenCalledWith(
+				expect.objectContaining({
+					component: 'reconnect',
+					error: expect.objectContaining({ message: 'reconnect failed' }),
+				}),
+			);
+		});
+	});
+
 	describe('background tool notification queuing', () => {
 		// Helper: create a controllable generateText mock.
 		// Returns { resolve, reject } to complete the subagent at will.
