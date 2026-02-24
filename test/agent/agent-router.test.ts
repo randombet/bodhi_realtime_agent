@@ -150,6 +150,22 @@ describe('AgentRouter', () => {
 			);
 		});
 
+		it('transitions to CLOSED and throws when reconnect fails during transfer', async () => {
+			const { router, sessionMgr, gemini, client } = setup();
+			router.registerAgents([createTestAgent('general'), createTestAgent('booking')]);
+			router.setInitialAgent('general');
+			sessionMgr.transitionTo('CONNECTING');
+			sessionMgr.transitionTo('ACTIVE');
+
+			gemini.reconnect.mockRejectedValueOnce(new Error('connection lost'));
+
+			await expect(router.transfer('booking')).rejects.toThrow(AgentError);
+			expect(sessionMgr.state).toBe('CLOSED');
+			expect(client.stopBuffering).toHaveBeenCalled();
+			// Active agent should not have changed since transfer failed
+			expect(router.activeAgent.name).toBe('general');
+		});
+
 		it('throws for unknown target agent', async () => {
 			const { router } = setup();
 			router.registerAgents([createTestAgent('general')]);

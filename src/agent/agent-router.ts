@@ -102,45 +102,54 @@ export class AgentRouter {
 		// 5. Save handle and disconnect
 		const handle = this.sessionManager.resumptionHandle;
 
-		// 6. Disconnect and reconnect with new agent config
-		const suffix = this.getInstructionSuffix?.() ?? '';
-		this.geminiTransport.updateSystemInstruction(resolveInstructions(toAgent) + suffix);
-		this.geminiTransport.updateTools([...toAgent.tools, ...this.extraTools]);
-		this.geminiTransport.updateGoogleSearch(toAgent.googleSearch ?? false);
-		await this.geminiTransport.reconnect(handle ?? undefined);
+		try {
+			// 6. Disconnect and reconnect with new agent config
+			const suffix = this.getInstructionSuffix?.() ?? '';
+			this.geminiTransport.updateSystemInstruction(resolveInstructions(toAgent) + suffix);
+			this.geminiTransport.updateTools([...toAgent.tools, ...this.extraTools]);
+			this.geminiTransport.updateGoogleSearch(toAgent.googleSearch ?? false);
+			await this.geminiTransport.reconnect(handle ?? undefined);
 
-		// 7. Stop buffering and replay
-		const buffered = this.clientTransport.stopBuffering();
+			// 7. Stop buffering and replay
+			const buffered = this.clientTransport.stopBuffering();
 
-		// 8. Replay conversation context
-		const replayContent = this.conversationContext.toReplayContent();
-		if (replayContent.length > 0) {
-			this.geminiTransport.sendClientContent(replayContent, false);
+			// 8. Replay conversation context
+			const replayContent = this.conversationContext.toReplayContent();
+			if (replayContent.length > 0) {
+				this.geminiTransport.sendClientContent(replayContent, false);
+			}
+
+			// 9. Replay buffered audio
+			for (const chunk of buffered) {
+				this.geminiTransport.sendAudio(chunk.toString('base64'));
+			}
+
+			// 10. Transition to ACTIVE
+			this.sessionManager.transitionTo('ACTIVE');
+			this._activeAgent = toAgent;
+
+			// 11. onEnter new agent
+			const newCtx = this.createContext(toAgent.name);
+			await toAgent.onEnter?.(newCtx);
+			this.eventBus.publish('agent.enter', {
+				sessionId: this.sessionManager.sessionId,
+				agentName: toAgent.name,
+			});
+
+			// 12. Publish transfer event
+			this.eventBus.publish('agent.transfer', {
+				sessionId: this.sessionManager.sessionId,
+				fromAgent: fromAgent.name,
+				toAgent: toAgentName,
+			});
+		} catch (err) {
+			// Reconnect failed — session is broken, clean up and transition to CLOSED
+			this.clientTransport.stopBuffering();
+			this.sessionManager.transitionTo('CLOSED');
+			throw new AgentError(
+				`Transfer to "${toAgentName}" failed: ${err instanceof Error ? err.message : String(err)}`,
+			);
 		}
-
-		// 9. Replay buffered audio
-		for (const chunk of buffered) {
-			this.geminiTransport.sendAudio(chunk.toString('base64'));
-		}
-
-		// 10. Transition to ACTIVE
-		this.sessionManager.transitionTo('ACTIVE');
-		this._activeAgent = toAgent;
-
-		// 11. onEnter new agent
-		const newCtx = this.createContext(toAgent.name);
-		await toAgent.onEnter?.(newCtx);
-		this.eventBus.publish('agent.enter', {
-			sessionId: this.sessionManager.sessionId,
-			agentName: toAgent.name,
-		});
-
-		// 12. Publish transfer event
-		this.eventBus.publish('agent.transfer', {
-			sessionId: this.sessionManager.sessionId,
-			fromAgent: fromAgent.name,
-			toAgent: toAgentName,
-		});
 	}
 
 	/** Spawn a background subagent to handle a tool call asynchronously. */
