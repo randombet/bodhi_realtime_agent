@@ -19,6 +19,7 @@ import { EventBus } from './event-bus.js';
 import { HooksManager } from './hooks.js';
 import { MemoryCacheManager } from './memory-cache-manager.js';
 import { SessionManager } from './session-manager.js';
+import { TranscriptManager } from './transcript-manager.js';
 
 /**
  * Configuration for creating a VoiceSession.
@@ -102,11 +103,8 @@ export class VoiceSession {
 	private memoryCacheManager?: MemoryCacheManager;
 	private turnId = 0;
 	private config: VoiceSessionConfig;
-	private inputTranscriptBuffer = '';
-	private outputTranscriptBuffer = '';
-	/** Pre-tool-call output text, saved when a tool call splits a turn. */
-	private outputTranscriptPrefix = '';
 	private directiveManager = new DirectiveManager();
+	private transcriptManager!: TranscriptManager;
 	/** Whether a client WebSocket connection is currently active. */
 	private clientConnected = false;
 	/** Whether the first audio chunk from Gemini has been received this turn (for TTFB logging). */
@@ -124,6 +122,11 @@ export class VoiceSession {
 		this.eventBus = new EventBus();
 		this.hooks = new HooksManager();
 		this.conversationContext = new ConversationContext();
+		this.transcriptManager = new TranscriptManager({
+			sendToClient: (msg) => this.clientTransport.sendJsonToClient(msg),
+			addUserMessage: (text) => this.conversationContext.addUserMessage(text),
+			addAssistantMessage: (text) => this.conversationContext.addAssistantMessage(text),
+		});
 
 		if (config.hooks) {
 			this.hooks.register(config.hooks);
@@ -204,8 +207,8 @@ export class VoiceSession {
 				onToolCallCancellation: (ids) => this.handleToolCallCancellation(ids),
 				onTurnComplete: () => this.handleTurnComplete(),
 				onInterrupted: () => this.handleInterrupted(),
-				onInputTranscription: (text) => this.handleInputTranscription(text),
-				onOutputTranscription: (text) => this.handleOutputTranscription(text),
+				onInputTranscription: (text) => this.transcriptManager.handleInput(text),
+				onOutputTranscription: (text) => this.transcriptManager.handleOutput(text),
 				onGroundingMetadata: (metadata) => this.handleGroundingMetadata(metadata),
 				onGoAway: (timeLeft) => this.handleGoAway(timeLeft),
 				onResumptionUpdate: (handle, resumable) => this.handleResumptionUpdate(handle, resumable),
@@ -303,7 +306,7 @@ export class VoiceSession {
 		this.pendingBackgroundNotifications = [];
 
 		// Flush any buffered transcription before closing
-		this.flushTranscriptBuffers();
+		this.transcriptManager.flush();
 
 		// Fire turn end if we're mid-turn
 		if (this.turnId > 0) {
@@ -403,24 +406,12 @@ export class VoiceSession {
 		// Flush user's input transcript before tool calls so it appears first
 		// in conversation context and logs. Safe because Gemini only calls tools
 		// after processing the user's complete utterance.
-		if (this.inputTranscriptBuffer.trim()) {
-			this.conversationContext.addUserMessage(this.inputTranscriptBuffer.trim());
-			this.clientTransport.sendJsonToClient({
-				type: 'transcript',
-				role: 'user',
-				text: this.inputTranscriptBuffer.trim(),
-				partial: false,
-			});
-			this.inputTranscriptBuffer = '';
-		}
+		this.transcriptManager.flushInput();
 
 		// Save output transcript accumulated before tool call to avoid
 		// duplication: Gemini transcribes ahead of tool calls, then
 		// re-transcribes the same text after receiving the tool result.
-		if (this.outputTranscriptBuffer.trim()) {
-			this.outputTranscriptPrefix += this.outputTranscriptBuffer;
-			this.outputTranscriptBuffer = '';
-		}
+		this.transcriptManager.saveOutputPrefix();
 
 		for (const call of calls) {
 			const toolCall = {
@@ -592,7 +583,7 @@ export class VoiceSession {
 	}
 
 	private handleTurnComplete(): void {
-		this.flushTranscriptBuffers();
+		this.transcriptManager.flush();
 		this.turnId++;
 		this.firstAudioReceived = false;
 		const wasInterrupted = this.lastTurnInterrupted;
@@ -712,94 +703,12 @@ export class VoiceSession {
 		this.log('Interrupted by user');
 		this.firstAudioReceived = false;
 		this.lastTurnInterrupted = true;
-		this.flushTranscriptBuffers();
+		this.transcriptManager.flush();
 		this.eventBus.publish('turn.interrupted', {
 			sessionId: this.config.sessionId,
 			turnId: `turn_${this.turnId}`,
 		});
 		this.clientTransport.sendJsonToClient({ type: 'turn.interrupted' });
-	}
-
-	private handleInputTranscription(text: string): void {
-		if (text.trim()) {
-			this.inputTranscriptBuffer += text;
-			this.clientTransport.sendJsonToClient({
-				type: 'transcript',
-				role: 'user',
-				text: this.inputTranscriptBuffer.trim(),
-				partial: true,
-			});
-		}
-	}
-
-	private handleOutputTranscription(text: string): void {
-		if (text.trim()) {
-			this.outputTranscriptBuffer += text;
-			const combined = this.combineOutputTranscript();
-			this.clientTransport.sendJsonToClient({
-				type: 'transcript',
-				role: 'assistant',
-				text: combined,
-				partial: true,
-			});
-		}
-	}
-
-	private flushTranscriptBuffers(): void {
-		if (this.inputTranscriptBuffer.trim()) {
-			this.conversationContext.addUserMessage(this.inputTranscriptBuffer.trim());
-			this.clientTransport.sendJsonToClient({
-				type: 'transcript',
-				role: 'user',
-				text: this.inputTranscriptBuffer.trim(),
-				partial: false,
-			});
-		}
-		const outputText = this.combineOutputTranscript();
-		if (outputText) {
-			this.conversationContext.addAssistantMessage(outputText);
-			this.clientTransport.sendJsonToClient({
-				type: 'transcript',
-				role: 'assistant',
-				text: outputText,
-				partial: false,
-			});
-		}
-		this.inputTranscriptBuffer = '';
-		this.outputTranscriptBuffer = '';
-		this.outputTranscriptPrefix = '';
-	}
-
-	/**
-	 * Combine pre-tool prefix and post-tool buffer, deduplicating any overlap.
-	 *
-	 * Gemini's outputTranscription can "leak" post-tool text into the pre-tool
-	 * stream, then re-send it after the tool result. This finds the longest
-	 * suffix of prefix that matches a prefix of buffer and removes the overlap.
-	 */
-	private combineOutputTranscript(): string {
-		const prefix = this.outputTranscriptPrefix.trim();
-		const buffer = this.outputTranscriptBuffer.trim();
-
-		if (!prefix) return buffer;
-		if (!buffer) return prefix;
-
-		// If post-tool buffer is entirely contained in the prefix tail, skip it
-		if (prefix.endsWith(buffer)) return prefix;
-
-		// Find the longest suffix of prefix that matches a prefix of buffer
-		const maxOverlap = Math.min(prefix.length, buffer.length);
-		let overlap = 0;
-		for (let i = 1; i <= maxOverlap; i++) {
-			if (prefix.slice(-i) === buffer.slice(0, i)) {
-				overlap = i;
-			}
-		}
-
-		if (overlap > 0) {
-			return prefix + buffer.slice(overlap);
-		}
-		return `${prefix} ${buffer}`;
 	}
 
 	private handleGroundingMetadata(metadata: Record<string, unknown>): void {
