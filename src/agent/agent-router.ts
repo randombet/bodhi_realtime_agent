@@ -186,7 +186,7 @@ export class AgentRouter {
 					toolName: toolCall.toolName,
 					args: toolCall.args,
 				},
-				resolveInstructions(this.activeAgent),
+				subagentConfig.instructions,
 				[],
 			);
 

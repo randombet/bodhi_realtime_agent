@@ -31,6 +31,10 @@ function buildSystemPrompt(context: SubagentContextSnapshot): string {
 	parts.push(`# Instructions\n${context.agentInstructions}`);
 	parts.push(`\n# Task\n${context.task.description}`);
 
+	if (context.task.args && Object.keys(context.task.args).length > 0) {
+		parts.push(`\n# Task Arguments\n${JSON.stringify(context.task.args, null, 2)}`);
+	}
+
 	if (context.conversationSummary) {
 		parts.push(`\n# Conversation Summary\n${context.conversationSummary}`);
 	}
@@ -70,7 +74,10 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 		const result = await generateText({
 			model,
 			system: buildSystemPrompt(context),
-			prompt: `Execute the task: ${context.task.description}`,
+			prompt:
+				Object.keys(context.task.args).length > 0
+					? `Execute the task: ${context.task.description}\nArguments: ${JSON.stringify(context.task.args)}`
+					: `Execute the task: ${context.task.description}`,
 			tools: config.tools as Parameters<typeof generateText>[0]['tools'],
 			maxSteps,
 			abortSignal: controller.signal,

@@ -212,6 +212,24 @@ describe('AgentRouter', () => {
 			);
 		});
 
+		it('passes subagent instructions (not active agent instructions) to context', async () => {
+			const { router, convCtx } = setup();
+			const spy = vi.spyOn(convCtx, 'getSubagentContext');
+			router.registerAgents([createTestAgent('general')]);
+			router.setInitialAgent('general');
+
+			await router.handoff(
+				{ toolCallId: 'tc_1', toolName: 'search', args: {} },
+				{ name: 'search-agent', instructions: 'You are a search specialist.', tools: {} },
+			);
+
+			expect(spy).toHaveBeenCalledWith(
+				expect.any(Object),
+				'You are a search specialist.',
+				expect.any(Array),
+			);
+		});
+
 		it('cancelSubagent aborts the running subagent', async () => {
 			const { router } = setup();
 			router.registerAgents([createTestAgent('general')]);

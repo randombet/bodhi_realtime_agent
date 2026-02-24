@@ -207,7 +207,7 @@ interface SubagentContextSnapshot {
   conversationSummary: string | null; // Compressed history
   recentTurns: ConversationItem[];   // Last few turns
   relevantMemoryFacts: MemoryFact[]; // User memory
-  agentInstructions: string;         // Parent agent's instructions
+  agentInstructions: string;         // Subagent's own instructions
 }
 ```
 

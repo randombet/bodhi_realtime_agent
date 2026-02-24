@@ -63,6 +63,27 @@ describe('buildSystemPrompt', () => {
 		expect(prompt).toContain('[assistant]: Looking now');
 	});
 
+	it('includes task arguments when present', () => {
+		const prompt = _buildSystemPromptForTest(createTestContext());
+		expect(prompt).toContain('# Task Arguments');
+		expect(prompt).toContain('"from": "SFO"');
+		expect(prompt).toContain('"to": "JFK"');
+	});
+
+	it('omits task arguments section when args are empty', () => {
+		const prompt = _buildSystemPromptForTest(
+			createTestContext({
+				task: {
+					description: 'Do something',
+					toolCallId: 'tc_2',
+					toolName: 'noop',
+					args: {},
+				},
+			}),
+		);
+		expect(prompt).not.toContain('# Task Arguments');
+	});
+
 	it('includes memory facts when present', () => {
 		const prompt = _buildSystemPromptForTest(
 			createTestContext({
@@ -97,6 +118,58 @@ describe('runSubagent', () => {
 				maxSteps: 3,
 				prompt: expect.stringContaining('Search for flights'),
 				model: mockModel,
+			}),
+		);
+	});
+
+	it('includes task args in the prompt sent to generateText', async () => {
+		const { generateText } = await import('ai');
+		const hooks = new HooksManager();
+
+		await runSubagent({
+			config: {
+				name: 'test-subagent',
+				instructions: 'Test instructions',
+				tools: {},
+			},
+			context: createTestContext(),
+			hooks,
+			model: mockModel,
+		});
+
+		expect(generateText).toHaveBeenCalledWith(
+			expect.objectContaining({
+				prompt: expect.stringContaining('"from":"SFO"'),
+				system: expect.stringContaining('"from": "SFO"'),
+			}),
+		);
+	});
+
+	it('omits args from prompt when args are empty', async () => {
+		const { generateText } = await import('ai');
+		const hooks = new HooksManager();
+
+		await runSubagent({
+			config: {
+				name: 'test-subagent',
+				instructions: 'Test instructions',
+				tools: {},
+			},
+			context: createTestContext({
+				task: {
+					description: 'Do something',
+					toolCallId: 'tc_2',
+					toolName: 'noop',
+					args: {},
+				},
+			}),
+			hooks,
+			model: mockModel,
+		});
+
+		expect(generateText).toHaveBeenCalledWith(
+			expect.objectContaining({
+				prompt: 'Execute the task: Do something',
 			}),
 		);
 	});
