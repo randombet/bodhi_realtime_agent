@@ -86,7 +86,15 @@ export class JsonMemoryStore implements MemoryStore {
 						: {},
 				facts: Array.isArray(parsed.facts) ? [...parsed.facts] : [],
 			};
-		} catch {
+		} catch (err) {
+			// ENOENT is expected for new users with no memory file yet
+			if (
+				err instanceof Error &&
+				'code' in err &&
+				(err as NodeJS.ErrnoException).code !== 'ENOENT'
+			) {
+				console.warn(`[JsonMemoryStore] Error reading ${filePath}: ${err.message}`);
+			}
 			return { ...EMPTY_FILE, directives: {}, facts: [] };
 		}
 	}

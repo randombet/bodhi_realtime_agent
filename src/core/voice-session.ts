@@ -11,12 +11,16 @@ import { GeminiLiveTransport } from '../transport/gemini-live-transport.js';
 import type { MainAgent, SubagentConfig } from '../types/agent.js';
 import type { BehaviorCategory } from '../types/behavior.js';
 import type { FrameworkHooks } from '../types/hooks.js';
-import type { MemoryFact, MemoryStore } from '../types/memory.js';
-import type { ToolDefinition } from '../types/tool.js';
+import type { MemoryStore } from '../types/memory.js';
+import { BackgroundNotificationQueue } from './background-notification-queue.js';
 import { ConversationContext } from './conversation-context.js';
+import { DirectiveManager } from './directive-manager.js';
 import { EventBus } from './event-bus.js';
 import { HooksManager } from './hooks.js';
+import { MemoryCacheManager } from './memory-cache-manager.js';
 import { SessionManager } from './session-manager.js';
+import { ToolCallRouter } from './tool-call-router.js';
+import { TranscriptManager } from './transcript-manager.js';
 
 /**
  * Configuration for creating a VoiceSession.
@@ -94,37 +98,33 @@ export class VoiceSession {
 	private clientTransport: ClientTransport;
 	private agentRouter: AgentRouter;
 	private toolExecutor: ToolExecutor;
+	private toolCallRouter!: ToolCallRouter;
 	private subagentConfigs: Record<string, SubagentConfig>;
 	private behaviorManager?: BehaviorManager;
 	private memoryDistiller?: MemoryDistiller;
-	private memoryFactsCache: MemoryFact[] = [];
+	private memoryCacheManager?: MemoryCacheManager;
 	private turnId = 0;
 	private config: VoiceSessionConfig;
-	private inputTranscriptBuffer = '';
-	private outputTranscriptBuffer = '';
-	/** Pre-tool-call output text, saved when a tool call splits a turn. */
-	private outputTranscriptPrefix = '';
-	/** Agent-scoped directives — cleared on agent transfer. */
-	private agentDirectives = new Map<string, string>();
-	/** Session-scoped directives (e.g. pacing) — persist across agent transfers. */
-	private sessionDirectives = new Map<string, string>();
+	private directiveManager = new DirectiveManager();
+	private transcriptManager!: TranscriptManager;
 	/** Whether a client WebSocket connection is currently active. */
 	private clientConnected = false;
-	/** Whether the first audio chunk from Gemini has been received this turn (for TTFB logging). */
-	private firstAudioReceived = false;
-	/** Whether the most recent turn ended via interruption (user started speaking). */
-	private lastTurnInterrupted = false;
-	/** Queued background tool completion notifications waiting for Gemini to finish generating. */
-	private pendingBackgroundNotifications: Array<{
-		turns: Array<{ role: string; parts: Array<{ text: string }> }>;
-		turnComplete: boolean;
-	}> = [];
+	private notificationQueue!: BackgroundNotificationQueue;
 
 	constructor(config: VoiceSessionConfig) {
 		this.config = config;
 		this.eventBus = new EventBus();
 		this.hooks = new HooksManager();
 		this.conversationContext = new ConversationContext();
+		this.transcriptManager = new TranscriptManager({
+			sendToClient: (msg) => this.clientTransport.sendJsonToClient(msg),
+			addUserMessage: (text) => this.conversationContext.addUserMessage(text),
+			addAssistantMessage: (text) => this.conversationContext.addAssistantMessage(text),
+		});
+		this.notificationQueue = new BackgroundNotificationQueue(
+			(turns, turnComplete) => this.geminiTransport.sendClientContent(turns, turnComplete),
+			(msg) => this.log(msg),
+		);
 
 		if (config.hooks) {
 			this.hooks.register(config.hooks);
@@ -157,18 +157,15 @@ export class VoiceSession {
 
 			this.behaviorManager = new BehaviorManager(
 				config.behaviors,
-				(key, value, scope) => {
-					const map = scope === 'session' ? this.sessionDirectives : this.agentDirectives;
-					if (value === null) map.delete(key);
-					else map.set(key, value);
-				},
+				(key, value, scope) => this.directiveManager.set(key, value, scope),
 				(msg) => this.clientTransport.sendJsonToClient(msg),
 				onPresetChange,
 			);
 		}
 
-		// Set up memory distillation plugin
+		// Set up memory cache and distillation plugin
 		if (config.memory) {
+			this.memoryCacheManager = new MemoryCacheManager(config.memory.store, config.userId);
 			const freq = config.memory.turnFrequency ?? 5;
 			this.memoryDistiller = new MemoryDistiller(
 				this.conversationContext,
@@ -204,12 +201,12 @@ export class VoiceSession {
 			{
 				onSetupComplete: (sessionId) => this.handleSetupComplete(sessionId),
 				onAudioOutput: (data) => this.handleAudioOutput(data),
-				onToolCall: (calls) => this.handleToolCalls(calls),
-				onToolCallCancellation: (ids) => this.handleToolCallCancellation(ids),
+				onToolCall: (calls) => this.toolCallRouter.handleToolCalls(calls),
+				onToolCallCancellation: (ids) => this.toolCallRouter.handleToolCallCancellation(ids),
 				onTurnComplete: () => this.handleTurnComplete(),
 				onInterrupted: () => this.handleInterrupted(),
-				onInputTranscription: (text) => this.handleInputTranscription(text),
-				onOutputTranscription: (text) => this.handleOutputTranscription(text),
+				onInputTranscription: (text) => this.transcriptManager.handleInput(text),
+				onOutputTranscription: (text) => this.transcriptManager.handleOutput(text),
 				onGroundingMetadata: (metadata) => this.handleGroundingMetadata(metadata),
 				onGoAway: (timeLeft) => this.handleGoAway(timeLeft),
 				onResumptionUpdate: (handle, resumable) => this.handleResumptionUpdate(handle, resumable),
@@ -242,18 +239,7 @@ export class VoiceSession {
 		});
 
 		// Set up tool executor
-		this.toolExecutor = new ToolExecutor(
-			this.hooks,
-			this.eventBus,
-			config.sessionId,
-			config.initialAgent,
-			(msg) => this.clientTransport.sendJsonToClient(msg),
-			(key, value, scope) => {
-				const map = scope === 'session' ? this.sessionDirectives : this.agentDirectives;
-				if (value === null) map.delete(key);
-				else map.set(key, value);
-			},
-		);
+		this.toolExecutor = this.createToolExecutor(config.initialAgent);
 
 		if (allInitialTools.length) {
 			this.toolExecutor.register(allInitialTools);
@@ -268,16 +254,30 @@ export class VoiceSession {
 			this.geminiTransport,
 			this.clientTransport,
 			config.model,
-			() => this.getSessionDirectiveSuffix(),
+			() => this.directiveManager.getSessionSuffix(),
 			behaviorTools,
 		);
 		this.agentRouter.registerAgents(config.agents);
 		this.agentRouter.setInitialAgent(config.initialAgent);
+
+		// Set up tool call router
+		this.toolCallRouter = new ToolCallRouter({
+			toolExecutor: this.toolExecutor,
+			agentRouter: this.agentRouter,
+			conversationContext: this.conversationContext,
+			notificationQueue: this.notificationQueue,
+			transcriptManager: this.transcriptManager,
+			subagentConfigs: this.subagentConfigs,
+			sendToolResponse: (responses) => this.geminiTransport.sendToolResponse(responses),
+			transfer: (toAgent) => this.transfer(toAgent),
+			reportError: (component, error) => this.reportError(component, error),
+			log: (msg) => this.log(msg),
+		});
 	}
 
 	/** Start the client WebSocket server and connect to Gemini. */
 	async start(): Promise<void> {
-		await this.refreshMemoryCache();
+		await this.memoryCacheManager?.refresh();
 
 		// Restore behavior presets from structured directives (deterministic lookup)
 		if (this.config.memory && this.behaviorManager) {
@@ -308,10 +308,10 @@ export class VoiceSession {
 	/** Gracefully shut down: disconnect Gemini, stop the WebSocket server, transition to CLOSED. */
 	async close(_reason = 'normal'): Promise<void> {
 		// Drop any queued background notifications — session is ending
-		this.pendingBackgroundNotifications = [];
+		this.notificationQueue.clear();
 
 		// Flush any buffered transcription before closing
-		this.flushTranscriptBuffers();
+		this.transcriptManager.flush();
 
 		// Fire turn end if we're mid-turn
 		if (this.turnId > 0) {
@@ -350,28 +350,29 @@ export class VoiceSession {
 
 		// Update tool executor with new agent's tools
 		const agent = this.agentRouter.activeAgent;
-		this.toolExecutor = new ToolExecutor(
-			this.hooks,
-			this.eventBus,
-			this.config.sessionId,
-			agent.name,
-			(msg) => this.clientTransport.sendJsonToClient(msg),
-			(key, value, scope) => {
-				const map = scope === 'session' ? this.sessionDirectives : this.agentDirectives;
-				if (value === null) map.delete(key);
-				else map.set(key, value);
-			},
-		);
+		this.toolExecutor = this.createToolExecutor(agent.name);
 		const behaviorTools = this.behaviorManager?.tools ?? [];
 		this.toolExecutor.register([...agent.tools, ...behaviorTools]);
+		this.toolCallRouter.toolExecutor = this.toolExecutor;
 
 		// Clear agent-scoped directives on transfer; session-scoped directives persist
-		this.agentDirectives.clear();
+		this.directiveManager.clearAgent();
 
 		// Send the new agent's greeting if configured
 		if (this.clientConnected) {
 			this.sendGreeting();
 		}
+	}
+
+	private createToolExecutor(agentName: string): ToolExecutor {
+		return new ToolExecutor(
+			this.hooks,
+			this.eventBus,
+			this.config.sessionId,
+			agentName,
+			(msg) => this.clientTransport.sendJsonToClient(msg),
+			(key, value, scope) => this.directiveManager.set(key, value, scope),
+		);
 	}
 
 	// --- Audio fast-path (no EventBus) ---
@@ -383,10 +384,7 @@ export class VoiceSession {
 	}
 
 	private handleAudioOutput(data: string): void {
-		if (!this.firstAudioReceived) {
-			this.firstAudioReceived = true;
-			this.log('First audio chunk from Gemini (TTFB)');
-		}
+		this.notificationQueue.markAudioReceived();
 		const buffer = Buffer.from(data, 'base64');
 		this.clientTransport.sendAudioToClient(buffer);
 	}
@@ -407,208 +405,9 @@ export class VoiceSession {
 		}
 	}
 
-	private handleToolCalls(
-		calls: Array<{ id: string; name: string; args: Record<string, unknown> }>,
-	): void {
-		const names = calls.map((c) => c.name).join(', ');
-		this.log(`Tool calls from Gemini: [${names}]`);
-		// Flush user's input transcript before tool calls so it appears first
-		// in conversation context and logs. Safe because Gemini only calls tools
-		// after processing the user's complete utterance.
-		if (this.inputTranscriptBuffer.trim()) {
-			this.conversationContext.addUserMessage(this.inputTranscriptBuffer.trim());
-			this.clientTransport.sendJsonToClient({
-				type: 'transcript',
-				role: 'user',
-				text: this.inputTranscriptBuffer.trim(),
-				partial: false,
-			});
-			this.inputTranscriptBuffer = '';
-		}
-
-		// Save output transcript accumulated before tool call to avoid
-		// duplication: Gemini transcribes ahead of tool calls, then
-		// re-transcribes the same text after receiving the tool result.
-		if (this.outputTranscriptBuffer.trim()) {
-			this.outputTranscriptPrefix += this.outputTranscriptBuffer;
-			this.outputTranscriptBuffer = '';
-		}
-
-		for (const call of calls) {
-			const toolCall = {
-				toolCallId: call.id,
-				toolName: call.name,
-				args: call.args,
-			};
-
-			// Check if this is a transfer tool
-			if (call.name === 'transfer_to_agent' && call.args.agent_name) {
-				this.transfer(call.args.agent_name as string).catch((err) => {
-					this.reportError('agent-router', err);
-				});
-				// Send empty response to acknowledge
-				this.geminiTransport.sendToolResponse([
-					{ id: call.id, name: call.name, response: { status: 'transferred' } },
-				]);
-				return;
-			}
-
-			// Find tool definition to determine execution type
-			const agent = this.agentRouter.activeAgent;
-			const toolDef = agent.tools.find((t: ToolDefinition) => t.name === call.name);
-
-			if (toolDef?.execution === 'background') {
-				this.handleBackgroundToolCall(toolCall, toolDef);
-			} else {
-				this.handleInlineToolCall(toolCall);
-			}
-		}
-	}
-
-	private handleInlineToolCall(call: {
-		toolCallId: string;
-		toolName: string;
-		args: Record<string, unknown>;
-	}): void {
-		this.toolExecutor
-			.handleToolCall(call)
-			.then((result) => {
-				this.conversationContext.addToolCall(call);
-				this.conversationContext.addToolResult(result);
-
-				this.geminiTransport.sendToolResponse([
-					{
-						id: result.toolCallId,
-						name: result.toolName,
-						response: result.error
-							? { error: result.error }
-							: (result.result as Record<string, unknown>),
-					},
-				]);
-			})
-			.catch((err) => {
-				this.reportError('tool-executor', err);
-				// Always send a response so Gemini doesn't hang
-				this.geminiTransport.sendToolResponse([
-					{
-						id: call.toolCallId,
-						name: call.toolName,
-						response: { error: err instanceof Error ? err.message : String(err) },
-					},
-				]);
-			});
-	}
-
-	private handleBackgroundToolCall(
-		call: { toolCallId: string; toolName: string; args: Record<string, unknown> },
-		toolDef: ToolDefinition,
-	): void {
-		const hasPendingMessage = !!toolDef.pendingMessage;
-
-		// Send a tool response to unblock Gemini (it stops generating until a response arrives).
-		// Explicitly mark the task as still in progress so Gemini doesn't claim it's done.
-		if (hasPendingMessage) {
-			this.geminiTransport.sendToolResponse([
-				{
-					id: call.toolCallId,
-					name: call.toolName,
-					response: {
-						status: 'still_in_progress',
-						message: toolDef.pendingMessage,
-						important:
-							'This task is NOT complete yet. Do NOT tell the user it is ready. You will receive a notification when it finishes.',
-					},
-				},
-			]);
-		}
-
-		// Find subagent config
-		const subagentConfig = this.subagentConfigs[call.toolName];
-		if (!subagentConfig) {
-			// Fallback: run as inline tool
-			this.handleInlineToolCall(call);
-			return;
-		}
-
-		// Handoff to subagent
-		this.agentRouter
-			.handoff(call, subagentConfig)
-			.then((result) => {
-				this.conversationContext.addToolCall(call);
-				this.conversationContext.addToolResult({
-					toolCallId: call.toolCallId,
-					toolName: call.toolName,
-					result: result.text,
-				});
-
-				if (hasPendingMessage) {
-					// The pending message already satisfied the tool call from Gemini's perspective.
-					// Inject the completion as a context message so Gemini naturally informs the user.
-					// If Gemini is mid-generation, queue it until the current turn ends.
-					this.sendOrQueueNotification(
-						[
-							{
-								role: 'user',
-								parts: [
-									{
-										text: `[SYSTEM: Background task "${call.toolName}" completed successfully. Result: ${result.text}. Please inform the user their content is ready now.]`,
-									},
-								],
-							},
-						],
-						true,
-					);
-				} else {
-					this.geminiTransport.sendToolResponse([
-						{
-							id: call.toolCallId,
-							name: call.toolName,
-							response: { result: result.text },
-						},
-					]);
-				}
-			})
-			.catch((err) => {
-				this.reportError('subagent-runner', err);
-				if (hasPendingMessage) {
-					this.sendOrQueueNotification(
-						[
-							{
-								role: 'user',
-								parts: [
-									{
-										text: `[SYSTEM: Background task "${call.toolName}" failed: ${err instanceof Error ? err.message : String(err)}. Please apologize to the user and let them know.]`,
-									},
-								],
-							},
-						],
-						true,
-					);
-				} else {
-					this.geminiTransport.sendToolResponse([
-						{
-							id: call.toolCallId,
-							name: call.toolName,
-							response: { error: err instanceof Error ? err.message : String(err) },
-						},
-					]);
-				}
-			});
-	}
-
-	private handleToolCallCancellation(ids: string[]): void {
-		this.toolExecutor.cancel(ids);
-		for (const id of ids) {
-			this.agentRouter.cancelSubagent(id);
-		}
-	}
-
 	private handleTurnComplete(): void {
-		this.flushTranscriptBuffers();
+		this.transcriptManager.flush();
 		this.turnId++;
-		this.firstAudioReceived = false;
-		const wasInterrupted = this.lastTurnInterrupted;
-		this.lastTurnInterrupted = false;
 		const turnIdStr = `turn_${this.turnId}`;
 		this.log(`Turn complete: ${turnIdStr}`);
 		this.eventBus.publish('turn.end', {
@@ -632,7 +431,7 @@ export class VoiceSession {
 					injectSystemMessage: (text) =>
 						this.conversationContext.addAssistantMessage(`[system] ${text}`),
 					getRecentTurns: (count = 10) => [...this.conversationContext.items].slice(-count),
-					getMemoryFacts: () => this.memoryFactsCache,
+					getMemoryFacts: () => this.memoryCacheManager?.facts ?? [],
 				},
 				transcript,
 			);
@@ -641,71 +440,22 @@ export class VoiceSession {
 		// Trigger memory extraction (every N turns) and refresh cache
 		if (this.memoryDistiller) {
 			this.memoryDistiller.onTurnEnd();
-			this.refreshMemoryCache();
+			this.memoryCacheManager?.refresh();
 		}
 
 		// Reinforce active directives so Gemini doesn't drift
 		this.reinforceDirectives();
 
-		// Flush one queued background notification now that Gemini finished generating.
-		// Skip after interruptions — the user is speaking and the next natural turn
-		// completion will flush instead.
-		if (!wasInterrupted) {
-			this.flushOneBackgroundNotification();
-		}
-	}
-
-	/** Returns session-scoped directives formatted as a system instruction suffix (for agent transfers). */
-	private getSessionDirectiveSuffix(): string {
-		if (this.sessionDirectives.size === 0) return '';
-		const text = [...this.sessionDirectives.values()].join('\n\n');
-		return `\n\n[SESSION DIRECTIVES — user preferences that persist across agents]\n${text}`;
+		// Reset audio flag and flush one queued notification (skips if interrupted)
+		this.notificationQueue.onTurnComplete();
 	}
 
 	/** Inject all active directives into Gemini's context to prevent behavioral drift. */
 	private reinforceDirectives(): void {
-		if (this.sessionDirectives.size === 0 && this.agentDirectives.size === 0) return;
-		// Merge both maps — agent directives override session directives with same key
-		const merged = new Map([...this.sessionDirectives, ...this.agentDirectives]);
-		const keys = [...merged.keys()];
-		const text = [...merged.values()].join('\n\n');
-		this.log(`Reinforcing directives [${keys.join(', ')}]: ${text.slice(0, 120)}...`);
-		this.geminiTransport.sendClientContent(
-			[
-				{
-					role: 'user',
-					parts: [{ text: `[SYSTEM DIRECTIVES — follow these instructions]\n${text}` }],
-				},
-			],
-			true,
-		);
-	}
-
-	/**
-	 * Send a background tool completion notification to Gemini, or queue it
-	 * if Gemini is currently generating audio (where it would be silently absorbed).
-	 */
-	private sendOrQueueNotification(
-		turns: Array<{ role: string; parts: Array<{ text: string }> }>,
-		turnComplete: boolean,
-	): void {
-		if (this.firstAudioReceived) {
-			this.log('Gemini is generating — queuing background notification');
-			this.pendingBackgroundNotifications.push({ turns, turnComplete });
-		} else {
-			this.geminiTransport.sendClientContent(turns, turnComplete);
-		}
-	}
-
-	/** Flush one queued background notification now that Gemini is idle. */
-	private flushOneBackgroundNotification(): void {
-		const notification = this.pendingBackgroundNotifications.shift();
-		if (notification) {
-			this.log(
-				`Flushing queued background notification (${this.pendingBackgroundNotifications.length} remaining)`,
-			);
-			this.geminiTransport.sendClientContent(notification.turns, notification.turnComplete);
-		}
+		const text = this.directiveManager.getReinforcementText();
+		if (!text) return;
+		this.log(`Reinforcing directives: ${text.slice(0, 120)}...`);
+		this.geminiTransport.sendClientContent([{ role: 'user', parts: [{ text }] }], true);
 	}
 
 	/** Send the active agent's greeting prompt to Gemini to trigger a spoken greeting. */
@@ -713,21 +463,22 @@ export class VoiceSession {
 		const agent = this.agentRouter.activeAgent;
 		if (!agent.greeting) return;
 		this.log(`Sending greeting for agent "${agent.name}"`);
-		this.firstAudioReceived = false;
+		this.notificationQueue.resetAudio();
 
 		// Inject stored memory facts so Gemini knows the user from the first turn
-		if (this.memoryFactsCache.length > 0) {
-			const summary = this.memoryFactsCache.map((f) => `- ${f.content}`).join('\n');
+		const cachedFacts = this.memoryCacheManager?.facts ?? [];
+		if (cachedFacts.length > 0) {
+			const summary = cachedFacts.map((f) => `- ${f.content}`).join('\n');
 			const memoryText = `[MEMORY — what you already know about this user from previous sessions]\n${summary}`;
 			this.geminiTransport.sendClientContent(
 				[{ role: 'user', parts: [{ text: memoryText }] }],
 				true,
 			);
-			this.log(`Injected ${this.memoryFactsCache.length} memory facts`);
+			this.log(`Injected ${cachedFacts.length} memory facts`);
 		}
 
 		// Prepend session directives so the greeting response respects user preferences (e.g. pacing)
-		const directiveSuffix = this.getSessionDirectiveSuffix();
+		const directiveSuffix = this.directiveManager.getSessionSuffix();
 		const greetingText = directiveSuffix
 			? `${directiveSuffix}\n\n${agent.greeting}`
 			: agent.greeting;
@@ -739,96 +490,14 @@ export class VoiceSession {
 
 	private handleInterrupted(): void {
 		this.log('Interrupted by user');
-		this.firstAudioReceived = false;
-		this.lastTurnInterrupted = true;
-		this.flushTranscriptBuffers();
+		this.notificationQueue.resetAudio();
+		this.notificationQueue.markInterrupted();
+		this.transcriptManager.flush();
 		this.eventBus.publish('turn.interrupted', {
 			sessionId: this.config.sessionId,
 			turnId: `turn_${this.turnId}`,
 		});
 		this.clientTransport.sendJsonToClient({ type: 'turn.interrupted' });
-	}
-
-	private handleInputTranscription(text: string): void {
-		if (text.trim()) {
-			this.inputTranscriptBuffer += text;
-			this.clientTransport.sendJsonToClient({
-				type: 'transcript',
-				role: 'user',
-				text: this.inputTranscriptBuffer.trim(),
-				partial: true,
-			});
-		}
-	}
-
-	private handleOutputTranscription(text: string): void {
-		if (text.trim()) {
-			this.outputTranscriptBuffer += text;
-			const combined = this.combineOutputTranscript();
-			this.clientTransport.sendJsonToClient({
-				type: 'transcript',
-				role: 'assistant',
-				text: combined,
-				partial: true,
-			});
-		}
-	}
-
-	private flushTranscriptBuffers(): void {
-		if (this.inputTranscriptBuffer.trim()) {
-			this.conversationContext.addUserMessage(this.inputTranscriptBuffer.trim());
-			this.clientTransport.sendJsonToClient({
-				type: 'transcript',
-				role: 'user',
-				text: this.inputTranscriptBuffer.trim(),
-				partial: false,
-			});
-		}
-		const outputText = this.combineOutputTranscript();
-		if (outputText) {
-			this.conversationContext.addAssistantMessage(outputText);
-			this.clientTransport.sendJsonToClient({
-				type: 'transcript',
-				role: 'assistant',
-				text: outputText,
-				partial: false,
-			});
-		}
-		this.inputTranscriptBuffer = '';
-		this.outputTranscriptBuffer = '';
-		this.outputTranscriptPrefix = '';
-	}
-
-	/**
-	 * Combine pre-tool prefix and post-tool buffer, deduplicating any overlap.
-	 *
-	 * Gemini's outputTranscription can "leak" post-tool text into the pre-tool
-	 * stream, then re-send it after the tool result. This finds the longest
-	 * suffix of prefix that matches a prefix of buffer and removes the overlap.
-	 */
-	private combineOutputTranscript(): string {
-		const prefix = this.outputTranscriptPrefix.trim();
-		const buffer = this.outputTranscriptBuffer.trim();
-
-		if (!prefix) return buffer;
-		if (!buffer) return prefix;
-
-		// If post-tool buffer is entirely contained in the prefix tail, skip it
-		if (prefix.endsWith(buffer)) return prefix;
-
-		// Find the longest suffix of prefix that matches a prefix of buffer
-		const maxOverlap = Math.min(prefix.length, buffer.length);
-		let overlap = 0;
-		for (let i = 1; i <= maxOverlap; i++) {
-			if (prefix.slice(-i) === buffer.slice(0, i)) {
-				overlap = i;
-			}
-		}
-
-		if (overlap > 0) {
-			return prefix + buffer.slice(overlap);
-		}
-		return `${prefix} ${buffer}`;
 	}
 
 	private handleGroundingMetadata(metadata: Record<string, unknown>): void {
@@ -848,13 +517,20 @@ export class VoiceSession {
 			this.sessionManager.transitionTo('RECONNECTING');
 			this.clientTransport.startBuffering();
 
-			this.geminiTransport.reconnect(handle).then(() => {
-				const buffered = this.clientTransport.stopBuffering();
-				for (const chunk of buffered) {
-					this.geminiTransport.sendAudio(chunk.toString('base64'));
-				}
-				this.sessionManager.transitionTo('ACTIVE');
-			});
+			this.geminiTransport
+				.reconnect(handle)
+				.then(() => {
+					const buffered = this.clientTransport.stopBuffering();
+					for (const chunk of buffered) {
+						this.geminiTransport.sendAudio(chunk.toString('base64'));
+					}
+					this.sessionManager.transitionTo('ACTIVE');
+				})
+				.catch((err) => {
+					this.clientTransport.stopBuffering();
+					this.reportError('reconnect', err);
+					this.sessionManager.transitionTo('CLOSED');
+				});
 		}
 	}
 
@@ -949,9 +625,15 @@ export class VoiceSession {
 			const handle = this.sessionManager.resumptionHandle;
 			if (handle) {
 				this.sessionManager.transitionTo('RECONNECTING');
-				this.geminiTransport.reconnect(handle).then(() => {
-					this.sessionManager.transitionTo('ACTIVE');
-				});
+				this.geminiTransport
+					.reconnect(handle)
+					.then(() => {
+						this.sessionManager.transitionTo('ACTIVE');
+					})
+					.catch((err) => {
+						this.reportError('reconnect', err);
+						this.sessionManager.transitionTo('CLOSED');
+					});
 			} else {
 				this.sessionManager.transitionTo('CLOSED');
 			}
@@ -968,19 +650,6 @@ export class VoiceSession {
 				severity: 'error',
 			});
 		}
-	}
-
-	/** Reload cached memory facts from the store (fire-and-forget safe). */
-	private refreshMemoryCache(): Promise<void> {
-		if (!this.config.memory) return Promise.resolve();
-		return this.config.memory.store
-			.getAll(this.config.userId)
-			.then((facts) => {
-				this.memoryFactsCache = facts;
-			})
-			.catch(() => {
-				// Best-effort — keep stale cache on failure
-			});
 	}
 
 	/** Compact diagnostic log: HH:MM:SS.mmm [VoiceSession] message */

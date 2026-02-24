@@ -190,6 +190,31 @@ describe('ClientTransport', () => {
 		await new Promise<void>((r) => ws.on('close', r));
 	});
 
+	it('stop() clears buffering state and audio buffer', async () => {
+		transport = new ClientTransport(TEST_PORT, {});
+		await transport.start();
+
+		const ws = new WebSocket(`ws://localhost:${TEST_PORT}`);
+		await new Promise<void>((r) => ws.on('open', r));
+
+		transport.startBuffering();
+		ws.send(Buffer.alloc(100, 1));
+		await new Promise((r) => setTimeout(r, 50));
+
+		expect(transport.buffering).toBe(true);
+
+		ws.close();
+		await new Promise<void>((r) => ws.on('close', r));
+		await transport.stop();
+
+		expect(transport.buffering).toBe(false);
+		// After stop + restart, stopBuffering should return empty
+		transport = new ClientTransport(TEST_PORT, {});
+		await transport.start();
+		const buffered = transport.stopBuffering();
+		expect(buffered).toHaveLength(0);
+	});
+
 	it('fires onClientDisconnected on close', async () => {
 		const onClientDisconnected = vi.fn();
 		transport = new ClientTransport(TEST_PORT, { onClientDisconnected });

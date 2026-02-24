@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 import { GoogleGenAI, type LiveServerMessage, type Session } from '@google/genai';
+import { DEFAULT_CONNECT_TIMEOUT_MS, DEFAULT_RECONNECT_TIMEOUT_MS } from '../core/constants.js';
 import type { ToolDefinition } from '../types/tool.js';
 import { zodToJsonSchema } from './zod-to-schema.js';
 
@@ -24,6 +25,10 @@ export interface GeminiTransportConfig {
 	googleSearch?: boolean;
 	/** Enable server-side transcription of user audio input (default: true). */
 	inputAudioTranscription?: boolean;
+	/** Timeout in ms for connect() to receive setupComplete (default: 30000). */
+	connectTimeoutMs?: number;
+	/** Timeout in ms for the overall reconnect operation (default: 45000). */
+	reconnectTimeoutMs?: number;
 }
 
 /** Callbacks fired by GeminiLiveTransport when server messages arrive. */
@@ -146,16 +151,34 @@ export class GeminiLiveTransport {
 			},
 		});
 
-		await setupComplete;
+		const timeoutMs = this.config.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const timeout = new Promise<never>((_, reject) => {
+			timer = setTimeout(
+				() => reject(new Error(`Gemini connect timed out after ${timeoutMs}ms`)),
+				timeoutMs,
+			);
+		});
+		await Promise.race([setupComplete, timeout]).finally(() => clearTimeout(timer));
 	}
 
 	/** Disconnect and reconnect, optionally with a new resumption handle. */
 	async reconnect(handle?: string): Promise<void> {
-		await this.disconnect();
-		if (handle) {
-			this.config.resumptionHandle = handle;
+		const timeoutMs = this.config.reconnectTimeoutMs ?? DEFAULT_RECONNECT_TIMEOUT_MS;
+		const timer = setTimeout(() => {
+			// Force-kill the stale session so disconnect() unblocks
+			this.session = null;
+		}, timeoutMs);
+
+		try {
+			await this.disconnect();
+			if (handle) {
+				this.config.resumptionHandle = handle;
+			}
+			await this.connect();
+		} finally {
+			clearTimeout(timer);
 		}
-		await this.connect();
 	}
 
 	async disconnect(): Promise<void> {

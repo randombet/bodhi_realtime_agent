@@ -155,6 +155,29 @@ describe('ToolExecutor', () => {
 		expect(result.error).toContain('timed out');
 	});
 
+	it('sets signal.aborted to true on timeout', async () => {
+		const { executor } = setup();
+		let receivedSignal: AbortSignal | null = null;
+		executor.register([
+			createTestTool({
+				timeout: 50,
+				execute: vi.fn(async (_args, ctx) => {
+					receivedSignal = ctx.abortSignal;
+					return new Promise((resolve) => setTimeout(() => resolve('late'), 200));
+				}),
+			}),
+		]);
+
+		await executor.handleToolCall({
+			toolCallId: 'tc_1',
+			toolName: 'test_tool',
+			args: { query: 'test' },
+		});
+
+		expect(receivedSignal).not.toBeNull();
+		expect(receivedSignal?.aborted).toBe(true);
+	});
+
 	it('cancel aborts pending execution', async () => {
 		const { hooks, executor } = setup();
 		const onToolResult = vi.fn();
@@ -248,6 +271,33 @@ describe('ToolExecutor', () => {
 		expect(mockSetDirective).toHaveBeenCalledTimes(2);
 		expect(mockSetDirective).toHaveBeenCalledWith('pacing', 'speak slowly');
 		expect(mockSetDirective).toHaveBeenCalledWith('language', null);
+	});
+
+	it('fires onError hook with ToolExecutionError preserving original cause', async () => {
+		const { hooks, executor } = setup();
+		const onError = vi.fn();
+		hooks.register({ onError });
+
+		const originalError = new Error('disk full');
+		executor.register([
+			createTestTool({
+				execute: vi.fn(async () => {
+					throw originalError;
+				}),
+			}),
+		]);
+
+		await executor.handleToolCall({
+			toolCallId: 'tc_1',
+			toolName: 'test_tool',
+			args: { query: 'test' },
+		});
+
+		expect(onError).toHaveBeenCalledOnce();
+		const errorEvent = onError.mock.calls[0][0];
+		expect(errorEvent.component).toBe('tool');
+		expect(errorEvent.error.message).toContain('disk full');
+		expect(errorEvent.error.cause).toBe(originalError);
 	});
 
 	it('tracks pending count', async () => {

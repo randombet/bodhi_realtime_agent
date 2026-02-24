@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 
+import { DEFAULT_TOOL_TIMEOUT_MS } from '../core/constants.js';
 import { ToolExecutionError } from '../core/errors.js';
 import type { IEventBus } from '../core/event-bus.js';
 import type { HooksManager } from '../core/hooks.js';
@@ -98,22 +99,27 @@ export class ToolExecutor {
 		};
 
 		let result: ToolResult;
+		let executionError: ToolExecutionError | undefined;
 		try {
-			const timeoutMs = tool.timeout ?? 30_000;
-			const output = await this.executeWithTimeout(tool, parsed.data, ctx, timeoutMs);
+			const timeoutMs = tool.timeout ?? DEFAULT_TOOL_TIMEOUT_MS;
+			const output = await this.executeWithTimeout(tool, parsed.data, ctx, timeoutMs, controller);
 			result = {
 				toolCallId: call.toolCallId,
 				toolName: call.toolName,
 				result: output,
 			};
 		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
+			const cause = err instanceof Error ? err : undefined;
+			const message = cause?.message ?? String(err);
 			result = {
 				toolCallId: call.toolCallId,
 				toolName: call.toolName,
 				result: null,
 				error: message,
 			};
+			executionError = new ToolExecutionError(`Tool "${call.toolName}" failed: ${message}`, {
+				cause,
+			});
 		} finally {
 			this.pending.delete(call.toolCallId);
 		}
@@ -127,6 +133,16 @@ export class ToolExecutor {
 				durationMs,
 				status: result.error ? 'error' : 'completed',
 				error: result.error,
+			});
+		}
+
+		// Fire onError hook with full ToolExecutionError (preserves original stack via cause)
+		if (executionError && this.hooks.onError) {
+			this.hooks.onError({
+				sessionId: this.sessionId,
+				component: 'tool',
+				error: executionError,
+				severity: 'error',
 			});
 		}
 
@@ -172,10 +188,11 @@ export class ToolExecutor {
 		args: Record<string, unknown>,
 		ctx: ToolContext,
 		timeoutMs: number,
+		controller: AbortController,
 	): Promise<unknown> {
 		return new Promise((resolve, reject) => {
 			const timer = setTimeout(() => {
-				ctx.abortSignal.dispatchEvent(new Event('abort'));
+				controller.abort();
 				reject(new ToolExecutionError(`Tool "${tool.name}" timed out after ${timeoutMs}ms`));
 			}, timeoutMs);
 

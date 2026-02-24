@@ -63,6 +63,27 @@ describe('buildSystemPrompt', () => {
 		expect(prompt).toContain('[assistant]: Looking now');
 	});
 
+	it('includes task arguments when present', () => {
+		const prompt = _buildSystemPromptForTest(createTestContext());
+		expect(prompt).toContain('# Task Arguments');
+		expect(prompt).toContain('"from": "SFO"');
+		expect(prompt).toContain('"to": "JFK"');
+	});
+
+	it('omits task arguments section when args are empty', () => {
+		const prompt = _buildSystemPromptForTest(
+			createTestContext({
+				task: {
+					description: 'Do something',
+					toolCallId: 'tc_2',
+					toolName: 'noop',
+					args: {},
+				},
+			}),
+		);
+		expect(prompt).not.toContain('# Task Arguments');
+	});
+
 	it('includes memory facts when present', () => {
 		const prompt = _buildSystemPromptForTest(
 			createTestContext({
@@ -97,6 +118,58 @@ describe('runSubagent', () => {
 				maxSteps: 3,
 				prompt: expect.stringContaining('Search for flights'),
 				model: mockModel,
+			}),
+		);
+	});
+
+	it('includes task args in the prompt sent to generateText', async () => {
+		const { generateText } = await import('ai');
+		const hooks = new HooksManager();
+
+		await runSubagent({
+			config: {
+				name: 'test-subagent',
+				instructions: 'Test instructions',
+				tools: {},
+			},
+			context: createTestContext(),
+			hooks,
+			model: mockModel,
+		});
+
+		expect(generateText).toHaveBeenCalledWith(
+			expect.objectContaining({
+				prompt: expect.stringContaining('"from":"SFO"'),
+				system: expect.stringContaining('"from": "SFO"'),
+			}),
+		);
+	});
+
+	it('omits args from prompt when args are empty', async () => {
+		const { generateText } = await import('ai');
+		const hooks = new HooksManager();
+
+		await runSubagent({
+			config: {
+				name: 'test-subagent',
+				instructions: 'Test instructions',
+				tools: {},
+			},
+			context: createTestContext({
+				task: {
+					description: 'Do something',
+					toolCallId: 'tc_2',
+					toolName: 'noop',
+					args: {},
+				},
+			}),
+			hooks,
+			model: mockModel,
+		});
+
+		expect(generateText).toHaveBeenCalledWith(
+			expect.objectContaining({
+				prompt: 'Execute the task: Do something',
 			}),
 		);
 	});
@@ -161,10 +234,42 @@ describe('runSubagent', () => {
 			abortSignal: controller.signal,
 		});
 
+		// The internal timeout controller's signal is passed (not the caller's directly),
+		// but caller abort propagates to it — verify an AbortSignal is always provided
 		expect(generateText).toHaveBeenCalledWith(
 			expect.objectContaining({
-				abortSignal: controller.signal,
+				abortSignal: expect.any(AbortSignal),
 			}),
 		);
+	});
+
+	it('propagates caller abort to generateText signal', async () => {
+		const { generateText } = await import('ai');
+		const hooks = new HooksManager();
+		const controller = new AbortController();
+
+		// Capture the signal passed to generateText and abort the caller mid-execution
+		let capturedSignal: AbortSignal | undefined;
+		vi.mocked(generateText).mockImplementationOnce(async (opts: { abortSignal?: AbortSignal }) => {
+			capturedSignal = opts.abortSignal;
+			// Abort the caller while generateText is still in-flight
+			controller.abort();
+			expect(capturedSignal?.aborted).toBe(true);
+			return { text: 'done' } as ReturnType<typeof generateText>;
+		});
+
+		await runSubagent({
+			config: {
+				name: 'test-subagent',
+				instructions: 'Test instructions',
+				tools: {},
+			},
+			context: createTestContext(),
+			hooks,
+			model: mockModel,
+			abortSignal: controller.signal,
+		});
+
+		expect(capturedSignal).toBeDefined();
 	});
 });

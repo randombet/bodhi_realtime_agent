@@ -37,18 +37,25 @@ export class ClientTransport {
 		private port: number,
 		private callbacks: ClientTransportCallbacks,
 		private host = '0.0.0.0',
+		private listenTimeoutMs = 10_000,
 	) {}
 
 	async start(): Promise<void> {
-		return new Promise((resolve) => {
+		return new Promise((resolve, reject) => {
+			const timer = setTimeout(() => {
+				reject(new Error(`ClientTransport listen timed out after ${this.listenTimeoutMs}ms`));
+			}, this.listenTimeoutMs);
+
 			this.wss = new WebSocketServer({ port: this.port, host: this.host });
 
-			this.wss.on('listening', () => resolve());
+			this.wss.on('listening', () => {
+				clearTimeout(timer);
+				resolve();
+			});
 
 			this.wss.on('connection', (ws) => {
-				this.client = ws;
-				this.callbacks.onClientConnected?.();
-
+				// Attach event handlers BEFORE setting this.client to avoid
+				// a race where messages arrive before handlers are registered.
 				ws.on('message', (data: Buffer, isBinary: boolean) => {
 					if (isBinary) {
 						if (this._buffering) {
@@ -70,12 +77,22 @@ export class ClientTransport {
 					this.client = null;
 					this.callbacks.onClientDisconnected?.();
 				});
+
+				ws.on('error', () => {
+					// Prevent unhandled error crash — 'close' event will follow
+				});
+
+				this.client = ws;
+				this.callbacks.onClientConnected?.();
 			});
 		});
 	}
 
 	async stop(): Promise<void> {
+		this._buffering = false;
+		this.audioBuffer.clear();
 		if (this.client) {
+			this.client.removeAllListeners();
 			this.client.close();
 			this.client = null;
 		}

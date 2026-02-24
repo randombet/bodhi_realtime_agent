@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 
-import type { LanguageModelV1 } from 'ai';
+import { type LanguageModelV1, generateObject } from 'ai';
 import { z } from 'zod';
+import { DEFAULT_EXTRACTION_TIMEOUT_MS } from '../core/constants.js';
 import type { ConversationContext } from '../core/conversation-context.js';
 import type { HooksManager } from '../core/hooks.js';
 import type { MemoryFact, MemoryStore } from '../types/memory.js';
@@ -60,7 +61,7 @@ export class MemoryDistiller {
 		this.userId = config.userId;
 		this.sessionId = config.sessionId;
 		this.turnFrequency = config.turnFrequency ?? 5;
-		this.extractionTimeoutMs = config.extractionTimeoutMs ?? 30_000;
+		this.extractionTimeoutMs = config.extractionTimeoutMs ?? DEFAULT_EXTRACTION_TIMEOUT_MS;
 	}
 
 	onTurnEnd(): void {
@@ -116,7 +117,6 @@ export class MemoryDistiller {
 			const timeout = setTimeout(() => controller.abort(), this.extractionTimeoutMs);
 
 			try {
-				const { generateObject } = await import('ai');
 				const { object } = await generateObject({
 					model: this.model,
 					prompt,

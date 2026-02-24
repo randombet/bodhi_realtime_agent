@@ -2,6 +2,7 @@
 
 import type { LanguageModelV1 } from 'ai';
 import { generateText } from 'ai';
+import { DEFAULT_SUBAGENT_TIMEOUT_MS } from '../core/constants.js';
 import type { HooksManager } from '../core/hooks.js';
 import type { SubagentConfig } from '../types/agent.js';
 import type { SubagentContextSnapshot, SubagentResult } from '../types/conversation.js';
@@ -30,6 +31,10 @@ function buildSystemPrompt(context: SubagentContextSnapshot): string {
 	parts.push(`# Instructions\n${context.agentInstructions}`);
 	parts.push(`\n# Task\n${context.task.description}`);
 
+	if (context.task.args && Object.keys(context.task.args).length > 0) {
+		parts.push(`\n# Task Arguments\n${JSON.stringify(context.task.args, null, 2)}`);
+	}
+
 	if (context.conversationSummary) {
 		parts.push(`\n# Conversation Summary\n${context.conversationSummary}`);
 	}
@@ -55,33 +60,48 @@ function buildSystemPrompt(context: SubagentContextSnapshot): string {
 export async function runSubagent(options: RunSubagentOptions): Promise<SubagentResult> {
 	const { config, context, hooks, model, abortSignal } = options;
 	const maxSteps = config.maxSteps ?? 5;
+	const timeoutMs = config.timeout ?? DEFAULT_SUBAGENT_TIMEOUT_MS;
+
+	// Compose timeout signal with caller-provided abort signal
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), timeoutMs);
+	const onCallerAbort = () => controller.abort();
+	abortSignal?.addEventListener('abort', onCallerAbort);
 
 	let stepCount = 0;
 
-	const result = await generateText({
-		model,
-		system: buildSystemPrompt(context),
-		prompt: `Execute the task: ${context.task.description}`,
-		tools: config.tools as Parameters<typeof generateText>[0]['tools'],
-		maxSteps,
-		abortSignal,
-		onStepFinish: (step) => {
-			stepCount++;
-			if (hooks.onSubagentStep) {
-				hooks.onSubagentStep({
-					subagentName: config.name,
-					stepNumber: stepCount,
-					toolCalls: step.toolCalls?.map((tc: { toolName: string }) => tc.toolName) ?? [],
-					tokensUsed: step.usage?.totalTokens ?? 0,
-				});
-			}
-		},
-	});
+	try {
+		const result = await generateText({
+			model,
+			system: buildSystemPrompt(context),
+			prompt:
+				Object.keys(context.task.args).length > 0
+					? `Execute the task: ${context.task.description}\nArguments: ${JSON.stringify(context.task.args)}`
+					: `Execute the task: ${context.task.description}`,
+			tools: config.tools as Parameters<typeof generateText>[0]['tools'],
+			maxSteps,
+			abortSignal: controller.signal,
+			onStepFinish: (step) => {
+				stepCount++;
+				if (hooks.onSubagentStep) {
+					hooks.onSubagentStep({
+						subagentName: config.name,
+						stepNumber: stepCount,
+						toolCalls: step.toolCalls?.map((tc: { toolName: string }) => tc.toolName) ?? [],
+						tokensUsed: step.usage?.totalTokens ?? 0,
+					});
+				}
+			},
+		});
 
-	return {
-		text: result.text,
-		stepCount,
-	};
+		return {
+			text: result.text,
+			stepCount,
+		};
+	} finally {
+		clearTimeout(timer);
+		abortSignal?.removeEventListener('abort', onCallerAbort);
+	}
 }
 
 export { buildSystemPrompt as _buildSystemPromptForTest };

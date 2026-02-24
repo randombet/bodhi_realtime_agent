@@ -158,6 +158,19 @@ describe('GeminiLiveTransport', () => {
 			await transport.connect();
 			expect(transport.isConnected).toBe(true);
 		});
+
+		it('rejects with timeout when setupComplete never fires', async () => {
+			// Override GoogleGenAI constructor to return a connect that never fires setupComplete
+			const { GoogleGenAI } = await import('@google/genai');
+			(GoogleGenAI as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => ({
+				live: {
+					connect: vi.fn(async () => mockSession),
+				},
+			}));
+
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key', connectTimeoutMs: 50 }, {});
+			await expect(transport.connect()).rejects.toThrow('timed out');
+		});
 	});
 
 	describe('sendAudio', () => {
