@@ -11,6 +11,16 @@ export {
 } from './errors.js';
 export type { ErrorSeverity } from './errors.js';
 
+export { BackgroundNotificationQueue } from './background-notification-queue.js';
+
+export {
+	DEFAULT_CONNECT_TIMEOUT_MS,
+	DEFAULT_EXTRACTION_TIMEOUT_MS,
+	DEFAULT_TOOL_TIMEOUT_MS,
+} from './constants.js';
+
+export { DirectiveManager } from './directive-manager.js';
+
 export { EventBus } from './event-bus.js';
 export type { EventHandler, IEventBus } from './event-bus.js';
 
@@ -24,6 +34,11 @@ export { SessionManager } from './session-manager.js';
 
 export { InMemorySessionStore } from './session-store.js';
 export type { SessionStore } from './session-store.js';
+
+export { MemoryCacheManager } from './memory-cache-manager.js';
+
+export { TranscriptManager } from './transcript-manager.js';
+export type { TranscriptSink } from './transcript-manager.js';
 
 export { VoiceSession } from './voice-session.js';
 export type { VoiceSessionConfig } from './voice-session.js';
