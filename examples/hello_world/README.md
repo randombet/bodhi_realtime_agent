@@ -1,13 +1,19 @@
 # Hello World — Multi-Agent Voice Assistant
 
-A minimal example showing four key features of the Bodhi Realtime Agent Framework.
+A minimal example showing key features of the Bodhi Realtime Agent Framework.
 
 ## Running
 
 ```bash
 # From the repository root:
 pnpm install
+
+# Full example (voice pacing, agent transfer, Google Search, image & video generation):
 GEMINI_API_KEY=your_key pnpm tsx examples/hello_world/agent.ts
+
+# Or use the web client for a browser-based UI:
+pnpm tsx examples/hello_world/web-client.ts
+# Then open http://localhost:8080 in Chrome
 ```
 
 Connect a WebSocket audio client to `ws://localhost:9900` sending PCM 16-bit 16kHz mono audio.
@@ -51,3 +57,35 @@ Say **"I need help with math"** — triggers `transfer_to_agent`, which disconne
 | "Take me back" | Math expert transfers back to main |
 | "What is the weather today?" | Google Search grounding |
 | "Draw me a cat in a spacesuit" | Image generated and sent to client |
+
+---
+
+## Background Subagent Test
+
+Video generation via Veo has a low daily request quota. Use `agent-background-test.ts` to test the non-blocking background tool flow without consuming API quotas — it uses `sleep()` delays instead of real generation calls.
+
+### Running
+
+```bash
+GEMINI_API_KEY=your_key pnpm tsx examples/hello_world/agent-background-test.ts
+```
+
+Then connect via the web client or a WebSocket audio client on `ws://localhost:9900`.
+
+### What It Tests
+
+This example exercises the full background subagent lifecycle:
+
+1. **Pending notification** — Gemini speaks a pending message immediately while the task runs in the background
+2. **Notification queuing** — If the task finishes while Gemini is mid-sentence, the completion notification is queued and delivered after the current turn
+3. **Concurrent tasks** — Multiple background tasks can run in parallel; each completes independently
+4. **Error handling** — A deliberate failure path tests that error notifications are spoken to the user
+
+### Things to Try
+
+| Say this | What happens |
+|----------|-------------|
+| "Run a 10 second task" | Starts a background sleep(10s), Gemini keeps chatting |
+| "Run a failing task" | Starts a task that errors after 3s — tests error notification |
+| "Run two tasks at once" | Fires two concurrent background tools |
+| (keep chatting while tasks run) | Tests notification queuing — completion is spoken after Gemini's current turn |
