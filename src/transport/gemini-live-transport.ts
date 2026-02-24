@@ -24,6 +24,8 @@ export interface GeminiTransportConfig {
 	googleSearch?: boolean;
 	/** Enable server-side transcription of user audio input (default: true). */
 	inputAudioTranscription?: boolean;
+	/** Timeout in ms for connect() to receive setupComplete (default: 30000). */
+	connectTimeoutMs?: number;
 }
 
 /** Callbacks fired by GeminiLiveTransport when server messages arrive. */
@@ -146,7 +148,14 @@ export class GeminiLiveTransport {
 			},
 		});
 
-		await setupComplete;
+		const timeoutMs = this.config.connectTimeoutMs ?? 30_000;
+		const timeout = new Promise<never>((_, reject) => {
+			setTimeout(
+				() => reject(new Error(`Gemini connect timed out after ${timeoutMs}ms`)),
+				timeoutMs,
+			);
+		});
+		await Promise.race([setupComplete, timeout]);
 	}
 
 	/** Disconnect and reconnect, optionally with a new resumption handle. */
