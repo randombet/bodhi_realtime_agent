@@ -238,14 +238,7 @@ export class VoiceSession {
 		});
 
 		// Set up tool executor
-		this.toolExecutor = new ToolExecutor(
-			this.hooks,
-			this.eventBus,
-			config.sessionId,
-			config.initialAgent,
-			(msg) => this.clientTransport.sendJsonToClient(msg),
-			(key, value, scope) => this.directiveManager.set(key, value, scope),
-		);
+		this.toolExecutor = this.createToolExecutor(config.initialAgent);
 
 		if (allInitialTools.length) {
 			this.toolExecutor.register(allInitialTools);
@@ -342,14 +335,7 @@ export class VoiceSession {
 
 		// Update tool executor with new agent's tools
 		const agent = this.agentRouter.activeAgent;
-		this.toolExecutor = new ToolExecutor(
-			this.hooks,
-			this.eventBus,
-			this.config.sessionId,
-			agent.name,
-			(msg) => this.clientTransport.sendJsonToClient(msg),
-			(key, value, scope) => this.directiveManager.set(key, value, scope),
-		);
+		this.toolExecutor = this.createToolExecutor(agent.name);
 		const behaviorTools = this.behaviorManager?.tools ?? [];
 		this.toolExecutor.register([...agent.tools, ...behaviorTools]);
 
@@ -360,6 +346,17 @@ export class VoiceSession {
 		if (this.clientConnected) {
 			this.sendGreeting();
 		}
+	}
+
+	private createToolExecutor(agentName: string): ToolExecutor {
+		return new ToolExecutor(
+			this.hooks,
+			this.eventBus,
+			this.config.sessionId,
+			agentName,
+			(msg) => this.clientTransport.sendJsonToClient(msg),
+			(key, value, scope) => this.directiveManager.set(key, value, scope),
+		);
 	}
 
 	// --- Audio fast-path (no EventBus) ---

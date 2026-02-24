@@ -273,6 +273,33 @@ describe('ToolExecutor', () => {
 		expect(mockSetDirective).toHaveBeenCalledWith('language', null);
 	});
 
+	it('fires onError hook with ToolExecutionError preserving original cause', async () => {
+		const { hooks, executor } = setup();
+		const onError = vi.fn();
+		hooks.register({ onError });
+
+		const originalError = new Error('disk full');
+		executor.register([
+			createTestTool({
+				execute: vi.fn(async () => {
+					throw originalError;
+				}),
+			}),
+		]);
+
+		await executor.handleToolCall({
+			toolCallId: 'tc_1',
+			toolName: 'test_tool',
+			args: { query: 'test' },
+		});
+
+		expect(onError).toHaveBeenCalledOnce();
+		const errorEvent = onError.mock.calls[0][0];
+		expect(errorEvent.component).toBe('tool');
+		expect(errorEvent.error.message).toContain('disk full');
+		expect(errorEvent.error.cause).toBe(originalError);
+	});
+
 	it('tracks pending count', async () => {
 		const { executor } = setup();
 		executor.register([

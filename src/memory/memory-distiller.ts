@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-import type { LanguageModelV1 } from 'ai';
+import { type LanguageModelV1, generateObject } from 'ai';
 import { z } from 'zod';
 import type { ConversationContext } from '../core/conversation-context.js';
 import type { HooksManager } from '../core/hooks.js';
@@ -116,7 +116,6 @@ export class MemoryDistiller {
 			const timeout = setTimeout(() => controller.abort(), this.extractionTimeoutMs);
 
 			try {
-				const { generateObject } = await import('ai');
 				const { object } = await generateObject({
 					model: this.model,
 					prompt,
