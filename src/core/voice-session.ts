@@ -14,6 +14,7 @@ import type { FrameworkHooks } from '../types/hooks.js';
 import type { MemoryStore } from '../types/memory.js';
 import type { ToolDefinition } from '../types/tool.js';
 import { ConversationContext } from './conversation-context.js';
+import { DirectiveManager } from './directive-manager.js';
 import { EventBus } from './event-bus.js';
 import { HooksManager } from './hooks.js';
 import { MemoryCacheManager } from './memory-cache-manager.js';
@@ -105,10 +106,7 @@ export class VoiceSession {
 	private outputTranscriptBuffer = '';
 	/** Pre-tool-call output text, saved when a tool call splits a turn. */
 	private outputTranscriptPrefix = '';
-	/** Agent-scoped directives — cleared on agent transfer. */
-	private agentDirectives = new Map<string, string>();
-	/** Session-scoped directives (e.g. pacing) — persist across agent transfers. */
-	private sessionDirectives = new Map<string, string>();
+	private directiveManager = new DirectiveManager();
 	/** Whether a client WebSocket connection is currently active. */
 	private clientConnected = false;
 	/** Whether the first audio chunk from Gemini has been received this turn (for TTFB logging). */
@@ -158,11 +156,7 @@ export class VoiceSession {
 
 			this.behaviorManager = new BehaviorManager(
 				config.behaviors,
-				(key, value, scope) => {
-					const map = scope === 'session' ? this.sessionDirectives : this.agentDirectives;
-					if (value === null) map.delete(key);
-					else map.set(key, value);
-				},
+				(key, value, scope) => this.directiveManager.set(key, value, scope),
 				(msg) => this.clientTransport.sendJsonToClient(msg),
 				onPresetChange,
 			);
@@ -250,11 +244,7 @@ export class VoiceSession {
 			config.sessionId,
 			config.initialAgent,
 			(msg) => this.clientTransport.sendJsonToClient(msg),
-			(key, value, scope) => {
-				const map = scope === 'session' ? this.sessionDirectives : this.agentDirectives;
-				if (value === null) map.delete(key);
-				else map.set(key, value);
-			},
+			(key, value, scope) => this.directiveManager.set(key, value, scope),
 		);
 
 		if (allInitialTools.length) {
@@ -270,7 +260,7 @@ export class VoiceSession {
 			this.geminiTransport,
 			this.clientTransport,
 			config.model,
-			() => this.getSessionDirectiveSuffix(),
+			() => this.directiveManager.getSessionSuffix(),
 			behaviorTools,
 		);
 		this.agentRouter.registerAgents(config.agents);
@@ -358,17 +348,13 @@ export class VoiceSession {
 			this.config.sessionId,
 			agent.name,
 			(msg) => this.clientTransport.sendJsonToClient(msg),
-			(key, value, scope) => {
-				const map = scope === 'session' ? this.sessionDirectives : this.agentDirectives;
-				if (value === null) map.delete(key);
-				else map.set(key, value);
-			},
+			(key, value, scope) => this.directiveManager.set(key, value, scope),
 		);
 		const behaviorTools = this.behaviorManager?.tools ?? [];
 		this.toolExecutor.register([...agent.tools, ...behaviorTools]);
 
 		// Clear agent-scoped directives on transfer; session-scoped directives persist
-		this.agentDirectives.clear();
+		this.directiveManager.clearAgent();
 
 		// Send the new agent's greeting if configured
 		if (this.clientConnected) {
@@ -657,30 +643,12 @@ export class VoiceSession {
 		}
 	}
 
-	/** Returns session-scoped directives formatted as a system instruction suffix (for agent transfers). */
-	private getSessionDirectiveSuffix(): string {
-		if (this.sessionDirectives.size === 0) return '';
-		const text = [...this.sessionDirectives.values()].join('\n\n');
-		return `\n\n[SESSION DIRECTIVES — user preferences that persist across agents]\n${text}`;
-	}
-
 	/** Inject all active directives into Gemini's context to prevent behavioral drift. */
 	private reinforceDirectives(): void {
-		if (this.sessionDirectives.size === 0 && this.agentDirectives.size === 0) return;
-		// Merge both maps — agent directives override session directives with same key
-		const merged = new Map([...this.sessionDirectives, ...this.agentDirectives]);
-		const keys = [...merged.keys()];
-		const text = [...merged.values()].join('\n\n');
-		this.log(`Reinforcing directives [${keys.join(', ')}]: ${text.slice(0, 120)}...`);
-		this.geminiTransport.sendClientContent(
-			[
-				{
-					role: 'user',
-					parts: [{ text: `[SYSTEM DIRECTIVES — follow these instructions]\n${text}` }],
-				},
-			],
-			true,
-		);
+		const text = this.directiveManager.getReinforcementText();
+		if (!text) return;
+		this.log(`Reinforcing directives: ${text.slice(0, 120)}...`);
+		this.geminiTransport.sendClientContent([{ role: 'user', parts: [{ text }] }], true);
 	}
 
 	/**
@@ -730,7 +698,7 @@ export class VoiceSession {
 		}
 
 		// Prepend session directives so the greeting response respects user preferences (e.g. pacing)
-		const directiveSuffix = this.getSessionDirectiveSuffix();
+		const directiveSuffix = this.directiveManager.getSessionSuffix();
 		const greetingText = directiveSuffix
 			? `${directiveSuffix}\n\n${agent.greeting}`
 			: agent.greeting;
