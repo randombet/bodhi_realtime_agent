@@ -11,11 +11,12 @@ import { GeminiLiveTransport } from '../transport/gemini-live-transport.js';
 import type { MainAgent, SubagentConfig } from '../types/agent.js';
 import type { BehaviorCategory } from '../types/behavior.js';
 import type { FrameworkHooks } from '../types/hooks.js';
-import type { MemoryFact, MemoryStore } from '../types/memory.js';
+import type { MemoryStore } from '../types/memory.js';
 import type { ToolDefinition } from '../types/tool.js';
 import { ConversationContext } from './conversation-context.js';
 import { EventBus } from './event-bus.js';
 import { HooksManager } from './hooks.js';
+import { MemoryCacheManager } from './memory-cache-manager.js';
 import { SessionManager } from './session-manager.js';
 
 /**
@@ -97,7 +98,7 @@ export class VoiceSession {
 	private subagentConfigs: Record<string, SubagentConfig>;
 	private behaviorManager?: BehaviorManager;
 	private memoryDistiller?: MemoryDistiller;
-	private memoryFactsCache: MemoryFact[] = [];
+	private memoryCacheManager?: MemoryCacheManager;
 	private turnId = 0;
 	private config: VoiceSessionConfig;
 	private inputTranscriptBuffer = '';
@@ -167,8 +168,9 @@ export class VoiceSession {
 			);
 		}
 
-		// Set up memory distillation plugin
+		// Set up memory cache and distillation plugin
 		if (config.memory) {
+			this.memoryCacheManager = new MemoryCacheManager(config.memory.store, config.userId);
 			const freq = config.memory.turnFrequency ?? 5;
 			this.memoryDistiller = new MemoryDistiller(
 				this.conversationContext,
@@ -277,7 +279,7 @@ export class VoiceSession {
 
 	/** Start the client WebSocket server and connect to Gemini. */
 	async start(): Promise<void> {
-		await this.refreshMemoryCache();
+		await this.memoryCacheManager?.refresh();
 
 		// Restore behavior presets from structured directives (deterministic lookup)
 		if (this.config.memory && this.behaviorManager) {
@@ -632,7 +634,7 @@ export class VoiceSession {
 					injectSystemMessage: (text) =>
 						this.conversationContext.addAssistantMessage(`[system] ${text}`),
 					getRecentTurns: (count = 10) => [...this.conversationContext.items].slice(-count),
-					getMemoryFacts: () => this.memoryFactsCache,
+					getMemoryFacts: () => this.memoryCacheManager?.facts ?? [],
 				},
 				transcript,
 			);
@@ -641,7 +643,7 @@ export class VoiceSession {
 		// Trigger memory extraction (every N turns) and refresh cache
 		if (this.memoryDistiller) {
 			this.memoryDistiller.onTurnEnd();
-			this.refreshMemoryCache();
+			this.memoryCacheManager?.refresh();
 		}
 
 		// Reinforce active directives so Gemini doesn't drift
@@ -716,14 +718,15 @@ export class VoiceSession {
 		this.firstAudioReceived = false;
 
 		// Inject stored memory facts so Gemini knows the user from the first turn
-		if (this.memoryFactsCache.length > 0) {
-			const summary = this.memoryFactsCache.map((f) => `- ${f.content}`).join('\n');
+		const cachedFacts = this.memoryCacheManager?.facts ?? [];
+		if (cachedFacts.length > 0) {
+			const summary = cachedFacts.map((f) => `- ${f.content}`).join('\n');
 			const memoryText = `[MEMORY — what you already know about this user from previous sessions]\n${summary}`;
 			this.geminiTransport.sendClientContent(
 				[{ role: 'user', parts: [{ text: memoryText }] }],
 				true,
 			);
-			this.log(`Injected ${this.memoryFactsCache.length} memory facts`);
+			this.log(`Injected ${cachedFacts.length} memory facts`);
 		}
 
 		// Prepend session directives so the greeting response respects user preferences (e.g. pacing)
@@ -981,19 +984,6 @@ export class VoiceSession {
 				severity: 'error',
 			});
 		}
-	}
-
-	/** Reload cached memory facts from the store (fire-and-forget safe). */
-	private refreshMemoryCache(): Promise<void> {
-		if (!this.config.memory) return Promise.resolve();
-		return this.config.memory.store
-			.getAll(this.config.userId)
-			.then((facts) => {
-				this.memoryFactsCache = facts;
-			})
-			.catch(() => {
-				// Best-effort — keep stale cache on failure
-			});
 	}
 
 	/** Compact diagnostic log: HH:MM:SS.mmm [VoiceSession] message */
