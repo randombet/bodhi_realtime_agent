@@ -13,6 +13,7 @@ import type { BehaviorCategory } from '../types/behavior.js';
 import type { FrameworkHooks } from '../types/hooks.js';
 import type { MemoryStore } from '../types/memory.js';
 import type { ToolDefinition } from '../types/tool.js';
+import { BackgroundNotificationQueue } from './background-notification-queue.js';
 import { ConversationContext } from './conversation-context.js';
 import { DirectiveManager } from './directive-manager.js';
 import { EventBus } from './event-bus.js';
@@ -107,15 +108,7 @@ export class VoiceSession {
 	private transcriptManager!: TranscriptManager;
 	/** Whether a client WebSocket connection is currently active. */
 	private clientConnected = false;
-	/** Whether the first audio chunk from Gemini has been received this turn (for TTFB logging). */
-	private firstAudioReceived = false;
-	/** Whether the most recent turn ended via interruption (user started speaking). */
-	private lastTurnInterrupted = false;
-	/** Queued background tool completion notifications waiting for Gemini to finish generating. */
-	private pendingBackgroundNotifications: Array<{
-		turns: Array<{ role: string; parts: Array<{ text: string }> }>;
-		turnComplete: boolean;
-	}> = [];
+	private notificationQueue!: BackgroundNotificationQueue;
 
 	constructor(config: VoiceSessionConfig) {
 		this.config = config;
@@ -127,6 +120,10 @@ export class VoiceSession {
 			addUserMessage: (text) => this.conversationContext.addUserMessage(text),
 			addAssistantMessage: (text) => this.conversationContext.addAssistantMessage(text),
 		});
+		this.notificationQueue = new BackgroundNotificationQueue(
+			(turns, turnComplete) => this.geminiTransport.sendClientContent(turns, turnComplete),
+			(msg) => this.log(msg),
+		);
 
 		if (config.hooks) {
 			this.hooks.register(config.hooks);
@@ -303,7 +300,7 @@ export class VoiceSession {
 	/** Gracefully shut down: disconnect Gemini, stop the WebSocket server, transition to CLOSED. */
 	async close(_reason = 'normal'): Promise<void> {
 		// Drop any queued background notifications — session is ending
-		this.pendingBackgroundNotifications = [];
+		this.notificationQueue.clear();
 
 		// Flush any buffered transcription before closing
 		this.transcriptManager.flush();
@@ -374,10 +371,7 @@ export class VoiceSession {
 	}
 
 	private handleAudioOutput(data: string): void {
-		if (!this.firstAudioReceived) {
-			this.firstAudioReceived = true;
-			this.log('First audio chunk from Gemini (TTFB)');
-		}
+		this.notificationQueue.markAudioReceived();
 		const buffer = Buffer.from(data, 'base64');
 		this.clientTransport.sendAudioToClient(buffer);
 	}
@@ -524,7 +518,7 @@ export class VoiceSession {
 					// The pending message already satisfied the tool call from Gemini's perspective.
 					// Inject the completion as a context message so Gemini naturally informs the user.
 					// If Gemini is mid-generation, queue it until the current turn ends.
-					this.sendOrQueueNotification(
+					this.notificationQueue.sendOrQueue(
 						[
 							{
 								role: 'user',
@@ -550,7 +544,7 @@ export class VoiceSession {
 			.catch((err) => {
 				this.reportError('subagent-runner', err);
 				if (hasPendingMessage) {
-					this.sendOrQueueNotification(
+					this.notificationQueue.sendOrQueue(
 						[
 							{
 								role: 'user',
@@ -585,9 +579,6 @@ export class VoiceSession {
 	private handleTurnComplete(): void {
 		this.transcriptManager.flush();
 		this.turnId++;
-		this.firstAudioReceived = false;
-		const wasInterrupted = this.lastTurnInterrupted;
-		this.lastTurnInterrupted = false;
 		const turnIdStr = `turn_${this.turnId}`;
 		this.log(`Turn complete: ${turnIdStr}`);
 		this.eventBus.publish('turn.end', {
@@ -626,12 +617,8 @@ export class VoiceSession {
 		// Reinforce active directives so Gemini doesn't drift
 		this.reinforceDirectives();
 
-		// Flush one queued background notification now that Gemini finished generating.
-		// Skip after interruptions — the user is speaking and the next natural turn
-		// completion will flush instead.
-		if (!wasInterrupted) {
-			this.flushOneBackgroundNotification();
-		}
+		// Reset audio flag and flush one queued notification (skips if interrupted)
+		this.notificationQueue.onTurnComplete();
 	}
 
 	/** Inject all active directives into Gemini's context to prevent behavioral drift. */
@@ -642,39 +629,12 @@ export class VoiceSession {
 		this.geminiTransport.sendClientContent([{ role: 'user', parts: [{ text }] }], true);
 	}
 
-	/**
-	 * Send a background tool completion notification to Gemini, or queue it
-	 * if Gemini is currently generating audio (where it would be silently absorbed).
-	 */
-	private sendOrQueueNotification(
-		turns: Array<{ role: string; parts: Array<{ text: string }> }>,
-		turnComplete: boolean,
-	): void {
-		if (this.firstAudioReceived) {
-			this.log('Gemini is generating — queuing background notification');
-			this.pendingBackgroundNotifications.push({ turns, turnComplete });
-		} else {
-			this.geminiTransport.sendClientContent(turns, turnComplete);
-		}
-	}
-
-	/** Flush one queued background notification now that Gemini is idle. */
-	private flushOneBackgroundNotification(): void {
-		const notification = this.pendingBackgroundNotifications.shift();
-		if (notification) {
-			this.log(
-				`Flushing queued background notification (${this.pendingBackgroundNotifications.length} remaining)`,
-			);
-			this.geminiTransport.sendClientContent(notification.turns, notification.turnComplete);
-		}
-	}
-
 	/** Send the active agent's greeting prompt to Gemini to trigger a spoken greeting. */
 	private sendGreeting(): void {
 		const agent = this.agentRouter.activeAgent;
 		if (!agent.greeting) return;
 		this.log(`Sending greeting for agent "${agent.name}"`);
-		this.firstAudioReceived = false;
+		this.notificationQueue.resetAudio();
 
 		// Inject stored memory facts so Gemini knows the user from the first turn
 		const cachedFacts = this.memoryCacheManager?.facts ?? [];
@@ -701,8 +661,8 @@ export class VoiceSession {
 
 	private handleInterrupted(): void {
 		this.log('Interrupted by user');
-		this.firstAudioReceived = false;
-		this.lastTurnInterrupted = true;
+		this.notificationQueue.resetAudio();
+		this.notificationQueue.markInterrupted();
 		this.transcriptManager.flush();
 		this.eventBus.publish('turn.interrupted', {
 			sessionId: this.config.sessionId,
