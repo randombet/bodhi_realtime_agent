@@ -100,7 +100,7 @@ export class ToolExecutor {
 		let result: ToolResult;
 		try {
 			const timeoutMs = tool.timeout ?? 30_000;
-			const output = await this.executeWithTimeout(tool, parsed.data, ctx, timeoutMs);
+			const output = await this.executeWithTimeout(tool, parsed.data, ctx, timeoutMs, controller);
 			result = {
 				toolCallId: call.toolCallId,
 				toolName: call.toolName,
@@ -172,10 +172,11 @@ export class ToolExecutor {
 		args: Record<string, unknown>,
 		ctx: ToolContext,
 		timeoutMs: number,
+		controller: AbortController,
 	): Promise<unknown> {
 		return new Promise((resolve, reject) => {
 			const timer = setTimeout(() => {
-				ctx.abortSignal.dispatchEvent(new Event('abort'));
+				controller.abort();
 				reject(new ToolExecutionError(`Tool "${tool.name}" timed out after ${timeoutMs}ms`));
 			}, timeoutMs);
 

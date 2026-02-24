@@ -155,6 +155,29 @@ describe('ToolExecutor', () => {
 		expect(result.error).toContain('timed out');
 	});
 
+	it('sets signal.aborted to true on timeout', async () => {
+		const { executor } = setup();
+		let receivedSignal: AbortSignal | null = null;
+		executor.register([
+			createTestTool({
+				timeout: 50,
+				execute: vi.fn(async (_args, ctx) => {
+					receivedSignal = ctx.abortSignal;
+					return new Promise((resolve) => setTimeout(() => resolve('late'), 200));
+				}),
+			}),
+		]);
+
+		await executor.handleToolCall({
+			toolCallId: 'tc_1',
+			toolName: 'test_tool',
+			args: { query: 'test' },
+		});
+
+		expect(receivedSignal).not.toBeNull();
+		expect(receivedSignal?.aborted).toBe(true);
+	});
+
 	it('cancel aborts pending execution', async () => {
 		const { hooks, executor } = setup();
 		const onToolResult = vi.fn();
