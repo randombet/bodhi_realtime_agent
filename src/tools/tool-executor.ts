@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 
+import { DEFAULT_TOOL_TIMEOUT_MS } from '../core/constants.js';
 import { ToolExecutionError } from '../core/errors.js';
 import type { IEventBus } from '../core/event-bus.js';
 import type { HooksManager } from '../core/hooks.js';
@@ -100,7 +101,7 @@ export class ToolExecutor {
 		let result: ToolResult;
 		let executionError: ToolExecutionError | undefined;
 		try {
-			const timeoutMs = tool.timeout ?? 30_000;
+			const timeoutMs = tool.timeout ?? DEFAULT_TOOL_TIMEOUT_MS;
 			const output = await this.executeWithTimeout(tool, parsed.data, ctx, timeoutMs, controller);
 			result = {
 				toolCallId: call.toolCallId,

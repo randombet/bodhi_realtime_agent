@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 import { GoogleGenAI, type LiveServerMessage, type Session } from '@google/genai';
+import { DEFAULT_CONNECT_TIMEOUT_MS } from '../core/constants.js';
 import type { ToolDefinition } from '../types/tool.js';
 import { zodToJsonSchema } from './zod-to-schema.js';
 
@@ -148,7 +149,7 @@ export class GeminiLiveTransport {
 			},
 		});
 
-		const timeoutMs = this.config.connectTimeoutMs ?? 30_000;
+		const timeoutMs = this.config.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
 		const timeout = new Promise<never>((_, reject) => {
 			setTimeout(
 				() => reject(new Error(`Gemini connect timed out after ${timeoutMs}ms`)),
