@@ -46,9 +46,8 @@ export class ClientTransport {
 			this.wss.on('listening', () => resolve());
 
 			this.wss.on('connection', (ws) => {
-				this.client = ws;
-				this.callbacks.onClientConnected?.();
-
+				// Attach event handlers BEFORE setting this.client to avoid
+				// a race where messages arrive before handlers are registered.
 				ws.on('message', (data: Buffer, isBinary: boolean) => {
 					if (isBinary) {
 						if (this._buffering) {
@@ -70,11 +69,16 @@ export class ClientTransport {
 					this.client = null;
 					this.callbacks.onClientDisconnected?.();
 				});
+
+				this.client = ws;
+				this.callbacks.onClientConnected?.();
 			});
 		});
 	}
 
 	async stop(): Promise<void> {
+		this._buffering = false;
+		this.audioBuffer.clear();
 		if (this.client) {
 			this.client.close();
 			this.client = null;
