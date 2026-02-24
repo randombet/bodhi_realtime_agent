@@ -142,6 +142,7 @@ export class ToolCallRouter {
 
 		// Send a tool response to unblock Gemini (it stops generating until a response arrives).
 		// Explicitly mark the task as still in progress so Gemini doesn't claim it's done.
+		// The pendingMessage is included as a speak_to_user directive so Gemini relays it verbally.
 		if (hasPendingMessage) {
 			this.deps.sendToolResponse([
 				{
@@ -149,9 +150,9 @@ export class ToolCallRouter {
 					name: call.toolName,
 					response: {
 						status: 'still_in_progress',
-						message: toolDef.pendingMessage,
+						speak_to_user: toolDef.pendingMessage,
 						important:
-							'This task is NOT complete yet. Do NOT tell the user it is ready. You will receive a notification when it finishes.',
+							'This task is NOT complete yet. Do NOT tell the user it is ready. You MUST speak the speak_to_user message to the user NOW. You will receive a separate notification when the task finishes.',
 					},
 				},
 			]);
@@ -186,7 +187,7 @@ export class ToolCallRouter {
 								role: 'user',
 								parts: [
 									{
-										text: `[SYSTEM: Background task "${call.toolName}" completed successfully. Result: ${result.text}. Please inform the user their content is ready now.]`,
+										text: `[SYSTEM NOTIFICATION — YOU MUST RESPOND TO THIS]\nBackground task "${call.toolName}" completed successfully.\nResult: ${result.text}\nYou MUST speak out loud to inform the user that their task is finished. Do NOT stay silent.`,
 									},
 								],
 							},
@@ -212,7 +213,7 @@ export class ToolCallRouter {
 								role: 'user',
 								parts: [
 									{
-										text: `[SYSTEM: Background task "${call.toolName}" failed: ${err instanceof Error ? err.message : String(err)}. Please apologize to the user and let them know.]`,
+										text: `[SYSTEM NOTIFICATION — YOU MUST RESPOND TO THIS]\nBackground task "${call.toolName}" failed with error: ${err instanceof Error ? err.message : String(err)}\nYou MUST speak out loud to apologize and inform the user that the task failed. Do NOT stay silent.`,
 									},
 								],
 							},
