@@ -1401,11 +1401,10 @@ describe('VoiceSession', () => {
 			// Set a resumption handle so reconnect path is taken
 			session.sessionManager.updateResumptionHandle('handle_1');
 
-			// Spy on geminiTransport.reconnect to make it reject
-			const transport = (
-				session as unknown as { geminiTransport: { reconnect: () => Promise<void> } }
-			).geminiTransport;
-			vi.spyOn(transport, 'reconnect').mockRejectedValueOnce(new Error('reconnect failed'));
+			// Spy on transport.reconnect to make it reject
+			const transportRef = (session as unknown as { transport: { reconnect: () => Promise<void> } })
+				.transport;
+			vi.spyOn(transportRef, 'reconnect').mockRejectedValueOnce(new Error('reconnect failed'));
 
 			// Fire goAway — triggers handleGoAway which calls reconnect
 			const { _getMessageHandler } = await import('@google/genai');
@@ -1442,11 +1441,10 @@ describe('VoiceSession', () => {
 			// Set a resumption handle so reconnect path is taken
 			session.sessionManager.updateResumptionHandle('handle_2');
 
-			// Spy on geminiTransport.reconnect to make it reject
-			const transport = (
-				session as unknown as { geminiTransport: { reconnect: () => Promise<void> } }
-			).geminiTransport;
-			vi.spyOn(transport, 'reconnect').mockRejectedValueOnce(new Error('reconnect failed'));
+			// Spy on transport.reconnect to make it reject
+			const transportRef = (session as unknown as { transport: { reconnect: () => Promise<void> } })
+				.transport;
+			vi.spyOn(transportRef, 'reconnect').mockRejectedValueOnce(new Error('reconnect failed'));
 
 			// Directly invoke the private handleTransportClose since the WebSocket onclose
 			// callback is internal to the transport and not exposed through the mock
