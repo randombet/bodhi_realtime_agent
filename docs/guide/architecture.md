@@ -317,7 +317,7 @@ graph TB
         U1 --> MD1
     end
 
-    MD1 -->|"addFacts()"| MS2["MemoryStore<br/>(persisted)"]
+    MD1 -->|"replaceAll()"| MS2["MemoryStore<br/>(persisted)"]
 
     subgraph Session2["Session 2"]
         OE["Agent.onEnter()"]

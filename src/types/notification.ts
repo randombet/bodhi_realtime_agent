@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import type { ExternalEvent, NotificationPriority } from './agent.js';
 import type { SubagentResult } from './conversation.js';
 

@@ -13,17 +13,19 @@ The framework supports three optional persistence stores, each handling a differ
 Persists user-specific facts extracted from conversation. See [Memory](/guide/memory) for a complete guide.
 
 ```typescript
-import { MarkdownMemoryStore } from '@bodhi_agent/realtime-agent-framework';
+import { JsonMemoryStore } from '@bodhi_agent/realtime-agent-framework';
 
 const session = new VoiceSession({
-  memoryStore: new MarkdownMemoryStore('./memory'),
+  memory: {
+    store: new JsonMemoryStore('./memory'),
+  },
   // ...
 });
 ```
 
-### Built-in: MarkdownMemoryStore
+### Built-in: JsonMemoryStore
 
-Stores facts as Markdown files at `{baseDir}/{userId}.md`. Human-readable and Git-friendly.
+Stores facts and directives as JSON files at `{baseDir}/{userId}.json`. Supports structured directives for deterministic behavior preset restoration.
 
 ### Custom Implementation
 
@@ -32,6 +34,8 @@ interface MemoryStore {
   addFacts(userId: string, facts: MemoryFact[]): Promise<void>;
   getAll(userId: string): Promise<MemoryFact[]>;
   replaceAll(userId: string, facts: MemoryFact[]): Promise<void>;
+  getDirectives(userId: string): Promise<Record<string, string>>;
+  setDirectives(userId: string, directives: Record<string, string>): Promise<void>;
 }
 ```
 
@@ -103,7 +107,9 @@ interface SessionStore {
 ```typescript
 const session = new VoiceSession({
   // Memory: persists user facts across sessions
-  memoryStore: new MarkdownMemoryStore('./data/memory'),
+  memory: {
+    store: new JsonMemoryStore('./data/memory'),
+  },
 
   // Conversation: persists transcripts
   conversationHistoryStore: new FileHistoryStore('./data/history'),

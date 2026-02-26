@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { GeminiLiveTransport } from '../../src/transport/gemini-live-transport.js';
@@ -17,9 +19,10 @@ vi.mock('@google/genai', () => ({
 		live: {
 			connect: vi.fn(async (params: Record<string, unknown>) => {
 				capturedConnectConfig = params;
-				// Call onopen callback
 				const cbs = params.callbacks as Record<string, (...args: unknown[]) => void>;
 				cbs.onopen?.();
+				// Fire setupComplete so connect() resolves (it awaits this)
+				setTimeout(() => cbs.onmessage?.({ setupComplete: { sessionId: 'mock_sid' } }), 1);
 				return mockSession;
 			}),
 		},
@@ -154,6 +157,19 @@ describe('GeminiLiveTransport', () => {
 			expect(transport.isConnected).toBe(false);
 			await transport.connect();
 			expect(transport.isConnected).toBe(true);
+		});
+
+		it('rejects with timeout when setupComplete never fires', async () => {
+			// Override GoogleGenAI constructor to return a connect that never fires setupComplete
+			const { GoogleGenAI } = await import('@google/genai');
+			(GoogleGenAI as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => ({
+				live: {
+					connect: vi.fn(async () => mockSession),
+				},
+			}));
+
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key', connectTimeoutMs: 50 }, {});
+			await expect(transport.connect()).rejects.toThrow('timed out');
 		});
 	});
 

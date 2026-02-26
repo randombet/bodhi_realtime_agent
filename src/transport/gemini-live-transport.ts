@@ -1,4 +1,7 @@
+// SPDX-License-Identifier: MIT
+
 import { GoogleGenAI, type LiveServerMessage, type Session } from '@google/genai';
+import { DEFAULT_CONNECT_TIMEOUT_MS, DEFAULT_RECONNECT_TIMEOUT_MS } from '../core/constants.js';
 import type { ToolDefinition } from '../types/tool.js';
 import { zodToJsonSchema } from './zod-to-schema.js';
 
@@ -22,6 +25,10 @@ export interface GeminiTransportConfig {
 	googleSearch?: boolean;
 	/** Enable server-side transcription of user audio input (default: true). */
 	inputAudioTranscription?: boolean;
+	/** Timeout in ms for connect() to receive setupComplete (default: 30000). */
+	connectTimeoutMs?: number;
+	/** Timeout in ms for the overall reconnect operation (default: 45000). */
+	reconnectTimeoutMs?: number;
 }
 
 /** Callbacks fired by GeminiLiveTransport when server messages arrive. */
@@ -66,6 +73,8 @@ export class GeminiLiveTransport {
 	private ai: GoogleGenAI;
 	private callbacks: GeminiTransportCallbacks;
 	private config: GeminiTransportConfig;
+	/** Resolves when setupComplete fires — used to make connect() await Gemini readiness. */
+	private setupResolver: (() => void) | null = null;
 
 	constructor(config: GeminiTransportConfig, callbacks: GeminiTransportCallbacks) {
 		this.ai = new GoogleGenAI({ apiKey: config.apiKey });
@@ -73,8 +82,15 @@ export class GeminiLiveTransport {
 		this.callbacks = callbacks;
 	}
 
-	/** Establish a WebSocket connection to the Gemini Live API. */
+	/** Establish a WebSocket connection to the Gemini Live API.
+	 *  Resolves only after Gemini sends `setupComplete`, so callers can safely
+	 *  send content immediately after awaiting this method.
+	 */
 	async connect(): Promise<void> {
+		const setupComplete = new Promise<void>((resolve) => {
+			this.setupResolver = resolve;
+		});
+
 		const model = this.config.model ?? 'gemini-live-2.5-flash-preview';
 
 		const connectConfig: Record<string, unknown> = {
@@ -134,15 +150,35 @@ export class GeminiLiveTransport {
 				},
 			},
 		});
+
+		const timeoutMs = this.config.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const timeout = new Promise<never>((_, reject) => {
+			timer = setTimeout(
+				() => reject(new Error(`Gemini connect timed out after ${timeoutMs}ms`)),
+				timeoutMs,
+			);
+		});
+		await Promise.race([setupComplete, timeout]).finally(() => clearTimeout(timer));
 	}
 
 	/** Disconnect and reconnect, optionally with a new resumption handle. */
 	async reconnect(handle?: string): Promise<void> {
-		await this.disconnect();
-		if (handle) {
-			this.config.resumptionHandle = handle;
+		const timeoutMs = this.config.reconnectTimeoutMs ?? DEFAULT_RECONNECT_TIMEOUT_MS;
+		const timer = setTimeout(() => {
+			// Force-kill the stale session so disconnect() unblocks
+			this.session = null;
+		}, timeoutMs);
+
+		try {
+			await this.disconnect();
+			if (handle) {
+				this.config.resumptionHandle = handle;
+			}
+			await this.connect();
+		} finally {
+			clearTimeout(timer);
 		}
-		await this.connect();
 	}
 
 	async disconnect(): Promise<void> {
@@ -204,6 +240,11 @@ export class GeminiLiveTransport {
 	// biome-ignore lint/suspicious/noExplicitAny: LiveServerMessage is a complex union type
 	private handleMessage(msg: any): void {
 		if (msg.setupComplete) {
+			// Resolve the connect() promise so callers know Gemini is ready
+			if (this.setupResolver) {
+				this.setupResolver();
+				this.setupResolver = null;
+			}
 			this.callbacks.onSetupComplete?.(msg.setupComplete.sessionId ?? '');
 			return;
 		}

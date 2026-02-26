@@ -31,7 +31,8 @@
     "typecheck": "tsc --noEmit",
     "docs:dev": "vitepress dev docs",
     "docs:build": "typedoc && vitepress build docs",
-    "docs:preview": "vitepress preview docs"
+    "docs:preview": "vitepress preview docs",
+    "prepare": "git config core.hooksPath .githooks"
   },
   "engines": {
     "node": ">=22.0.0"

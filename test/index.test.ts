@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import { describe, expect, it } from 'vitest';
 
 describe('module smoke test', () => {
@@ -35,7 +37,7 @@ describe('module smoke test', () => {
 		expect(mod.zodToJsonSchema).toBeDefined();
 
 		// Memory
-		expect(mod.MarkdownMemoryStore).toBeDefined();
+		expect(mod.JsonMemoryStore).toBeDefined();
 		expect(mod.MemoryDistiller).toBeDefined();
 
 		// Types (constants)

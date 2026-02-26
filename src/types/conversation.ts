@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import type { MemoryFact } from './memory.js';
 
 /** The role of a conversation item, used to distinguish message types in the context. */
@@ -72,7 +74,7 @@ export interface SubagentContextSnapshot {
 	recentTurns: ConversationItem[];
 	/** User-specific memory facts relevant to the task. */
 	relevantMemoryFacts: MemoryFact[];
-	/** The parent agent's system instructions (for tone/behavior consistency). */
+	/** The subagent's own system instructions. */
 	agentInstructions: string;
 }
 

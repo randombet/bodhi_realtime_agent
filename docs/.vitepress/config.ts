@@ -6,7 +6,7 @@ export default withMermaid(
 	defineConfig({
 		title: 'Bodhi Realtime Agent Framework',
 		description: 'TypeScript framework for real-time voice agents using Google Gemini Live API',
-		base: '/realtime_agent_framework/',
+		base: '/bodhi_realtime_agent/',
 		ignoreDeadLinks: [/^http:\/\/localhost/],
 
 		themeConfig: {
@@ -33,6 +33,7 @@ export default withMermaid(
 							{ text: 'VoiceSession', link: '/guide/voice-session' },
 							{ text: 'Agents', link: '/guide/agents' },
 							{ text: 'Tools', link: '/guide/tools' },
+							{ text: 'Behaviors', link: '/guide/behaviors' },
 							{ text: 'Memory', link: '/guide/memory' },
 							{ text: 'Events & Hooks', link: '/guide/events' },
 							{ text: 'Transport', link: '/guide/transport' },

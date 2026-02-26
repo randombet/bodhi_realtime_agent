@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import type { LanguageModelV1 } from 'ai';
 import type { ConversationContext } from '../core/conversation-context.js';
 import { AgentError } from '../core/errors.js';
@@ -8,6 +10,7 @@ import type { ClientTransport } from '../transport/client-transport.js';
 import type { GeminiLiveTransport } from '../transport/gemini-live-transport.js';
 import type { MainAgent, SubagentConfig } from '../types/agent.js';
 import type { SubagentResult, ToolCall } from '../types/conversation.js';
+import type { ToolDefinition } from '../types/tool.js';
 import { createAgentContext, resolveInstructions } from './agent-context.js';
 import { runSubagent } from './subagent-runner.js';
 
@@ -32,7 +35,7 @@ interface ActiveSubagent {
  */
 export class AgentRouter {
 	private agents = new Map<string, MainAgent>();
-	private _activeAgent: MainAgent;
+	private _activeAgent: MainAgent | null = null;
 	private activeSubagents = new Map<string, ActiveSubagent>();
 
 	constructor(
@@ -43,9 +46,9 @@ export class AgentRouter {
 		private geminiTransport: GeminiLiveTransport,
 		private clientTransport: ClientTransport,
 		private model: LanguageModelV1,
-	) {
-		this._activeAgent = undefined as unknown as MainAgent;
-	}
+		private getInstructionSuffix?: () => string,
+		private extraTools: ToolDefinition[] = [],
+	) {}
 
 	registerAgents(agents: MainAgent[]): void {
 		for (const agent of agents) {
@@ -62,6 +65,9 @@ export class AgentRouter {
 	}
 
 	get activeAgent(): MainAgent {
+		if (!this._activeAgent) {
+			throw new AgentError('No active agent — call setInitialAgent() first');
+		}
 		return this._activeAgent;
 	}
 
@@ -75,7 +81,7 @@ export class AgentRouter {
 			throw new AgentError(`Unknown agent: ${toAgentName}`);
 		}
 
-		const fromAgent = this._activeAgent;
+		const fromAgent = this.activeAgent;
 		const ctx = this.createContext(fromAgent.name);
 
 		// 1. onExit current agent
@@ -97,44 +103,63 @@ export class AgentRouter {
 		// 5. Save handle and disconnect
 		const handle = this.sessionManager.resumptionHandle;
 
-		// 6. Disconnect and reconnect with new agent config
-		this.geminiTransport.updateSystemInstruction(resolveInstructions(toAgent));
-		this.geminiTransport.updateTools(toAgent.tools);
-		this.geminiTransport.updateGoogleSearch(toAgent.googleSearch ?? false);
-		await this.geminiTransport.reconnect(handle ?? undefined);
+		try {
+			// 6. Disconnect and reconnect with new agent config
+			const suffix = this.getInstructionSuffix?.() ?? '';
+			this.geminiTransport.updateSystemInstruction(resolveInstructions(toAgent) + suffix);
+			this.geminiTransport.updateTools([...toAgent.tools, ...this.extraTools]);
+			this.geminiTransport.updateGoogleSearch(toAgent.googleSearch ?? false);
+			await this.geminiTransport.reconnect(handle ?? undefined);
 
-		// 7. Stop buffering and replay
-		const buffered = this.clientTransport.stopBuffering();
+			// 7. Stop buffering and replay
+			const buffered = this.clientTransport.stopBuffering();
 
-		// 8. Replay conversation context
-		const replayContent = this.conversationContext.toReplayContent();
-		if (replayContent.length > 0) {
-			this.geminiTransport.sendClientContent(replayContent, false);
+			// 8. Replay conversation context
+			const replayContent = this.conversationContext.toReplayContent();
+			if (replayContent.length > 0) {
+				this.geminiTransport.sendClientContent(replayContent, false);
+			}
+
+			// 9. Replay buffered audio
+			for (const chunk of buffered) {
+				this.geminiTransport.sendAudio(chunk.toString('base64'));
+			}
+
+			// 10. Transition to ACTIVE
+			this.sessionManager.transitionTo('ACTIVE');
+			this._activeAgent = toAgent;
+
+			// 11. onEnter new agent
+			const newCtx = this.createContext(toAgent.name);
+			await toAgent.onEnter?.(newCtx);
+			this.eventBus.publish('agent.enter', {
+				sessionId: this.sessionManager.sessionId,
+				agentName: toAgent.name,
+			});
+
+			// 12. Publish transfer event
+			this.eventBus.publish('agent.transfer', {
+				sessionId: this.sessionManager.sessionId,
+				fromAgent: fromAgent.name,
+				toAgent: toAgentName,
+			});
+		} catch (err) {
+			// Reconnect failed — session is broken, clean up and transition to CLOSED
+			this.clientTransport.stopBuffering();
+			this.sessionManager.transitionTo('CLOSED');
+			const error = new AgentError(
+				`Transfer to "${toAgentName}" failed: ${err instanceof Error ? err.message : String(err)}`,
+			);
+			if (this.hooks.onError) {
+				this.hooks.onError({
+					sessionId: this.sessionManager.sessionId,
+					component: 'agent-router',
+					error,
+					severity: 'fatal',
+				});
+			}
+			throw error;
 		}
-
-		// 9. Replay buffered audio
-		for (const chunk of buffered) {
-			this.geminiTransport.sendAudio(chunk.toString('base64'));
-		}
-
-		// 10. Transition to ACTIVE
-		this.sessionManager.transitionTo('ACTIVE');
-		this._activeAgent = toAgent;
-
-		// 11. onEnter new agent
-		const newCtx = this.createContext(toAgent.name);
-		await toAgent.onEnter?.(newCtx);
-		this.eventBus.publish('agent.enter', {
-			sessionId: this.sessionManager.sessionId,
-			agentName: toAgent.name,
-		});
-
-		// 12. Publish transfer event
-		this.eventBus.publish('agent.transfer', {
-			sessionId: this.sessionManager.sessionId,
-			fromAgent: fromAgent.name,
-			toAgent: toAgentName,
-		});
 	}
 
 	/** Spawn a background subagent to handle a tool call asynchronously. */
@@ -148,7 +173,7 @@ export class AgentRouter {
 
 		this.eventBus.publish('agent.handoff', {
 			sessionId: this.sessionManager.sessionId,
-			agentName: this._activeAgent.name,
+			agentName: this.activeAgent.name,
 			subagentName: subagentConfig.name,
 			toolCallId: toolCall.toolCallId,
 		});
@@ -161,7 +186,7 @@ export class AgentRouter {
 					toolName: toolCall.toolName,
 					args: toolCall.args,
 				},
-				resolveInstructions(this._activeAgent),
+				subagentConfig.instructions,
 				[],
 			);
 

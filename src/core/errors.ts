@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Severity level for framework errors, used by the onError hook. */
 export type ErrorSeverity = 'warn' | 'error' | 'fatal';
 
