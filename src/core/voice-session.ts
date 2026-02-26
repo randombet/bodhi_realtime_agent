@@ -567,14 +567,27 @@ export class VoiceSession {
 	private handleFileUpload(base64: string, mimeType: string, fileName?: string): void {
 		if (!this.sessionManager.isActive) return;
 
-		// Send image/document to Gemini as inline data
+		const label = fileName ?? 'file';
+
+		// Send image/document to Gemini as inline data with turnComplete=true
+		// so Gemini acknowledges the upload and describes what it sees.
 		this.geminiTransport.sendClientContent(
-			[{ role: 'user', parts: [{ inlineData: { data: base64, mimeType } }] as never[] }],
-			false,
+			[
+				{
+					role: 'user',
+					parts: [
+						{ inlineData: { data: base64, mimeType } },
+						{
+							text: `[The user uploaded a file: ${label}. Acknowledge receipt and briefly describe what you see.]`,
+						},
+					],
+				},
+			],
+			true,
 		);
 
 		// Record in conversation context
-		this.conversationContext.addUserMessage(`[Uploaded file: ${fileName ?? 'file'}]`);
+		this.conversationContext.addUserMessage(`[Uploaded file: ${label}]`);
 	}
 
 	private handleTextInput(text: string): void {

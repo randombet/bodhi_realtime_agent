@@ -680,13 +680,9 @@ function sendText() {
   ws.send(JSON.stringify({ type: 'text_input', text }));
   input.value = '';
 
-  // Show typed text in the conversation
-  currentUserEl = null; // finalize any in-progress user speech
-  const el = document.createElement('div');
-  el.className = 't-entry t-user';
-  el.textContent = text;
-  $('transcript').appendChild(el);
-  $('transcript').scrollTop = $('transcript').scrollHeight;
+  // Finalize any in-progress user speech bubble so the server echo
+  // creates a fresh entry (server sends back a transcript message).
+  currentUserEl = null;
 
   dbg('Sent text: "' + text.slice(0, 50) + '"', 'event');
 }

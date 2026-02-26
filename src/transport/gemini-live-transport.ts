@@ -209,9 +209,12 @@ export class GeminiLiveTransport {
 		this.session.sendToolResponse({ functionResponses: responses });
 	}
 
-	/** Send text-based conversation turns to Gemini (used for context replay). */
+	/** Send conversation turns to Gemini (text, inline data, or mixed). */
 	sendClientContent(
-		turns: Array<{ role: string; parts: Array<{ text: string }> }>,
+		turns: Array<{
+			role: string;
+			parts: Array<{ text: string } | { inlineData: { data: string; mimeType: string } }>;
+		}>,
 		turnComplete = true,
 	): void {
 		if (!this.session) return;
