@@ -620,6 +620,13 @@ export class VoiceSession {
 	private handleClientConnected(): void {
 		this.log(`Client connected (geminiActive=${this.sessionManager.isActive})`);
 		this.clientConnected = true;
+
+		// Send audio format config so the client can negotiate correct sample rates
+		this.clientTransport.sendJsonToClient({
+			type: 'session.config',
+			audioFormat: this.transport.audioFormat,
+		});
+
 		this.behaviorManager?.sendCatalog();
 		if (this.sessionManager.isActive) {
 			this.sendGreeting();
