@@ -416,8 +416,11 @@ export class VoiceSession {
 		if (this.sessionManager.state === 'CONNECTING') {
 			this.sessionManager.transitionTo('ACTIVE');
 		}
-		// During transfer, the transfer path handles greeting after context replay — skip here
-		if (this.sessionManager.state === 'TRANSFERRING') {
+		// During transfer or reconnect, the caller handles post-connect logic — skip greeting here
+		if (
+			this.sessionManager.state === 'TRANSFERRING' ||
+			this.sessionManager.state === 'RECONNECTING'
+		) {
 			return;
 		}
 		if (this.clientConnected) {

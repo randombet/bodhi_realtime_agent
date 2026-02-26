@@ -390,17 +390,26 @@ export class GeminiLiveTransport implements LLMTransport {
 	// --- Private helpers ---
 
 	/** Apply LLMTransportConfig fields to the internal GeminiTransportConfig. */
+	/** Merge LLMTransportConfig into the internal config. Only provided fields are applied;
+	 *  undefined fields preserve existing constructor values.
+	 */
 	private applyTransportConfig(config: LLMTransportConfig): void {
 		if (config.auth.type === 'api_key') {
 			this.ai = new GoogleGenAI({ apiKey: config.auth.apiKey });
 		}
-		this.config.model = config.model;
-		this.config.systemInstruction = config.instructions;
-		this.config.tools = config.tools;
-		if (config.voice) {
+		if (config.model !== undefined) {
+			this.config.model = config.model;
+		}
+		if (config.instructions !== undefined) {
+			this.config.systemInstruction = config.instructions;
+		}
+		if (config.tools !== undefined) {
+			this.config.tools = config.tools;
+		}
+		if (config.voice !== undefined) {
 			this.config.speechConfig = { voiceName: config.voice };
 		}
-		if (config.transcription) {
+		if (config.transcription !== undefined) {
 			this.config.inputAudioTranscription = config.transcription.input ?? true;
 		}
 		if (config.providerOptions) {
