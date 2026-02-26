@@ -113,6 +113,10 @@ export class VoiceSession {
 	/** Whether a client WebSocket connection is currently active. */
 	private clientConnected = false;
 	private notificationQueue!: BackgroundNotificationQueue;
+	/** Tracks consecutive reconnect attempts to prevent infinite reconnect storms. */
+	private reconnectAttempts = 0;
+	private static readonly MAX_RECONNECT_ATTEMPTS = 3;
+	private static readonly RECONNECT_BACKOFF_MS = [1000, 2000, 4000];
 
 	constructor(config: VoiceSessionConfig) {
 		this.config = config;
@@ -429,6 +433,8 @@ export class VoiceSession {
 	}
 
 	private handleTurnComplete(): void {
+		// A completed turn means the connection is healthy — reset reconnect counter
+		this.reconnectAttempts = 0;
 		this.transcriptManager.flush();
 		this.turnId++;
 		const turnIdStr = `turn_${this.turnId}`;
@@ -600,12 +606,7 @@ export class VoiceSession {
 		// Record in conversation context
 		this.conversationContext.addUserMessage(text.trim());
 
-		// Forward transcript to client for display
-		this.clientTransport.sendJsonToClient({
-			type: 'transcript',
-			role: 'user',
-			text: text.trim(),
-		});
+		// No transcript echo — the web client already displays typed text locally.
 	}
 
 	private handleClientConnected(): void {
@@ -633,20 +634,32 @@ export class VoiceSession {
 	private handleTransportClose(): void {
 		this.log(`Transport closed (state=${this.sessionManager.state})`);
 		if (this.sessionManager.state === 'ACTIVE') {
-			// Unexpected close — try to reconnect
+			// Unexpected close — try to reconnect with backoff and retry limit
 			const handle = this.sessionManager.resumptionHandle;
-			if (handle) {
+			if (handle && this.reconnectAttempts < VoiceSession.MAX_RECONNECT_ATTEMPTS) {
+				const attempt = this.reconnectAttempts++;
+				const delay = VoiceSession.RECONNECT_BACKOFF_MS[attempt] ?? 4000;
+				this.log(
+					`Reconnect attempt ${attempt + 1}/${VoiceSession.MAX_RECONNECT_ATTEMPTS} in ${delay}ms`,
+				);
 				this.sessionManager.transitionTo('RECONNECTING');
-				this.transport
-					.reconnect({ conversationHistory: this.conversationContext.toReplayContent() })
-					.then(() => {
-						this.sessionManager.transitionTo('ACTIVE');
-					})
-					.catch((err) => {
-						this.reportError('reconnect', err);
-						this.sessionManager.transitionTo('CLOSED');
-					});
+				setTimeout(() => {
+					this.transport
+						.reconnect({ conversationHistory: this.conversationContext.toReplayContent() })
+						.then(() => {
+							this.sessionManager.transitionTo('ACTIVE');
+						})
+						.catch((err) => {
+							this.reportError('reconnect', err);
+							this.sessionManager.transitionTo('CLOSED');
+						});
+				}, delay);
 			} else {
+				if (this.reconnectAttempts >= VoiceSession.MAX_RECONNECT_ATTEMPTS) {
+					this.log(
+						`Reconnect limit reached (${VoiceSession.MAX_RECONNECT_ATTEMPTS} attempts), giving up`,
+					);
+				}
 				this.sessionManager.transitionTo('CLOSED');
 			}
 		}
