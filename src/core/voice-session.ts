@@ -202,7 +202,7 @@ export class VoiceSession {
 		const allInitialTools = [...(initialAgent?.tools ?? []), ...behaviorTools];
 
 		if (config.transport) {
-			// Use pre-constructed transport
+			// Use pre-constructed transport (OpenAI, mock, etc.)
 			this.transport = config.transport;
 		} else {
 			// Construct GeminiLiveTransport from config (backward compatibility)
@@ -217,23 +217,25 @@ export class VoiceSession {
 					compressionConfig: config.compressionConfig,
 					inputAudioTranscription: config.inputAudioTranscription,
 				},
-				{
-					onSetupComplete: (sessionId) => this.handleSetupComplete(sessionId),
-					onAudioOutput: (data) => this.handleAudioOutput(data),
-					onToolCall: (calls) => this.toolCallRouter.handleToolCalls(calls),
-					onToolCallCancellation: (ids) => this.toolCallRouter.handleToolCallCancellation(ids),
-					onTurnComplete: () => this.handleTurnComplete(),
-					onInterrupted: () => this.handleInterrupted(),
-					onInputTranscription: (text) => this.transcriptManager.handleInput(text),
-					onOutputTranscription: (text) => this.transcriptManager.handleOutput(text),
-					onGroundingMetadata: (metadata) => this.handleGroundingMetadata(metadata),
-					onGoAway: (timeLeft) => this.handleGoAway(timeLeft),
-					onResumptionUpdate: (handle, resumable) => this.handleResumptionUpdate(handle, resumable),
-					onError: (error) => this.handleTransportError(error),
-					onClose: (code, reason) => this.handleTransportClose(code, reason),
-				},
+				{},
 			);
 		}
+
+		// Wire LLMTransport property callbacks — works for both injected and default transports
+		this.transport.onAudioOutput = (data) => this.handleAudioOutput(data);
+		this.transport.onToolCall = (calls) => this.toolCallRouter.handleToolCalls(calls);
+		this.transport.onToolCallCancel = (ids) => this.toolCallRouter.handleToolCallCancellation(ids);
+		this.transport.onTurnComplete = () => this.handleTurnComplete();
+		this.transport.onInterrupted = () => this.handleInterrupted();
+		this.transport.onInputTranscription = (text) => this.transcriptManager.handleInput(text);
+		this.transport.onOutputTranscription = (text) => this.transcriptManager.handleOutput(text);
+		this.transport.onSessionReady = (sessionId) => this.handleSetupComplete(sessionId);
+		this.transport.onError = (error) => this.handleTransportError(error);
+		this.transport.onClose = (code, reason) => this.handleTransportClose(code, reason);
+		this.transport.onGoAway = (timeLeft) => this.handleGoAway(timeLeft);
+		this.transport.onResumptionUpdate = (handle, resumable) =>
+			this.handleResumptionUpdate(handle, resumable);
+		this.transport.onGroundingMetadata = (metadata) => this.handleGroundingMetadata(metadata);
 
 		// Set up client transport
 		this.clientTransport = new ClientTransport(
@@ -320,13 +322,19 @@ export class VoiceSession {
 
 		this.log('Starting WS server...');
 		await this.clientTransport.start();
-		this.log('WS server ready. Connecting to Gemini...');
+		this.log('WS server ready. Connecting to LLM transport...');
 		this.sessionManager.transitionTo('CONNECTING');
-		await this.transport.connect({
-			auth: { type: 'api_key', apiKey: this.config.apiKey },
-			model: this.config.geminiModel ?? 'gemini-live-2.5-flash-preview',
-		});
-		this.log('Gemini connected and setup complete');
+		if (this.config.transport) {
+			// Pre-constructed transport — already configured, just connect
+			await this.transport.connect();
+		} else {
+			// Default Gemini transport — pass config for backward compatibility
+			await this.transport.connect({
+				auth: { type: 'api_key', apiKey: this.config.apiKey },
+				model: this.config.geminiModel ?? 'gemini-live-2.5-flash-preview',
+			});
+		}
+		this.log('LLM transport connected and setup complete');
 	}
 
 	/** Gracefully shut down: disconnect Gemini, stop the WebSocket server, transition to CLOSED. */

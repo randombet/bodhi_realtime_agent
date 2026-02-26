@@ -140,7 +140,7 @@ export interface LLMTransport {
 	readonly capabilities: TransportCapabilities;
 
 	// --- Lifecycle ---
-	connect(config: LLMTransportConfig): Promise<void>;
+	connect(config?: LLMTransportConfig): Promise<void>;
 	disconnect(): Promise<void>;
 	reconnect(state?: ReconnectState): Promise<void>;
 	readonly isConnected: boolean;
