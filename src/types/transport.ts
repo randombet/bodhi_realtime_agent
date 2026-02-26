@@ -181,7 +181,7 @@ export interface LLMTransport {
 	onOutputTranscription?: (text: string) => void;
 	onSessionReady?: (sessionId: string) => void;
 	onError?: (error: LLMTransportError) => void;
-	onClose?: () => void;
+	onClose?: (code?: number, reason?: string) => void;
 
 	// --- Optional capability callbacks (only fired by supporting transports) ---
 	onGoAway?: (timeLeft: string) => void;

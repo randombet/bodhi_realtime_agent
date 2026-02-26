@@ -71,7 +71,7 @@ export interface GeminiTransportCallbacks {
 	/** Transport-level error. */
 	onError?(error: Error): void;
 	/** WebSocket connection closed. */
-	onClose?(): void;
+	onClose?(code?: number, reason?: string): void;
 }
 
 /**
@@ -123,7 +123,7 @@ export class GeminiLiveTransport implements LLMTransport {
 	onOutputTranscription?: (text: string) => void;
 	onSessionReady?: (sessionId: string) => void;
 	onError?: (error: LLMTransportError) => void;
-	onClose?: () => void;
+	onClose?: (code?: number, reason?: string) => void;
 	onGoAway?: (timeLeft: string) => void;
 	onResumptionUpdate?: (handle: string, resumable: boolean) => void;
 	onGroundingMetadata?: (metadata: Record<string, unknown>) => void;
@@ -206,9 +206,11 @@ export class GeminiLiveTransport implements LLMTransport {
 					this.callbacks.onError?.(error);
 					if (this.onError) this.onError({ error, recoverable: true });
 				},
-				onclose: () => {
-					this.callbacks.onClose?.();
-					if (this.onClose) this.onClose();
+				onclose: (e: { code?: number; reason?: string }) => {
+					const code = e?.code;
+					const reason = e?.reason;
+					this.callbacks.onClose?.(code, reason);
+					if (this.onClose) this.onClose(code, reason);
 				},
 			},
 		});

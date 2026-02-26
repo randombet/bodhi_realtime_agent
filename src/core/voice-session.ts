@@ -230,7 +230,7 @@ export class VoiceSession {
 					onGoAway: (timeLeft) => this.handleGoAway(timeLeft),
 					onResumptionUpdate: (handle, resumable) => this.handleResumptionUpdate(handle, resumable),
 					onError: (error) => this.handleTransportError(error),
-					onClose: () => this.handleTransportClose(),
+					onClose: (code, reason) => this.handleTransportClose(code, reason),
 				},
 			);
 		}
@@ -631,8 +631,9 @@ export class VoiceSession {
 		this.reportError('gemini-transport', err);
 	}
 
-	private handleTransportClose(): void {
-		this.log(`Transport closed (state=${this.sessionManager.state})`);
+	private handleTransportClose(code?: number, reason?: string): void {
+		const detail = code != null ? ` code=${code}${reason ? ` reason="${reason}"` : ''}` : '';
+		this.log(`Transport closed (state=${this.sessionManager.state}${detail})`);
 		if (this.sessionManager.state === 'ACTIVE') {
 			// Unexpected close — try to reconnect with backoff and retry limit
 			const handle = this.sessionManager.resumptionHandle;
