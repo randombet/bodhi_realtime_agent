@@ -14,11 +14,17 @@ function createMockRt() {
 	const socketListeners = new Map<string, ((...args: unknown[]) => void)[]>();
 	const sent: Record<string, unknown>[] = [];
 
+	const onceListeners = new Map<string, ((...args: unknown[]) => void)[]>();
+
 	return {
 		sent,
 		on(event: string, handler: (...args: unknown[]) => void) {
 			if (!listeners.has(event)) listeners.set(event, []);
 			listeners.get(event)?.push(handler);
+		},
+		once(event: string, handler: (...args: unknown[]) => void) {
+			if (!onceListeners.has(event)) onceListeners.set(event, []);
+			onceListeners.get(event)?.push(handler);
 		},
 		send(message: Record<string, unknown>) {
 			sent.push(message);
@@ -31,6 +37,11 @@ function createMockRt() {
 		close: vi.fn(),
 		emit(event: string, data: unknown) {
 			for (const handler of listeners.get(event) ?? []) {
+				handler(data);
+			}
+			// Fire and remove once-listeners
+			const once = onceListeners.get(event)?.splice(0) ?? [];
+			for (const handler of once) {
 				handler(data);
 			}
 		},

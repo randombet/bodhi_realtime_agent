@@ -290,8 +290,7 @@ export class VoiceSession {
 			notificationQueue: this.notificationQueue,
 			transcriptManager: this.transcriptManager,
 			subagentConfigs: this.subagentConfigs,
-			sendToolResponse: (responses) =>
-				(this.transport as GeminiLiveTransport).sendToolResponse(responses),
+			sendToolResult: (result) => this.transport.sendToolResult(result),
 			transfer: (toAgent) => this.transfer(toAgent),
 			reportError: (component, error) => this.reportError(component, error),
 			log: (msg) => this.log(msg),

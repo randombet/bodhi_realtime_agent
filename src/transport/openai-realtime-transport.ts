@@ -30,6 +30,8 @@ export interface OpenAIRealtimeConfig {
 	model?: string;
 	/** Voice name (default: 'coral'). */
 	voice?: string;
+	/** Transcription model (default: 'gpt-4o-mini-transcribe'). Set to null to disable input transcription. */
+	transcriptionModel?: string | null;
 	/** Turn detection configuration. */
 	turnDetection?: Record<string, unknown>;
 	/** Noise reduction configuration. */
@@ -148,7 +150,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 				() => reject(new Error('session.created timeout — WebSocket may have failed to open')),
 				15_000,
 			);
-			this.rt?.on('session.created', (event) => {
+			this.rt?.once('session.created', (event) => {
 				clearTimeout(timeout);
 				// biome-ignore lint/suspicious/noExplicitAny: SDK type gap — runtime event includes session id
 				resolve((event.session as any)?.id ?? 'unknown');
@@ -162,7 +164,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 
 		const updatedPromise = new Promise<void>((resolve, reject) => {
 			const timeout = setTimeout(() => reject(new Error('session.update timeout')), 15_000);
-			this.rt?.on('session.updated', () => {
+			this.rt?.once('session.updated', () => {
 				clearTimeout(timeout);
 				resolve();
 			});
@@ -285,7 +287,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		// Wait for session.updated confirmation
 		const updatedPromise = new Promise<void>((resolve, reject) => {
 			const timeout = setTimeout(() => reject(new Error('transferSession timeout')), 10_000);
-			this.rt?.on('session.updated', () => {
+			this.rt?.once('session.updated', () => {
 				clearTimeout(timeout);
 				resolve();
 			});
@@ -432,7 +434,13 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			audio: {
 				input: {
 					format: { type: 'audio/pcm', rate: 24000 },
-					transcription: { model: 'gpt-4o-transcribe' },
+					...(this.config.transcriptionModel !== null
+						? {
+								transcription: {
+									model: this.config.transcriptionModel ?? 'gpt-4o-mini-transcribe',
+								},
+							}
+						: {}),
 					turn_detection: (this.config.turnDetection ?? {
 						type: 'semantic_vad',
 						eagerness: 'medium',
