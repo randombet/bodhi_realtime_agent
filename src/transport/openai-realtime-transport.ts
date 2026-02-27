@@ -108,7 +108,11 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	private audioOutputMs = 0;
 
 	// Tool call argument accumulation (OpenAI streams args incrementally)
-	private pendingFunctionCalls = new Map<string, { name: string; buffer: string }>();
+	private pendingFunctionCalls = new Map<string, string>();
+
+	// when_idle scheduling: buffer tool results while model is generating
+	private _isModelGenerating = false;
+	private _pendingWhenIdle: TransportToolResult[] = [];
 
 	constructor(config: OpenAIRealtimeConfig) {
 		this.config = config;
@@ -174,6 +178,8 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	async disconnect(): Promise<void> {
 		this._isConnected = false;
 		this.pendingFunctionCalls.clear();
+		this._pendingWhenIdle = [];
+		this._isModelGenerating = false;
 		this.lastAssistantItemId = null;
 		this.audioOutputMs = 0;
 		if (this.rt) {
@@ -190,9 +196,31 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		await this.disconnect();
 		await this.connect();
 
+		if (!this.rt) return;
+
 		// Replay conversation history as conversation items
 		if (state?.conversationHistory?.length) {
 			this.replayHistory(state.conversationHistory);
+		}
+
+		// Re-send completed tool results that were in-flight at disconnect time.
+		// Executing tool calls are ignored — the framework re-dispatches those.
+		if (state?.pendingToolCalls?.length) {
+			for (const pending of state.pendingToolCalls) {
+				if (pending.status === 'completed' && pending.result !== undefined) {
+					this.rt.send({
+						type: 'conversation.item.create',
+						item: {
+							type: 'function_call_output',
+							call_id: pending.id,
+							output:
+								typeof pending.result === 'string'
+									? pending.result
+									: JSON.stringify(pending.result),
+						},
+					});
+				}
+			}
 		}
 	}
 
@@ -326,7 +354,20 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	sendToolResult(result: TransportToolResult): void {
 		if (!this.rt || !this._isConnected) return;
 
-		// Step 1: Send the tool output as a conversation item
+		const scheduling = result.scheduling ?? 'immediate';
+
+		// 'when_idle': buffer if model is mid-response, flush on response.done
+		if (scheduling === 'when_idle' && this._isModelGenerating) {
+			this._pendingWhenIdle.push(result);
+			return;
+		}
+
+		// 'interrupt': cancel in-flight response before delivering
+		if (scheduling === 'interrupt') {
+			this.rt.send({ type: 'response.cancel' });
+		}
+
+		// Send the tool output as a conversation item
 		this.rt.send({
 			type: 'conversation.item.create',
 			item: {
@@ -336,10 +377,9 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			},
 		});
 
-		// Step 2: Explicitly trigger response generation
-		// OpenAI requires manual response.create after tool results (unlike Gemini's auto-response).
-		// For 'silent' scheduling, skip the response trigger.
-		if (result.scheduling !== 'silent') {
+		// Trigger response generation (OpenAI requires explicit response.create).
+		// 'silent': skip — result is injected without triggering a new turn.
+		if (scheduling !== 'silent') {
 			this.rt.send({ type: 'response.create' });
 		}
 	}
@@ -436,8 +476,9 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			this.audioOutputMs += (samples / 24000) * 1000;
 		});
 
-		// --- Track assistant output items for interruption ---
+		// --- Track assistant output items for interruption + model generating state ---
 		rt.on('response.output_item.added', (event) => {
+			this._isModelGenerating = true;
 			// ConversationItem is a union; only messages have role
 			const item = event.item;
 			if ('role' in item && item.role === 'assistant' && item.id) {
@@ -446,22 +487,37 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			}
 		});
 
-		// --- Tool call argument streaming ---
+		// --- Tool call argument streaming (accumulate per item_id) ---
 		rt.on('response.function_call_arguments.delta', (event) => {
-			const pending = this.pendingFunctionCalls.get(event.item_id) ?? {
-				name: '',
-				buffer: '',
-			};
-			pending.buffer += event.delta;
-			this.pendingFunctionCalls.set(event.item_id, pending);
+			const buffer = this.pendingFunctionCalls.get(event.item_id) ?? '';
+			this.pendingFunctionCalls.set(event.item_id, buffer + event.delta);
 		});
 
 		// --- Tool call complete (fires onToolCall) ---
 		rt.on('response.output_item.done', (event) => {
 			const item = event.item;
 			if (item.type === 'function_call') {
+				// Prefer accumulated buffer (built from streamed deltas).
+				// Fall back to item.arguments from the done event.
+				const rawArgs = (item.id && this.pendingFunctionCalls.get(item.id)) || item.arguments;
 				if (item.id) this.pendingFunctionCalls.delete(item.id);
-				const args = item.arguments ? JSON.parse(item.arguments) : {};
+
+				let args: Record<string, unknown> = {};
+				if (rawArgs) {
+					try {
+						args = JSON.parse(rawArgs);
+					} catch {
+						if (this.onError) {
+							this.onError({
+								error: new Error(
+									`Failed to parse tool call arguments for ${item.name}: ${rawArgs}`,
+								),
+								recoverable: true,
+							});
+						}
+						return;
+					}
+				}
 				if (this.onToolCall) {
 					this.onToolCall([
 						{
@@ -474,8 +530,10 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			}
 		});
 
-		// --- Turn complete ---
+		// --- Turn complete: clear generating state, flush when_idle queue ---
 		rt.on('response.done', () => {
+			this._isModelGenerating = false;
+			this.flushPendingWhenIdle();
 			if (this.onTurnComplete) this.onTurnComplete();
 		});
 
@@ -507,13 +565,16 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		// NOTE: session.created is handled in connect() to control startup ordering.
 		// onSessionReady fires at the end of connect() after session.updated confirms.
 
-		// --- Error handling ---
+		// --- Error handling (classify recoverability by error type) ---
 		rt.on('error', (error) => {
 			if (this.onError) {
-				this.onError({
-					error: error instanceof Error ? error : new Error(String(error)),
-					recoverable: true,
-				});
+				const err = error instanceof Error ? error : new Error(String(error));
+				// OpenAIRealtimeError has .error.type for classification
+				// biome-ignore lint/suspicious/noExplicitAny: checking OpenAIRealtimeError shape without importing SDK internal type
+				const errorType: string = (error as any)?.error?.type ?? '';
+				const nonRecoverable =
+					errorType === 'invalid_request_error' || errorType === 'authentication_error';
+				this.onError({ error: err, recoverable: !nonRecoverable });
 			}
 		});
 
@@ -522,6 +583,24 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			this._isConnected = false;
 			if (this.onClose) this.onClose(code, reason.toString());
 		});
+	}
+
+	/** Flush any tool results queued with 'when_idle' scheduling. */
+	private flushPendingWhenIdle(): void {
+		if (!this.rt || this._pendingWhenIdle.length === 0) return;
+		const queued = this._pendingWhenIdle.splice(0);
+		for (const result of queued) {
+			this.rt.send({
+				type: 'conversation.item.create',
+				item: {
+					type: 'function_call_output',
+					call_id: result.id,
+					output: typeof result.result === 'string' ? result.result : JSON.stringify(result.result),
+				},
+			});
+		}
+		// Trigger a single response for all flushed results
+		this.rt.send({ type: 'response.create' });
 	}
 
 	private replayHistory(items: ReplayItem[]): void {

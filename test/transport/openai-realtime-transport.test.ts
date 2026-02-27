@@ -135,7 +135,7 @@ describe('OpenAIRealtimeTransport', () => {
 	});
 
 	describe('tool call handling', () => {
-		it('accumulates streamed args and fires onToolCall on output_item.done', () => {
+		it('uses accumulated buffer from streamed deltas as primary arg source', () => {
 			const calls: unknown[] = [];
 			transport.onToolCall = (c) => calls.push(...c);
 
@@ -146,17 +146,17 @@ describe('OpenAIRealtimeTransport', () => {
 			});
 			mockRt.emit('response.function_call_arguments.delta', {
 				item_id: 'item_1',
-				delta: 'ut":"hello"}',
+				delta: 'ut":"from_buffer"}',
 			});
 
-			// Tool call complete
+			// Tool call complete — item.arguments differs from buffer to prove buffer wins
 			mockRt.emit('response.output_item.done', {
 				item: {
 					id: 'item_1',
 					type: 'function_call',
 					call_id: 'call_1',
 					name: 'test_tool',
-					arguments: '{"input":"hello"}',
+					arguments: '{"input":"from_done_event"}',
 				},
 			});
 
@@ -164,8 +164,102 @@ describe('OpenAIRealtimeTransport', () => {
 			expect(calls[0]).toEqual({
 				id: 'call_1',
 				name: 'test_tool',
-				args: { input: 'hello' },
+				args: { input: 'from_buffer' },
 			});
+		});
+
+		it('falls back to item.arguments when no deltas were streamed', () => {
+			const calls: unknown[] = [];
+			transport.onToolCall = (c) => calls.push(...c);
+
+			// No delta events — only the done event with arguments
+			mockRt.emit('response.output_item.done', {
+				item: {
+					id: 'item_2',
+					type: 'function_call',
+					call_id: 'call_2',
+					name: 'test_tool',
+					arguments: '{"input":"fallback"}',
+				},
+			});
+
+			expect(calls).toHaveLength(1);
+			expect(calls[0]).toEqual({
+				id: 'call_2',
+				name: 'test_tool',
+				args: { input: 'fallback' },
+			});
+		});
+
+		it('handles interleaved tool calls independently', () => {
+			const calls: unknown[] = [];
+			transport.onToolCall = (c) => calls.push(...c);
+
+			// Two interleaved streams
+			mockRt.emit('response.function_call_arguments.delta', {
+				item_id: 'item_a',
+				delta: '{"x":',
+			});
+			mockRt.emit('response.function_call_arguments.delta', {
+				item_id: 'item_b',
+				delta: '{"y":',
+			});
+			mockRt.emit('response.function_call_arguments.delta', {
+				item_id: 'item_a',
+				delta: '1}',
+			});
+			mockRt.emit('response.function_call_arguments.delta', {
+				item_id: 'item_b',
+				delta: '2}',
+			});
+
+			mockRt.emit('response.output_item.done', {
+				item: {
+					id: 'item_a',
+					type: 'function_call',
+					call_id: 'ca',
+					name: 'toolA',
+					arguments: '{}',
+				},
+			});
+			mockRt.emit('response.output_item.done', {
+				item: {
+					id: 'item_b',
+					type: 'function_call',
+					call_id: 'cb',
+					name: 'toolB',
+					arguments: '{}',
+				},
+			});
+
+			expect(calls).toHaveLength(2);
+			expect(calls[0]).toEqual({ id: 'ca', name: 'toolA', args: { x: 1 } });
+			expect(calls[1]).toEqual({ id: 'cb', name: 'toolB', args: { y: 2 } });
+		});
+
+		it('fires onError and skips dispatch on malformed JSON args', () => {
+			const calls: unknown[] = [];
+			const errors: unknown[] = [];
+			transport.onToolCall = (c) => calls.push(...c);
+			transport.onError = (e) => errors.push(e);
+
+			mockRt.emit('response.function_call_arguments.delta', {
+				item_id: 'item_bad',
+				delta: '{not valid json',
+			});
+			mockRt.emit('response.output_item.done', {
+				item: {
+					id: 'item_bad',
+					type: 'function_call',
+					call_id: 'call_bad',
+					name: 'broken',
+					arguments: '{also bad}',
+				},
+			});
+
+			expect(calls).toHaveLength(0);
+			expect(errors).toHaveLength(1);
+			expect(errors[0]).toMatchObject({ recoverable: true });
 		});
 
 		it('ignores non-function_call output items', () => {
@@ -181,7 +275,7 @@ describe('OpenAIRealtimeTransport', () => {
 	});
 
 	describe('sendToolResult', () => {
-		it('sends conversation.item.create and response.create', () => {
+		it('sends conversation.item.create and response.create for immediate', () => {
 			transport.sendToolResult({
 				id: 'call_1',
 				name: 'test_tool',
@@ -211,7 +305,7 @@ describe('OpenAIRealtimeTransport', () => {
 			expect(responseCreates).toHaveLength(0);
 		});
 
-		it('sends response.create for when_idle scheduling', () => {
+		it('sends immediately when_idle and model is NOT generating', () => {
 			transport.sendToolResult({
 				id: 'call_1',
 				name: 'test_tool',
@@ -219,6 +313,53 @@ describe('OpenAIRealtimeTransport', () => {
 				scheduling: 'when_idle',
 			});
 
+			expect(mockRt.sent).toContainEqual({
+				type: 'conversation.item.create',
+				item: expect.objectContaining({ call_id: 'call_1' }),
+			});
+			expect(mockRt.sent).toContainEqual({ type: 'response.create' });
+		});
+
+		it('buffers when_idle result while model is generating, flushes on response.done', () => {
+			// Simulate model generating (output item added sets _isModelGenerating)
+			mockRt.emit('response.output_item.added', {
+				item: { id: 'asst_1', role: 'assistant' },
+			});
+
+			transport.sendToolResult({
+				id: 'call_1',
+				name: 'test_tool',
+				result: 'bg_result',
+				scheduling: 'when_idle',
+			});
+
+			// Should NOT have sent the tool result yet
+			const creates = mockRt.sent.filter((m) => m.type === 'conversation.item.create');
+			expect(creates).toHaveLength(0);
+
+			// Model finishes → response.done flushes the queue
+			mockRt.emit('response.done', {});
+
+			const afterFlush = mockRt.sent.filter((m) => m.type === 'conversation.item.create');
+			expect(afterFlush).toHaveLength(1);
+			expect(afterFlush[0]).toMatchObject({
+				item: { call_id: 'call_1', output: 'bg_result' },
+			});
+			expect(mockRt.sent).toContainEqual({ type: 'response.create' });
+		});
+
+		it('sends response.cancel before result for interrupt scheduling', () => {
+			transport.sendToolResult({
+				id: 'call_1',
+				name: 'test_tool',
+				result: 'urgent',
+				scheduling: 'interrupt',
+			});
+
+			const cancelIdx = mockRt.sent.findIndex((m) => m.type === 'response.cancel');
+			const createIdx = mockRt.sent.findIndex((m) => m.type === 'conversation.item.create');
+			expect(cancelIdx).toBeGreaterThanOrEqual(0);
+			expect(createIdx).toBeGreaterThan(cancelIdx);
 			expect(mockRt.sent).toContainEqual({ type: 'response.create' });
 		});
 	});
@@ -397,13 +538,12 @@ describe('OpenAIRealtimeTransport', () => {
 	});
 
 	describe('error and close', () => {
-		it('fires onError on error event', () => {
+		it('marks transient errors as recoverable', () => {
 			let err: unknown = null;
 			transport.onError = (e) => {
 				err = e;
 			};
 
-			// The emitter passes OpenAIRealtimeError (extends Error) to the error handler
 			const error = new Error('rate limit');
 			mockRt.emit('error', error);
 
@@ -411,6 +551,45 @@ describe('OpenAIRealtimeTransport', () => {
 				error: expect.objectContaining({ message: 'rate limit' }),
 				recoverable: true,
 			});
+		});
+
+		it('marks server_error as recoverable', () => {
+			let err: unknown = null;
+			transport.onError = (e) => {
+				err = e;
+			};
+
+			const error = Object.assign(new Error('server error'), {
+				error: { type: 'server_error', message: 'internal' },
+			});
+			mockRt.emit('error', error);
+			expect(err).toMatchObject({ recoverable: true });
+		});
+
+		it('marks authentication_error as non-recoverable', () => {
+			let err: unknown = null;
+			transport.onError = (e) => {
+				err = e;
+			};
+
+			const error = Object.assign(new Error('bad key'), {
+				error: { type: 'authentication_error', message: 'invalid key' },
+			});
+			mockRt.emit('error', error);
+			expect(err).toMatchObject({ recoverable: false });
+		});
+
+		it('marks invalid_request_error as non-recoverable', () => {
+			let err: unknown = null;
+			transport.onError = (e) => {
+				err = e;
+			};
+
+			const error = Object.assign(new Error('bad request'), {
+				error: { type: 'invalid_request_error', message: 'malformed' },
+			});
+			mockRt.emit('error', error);
+			expect(err).toMatchObject({ recoverable: false });
 		});
 
 		it('fires onClose on socket close event', () => {
