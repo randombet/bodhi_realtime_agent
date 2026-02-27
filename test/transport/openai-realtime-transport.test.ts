@@ -469,7 +469,7 @@ describe('OpenAIRealtimeTransport', () => {
 	});
 
 	describe('interruption handling', () => {
-		it('sends truncate and cancel on speech_started when model is generating', () => {
+		it('sends truncate (but not cancel) on speech_started when model is generating', () => {
 			let interrupted = false;
 			transport.onInterrupted = () => {
 				interrupted = true;
@@ -487,7 +487,7 @@ describe('OpenAIRealtimeTransport', () => {
 			const audioChunk = Buffer.alloc(4800).toString('base64'); // 2400 samples = 100ms
 			mockRt.emit('response.output_audio.delta', { delta: audioChunk });
 
-			// User starts speaking
+			// User starts speaking — server VAD auto-cancels, so we only truncate
 			mockRt.emit('input_audio_buffer.speech_started', {});
 
 			expect(mockRt.sent).toContainEqual({
@@ -496,7 +496,9 @@ describe('OpenAIRealtimeTransport', () => {
 				content_index: 0,
 				audio_end_ms: 100,
 			});
-			expect(mockRt.sent).toContainEqual({ type: 'response.cancel' });
+			// No response.cancel — server handles cancellation in server VAD mode
+			const cancels = mockRt.sent.filter((m) => m.type === 'response.cancel');
+			expect(cancels).toHaveLength(0);
 			expect(interrupted).toBe(true);
 		});
 
@@ -531,7 +533,7 @@ describe('OpenAIRealtimeTransport', () => {
 			expect(truncates).toHaveLength(0);
 		});
 
-		it('response.created enables cancellation even before output_item.added', () => {
+		it('response.created enables interruption even before output_item.added', () => {
 			let interrupted = false;
 			transport.onInterrupted = () => {
 				interrupted = true;
@@ -541,13 +543,14 @@ describe('OpenAIRealtimeTransport', () => {
 			mockRt.emit('response.created', {});
 			mockRt.emit('input_audio_buffer.speech_started', {});
 
-			// Cancel should be sent (response is active)
-			expect(mockRt.sent).toContainEqual({ type: 'response.cancel' });
+			// onInterrupted should fire (response was active)
 			expect(interrupted).toBe(true);
 
-			// But no truncation (no assistant item tracked yet)
+			// No truncation (no assistant item tracked yet) and no cancel (server VAD)
 			const truncates = mockRt.sent.filter((m) => m.type === 'conversation.item.truncate');
+			const cancels = mockRt.sent.filter((m) => m.type === 'response.cancel');
 			expect(truncates).toHaveLength(0);
+			expect(cancels).toHaveLength(0);
 		});
 	});
 

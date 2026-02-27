@@ -544,11 +544,15 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			if (this.onTurnComplete) this.onTurnComplete();
 		});
 
-		// --- Interruption handling (only when model is actively generating) ---
+		// --- Interruption handling (server VAD mode) ---
+		// In server VAD mode (when speech_started fires), the server automatically
+		// cancels any in-flight response and sends response.done (status: cancelled).
+		// We only need to truncate the audio item to what the user actually heard.
+		// Sending response.cancel here would race with the server's own cancellation
+		// and produce "no active response found" errors.
 		rt.on('input_audio_buffer.speech_started', () => {
 			if (!this._isModelGenerating) return;
 
-			// Truncate assistant audio to what the user actually heard
 			if (this.lastAssistantItemId) {
 				rt.send({
 					type: 'conversation.item.truncate',
@@ -557,7 +561,6 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 					audio_end_ms: Math.floor(this.audioOutputMs),
 				});
 			}
-			rt.send({ type: 'response.cancel' });
 			this._isModelGenerating = false;
 			if (this.onInterrupted) this.onInterrupted();
 		});
