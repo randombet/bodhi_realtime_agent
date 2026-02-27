@@ -23,7 +23,7 @@ That's all you need to get started. Register it with `VoiceSession` and it becom
 | Property | Type | Required | Description |
 |----------|------|----------|-------------|
 | `name` | `string` | Yes | Unique identifier used for routing and transfers |
-| `instructions` | `string \| () => string` | Yes | System prompt sent to Gemini |
+| `instructions` | `string \| () => string` | Yes | System prompt sent to the LLM |
 | `tools` | `ToolDefinition[]` | Yes | Tools available when this agent is active |
 | `googleSearch` | `boolean` | No | Enable Gemini's built-in Google Search grounding |
 | `language` | `string` | No | BCP 47 language tag (e.g. `'zh-CN'`, `'es-ES'`) |
@@ -46,11 +46,11 @@ const agent: MainAgent = {
 };
 ```
 
-The function is called each time the agent connects to Gemini (on start, after transfers, and on reconnection).
+The function is called each time the agent connects to the LLM provider (on start, after transfers, and on reconnection).
 
 ## Agent Transfers
 
-The framework includes a built-in `transferToAgent` tool that Gemini can call to switch agents. When you register multiple agents, the framework automatically makes this tool available:
+The framework includes a built-in `transferToAgent` tool that the model can call to switch agents. When you register multiple agents, the framework automatically makes this tool available:
 
 ```typescript
 const mainAgent: MainAgent = {
@@ -77,19 +77,18 @@ const session = new VoiceSession({
 During a transfer, the framework:
 
 1. Calls `onExit` on the current agent
-2. Buffers client audio (so nothing is lost)
-3. Disconnects from the current Gemini session
-4. Connects a new Gemini session with the new agent's instructions and tools
-5. Replays buffered audio
-6. Calls `onEnter` on the new agent
+2. Updates the LLM session with the new agent's instructions and tools
+   - **OpenAI**: In-place `session.update` — no reconnect needed
+   - **Gemini**: Buffers client audio, disconnects, reconnects with new config, replays audio
+3. Calls `onEnter` on the new agent
 
 ::: tip
-Transfers are seamless to the user — they hear continuous audio. The framework manages the Gemini reconnection behind the scenes.
+Transfers are seamless to the user — they hear continuous audio. The framework handles the provider-specific mechanics behind the scenes.
 :::
 
 ## Multilingual Support
 
-Gemini's native audio model automatically detects the user's language and can respond in kind. The simplest approach is to instruct the agent to be multilingual:
+Both Gemini and OpenAI's native audio models automatically detect the user's language and can respond in kind. The simplest approach is to instruct the agent to be multilingual:
 
 ```typescript
 const assistant: MainAgent = {
