@@ -204,6 +204,11 @@ export class VoiceSession {
 		if (config.transport) {
 			// Use pre-constructed transport (OpenAI, mock, etc.)
 			this.transport = config.transport;
+			// Sync tools and instructions so they're available at connect time
+			this.transport.updateSession({
+				instructions,
+				tools: allInitialTools.length ? allInitialTools : undefined,
+			});
 		} else {
 			// Construct GeminiLiveTransport from config (backward compatibility)
 			this.transport = new GeminiLiveTransport(

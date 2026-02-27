@@ -116,6 +116,9 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	private _isModelGenerating = false;
 	private _pendingWhenIdle: TransportToolResult[] = [];
 
+	// Audio suppression: stop forwarding audio deltas after interruption
+	private _suppressAudio = false;
+
 	constructor(config: OpenAIRealtimeConfig) {
 		this.config = config;
 		this.client = new OpenAI({ apiKey: config.apiKey });
@@ -182,6 +185,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		this.pendingFunctionCalls.clear();
 		this._pendingWhenIdle = [];
 		this._isModelGenerating = false;
+		this._suppressAudio = false;
 		this.lastAssistantItemId = null;
 		this.audioOutputMs = 0;
 		if (this.rt) {
@@ -477,6 +481,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 
 		// --- Audio output ---
 		rt.on('response.output_audio.delta', (event) => {
+			if (this._suppressAudio) return;
 			if (this.onAudioOutput) this.onAudioOutput(event.delta);
 
 			// Track audio duration for interruption handling
@@ -488,6 +493,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		// --- Response lifecycle: track when a response is active ---
 		rt.on('response.created', () => {
 			this._isModelGenerating = true;
+			this._suppressAudio = false;
 		});
 
 		// --- Track assistant output items for interruption ---
@@ -560,6 +566,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		// and produce "no active response found" errors.
 		rt.on('input_audio_buffer.speech_started', () => {
 			if (!this._isModelGenerating) return;
+			this._suppressAudio = true;
 
 			if (this.lastAssistantItemId) {
 				rt.send({

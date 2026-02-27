@@ -565,6 +565,35 @@ describe('OpenAIRealtimeTransport', () => {
 		});
 	});
 
+	describe('audio suppression after interruption', () => {
+		it('suppresses audio output after speech_started until next response.created', () => {
+			const audioChunks: string[] = [];
+			transport.onAudioOutput = (data) => audioChunks.push(data);
+
+			// Start a response and emit audio
+			mockRt.emit('response.created', {});
+			mockRt.emit('response.output_audio.delta', { delta: 'AQID' }); // chunk 1
+			expect(audioChunks).toHaveLength(1);
+
+			// Interruption: speech_started suppresses subsequent audio
+			mockRt.emit('response.output_item.added', {
+				item: { role: 'assistant', id: 'item_1' },
+			});
+			mockRt.emit('input_audio_buffer.speech_started', {});
+			mockRt.emit('response.output_audio.delta', { delta: 'BAUG' }); // chunk 2 — suppressed
+			mockRt.emit('response.output_audio.delta', { delta: 'BwgJ' }); // chunk 3 — suppressed
+			expect(audioChunks).toHaveLength(1); // still 1
+
+			// response.done (cancelled) arrives
+			mockRt.emit('response.done', {});
+
+			// New response starts — audio resumes
+			mockRt.emit('response.created', {});
+			mockRt.emit('response.output_audio.delta', { delta: 'CgsM' }); // chunk 4 — forwarded
+			expect(audioChunks).toHaveLength(2);
+		});
+	});
+
 	describe('transcription callbacks', () => {
 		it('fires onInputTranscription', () => {
 			let transcript = '';
