@@ -363,8 +363,9 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		}
 
 		// 'interrupt': cancel in-flight response before delivering
-		if (scheduling === 'interrupt') {
+		if (scheduling === 'interrupt' && this._isModelGenerating) {
 			this.rt.send({ type: 'response.cancel' });
+			this._isModelGenerating = false;
 		}
 
 		// Send the tool output as a conversation item
@@ -476,9 +477,13 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			this.audioOutputMs += (samples / 24000) * 1000;
 		});
 
-		// --- Track assistant output items for interruption + model generating state ---
-		rt.on('response.output_item.added', (event) => {
+		// --- Response lifecycle: track when a response is active ---
+		rt.on('response.created', () => {
 			this._isModelGenerating = true;
+		});
+
+		// --- Track assistant output items for interruption ---
+		rt.on('response.output_item.added', (event) => {
 			// ConversationItem is a union; only messages have role
 			const item = event.item;
 			if ('role' in item && item.role === 'assistant' && item.id) {
@@ -533,13 +538,17 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		// --- Turn complete: clear generating state, flush when_idle queue ---
 		rt.on('response.done', () => {
 			this._isModelGenerating = false;
+			this.lastAssistantItemId = null;
+			this.audioOutputMs = 0;
 			this.flushPendingWhenIdle();
 			if (this.onTurnComplete) this.onTurnComplete();
 		});
 
-		// --- Interruption handling (client-managed) ---
+		// --- Interruption handling (only when model is actively generating) ---
 		rt.on('input_audio_buffer.speech_started', () => {
-			// Truncate assistant's message to what user actually heard
+			if (!this._isModelGenerating) return;
+
+			// Truncate assistant audio to what the user actually heard
 			if (this.lastAssistantItemId) {
 				rt.send({
 					type: 'conversation.item.truncate',
@@ -549,6 +558,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 				});
 			}
 			rt.send({ type: 'response.cancel' });
+			this._isModelGenerating = false;
 			if (this.onInterrupted) this.onInterrupted();
 		});
 

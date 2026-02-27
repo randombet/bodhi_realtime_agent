@@ -321,10 +321,8 @@ describe('OpenAIRealtimeTransport', () => {
 		});
 
 		it('buffers when_idle result while model is generating, flushes on response.done', () => {
-			// Simulate model generating (output item added sets _isModelGenerating)
-			mockRt.emit('response.output_item.added', {
-				item: { id: 'asst_1', role: 'assistant' },
-			});
+			// Simulate model generating (response.created sets _isModelGenerating)
+			mockRt.emit('response.created', {});
 
 			transport.sendToolResult({
 				id: 'call_1',
@@ -349,6 +347,9 @@ describe('OpenAIRealtimeTransport', () => {
 		});
 
 		it('sends response.cancel before result for interrupt scheduling', () => {
+			// Model must be generating for cancel to be sent
+			mockRt.emit('response.created', {});
+
 			transport.sendToolResult({
 				id: 'call_1',
 				name: 'test_tool',
@@ -468,11 +469,14 @@ describe('OpenAIRealtimeTransport', () => {
 	});
 
 	describe('interruption handling', () => {
-		it('sends truncate and cancel on speech_started', () => {
+		it('sends truncate and cancel on speech_started when model is generating', () => {
 			let interrupted = false;
 			transport.onInterrupted = () => {
 				interrupted = true;
 			};
+
+			// Start a response (sets _isModelGenerating)
+			mockRt.emit('response.created', {});
 
 			// Simulate assistant output item
 			mockRt.emit('response.output_item.added', {
@@ -494,6 +498,56 @@ describe('OpenAIRealtimeTransport', () => {
 			});
 			expect(mockRt.sent).toContainEqual({ type: 'response.cancel' });
 			expect(interrupted).toBe(true);
+		});
+
+		it('does not send cancel/truncate when model is idle', () => {
+			let interrupted = false;
+			transport.onInterrupted = () => {
+				interrupted = true;
+			};
+
+			// No response.created — model is idle
+			mockRt.emit('input_audio_buffer.speech_started', {});
+
+			const cancels = mockRt.sent.filter((m) => m.type === 'response.cancel');
+			const truncates = mockRt.sent.filter((m) => m.type === 'conversation.item.truncate');
+			expect(cancels).toHaveLength(0);
+			expect(truncates).toHaveLength(0);
+			expect(interrupted).toBe(false);
+		});
+
+		it('resets lastAssistantItemId on response.done so stale truncation is avoided', () => {
+			// First response with audio
+			mockRt.emit('response.created', {});
+			mockRt.emit('response.output_item.added', {
+				item: { id: 'asst_old', role: 'assistant' },
+			});
+			mockRt.emit('response.done', {});
+
+			// User starts speaking after response completed — model is idle
+			mockRt.emit('input_audio_buffer.speech_started', {});
+
+			const truncates = mockRt.sent.filter((m) => m.type === 'conversation.item.truncate');
+			expect(truncates).toHaveLength(0);
+		});
+
+		it('response.created enables cancellation even before output_item.added', () => {
+			let interrupted = false;
+			transport.onInterrupted = () => {
+				interrupted = true;
+			};
+
+			// Response created but no output items yet
+			mockRt.emit('response.created', {});
+			mockRt.emit('input_audio_buffer.speech_started', {});
+
+			// Cancel should be sent (response is active)
+			expect(mockRt.sent).toContainEqual({ type: 'response.cancel' });
+			expect(interrupted).toBe(true);
+
+			// But no truncation (no assistant item tracked yet)
+			const truncates = mockRt.sent.filter((m) => m.type === 'conversation.item.truncate');
+			expect(truncates).toHaveLength(0);
 		});
 	});
 
