@@ -436,14 +436,16 @@ describe('OpenAIRealtimeTransport', () => {
 	});
 
 	describe('session ready', () => {
-		it('fires onSessionReady on session.created', () => {
+		it('does NOT fire onSessionReady from session.created event (moved to connect)', () => {
 			let sessionId = '';
 			transport.onSessionReady = (id) => {
 				sessionId = id;
 			};
 
+			// session.created via wireEventListeners() should NOT trigger onSessionReady
+			// (onSessionReady is now fired at the end of connect() after session.updated)
 			mockRt.emit('session.created', { session: { id: 'sess_abc123' } });
-			expect(sessionId).toBe('sess_abc123');
+			expect(sessionId).toBe('');
 		});
 	});
 

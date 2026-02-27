@@ -643,7 +643,7 @@ export class VoiceSession {
 	private handleTransportError(error: Error | LLMTransportError): void {
 		const err = error instanceof Error ? error : error.error;
 		this.log(`Transport error: ${err.message}`);
-		this.reportError('gemini-transport', err);
+		this.reportError('llm-transport', err);
 	}
 
 	private handleTransportClose(code?: number, reason?: string): void {

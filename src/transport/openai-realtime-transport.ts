@@ -129,17 +129,33 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 
 		const model = this.config.model ?? 'gpt-realtime';
 
-		// Create WebSocket connection using the openai SDK
+		// Create WebSocket connection using the openai SDK.
+		// NOTE: OpenAIRealtimeWS.create() returns immediately after resolving the
+		// API key — the underlying WebSocket is NOT open yet.  We must wait for
+		// `session.created` (the server's first message) before sending anything.
 		this.rt = await OpenAIRealtimeWS.create(this.client, { model });
-		this._isConnected = true;
 
-		// Wire event listeners
+		// Wire event listeners (before awaiting session.created so events aren't lost)
 		this.wireEventListeners();
 
-		// Build session configuration
+		// Wait for the WebSocket to open and the server to acknowledge the session
+		const sessionId = await new Promise<string>((resolve, reject) => {
+			const timeout = setTimeout(
+				() => reject(new Error('session.created timeout — WebSocket may have failed to open')),
+				15_000,
+			);
+			this.rt?.on('session.created', (event) => {
+				clearTimeout(timeout);
+				// biome-ignore lint/suspicious/noExplicitAny: SDK type gap — runtime event includes session id
+				resolve((event.session as any)?.id ?? 'unknown');
+			});
+		});
+
+		this._isConnected = true;
+
+		// Build and send session configuration, wait for confirmation
 		const sessionConfig = this.buildSessionConfig();
 
-		// Wait for session.updated confirmation after sending session.update
 		const updatedPromise = new Promise<void>((resolve, reject) => {
 			const timeout = setTimeout(() => reject(new Error('session.update timeout')), 15_000);
 			this.rt?.on('session.updated', () => {
@@ -150,6 +166,9 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 
 		this.rtSend({ type: 'session.update', session: sessionConfig });
 		await updatedPromise;
+
+		// Session is fully ready — notify the framework
+		if (this.onSessionReady) this.onSessionReady(sessionId);
 	}
 
 	async disconnect(): Promise<void> {
@@ -485,13 +504,8 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			if (this.onOutputTranscription) this.onOutputTranscription(event.transcript);
 		});
 
-		// --- Session created (fires onSessionReady) ---
-		rt.on('session.created', (event) => {
-			// The API returns session.id at runtime but SDK types model session as RealtimeSessionCreateRequest
-			// biome-ignore lint/suspicious/noExplicitAny: SDK type gap — runtime event includes session id
-			const sessionId = (event.session as any)?.id ?? 'unknown';
-			if (this.onSessionReady) this.onSessionReady(sessionId);
-		});
+		// NOTE: session.created is handled in connect() to control startup ordering.
+		// onSessionReady fires at the end of connect() after session.updated confirms.
 
 		// --- Error handling ---
 		rt.on('error', (error) => {
