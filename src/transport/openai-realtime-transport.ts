@@ -73,7 +73,8 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	};
 
 	readonly audioFormat: AudioFormatSpec = {
-		sampleRate: 24000,
+		inputSampleRate: 24000,
+		outputSampleRate: 24000,
 		channels: 1,
 		bitDepth: 16,
 		encoding: 'pcm',

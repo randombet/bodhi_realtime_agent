@@ -106,7 +106,8 @@ export class GeminiLiveTransport implements LLMTransport {
 	};
 
 	readonly audioFormat: AudioFormatSpec = {
-		sampleRate: 16000,
+		inputSampleRate: 16000,
+		outputSampleRate: 24000,
 		channels: 1,
 		bitDepth: 16,
 		encoding: 'pcm',

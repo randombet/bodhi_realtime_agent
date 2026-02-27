@@ -108,7 +108,8 @@ describe('OpenAIRealtimeTransport', () => {
 
 		it('reports 24kHz audio format', () => {
 			expect(transport.audioFormat).toEqual({
-				sampleRate: 24000,
+				inputSampleRate: 24000,
+				outputSampleRate: 24000,
 				channels: 1,
 				bitDepth: 16,
 				encoding: 'pcm',

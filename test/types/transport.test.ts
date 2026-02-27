@@ -115,7 +115,13 @@ describe('LLMTransport type definitions', () => {
 				contextCompression: false,
 				groundingMetadata: false,
 			},
-			audioFormat: { sampleRate: 16000, channels: 1, bitDepth: 16, encoding: 'pcm' },
+			audioFormat: {
+				inputSampleRate: 16000,
+				outputSampleRate: 24000,
+				channels: 1,
+				bitDepth: 16,
+				encoding: 'pcm',
+			},
 			isConnected: false,
 			connect: vi.fn(),
 			disconnect: vi.fn(),
@@ -132,7 +138,8 @@ describe('LLMTransport type definitions', () => {
 		};
 
 		expect(stub.capabilities.turnDetection).toBe(true);
-		expect(stub.audioFormat.sampleRate).toBe(16000);
+		expect(stub.audioFormat.inputSampleRate).toBe(16000);
+		expect(stub.audioFormat.outputSampleRate).toBe(24000);
 	});
 
 	it('LLMTransportConfig supports all auth types', () => {

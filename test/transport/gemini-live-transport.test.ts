@@ -389,7 +389,8 @@ describe('GeminiLiveTransport', () => {
 		it('reports Gemini audio format', () => {
 			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
 			expect(transport.audioFormat).toEqual({
-				sampleRate: 16000,
+				inputSampleRate: 16000,
+				outputSampleRate: 24000,
 				channels: 1,
 				bitDepth: 16,
 				encoding: 'pcm',

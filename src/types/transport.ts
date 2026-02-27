@@ -39,9 +39,11 @@ export type ReplayItem =
 	| { type: 'file'; role: 'user'; base64Data: string; mimeType: string }
 	| { type: 'transfer'; fromAgent: string; toAgent: string };
 
-/** Audio format specification advertised by a transport. */
+/** Audio format specification advertised by a transport.
+ *  Input and output rates may differ (e.g. Gemini: 16kHz in / 24kHz out). */
 export interface AudioFormatSpec {
-	sampleRate: number;
+	inputSampleRate: number;
+	outputSampleRate: number;
 	channels: number;
 	bitDepth: number;
 	encoding: 'pcm';
