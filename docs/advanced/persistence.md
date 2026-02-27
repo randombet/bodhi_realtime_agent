@@ -86,7 +86,7 @@ interface SessionCheckpoint {
 }
 ```
 
-This enables recovering a session after a server restart — the framework can reconnect to Gemini using the stored resumption handle and restore the conversation context.
+This enables recovering a session after a server restart — the framework can reconnect to the LLM provider using the stored resumption handle and restore the conversation context.
 
 ### Built-in: InMemorySessionStore
 

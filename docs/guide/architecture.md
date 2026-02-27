@@ -4,7 +4,7 @@ This page maps how all core concepts relate to each other. Use it as a mental mo
 
 ## The Big Picture
 
-Every component lives inside `VoiceSession`. Two WebSocket connections bridge the client and Gemini, with the framework orchestrating everything in between.
+Every component lives inside `VoiceSession`. Two WebSocket connections bridge the client and LLM provider, with the framework orchestrating everything in between. The `LLMTransport` interface abstracts provider differences — Gemini Live and OpenAI Realtime are both supported.
 
 ```mermaid
 graph TB
@@ -33,21 +33,21 @@ graph TB
     end
 
     CT[ClientTransport<br/>WebSocket Server]
-    GT[GeminiLiveTransport<br/>WebSocket Client]
+    LT[LLMTransport<br/>Gemini / OpenAI]
     Client["Client App"]
-    Gemini["Gemini Live API"]
+    LLM["LLM Provider"]
 
     Client <-->|"binary: audio<br/>text: JSON"| CT
     CT <--> VoiceSession
-    VoiceSession <--> GT
-    GT <-->|"audio + tool calls<br/>+ transcripts"| Gemini
+    VoiceSession <--> LT
+    LT <-->|"audio + tool calls<br/>+ transcripts"| LLM
 
     style VoiceSession fill:#f0f7ff,stroke:#3b82f6
     style Agents fill:#ecfdf5,stroke:#10b981
     style Tools fill:#fef3c7,stroke:#f59e0b
     style Memory fill:#fdf2f8,stroke:#ec4899
     style Client fill:#e0e7ff,stroke:#6366f1
-    style Gemini fill:#e0e7ff,stroke:#6366f1
+    style LLM fill:#e0e7ff,stroke:#6366f1
 ```
 
 ## Component Ownership
@@ -58,7 +58,7 @@ graph TB
 graph LR
     VS[VoiceSession] --> AR[AgentRouter]
     VS --> CT[ClientTransport]
-    VS --> GT[GeminiLiveTransport]
+    VS --> GT[LLMTransport]
     VS --> EB[EventBus]
     VS --> HM[HooksManager]
     VS --> CC[ConversationContext]
@@ -74,17 +74,17 @@ graph LR
     style VS fill:#3b82f6,color:#fff,stroke:#1d4ed8
 ```
 
-## How Agents, Tools, and Gemini Interact
+## How Agents, Tools, and the LLM Interact
 
-Each agent provides its system instructions and tool set to Gemini. When Gemini calls a tool, the execution mode determines the path:
+Each agent provides its system instructions and tool set to the LLM. When the model calls a tool, the execution mode determines the path:
 
 ```mermaid
 flowchart TD
-    A["Active Agent"] -->|"instructions + tools"| G["Gemini Live API"]
+    A["Active Agent"] -->|"instructions + tools"| G["LLM Provider"]
     G -->|"generates voice"| Audio["Audio Response"]
     G -->|"calls function"| TC{"Tool Call"}
 
-    TC -->|"execution: inline"| IT["Inline Tool<br/>(Gemini waits)"]
+    TC -->|"execution: inline"| IT["Inline Tool<br/>(LLM waits)"]
     TC -->|"execution: background"| BT["Background Tool<br/>(Subagent runs)"]
 
     IT -->|"return result"| G
@@ -107,8 +107,8 @@ This is what happens when a user speaks and gets a response:
 sequenceDiagram
     participant C as Client App
     participant CT as ClientTransport
-    participant GT as GeminiTransport
-    participant G as Gemini
+    participant GT as LLMTransport
+    participant G as LLM Provider
     participant T as Tool
 
     C->>CT: Binary frame (PCM audio)
@@ -133,14 +133,14 @@ sequenceDiagram
 
 ## Agent Transfer Flow
 
-When Gemini calls `transferToAgent`, the framework seamlessly reconnects:
+When the model calls `transferToAgent`, the framework handles the transition. For Gemini, this requires a reconnect; for OpenAI, it uses in-place `session.update`:
 
 ```mermaid
 sequenceDiagram
-    participant G as Gemini
+    participant G as LLM
     participant AR as AgentRouter
     participant CT as ClientTransport
-    participant GT as GeminiTransport
+    participant GT as LLMTransport
     participant A as Agent A
     participant B as Agent B
 
@@ -224,7 +224,7 @@ graph TB
 
 ## Transport Layer
 
-The two transports handle different sides of the connection:
+The `LLMTransport` interface abstracts provider differences. Two implementations are available:
 
 ```mermaid
 graph LR
@@ -237,23 +237,27 @@ graph LR
         AB["AudioBuffer<br/>(during transfers)"]
     end
 
-    subgraph GT["GeminiLiveTransport"]
-        GC["WebSocket Client"]
+    subgraph LT["LLMTransport Interface"]
+        GLT["GeminiLiveTransport"]
+        ORT["OpenAIRealtimeTransport"]
         ZS["Zod → JSON Schema<br/>converter"]
     end
 
-    subgraph Gemini Side
+    subgraph Provider Side
         G["Gemini Live API"]
+        O["OpenAI Realtime API"]
     end
 
     C <-->|"Binary: PCM audio<br/>Text: JSON messages"| WS
     WS <--> AB
-    WS <--> GC
-    ZS -->|"tool declarations"| GC
-    GC <-->|"audio + tool calls<br/>+ transcriptions<br/>+ GoAway signals"| G
+    WS <--> LT
+    ZS -->|"tool declarations"| GLT
+    ZS -->|"tool declarations"| ORT
+    GLT <-->|"16kHz in / 24kHz out"| G
+    ORT <-->|"24kHz in / 24kHz out"| O
 
     style CT fill:#f0f7ff,stroke:#3b82f6
-    style GT fill:#fef3c7,stroke:#f59e0b
+    style LT fill:#fef3c7,stroke:#f59e0b
 ```
 
 ## Session State Machine
@@ -275,12 +279,12 @@ stateDiagram-v2
     CLOSED --> [*]
 ```
 
-| State | ClientTransport | GeminiTransport |
-|-------|-----------------|-----------------|
+| State | ClientTransport | LLMTransport |
+|-------|-----------------|--------------|
 | CREATED | Not started | Not connected |
 | CONNECTING | Listening | Connecting |
 | ACTIVE | Forwarding audio | Streaming |
-| TRANSFERRING | Buffering audio | Reconnecting |
+| TRANSFERRING | Buffering audio (Gemini) / Brief pause (OpenAI) | Reconnecting / session.update |
 | RECONNECTING | Buffering audio | Reconnecting |
 | CLOSED | Stopped | Disconnected |
 
@@ -294,11 +298,11 @@ graph LR
     AG -->|"owns"| T2["Tool B<br/>(inline)"]
     AG -->|"owns"| T3["Tool C<br/>(background)"]
 
-    T1 -->|"execute()"| R1["Result → Gemini"]
-    T2 -->|"execute()"| R2["Result → Gemini"]
+    T1 -->|"execute()"| R1["Result → LLM"]
+    T2 -->|"execute()"| R2["Result → LLM"]
     T3 -->|"handoff"| SR["SubagentRunner"]
     SR -->|"generateText()"| LLM["Vercel AI SDK"]
-    LLM -->|"result"| R3["Result → Gemini"]
+    LLM -->|"result"| R3["Result → LLM"]
 
     style AG fill:#10b981,color:#fff
     style T1 fill:#f59e0b
@@ -323,7 +327,7 @@ graph TB
         OE["Agent.onEnter()"]
         GM["getMemoryFacts()"]
         INJ2["injectSystemMessage()"]
-        GEM["Gemini knows preference<br/>without being told"]
+        GEM["LLM knows preference<br/>without being told"]
         OE --> GM --> INJ2 --> GEM
     end
 

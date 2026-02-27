@@ -80,3 +80,64 @@ describe('zodToJsonSchema', () => {
 		});
 	});
 });
+
+describe('zodToJsonSchema — standard format', () => {
+	it('converts object with lowercase type names', () => {
+		const schema = z.object({
+			name: z.string(),
+			age: z.number(),
+		});
+		const result = zodToJsonSchema(schema, 'standard');
+		expect(result).toEqual({
+			type: 'object',
+			properties: {
+				name: { type: 'string' },
+				age: { type: 'number' },
+			},
+			required: ['name', 'age'],
+		});
+	});
+
+	it('handles optional fields with lowercase types', () => {
+		const schema = z.object({
+			query: z.string(),
+			limit: z.number().optional(),
+		});
+		const result = zodToJsonSchema(schema, 'standard');
+		expect(result.required).toEqual(['query']);
+		expect(result.properties).toEqual({
+			query: { type: 'string' },
+			limit: { type: 'number' },
+		});
+	});
+
+	it('converts boolean and array with lowercase types', () => {
+		const schema = z.object({
+			active: z.boolean(),
+			tags: z.array(z.string()),
+		});
+		const result = zodToJsonSchema(schema, 'standard');
+		const props = result.properties as Record<string, unknown>;
+		expect(props.active).toEqual({ type: 'boolean' });
+		expect(props.tags).toEqual({ type: 'array', items: { type: 'string' } });
+	});
+
+	it('converts enum and literal with lowercase types', () => {
+		const schema = z.object({
+			priority: z.enum(['low', 'high']),
+			agent: z.literal('main'),
+			version: z.literal(2),
+		});
+		const result = zodToJsonSchema(schema, 'standard');
+		const props = result.properties as Record<string, unknown>;
+		expect(props.priority).toEqual({ type: 'string', enum: ['low', 'high'] });
+		expect(props.agent).toEqual({ type: 'string', enum: ['main'] });
+		expect(props.version).toEqual({ type: 'number', enum: [2] });
+	});
+
+	it('default format is gemini (uppercase)', () => {
+		const schema = z.object({ name: z.string() });
+		const result = zodToJsonSchema(schema);
+		expect(result.type).toBe('OBJECT');
+	});
+});

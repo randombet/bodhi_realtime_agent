@@ -35,7 +35,7 @@ unsubscribe();
 
 | Event | Payload | When |
 |-------|---------|------|
-| `tool.call` | `{ sessionId, agentName, id, name, args }` | Gemini requests a tool call |
+| `tool.call` | `{ sessionId, agentName, id, name, args }` | LLM requests a tool call |
 | `tool.result` | `{ sessionId, toolCallId, status, result }` | Tool execution completes |
 | `tool.cancel` | `{ sessionId, toolCallIds }` | Tool calls cancelled (user interruption) |
 
@@ -62,7 +62,7 @@ unsubscribe();
 | `session.close` | `{ sessionId, reason }` | Session closed |
 | `session.stateChange` | `{ sessionId, fromState, toState }` | State machine transition |
 | `session.resume` | `{ sessionId, handle }` | Session resumed from handle |
-| `session.goaway` | `{ sessionId, timeLeft }` | Gemini server shutting down |
+| `session.goaway` | `{ sessionId, timeLeft }` | LLM server shutting down (Gemini-specific) |
 | `context.compact` | `{ sessionId, removedItems }` | Conversation context compressed |
 
 #### Subagent Events
@@ -145,7 +145,7 @@ const session = new VoiceSession({
 
 | Hook | Event Shape | When |
 |------|------------|------|
-| `onSessionStart` | `{ sessionId, userId, agentName }` | Gemini connection becomes ACTIVE |
+| `onSessionStart` | `{ sessionId, userId, agentName }` | LLM connection becomes ACTIVE |
 | `onSessionEnd` | `{ sessionId, durationMs, reason }` | Session transitions to CLOSED |
 | `onTurnLatency` | `{ sessionId, turnId, segments }` | End of each turn with latency breakdown |
 | `onToolCall` | `{ sessionId, toolCallId, toolName, execution, agentName }` | Before tool execution |
@@ -165,9 +165,9 @@ hooks: {
     const { segments } = e;
     console.log(`Turn ${e.turnId} latency breakdown:`);
     console.log(`  Client → Backend:  ${segments.clientToBackendMs}ms`);
-    console.log(`  Backend → Gemini:  ${segments.backendToGeminiMs}ms`);
-    console.log(`  Gemini processing: ${segments.geminiProcessingMs}ms`);
-    console.log(`  Gemini → Backend:  ${segments.geminiToBackendMs}ms`);
+    console.log(`  Backend → LLM:     ${segments.backendToLLMMs}ms`);
+    console.log(`  LLM processing:    ${segments.llmProcessingMs}ms`);
+    console.log(`  LLM → Backend:     ${segments.llmToBackendMs}ms`);
     console.log(`  Backend → Client:  ${segments.backendToClientMs}ms`);
     console.log(`  Total E2E:         ${segments.totalE2EMs}ms`);
   },
@@ -182,7 +182,7 @@ The `onError` hook is your centralized error handler. Errors are classified by s
 |----------|---------|---------|
 | `warn` | Recoverable, no user impact | Tool timeout, retry succeeded |
 | `error` | Something failed, partial impact | Memory extraction failed |
-| `fatal` | Session cannot continue | Gemini connection lost permanently |
+| `fatal` | Session cannot continue | LLM connection lost permanently |
 
 ```typescript
 hooks: {

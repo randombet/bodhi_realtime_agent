@@ -140,18 +140,18 @@ describe('ConversationContext', () => {
 	});
 
 	describe('toReplayContent', () => {
-		it('formats items as Gemini Content array', () => {
+		it('formats user/assistant items as text ReplayItems', () => {
 			const ctx = new ConversationContext();
 			ctx.addUserMessage('hello');
 			ctx.addAssistantMessage('hi');
 
 			const content = ctx.toReplayContent();
 			expect(content).toHaveLength(2);
-			expect(content[0]).toEqual({ role: 'user', parts: [{ text: 'hello' }] });
-			expect(content[1]).toEqual({ role: 'model', parts: [{ text: 'hi' }] });
+			expect(content[0]).toEqual({ type: 'text', role: 'user', text: 'hello' });
+			expect(content[1]).toEqual({ type: 'text', role: 'assistant', text: 'hi' });
 		});
 
-		it('prepends summary as user context message', () => {
+		it('prepends summary as user text ReplayItem', () => {
 			const ctx = new ConversationContext();
 			ctx.addUserMessage('msg');
 			ctx.markCheckpoint();
@@ -159,16 +159,47 @@ describe('ConversationContext', () => {
 			ctx.addUserMessage('new msg');
 
 			const content = ctx.toReplayContent();
-			expect(content[0].role).toBe('user');
-			expect(content[0].parts[0].text).toContain('Previous context');
-			expect(content[1].parts[0].text).toBe('new msg');
+			expect(content[0]).toEqual({
+				type: 'text',
+				role: 'user',
+				text: '[Context summary]: Previous context',
+			});
+			expect(content[1]).toEqual({ type: 'text', role: 'user', text: 'new msg' });
 		});
 
-		it('maps tool_call role to model', () => {
+		it('maps tool_call to typed ReplayItem', () => {
 			const ctx = new ConversationContext();
-			ctx.addToolCall({ toolCallId: 'tc', toolName: 'fn', args: {} });
+			ctx.addToolCall({ toolCallId: 'tc', toolName: 'fn', args: { x: 1 } });
 			const content = ctx.toReplayContent();
-			expect(content[0].role).toBe('model');
+			expect(content[0]).toEqual({
+				type: 'tool_call',
+				id: 'tc',
+				name: 'fn',
+				args: { x: 1 },
+			});
+		});
+
+		it('maps tool_result to typed ReplayItem', () => {
+			const ctx = new ConversationContext();
+			ctx.addToolResult({ toolCallId: 'tc', toolName: 'fn', result: 'found' });
+			const content = ctx.toReplayContent();
+			expect(content[0]).toEqual({
+				type: 'tool_result',
+				id: 'tc',
+				name: 'fn',
+				result: 'found',
+			});
+		});
+
+		it('maps transfer to typed ReplayItem', () => {
+			const ctx = new ConversationContext();
+			ctx.addAgentTransfer('general', 'booking');
+			const content = ctx.toReplayContent();
+			expect(content[0]).toEqual({
+				type: 'transfer',
+				fromAgent: 'general',
+				toAgent: 'booking',
+			});
 		});
 	});
 

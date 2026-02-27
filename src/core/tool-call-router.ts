@@ -4,6 +4,7 @@ import type { AgentRouter } from '../agent/agent-router.js';
 import type { ToolExecutor } from '../tools/tool-executor.js';
 import type { SubagentConfig } from '../types/agent.js';
 import type { ToolDefinition } from '../types/tool.js';
+import type { TransportToolResult } from '../types/transport.js';
 import type { BackgroundNotificationQueue } from './background-notification-queue.js';
 import type { ConversationContext } from './conversation-context.js';
 import type { TranscriptManager } from './transcript-manager.js';
@@ -16,10 +17,8 @@ export interface ToolCallRouterDeps {
 	notificationQueue: BackgroundNotificationQueue;
 	transcriptManager: TranscriptManager;
 	subagentConfigs: Record<string, SubagentConfig>;
-	/** Send tool responses back to the LLM transport. */
-	sendToolResponse(
-		responses: Array<{ id?: string; name?: string; response?: Record<string, unknown> }>,
-	): void;
+	/** Send a tool result back to the LLM transport. */
+	sendToolResult(result: TransportToolResult): void;
 	/** Trigger an agent transfer. */
 	transfer(toAgent: string): Promise<void>;
 	/** Report an error via hooks/logging. */
@@ -29,7 +28,7 @@ export interface ToolCallRouterDeps {
 }
 
 /**
- * Routes tool calls from Gemini to the correct execution path:
+ * Routes tool calls from the LLM to the correct execution path:
  * inline execution, background subagent handoff, or agent transfer.
  *
  * Extracted from VoiceSession to reduce its line count and isolate
@@ -50,7 +49,7 @@ export class ToolCallRouter {
 	/** Dispatch incoming tool calls to the appropriate handler. */
 	handleToolCalls(calls: Array<{ id: string; name: string; args: Record<string, unknown> }>): void {
 		const names = calls.map((c) => c.name).join(', ');
-		this.deps.log(`Tool calls from Gemini: [${names}]`);
+		this.deps.log(`Tool calls from LLM: [${names}]`);
 		// Flush user's input transcript before tool calls so it appears first
 		// in conversation context and logs. Safe because Gemini only calls tools
 		// after processing the user's complete utterance.
@@ -73,10 +72,13 @@ export class ToolCallRouter {
 				this.deps.transfer(call.args.agent_name as string).catch((err) => {
 					this.deps.reportError('agent-router', err);
 				});
-				// Send empty response to acknowledge
-				this.deps.sendToolResponse([
-					{ id: call.id, name: call.name, response: { status: 'transferred' } },
-				]);
+				// Send acknowledgement so the LLM doesn't hang
+				this.deps.sendToolResult({
+					id: call.id,
+					name: call.name,
+					result: { status: 'transferred' },
+					scheduling: 'immediate',
+				});
 				return;
 			}
 
@@ -111,26 +113,22 @@ export class ToolCallRouter {
 				this.deps.conversationContext.addToolCall(call);
 				this.deps.conversationContext.addToolResult(result);
 
-				this.deps.sendToolResponse([
-					{
-						id: result.toolCallId,
-						name: result.toolName,
-						response: result.error
-							? { error: result.error }
-							: (result.result as Record<string, unknown>),
-					},
-				]);
+				this.deps.sendToolResult({
+					id: result.toolCallId,
+					name: result.toolName,
+					result: result.error ? { error: result.error } : result.result,
+					scheduling: 'immediate',
+				});
 			})
 			.catch((err) => {
 				this.deps.reportError('tool-executor', err);
-				// Always send a response so Gemini doesn't hang
-				this.deps.sendToolResponse([
-					{
-						id: call.toolCallId,
-						name: call.toolName,
-						response: { error: err instanceof Error ? err.message : String(err) },
-					},
-				]);
+				// Always send a response so the LLM doesn't hang
+				this.deps.sendToolResult({
+					id: call.toolCallId,
+					name: call.toolName,
+					result: { error: err instanceof Error ? err.message : String(err) },
+					scheduling: 'immediate',
+				});
 			});
 	}
 
@@ -140,22 +138,20 @@ export class ToolCallRouter {
 	): void {
 		const hasPendingMessage = !!toolDef.pendingMessage;
 
-		// Send a tool response to unblock Gemini (it stops generating until a response arrives).
-		// Explicitly mark the task as still in progress so Gemini doesn't claim it's done.
-		// The pendingMessage is included as a speak_to_user directive so Gemini relays it verbally.
+		// Send a tool result to unblock the LLM (it stops generating until a response arrives).
+		// Explicitly mark the task as still in progress so the LLM doesn't claim it's done.
 		if (hasPendingMessage) {
-			this.deps.sendToolResponse([
-				{
-					id: call.toolCallId,
-					name: call.toolName,
-					response: {
-						status: 'still_in_progress',
-						speak_to_user: toolDef.pendingMessage,
-						important:
-							'This task is NOT complete yet. Do NOT tell the user it is ready. You MUST speak the speak_to_user message to the user NOW. You will receive a separate notification when the task finishes.',
-					},
+			this.deps.sendToolResult({
+				id: call.toolCallId,
+				name: call.toolName,
+				result: {
+					status: 'still_in_progress',
+					message: toolDef.pendingMessage,
+					important:
+						'This task is NOT complete yet. Do NOT tell the user it is ready. You will receive a notification when it finishes.',
 				},
-			]);
+				scheduling: 'immediate',
+			});
 		}
 
 		// Find subagent config
@@ -187,7 +183,7 @@ export class ToolCallRouter {
 								role: 'user',
 								parts: [
 									{
-										text: `[SYSTEM NOTIFICATION — YOU MUST RESPOND TO THIS]\nBackground task "${call.toolName}" completed successfully.\nResult: ${result.text}\nYou MUST speak out loud to inform the user that their task is finished. Do NOT stay silent.`,
+										text: `[SYSTEM: Background task "${call.toolName}" completed successfully. Result: ${result.text}. Please inform the user their content is ready now.]`,
 									},
 								],
 							},
@@ -195,13 +191,12 @@ export class ToolCallRouter {
 						true,
 					);
 				} else {
-					this.deps.sendToolResponse([
-						{
-							id: call.toolCallId,
-							name: call.toolName,
-							response: { result: result.text },
-						},
-					]);
+					this.deps.sendToolResult({
+						id: call.toolCallId,
+						name: call.toolName,
+						result: { result: result.text },
+						scheduling: 'when_idle',
+					});
 				}
 			})
 			.catch((err) => {
@@ -213,7 +208,7 @@ export class ToolCallRouter {
 								role: 'user',
 								parts: [
 									{
-										text: `[SYSTEM NOTIFICATION — YOU MUST RESPOND TO THIS]\nBackground task "${call.toolName}" failed with error: ${err instanceof Error ? err.message : String(err)}\nYou MUST speak out loud to apologize and inform the user that the task failed. Do NOT stay silent.`,
+										text: `[SYSTEM: Background task "${call.toolName}" failed: ${err instanceof Error ? err.message : String(err)}. Please apologize to the user and let them know.]`,
 									},
 								],
 							},
@@ -221,13 +216,12 @@ export class ToolCallRouter {
 						true,
 					);
 				} else {
-					this.deps.sendToolResponse([
-						{
-							id: call.toolCallId,
-							name: call.toolName,
-							response: { error: err instanceof Error ? err.message : String(err) },
-						},
-					]);
+					this.deps.sendToolResult({
+						id: call.toolCallId,
+						name: call.toolName,
+						result: { error: err instanceof Error ? err.message : String(err) },
+						scheduling: 'when_idle',
+					});
 				}
 			});
 	}

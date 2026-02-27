@@ -9,8 +9,8 @@ import { EventBus } from '../../src/core/event-bus.js';
 import { HooksManager } from '../../src/core/hooks.js';
 import { SessionManager } from '../../src/core/session-manager.js';
 import type { ClientTransport } from '../../src/transport/client-transport.js';
-import type { GeminiLiveTransport } from '../../src/transport/gemini-live-transport.js';
 import type { MainAgent } from '../../src/types/agent.js';
+import type { LLMTransport } from '../../src/types/transport.js';
 
 // Mock the ai module
 vi.mock('ai', () => ({
@@ -22,17 +22,36 @@ vi.mock('ai', () => ({
 
 const mockModel = { modelId: 'test-model' } as unknown as LanguageModelV1;
 
-function createMockGeminiTransport() {
+function createMockLLMTransport() {
 	return {
+		capabilities: {
+			messageTruncation: false,
+			turnDetection: true,
+			userTranscription: true,
+			inPlaceSessionUpdate: false,
+			sessionResumption: true,
+			contextCompression: true,
+			groundingMetadata: true,
+		},
+		audioFormat: {
+			inputSampleRate: 16000,
+			outputSampleRate: 24000,
+			channels: 1,
+			bitDepth: 16,
+			encoding: 'pcm' as const,
+		},
 		connect: vi.fn(),
 		reconnect: vi.fn(),
 		disconnect: vi.fn(),
 		sendAudio: vi.fn(),
-		sendToolResponse: vi.fn(),
-		sendClientContent: vi.fn(),
-		updateTools: vi.fn(),
-		updateSystemInstruction: vi.fn(),
-		updateGoogleSearch: vi.fn(),
+		sendContent: vi.fn(),
+		sendFile: vi.fn(),
+		sendToolResult: vi.fn(),
+		triggerGeneration: vi.fn(),
+		commitAudio: vi.fn(),
+		clearAudio: vi.fn(),
+		updateSession: vi.fn(),
+		transferSession: vi.fn(),
 		isConnected: true,
 	};
 }
@@ -65,7 +84,7 @@ function setup() {
 		eventBus,
 		hooks,
 	);
-	const gemini = createMockGeminiTransport();
+	const transport = createMockLLMTransport();
 	const client = createMockClientTransport();
 
 	const router = new AgentRouter(
@@ -73,12 +92,12 @@ function setup() {
 		eventBus,
 		hooks,
 		convCtx,
-		gemini as unknown as GeminiLiveTransport,
+		transport as unknown as LLMTransport,
 		client as unknown as ClientTransport,
 		mockModel,
 	);
 
-	return { router, eventBus, hooks, convCtx, sessionMgr, gemini, client };
+	return { router, eventBus, hooks, convCtx, sessionMgr, transport, client };
 }
 
 describe('AgentRouter', () => {
@@ -99,7 +118,7 @@ describe('AgentRouter', () => {
 
 	describe('transfer', () => {
 		it('transfers from one agent to another', async () => {
-			const { router, sessionMgr, gemini, client, eventBus } = setup();
+			const { router, sessionMgr, transport, client, eventBus } = setup();
 			const onExit = vi.fn();
 			const onEnter = vi.fn();
 
@@ -123,15 +142,17 @@ describe('AgentRouter', () => {
 			expect(router.activeAgent.name).toBe('booking');
 			expect(client.startBuffering).toHaveBeenCalledOnce();
 			expect(client.stopBuffering).toHaveBeenCalledOnce();
-			expect(gemini.updateSystemInstruction).toHaveBeenCalledWith('You are booking');
-			expect(gemini.reconnect).toHaveBeenCalledOnce();
+			expect(transport.transferSession).toHaveBeenCalledWith(
+				expect.objectContaining({ instructions: 'You are booking' }),
+				expect.objectContaining({ conversationHistory: expect.any(Array) }),
+			);
 			expect(transferHandler).toHaveBeenCalledWith(
 				expect.objectContaining({ fromAgent: 'general', toAgent: 'booking' }),
 			);
 		});
 
 		it('prepends language directive on transfer when agent has language', async () => {
-			const { router, sessionMgr, gemini } = setup();
+			const { router, sessionMgr, transport } = setup();
 			router.registerAgents([
 				createTestAgent('general'),
 				createTestAgent('spanish', { language: 'es-ES' }),
@@ -142,22 +163,28 @@ describe('AgentRouter', () => {
 
 			await router.transfer('spanish');
 
-			expect(gemini.updateSystemInstruction).toHaveBeenCalledWith(
-				expect.stringContaining('You MUST respond in Spanish'),
+			expect(transport.transferSession).toHaveBeenCalledWith(
+				expect.objectContaining({
+					instructions: expect.stringContaining('You MUST respond in Spanish'),
+				}),
+				expect.any(Object),
 			);
-			expect(gemini.updateSystemInstruction).toHaveBeenCalledWith(
-				expect.stringContaining('You are spanish'),
+			expect(transport.transferSession).toHaveBeenCalledWith(
+				expect.objectContaining({
+					instructions: expect.stringContaining('You are spanish'),
+				}),
+				expect.any(Object),
 			);
 		});
 
-		it('transitions to CLOSED and throws when reconnect fails during transfer', async () => {
-			const { router, sessionMgr, gemini, client } = setup();
+		it('transitions to CLOSED and throws when transferSession fails during transfer', async () => {
+			const { router, sessionMgr, transport, client } = setup();
 			router.registerAgents([createTestAgent('general'), createTestAgent('booking')]);
 			router.setInitialAgent('general');
 			sessionMgr.transitionTo('CONNECTING');
 			sessionMgr.transitionTo('ACTIVE');
 
-			gemini.reconnect.mockRejectedValueOnce(new Error('connection lost'));
+			transport.transferSession.mockRejectedValueOnce(new Error('connection lost'));
 
 			await expect(router.transfer('booking')).rejects.toThrow(AgentError);
 			expect(sessionMgr.state).toBe('CLOSED');

@@ -8,6 +8,7 @@ import type {
 	ToolResult,
 } from '../types/conversation.js';
 import type { MemoryFact } from '../types/memory.js';
+import type { ReplayItem } from '../types/transport.js';
 
 /**
  * In-memory conversation timeline that tracks all messages, tool calls, and agent transfers.
@@ -112,22 +113,52 @@ export class ConversationContext {
 		};
 	}
 
-	/** Format the conversation as Gemini-compatible Content array for replay after reconnection. */
-	toReplayContent(): Array<{ role: string; parts: Array<{ text: string }> }> {
-		const content: Array<{ role: string; parts: Array<{ text: string }> }> = [];
+	/** Format the conversation as provider-neutral ReplayItem[] for replay after reconnection. */
+	toReplayContent(): ReplayItem[] {
+		const items: ReplayItem[] = [];
 
 		if (this._summary) {
-			content.push({
-				role: 'user',
-				parts: [{ text: `[Context summary]: ${this._summary}` }],
-			});
+			items.push({ type: 'text', role: 'user', text: `[Context summary]: ${this._summary}` });
 		}
 
 		for (const item of this._items) {
-			const role = item.role === 'user' ? 'user' : 'model';
-			content.push({ role, parts: [{ text: item.content }] });
+			if (item.role === 'tool_call') {
+				try {
+					const parsed = JSON.parse(item.content);
+					items.push({
+						type: 'tool_call',
+						id: parsed.toolCallId,
+						name: parsed.toolName,
+						args: parsed.args ?? {},
+					});
+				} catch {
+					items.push({ type: 'text', role: 'assistant', text: item.content });
+				}
+			} else if (item.role === 'tool_result') {
+				try {
+					const parsed = JSON.parse(item.content);
+					items.push({
+						type: 'tool_result',
+						id: parsed.toolCallId,
+						name: parsed.toolName,
+						result: parsed.result,
+					});
+				} catch {
+					items.push({ type: 'text', role: 'assistant', text: item.content });
+				}
+			} else if (item.role === 'transfer') {
+				const match = item.content.match(/Transfer:\s*(.+?)\s*→\s*(.+)/);
+				if (match) {
+					items.push({ type: 'transfer', fromAgent: match[1], toAgent: match[2] });
+				} else {
+					items.push({ type: 'text', role: 'assistant', text: item.content });
+				}
+			} else {
+				const role = item.role === 'user' ? 'user' : 'assistant';
+				items.push({ type: 'text', role, text: item.content });
+			}
 		}
 
-		return content;
+		return items;
 	}
 }

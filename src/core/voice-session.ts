@@ -12,6 +12,7 @@ import type { MainAgent, SubagentConfig } from '../types/agent.js';
 import type { BehaviorCategory } from '../types/behavior.js';
 import type { FrameworkHooks } from '../types/hooks.js';
 import type { MemoryStore } from '../types/memory.js';
+import type { LLMTransport, LLMTransportError } from '../types/transport.js';
 import { BackgroundNotificationQueue } from './background-notification-queue.js';
 import { ConversationContext } from './conversation-context.js';
 import { DirectiveManager } from './directive-manager.js';
@@ -30,7 +31,7 @@ export interface VoiceSessionConfig {
 	sessionId: string;
 	/** User identifier (used for memory storage and history). */
 	userId: string;
-	/** Google API key for the Gemini Live API. */
+	/** Google API key for the Gemini Live API (used when no transport is provided). */
 	apiKey: string;
 	/** All agents available in this session. */
 	agents: MainAgent[];
@@ -44,7 +45,7 @@ export interface VoiceSessionConfig {
 	port: number;
 	/** Host for the client WebSocket server (default: '0.0.0.0' for all interfaces). */
 	host?: string;
-	/** Gemini model name (e.g. "gemini-2.0-flash-live-001"). */
+	/** LLM model name (e.g. "gemini-live-2.5-flash-preview"). */
 	geminiModel?: string;
 	/** Vercel AI SDK model for subagent text generation. */
 	model: LanguageModelV1;
@@ -63,13 +64,15 @@ export interface VoiceSessionConfig {
 		/** Extract every N turns (default: 5). */
 		turnFrequency?: number;
 	};
+	/** Pre-constructed LLM transport. If provided, apiKey/geminiModel/speechConfig/compressionConfig are ignored. */
+	transport?: LLMTransport;
 }
 
 /**
  * Top-level integration hub that wires all framework components together.
  *
  * Manages the full lifecycle of a real-time voice session:
- * - **Audio fast-path**: Client audio → Gemini (and back) without touching the EventBus.
+ * - **Audio fast-path**: Client audio → LLM (and back) without touching the EventBus.
  * - **Tool routing**: Inline tools execute synchronously; background tools hand off to subagents.
  * - **Agent transfers**: Intercepts `transfer_to_agent` tool calls and delegates to AgentRouter.
  * - **Reconnection**: Handles GoAway signals and unexpected disconnects via session resumption.
@@ -94,7 +97,7 @@ export class VoiceSession {
 	readonly sessionManager: SessionManager;
 	readonly conversationContext: ConversationContext;
 	readonly hooks: HooksManager;
-	private geminiTransport: GeminiLiveTransport;
+	private transport: LLMTransport;
 	private clientTransport: ClientTransport;
 	private agentRouter: AgentRouter;
 	private toolExecutor: ToolExecutor;
@@ -110,6 +113,10 @@ export class VoiceSession {
 	/** Whether a client WebSocket connection is currently active. */
 	private clientConnected = false;
 	private notificationQueue!: BackgroundNotificationQueue;
+	/** Tracks consecutive reconnect attempts to prevent infinite reconnect storms. */
+	private reconnectAttempts = 0;
+	private static readonly MAX_RECONNECT_ATTEMPTS = 3;
+	private static readonly RECONNECT_BACKOFF_MS = [1000, 2000, 4000];
 
 	constructor(config: VoiceSessionConfig) {
 		this.config = config;
@@ -122,7 +129,14 @@ export class VoiceSession {
 			addAssistantMessage: (text) => this.conversationContext.addAssistantMessage(text),
 		});
 		this.notificationQueue = new BackgroundNotificationQueue(
-			(turns, turnComplete) => this.geminiTransport.sendClientContent(turns, turnComplete),
+			(turns, turnComplete) => {
+				// Convert the Gemini-format turns from the notification queue to ContentTurn[]
+				const contentTurns = turns.map((t) => ({
+					role: (t.role === 'model' ? 'assistant' : t.role) as 'user' | 'assistant',
+					text: t.parts[0]?.text ?? '',
+				}));
+				this.transport.sendContent(contentTurns, turnComplete);
+			},
 			(msg) => this.log(msg),
 		);
 
@@ -142,7 +156,7 @@ export class VoiceSession {
 
 		this.subagentConfigs = config.subagentConfigs ?? {};
 
-		// Set up BehaviorManager early — tools must be declared to Gemini at connect time.
+		// Set up BehaviorManager early — tools must be declared to the LLM at connect time.
 		// Callbacks capture `this` via closures and are only invoked at runtime (not during construction).
 		if (config.behaviors?.length) {
 			const memoryStore = config.memory?.store;
@@ -181,39 +195,52 @@ export class VoiceSession {
 			this.log(`Memory distillation enabled (every ${freq} turns)`);
 		}
 
-		// Set up Gemini transport
+		// Set up LLM transport
 		const initialAgent = config.agents.find((a) => a.name === config.initialAgent);
 		const instructions = initialAgent ? resolveInstructions(initialAgent) : '';
 		const behaviorTools = this.behaviorManager?.tools ?? [];
 		const allInitialTools = [...(initialAgent?.tools ?? []), ...behaviorTools];
 
-		this.geminiTransport = new GeminiLiveTransport(
-			{
-				apiKey: config.apiKey,
-				model: config.geminiModel,
-				systemInstruction: instructions,
+		if (config.transport) {
+			// Use pre-constructed transport (OpenAI, mock, etc.)
+			this.transport = config.transport;
+			// Sync tools and instructions so they're available at connect time
+			this.transport.updateSession({
+				instructions,
 				tools: allInitialTools.length ? allInitialTools : undefined,
-				googleSearch: initialAgent?.googleSearch,
-				speechConfig: config.speechConfig,
-				compressionConfig: config.compressionConfig,
-				inputAudioTranscription: config.inputAudioTranscription,
-			},
-			{
-				onSetupComplete: (sessionId) => this.handleSetupComplete(sessionId),
-				onAudioOutput: (data) => this.handleAudioOutput(data),
-				onToolCall: (calls) => this.toolCallRouter.handleToolCalls(calls),
-				onToolCallCancellation: (ids) => this.toolCallRouter.handleToolCallCancellation(ids),
-				onTurnComplete: () => this.handleTurnComplete(),
-				onInterrupted: () => this.handleInterrupted(),
-				onInputTranscription: (text) => this.transcriptManager.handleInput(text),
-				onOutputTranscription: (text) => this.transcriptManager.handleOutput(text),
-				onGroundingMetadata: (metadata) => this.handleGroundingMetadata(metadata),
-				onGoAway: (timeLeft) => this.handleGoAway(timeLeft),
-				onResumptionUpdate: (handle, resumable) => this.handleResumptionUpdate(handle, resumable),
-				onError: (error) => this.handleTransportError(error),
-				onClose: () => this.handleTransportClose(),
-			},
-		);
+			});
+		} else {
+			// Construct GeminiLiveTransport from config (backward compatibility)
+			this.transport = new GeminiLiveTransport(
+				{
+					apiKey: config.apiKey,
+					model: config.geminiModel,
+					systemInstruction: instructions,
+					tools: allInitialTools.length ? allInitialTools : undefined,
+					googleSearch: initialAgent?.googleSearch,
+					speechConfig: config.speechConfig,
+					compressionConfig: config.compressionConfig,
+					inputAudioTranscription: config.inputAudioTranscription,
+				},
+				{},
+			);
+		}
+
+		// Wire LLMTransport property callbacks — works for both injected and default transports
+		this.transport.onAudioOutput = (data) => this.handleAudioOutput(data);
+		this.transport.onToolCall = (calls) => this.toolCallRouter.handleToolCalls(calls);
+		this.transport.onToolCallCancel = (ids) => this.toolCallRouter.handleToolCallCancellation(ids);
+		this.transport.onTurnComplete = () => this.handleTurnComplete();
+		this.transport.onInterrupted = () => this.handleInterrupted();
+		this.transport.onInputTranscription = (text) => this.transcriptManager.handleInput(text);
+		this.transport.onOutputTranscription = (text) => this.transcriptManager.handleOutput(text);
+		this.transport.onSessionReady = (sessionId) => this.handleSetupComplete(sessionId);
+		this.transport.onError = (error) => this.handleTransportError(error);
+		this.transport.onClose = (code, reason) => this.handleTransportClose(code, reason);
+		this.transport.onGoAway = (timeLeft) => this.handleGoAway(timeLeft);
+		this.transport.onResumptionUpdate = (handle, resumable) =>
+			this.handleResumptionUpdate(handle, resumable);
+		this.transport.onGroundingMetadata = (metadata) => this.handleGroundingMetadata(metadata);
 
 		// Set up client transport
 		this.clientTransport = new ClientTransport(
@@ -251,7 +278,7 @@ export class VoiceSession {
 			this.eventBus,
 			this.hooks,
 			this.conversationContext,
-			this.geminiTransport,
+			this.transport,
 			this.clientTransport,
 			config.model,
 			() => this.directiveManager.getSessionSuffix(),
@@ -268,7 +295,7 @@ export class VoiceSession {
 			notificationQueue: this.notificationQueue,
 			transcriptManager: this.transcriptManager,
 			subagentConfigs: this.subagentConfigs,
-			sendToolResponse: (responses) => this.geminiTransport.sendToolResponse(responses),
+			sendToolResult: (result) => this.transport.sendToolResult(result),
 			transfer: (toAgent) => this.transfer(toAgent),
 			reportError: (component, error) => this.reportError(component, error),
 			log: (msg) => this.log(msg),
@@ -299,10 +326,19 @@ export class VoiceSession {
 
 		this.log('Starting WS server...');
 		await this.clientTransport.start();
-		this.log('WS server ready. Connecting to Gemini...');
+		this.log('WS server ready. Connecting to LLM transport...');
 		this.sessionManager.transitionTo('CONNECTING');
-		await this.geminiTransport.connect();
-		this.log('Gemini connected and setup complete');
+		if (this.config.transport) {
+			// Pre-constructed transport — already configured, just connect
+			await this.transport.connect();
+		} else {
+			// Default Gemini transport — pass config for backward compatibility
+			await this.transport.connect({
+				auth: { type: 'api_key', apiKey: this.config.apiKey },
+				model: this.config.geminiModel ?? 'gemini-live-2.5-flash-preview',
+			});
+		}
+		this.log('LLM transport connected and setup complete');
 	}
 
 	/** Gracefully shut down: disconnect Gemini, stop the WebSocket server, transition to CLOSED. */
@@ -332,7 +368,7 @@ export class VoiceSession {
 			}
 		}
 
-		await this.geminiTransport.disconnect();
+		await this.transport.disconnect();
 		await this.clientTransport.stop();
 
 		if (this.sessionManager.state !== 'CLOSED') {
@@ -379,7 +415,7 @@ export class VoiceSession {
 
 	private handleAudioFromClient(data: Buffer): void {
 		if (this.sessionManager.isActive) {
-			this.geminiTransport.sendAudio(data.toString('base64'));
+			this.transport.sendAudio(data.toString('base64'));
 		}
 	}
 
@@ -396,8 +432,11 @@ export class VoiceSession {
 		if (this.sessionManager.state === 'CONNECTING') {
 			this.sessionManager.transitionTo('ACTIVE');
 		}
-		// During transfer, the transfer path handles greeting after context replay — skip here
-		if (this.sessionManager.state === 'TRANSFERRING') {
+		// During transfer or reconnect, the caller handles post-connect logic — skip greeting here
+		if (
+			this.sessionManager.state === 'TRANSFERRING' ||
+			this.sessionManager.state === 'RECONNECTING'
+		) {
 			return;
 		}
 		if (this.clientConnected) {
@@ -406,6 +445,8 @@ export class VoiceSession {
 	}
 
 	private handleTurnComplete(): void {
+		// A completed turn means the connection is healthy — reset reconnect counter
+		this.reconnectAttempts = 0;
 		this.transcriptManager.flush();
 		this.turnId++;
 		const turnIdStr = `turn_${this.turnId}`;
@@ -450,30 +491,27 @@ export class VoiceSession {
 		this.notificationQueue.onTurnComplete();
 	}
 
-	/** Inject all active directives into Gemini's context to prevent behavioral drift. */
+	/** Inject all active directives into the LLM's context to prevent behavioral drift. */
 	private reinforceDirectives(): void {
 		const text = this.directiveManager.getReinforcementText();
 		if (!text) return;
 		this.log(`Reinforcing directives: ${text.slice(0, 120)}...`);
-		this.geminiTransport.sendClientContent([{ role: 'user', parts: [{ text }] }], true);
+		this.transport.sendContent([{ role: 'user', text }], true);
 	}
 
-	/** Send the active agent's greeting prompt to Gemini to trigger a spoken greeting. */
+	/** Send the active agent's greeting prompt to the LLM to trigger a spoken greeting. */
 	private sendGreeting(): void {
 		const agent = this.agentRouter.activeAgent;
 		if (!agent.greeting) return;
 		this.log(`Sending greeting for agent "${agent.name}"`);
 		this.notificationQueue.resetAudio();
 
-		// Inject stored memory facts so Gemini knows the user from the first turn
+		// Inject stored memory facts so the LLM knows the user from the first turn
 		const cachedFacts = this.memoryCacheManager?.facts ?? [];
 		if (cachedFacts.length > 0) {
 			const summary = cachedFacts.map((f) => `- ${f.content}`).join('\n');
 			const memoryText = `[MEMORY — what you already know about this user from previous sessions]\n${summary}`;
-			this.geminiTransport.sendClientContent(
-				[{ role: 'user', parts: [{ text: memoryText }] }],
-				true,
-			);
+			this.transport.sendContent([{ role: 'user', text: memoryText }], true);
 			this.log(`Injected ${cachedFacts.length} memory facts`);
 		}
 
@@ -482,10 +520,7 @@ export class VoiceSession {
 		const greetingText = directiveSuffix
 			? `${directiveSuffix}\n\n${agent.greeting}`
 			: agent.greeting;
-		this.geminiTransport.sendClientContent(
-			[{ role: 'user', parts: [{ text: greetingText }] }],
-			true,
-		);
+		this.transport.sendContent([{ role: 'user', text: greetingText }], true);
 	}
 
 	private handleInterrupted(): void {
@@ -517,12 +552,12 @@ export class VoiceSession {
 			this.sessionManager.transitionTo('RECONNECTING');
 			this.clientTransport.startBuffering();
 
-			this.geminiTransport
-				.reconnect(handle)
+			this.transport
+				.reconnect({ conversationHistory: this.conversationContext.toReplayContent() })
 				.then(() => {
 					const buffered = this.clientTransport.stopBuffering();
 					for (const chunk of buffered) {
-						this.geminiTransport.sendAudio(chunk.toString('base64'));
+						this.transport.sendAudio(chunk.toString('base64'));
 					}
 					this.sessionManager.transitionTo('ACTIVE');
 				})
@@ -567,52 +602,35 @@ export class VoiceSession {
 	private handleFileUpload(base64: string, mimeType: string, fileName?: string): void {
 		if (!this.sessionManager.isActive) return;
 
-		const label = fileName ?? 'file';
-
-		// Send image/document to Gemini as inline data with turnComplete=true
-		// so Gemini acknowledges the upload and describes what it sees.
-		this.geminiTransport.sendClientContent(
-			[
-				{
-					role: 'user',
-					parts: [
-						{ inlineData: { data: base64, mimeType } },
-						{
-							text: `[The user uploaded a file: ${label}. Acknowledge receipt and briefly describe what you see.]`,
-						},
-					],
-				},
-			],
-			true,
-		);
+		// Send image/document to the LLM as inline data
+		this.transport.sendFile(base64, mimeType);
 
 		// Record in conversation context
-		this.conversationContext.addUserMessage(`[Uploaded file: ${label}]`);
+		this.conversationContext.addUserMessage(`[Uploaded file: ${fileName ?? 'file'}]`);
 	}
 
 	private handleTextInput(text: string): void {
 		if (!this.sessionManager.isActive || !text.trim()) return;
 
-		// Send text to Gemini
-		this.geminiTransport.sendClientContent(
-			[{ role: 'user', parts: [{ text: text.trim() }] }],
-			true,
-		);
+		// Send text to the LLM
+		this.transport.sendContent([{ role: 'user', text: text.trim() }], true);
 
 		// Record in conversation context
 		this.conversationContext.addUserMessage(text.trim());
 
-		// Forward transcript to client for display
-		this.clientTransport.sendJsonToClient({
-			type: 'transcript',
-			role: 'user',
-			text: text.trim(),
-		});
+		// No transcript echo — the web client already displays typed text locally.
 	}
 
 	private handleClientConnected(): void {
 		this.log(`Client connected (geminiActive=${this.sessionManager.isActive})`);
 		this.clientConnected = true;
+
+		// Send audio format config so the client can negotiate correct sample rates
+		this.clientTransport.sendJsonToClient({
+			type: 'session.config',
+			audioFormat: this.transport.audioFormat,
+		});
+
 		this.behaviorManager?.sendCatalog();
 		if (this.sessionManager.isActive) {
 			this.sendGreeting();
@@ -626,28 +644,42 @@ export class VoiceSession {
 
 	// --- Error handling ---
 
-	private handleTransportError(error: Error): void {
-		this.log(`Transport error: ${error.message}`);
-		this.reportError('gemini-transport', error);
+	private handleTransportError(error: Error | LLMTransportError): void {
+		const err = error instanceof Error ? error : error.error;
+		this.log(`Transport error: ${err.message}`);
+		this.reportError('llm-transport', err);
 	}
 
-	private handleTransportClose(): void {
-		this.log(`Transport closed (state=${this.sessionManager.state})`);
+	private handleTransportClose(code?: number, reason?: string): void {
+		const detail = code != null ? ` code=${code}${reason ? ` reason="${reason}"` : ''}` : '';
+		this.log(`Transport closed (state=${this.sessionManager.state}${detail})`);
 		if (this.sessionManager.state === 'ACTIVE') {
-			// Unexpected close — try to reconnect
+			// Unexpected close — try to reconnect with backoff and retry limit
 			const handle = this.sessionManager.resumptionHandle;
-			if (handle) {
+			if (handle && this.reconnectAttempts < VoiceSession.MAX_RECONNECT_ATTEMPTS) {
+				const attempt = this.reconnectAttempts++;
+				const delay = VoiceSession.RECONNECT_BACKOFF_MS[attempt] ?? 4000;
+				this.log(
+					`Reconnect attempt ${attempt + 1}/${VoiceSession.MAX_RECONNECT_ATTEMPTS} in ${delay}ms`,
+				);
 				this.sessionManager.transitionTo('RECONNECTING');
-				this.geminiTransport
-					.reconnect(handle)
-					.then(() => {
-						this.sessionManager.transitionTo('ACTIVE');
-					})
-					.catch((err) => {
-						this.reportError('reconnect', err);
-						this.sessionManager.transitionTo('CLOSED');
-					});
+				setTimeout(() => {
+					this.transport
+						.reconnect({ conversationHistory: this.conversationContext.toReplayContent() })
+						.then(() => {
+							this.sessionManager.transitionTo('ACTIVE');
+						})
+						.catch((err) => {
+							this.reportError('reconnect', err);
+							this.sessionManager.transitionTo('CLOSED');
+						});
+				}, delay);
 			} else {
+				if (this.reconnectAttempts >= VoiceSession.MAX_RECONNECT_ATTEMPTS) {
+					this.log(
+						`Reconnect limit reached (${VoiceSession.MAX_RECONNECT_ATTEMPTS} attempts), giving up`,
+					);
+				}
 				this.sessionManager.transitionTo('CLOSED');
 			}
 		}

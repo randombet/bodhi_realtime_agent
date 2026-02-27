@@ -6,12 +6,14 @@ This guide covers deploying the framework in production: environment variables, 
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `GEMINI_API_KEY` | Yes | Google Gemini API key |
+| `GOOGLE_API_KEY` | For Gemini | Google Gemini API key |
+| `OPENAI_API_KEY` | For OpenAI | OpenAI API key |
 | `PORT` | No | WebSocket server port (default: 9900) |
 
 ```bash
-# .env
-GEMINI_API_KEY=your_api_key_here
+# .env — set the key for your chosen provider
+GOOGLE_API_KEY=your_gemini_key_here
+OPENAI_API_KEY=your_openai_key_here
 PORT=9900
 ```
 
@@ -41,7 +43,7 @@ The `close()` method:
 1. Notifies the active agent via `onExit`
 2. Triggers memory extraction (if configured)
 3. Saves session checkpoint (if configured)
-4. Disconnects from Gemini
+4. Disconnects from the LLM provider
 5. Closes the client WebSocket server
 
 ## Error Handling
@@ -87,11 +89,10 @@ function createSession(userId: string): VoiceSession {
   const session = new VoiceSession({
     sessionId,
     userId,
-    apiKey: process.env.GEMINI_API_KEY!,
+    apiKey: process.env.GOOGLE_API_KEY!,
     agents: [mainAgent],
     initialAgent: 'main',
     port: 0, // Dynamically assigned
-    model: google('gemini-2.0-flash'),
   });
 
   sessions.set(sessionId, session);

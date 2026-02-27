@@ -5,7 +5,7 @@ import typedocSidebar from '../api/typedoc-sidebar.json';
 export default withMermaid(
 	defineConfig({
 		title: 'Bodhi Realtime Agent Framework',
-		description: 'TypeScript framework for real-time voice agents using Google Gemini Live API',
+		description: 'TypeScript framework for real-time voice agents — supports Google Gemini Live and OpenAI Realtime APIs',
 		base: '/bodhi_realtime_agent/',
 		ignoreDeadLinks: [/^http:\/\/localhost/],
 

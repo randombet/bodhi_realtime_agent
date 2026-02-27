@@ -1,6 +1,6 @@
 # Introduction
 
-Bodhi Realtime Agent Framework is a TypeScript framework for building **real-time voice agent applications** using the [Google Gemini Live API](https://ai.google.dev/gemini-api/docs/live). It handles the hard parts of voice AI — bidirectional audio streaming, turn detection, agent transfers, tool execution, and session management — so you can focus on what your agent actually does.
+Bodhi Realtime Agent Framework is a TypeScript framework for building **real-time voice agent applications**. It supports multiple LLM providers through a unified `LLMTransport` interface — currently [Google Gemini Live API](https://ai.google.dev/gemini-api/docs/live) and [OpenAI Realtime API](https://platform.openai.com/docs/guides/realtime). It handles the hard parts of voice AI — bidirectional audio streaming, turn detection, agent transfers, tool execution, and session management — so you can focus on what your agent actually does.
 
 ## What You Can Build
 
@@ -12,15 +12,15 @@ Bodhi Realtime Agent Framework is a TypeScript framework for building **real-tim
 ## Architecture Overview
 
 ```
-Client App  <──WebSocket──>  ClientTransport  <──audio──>  GeminiLiveTransport  <──WebSocket──>  Gemini Live API
-                                    │                              │
-                                    └───────── VoiceSession ───────┘
-                                    │    (audio fast-path relay)    │
-                                    │                              │
+Client App  <──WebSocket──>  ClientTransport  <──audio──>  LLMTransport  <──WebSocket──>  LLM Provider
+                                    │                           │            (Gemini / OpenAI)
+                                    └───────── VoiceSession ────┘
+                                    │    (audio fast-path relay) │
+                                    │                           │
                               AgentRouter    ToolExecutor    ConversationContext
 ```
 
-Audio flows on a **fast-path** directly between the client and Gemini transports, bypassing the EventBus for minimal latency. Everything else (tool calls, agent transfers, GUI events) goes through the control plane.
+Audio flows on a **fast-path** directly between the client and LLM transports, bypassing the EventBus for minimal latency. Everything else (tool calls, agent transfers, GUI events) goes through the control plane. The `LLMTransport` interface abstracts provider differences — your agent code is the same regardless of which LLM provider you use.
 
 ## Key Concepts
 
@@ -31,13 +31,13 @@ Audio flows on a **fast-path** directly between the client and Gemini transports
 | [Tools](/guide/tools) | Functions the AI model can call during conversation (inline or background) |
 | [Memory](/guide/memory) | Automatic extraction of durable user facts across sessions |
 | [Events & Hooks](/guide/events) | Type-safe EventBus and lifecycle callbacks for observability |
-| [Transport](/guide/transport) | WebSocket connections to Gemini and client applications |
+| [Transport](/guide/transport) | Provider-agnostic LLM transport and client WebSocket connections |
 
 ## Prerequisites
 
 - **Node.js 22+** — The framework uses modern JavaScript features
 - **pnpm** — Package manager ([install guide](https://pnpm.io/installation))
-- **Google API key** — With Gemini Live API access ([get one here](https://aistudio.google.com/))
+- **LLM API key** — A Google API key ([get one](https://aistudio.google.com/)) for Gemini Live, or an OpenAI API key for OpenAI Realtime
 
 ## Next Steps
 

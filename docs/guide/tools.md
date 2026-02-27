@@ -39,21 +39,21 @@ const agent: MainAgent = {
 
 | Property | Type | Required | Description |
 |----------|------|----------|-------------|
-| `name` | `string` | Yes | Unique identifier (used by Gemini to call the tool) |
+| `name` | `string` | Yes | Unique identifier (used by the model to call the tool) |
 | `description` | `string` | Yes | Tells the model when and why to use this tool |
 | `parameters` | `z.ZodSchema` | Yes | Zod schema for argument validation and declaration |
 | `execution` | `'inline' \| 'background'` | Yes | How the tool runs relative to the audio stream |
-| `pendingMessage` | `string` | No | For background tools: immediate response to Gemini |
+| `pendingMessage` | `string` | No | For background tools: immediate response to the model |
 | `timeout` | `number` | No | Execution timeout in ms (default 30,000) |
 | `execute` | `(args, ctx) => Promise<unknown>` | Yes | The function that does the work |
 
 ## Inline vs Background Execution
 
-The `execution` mode controls whether Gemini waits for the result or keeps talking:
+The `execution` mode controls whether the model waits for the result or keeps talking:
 
 ### Inline Tools
 
-Gemini pauses its response and waits for the result. Use for fast lookups (< 2 seconds):
+The model pauses its response and waits for the result. Use for fast lookups (< 2 seconds):
 
 ```typescript
 const lookupUser: ToolDefinition = {
@@ -72,7 +72,7 @@ const lookupUser: ToolDefinition = {
 
 ### Background Tools
 
-Gemini receives a `pendingMessage` immediately and continues speaking while the tool runs asynchronously via a [subagent](/advanced/subagents):
+The model receives a `pendingMessage` immediately and continues speaking while the tool runs asynchronously via a [subagent](/advanced/subagents):
 
 ```typescript
 const generateReport: ToolDefinition = {
@@ -156,7 +156,7 @@ const processOrder: ToolDefinition = {
 
 ### Setting Active Directives
 
-Tools can set **active directives** via `ctx.setDirective(key, value)` to influence the LLM's behavior across turns. Directives are automatically reinforced every turn by injecting them into Gemini's context via `sendClientContent`, preventing behavioral drift.
+Tools can set **active directives** via `ctx.setDirective(key, value)` to influence the LLM's behavior across turns. Directives are automatically reinforced every turn by injecting them into the model's context via `sendContent`, preventing behavioral drift.
 
 ```typescript
 // Set a directive — persists and reinforces every turn
@@ -170,7 +170,7 @@ Directives can be scoped to `'session'` (persists across agent transfers) or `'a
 
 ## Zod Schemas
 
-The `parameters` field accepts any Zod schema. The framework converts it to a JSON Schema for the Gemini function declaration and validates arguments at runtime:
+The `parameters` field accepts any Zod schema. The framework converts it to JSON Schema for the provider's function declaration format and validates arguments at runtime:
 
 ```typescript
 // Simple parameters
@@ -195,7 +195,7 @@ parameters: z.object({
 ```
 
 ::: tip
-Always use `.describe()` on parameters — these descriptions help Gemini understand what values to pass.
+Always use `.describe()` on parameters — these descriptions help the model understand what values to pass.
 :::
 
 ## Timeouts and Cancellation
@@ -222,7 +222,7 @@ const slowTool: ToolDefinition = {
 When a tool is cancelled:
 - `ctx.abortSignal` is aborted
 - The `onToolResult` hook fires with `status: 'cancelled'`
-- For inline tools, Gemini receives an error response
+- For inline tools, the model receives an error response
 - For background tools, the subagent run is terminated
 
 ## Complete Example

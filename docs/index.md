@@ -4,7 +4,7 @@ layout: home
 hero:
   name: Bodhi Realtime Agent Framework
   text: Build Real-Time Voice Agents
-  tagline: TypeScript framework for voice AI applications using Google Gemini Live API
+  tagline: TypeScript framework for voice AI applications — supports Google Gemini Live and OpenAI Realtime APIs
   actions:
     - theme: brand
       text: Get Started
@@ -18,7 +18,7 @@ hero:
 
 features:
   - title: Real-Time Voice
-    details: Bidirectional audio streaming with Gemini Live API. Server-side turn detection, native audio understanding, and sub-500ms latency.
+    details: Bidirectional audio streaming via a provider-agnostic LLMTransport interface. Supports Google Gemini Live and OpenAI Realtime APIs with server-side turn detection and sub-500ms latency.
   - title: Multi-Agent
     details: Define multiple agents with distinct personas and tool sets. Transfer between them mid-conversation with automatic context preservation.
   - title: Function Tools

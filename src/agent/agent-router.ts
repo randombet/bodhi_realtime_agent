@@ -7,10 +7,10 @@ import type { IEventBus } from '../core/event-bus.js';
 import type { HooksManager } from '../core/hooks.js';
 import type { SessionManager } from '../core/session-manager.js';
 import type { ClientTransport } from '../transport/client-transport.js';
-import type { GeminiLiveTransport } from '../transport/gemini-live-transport.js';
 import type { MainAgent, SubagentConfig } from '../types/agent.js';
 import type { SubagentResult, ToolCall } from '../types/conversation.js';
 import type { ToolDefinition } from '../types/tool.js';
+import type { LLMTransport } from '../types/transport.js';
 import { createAgentContext, resolveInstructions } from './agent-context.js';
 import { runSubagent } from './subagent-runner.js';
 
@@ -43,7 +43,7 @@ export class AgentRouter {
 		private eventBus: IEventBus,
 		private hooks: HooksManager,
 		private conversationContext: ConversationContext,
-		private geminiTransport: GeminiLiveTransport,
+		private transport: LLMTransport,
 		private clientTransport: ClientTransport,
 		private model: LanguageModelV1,
 		private getInstructionSuffix?: () => string,
@@ -72,8 +72,9 @@ export class AgentRouter {
 	}
 
 	/**
-	 * Transfer the active Gemini session to a different agent.
-	 * Disconnects, reconnects with new system instructions and tools, and replays context.
+	 * Transfer the active LLM session to a different agent.
+	 * Uses transport.transferSession() — the transport decides whether to
+	 * apply in-place (OpenAI session.update) or reconnect-based (Gemini).
 	 */
 	async transfer(toAgentName: string): Promise<void> {
 		const toAgent = this.agents.get(toAgentName);
@@ -100,36 +101,45 @@ export class AgentRouter {
 		// 4. Start buffering client audio
 		this.clientTransport.startBuffering();
 
-		// 5. Save handle and disconnect
-		const handle = this.sessionManager.resumptionHandle;
-
 		try {
-			// 6. Disconnect and reconnect with new agent config
+			// 5. Build transfer config and state
 			const suffix = this.getInstructionSuffix?.() ?? '';
-			this.geminiTransport.updateSystemInstruction(resolveInstructions(toAgent) + suffix);
-			this.geminiTransport.updateTools([...toAgent.tools, ...this.extraTools]);
-			this.geminiTransport.updateGoogleSearch(toAgent.googleSearch ?? false);
-			await this.geminiTransport.reconnect(handle ?? undefined);
+			const resolvedInstructions = resolveInstructions(toAgent) + suffix;
+			const allTools = [...toAgent.tools, ...this.extraTools];
 
-			// 7. Stop buffering and replay
+			const state = {
+				conversationHistory: this.conversationContext.toReplayContent(),
+			};
+
+			// 6. Single transferSession call — transport handles reconnect/replay internally
+			const providerOptions: Record<string, unknown> = {
+				...(toAgent.providerOptions ?? {}),
+			};
+			// Support legacy googleSearch field
+			if (toAgent.googleSearch !== undefined && providerOptions.googleSearch === undefined) {
+				providerOptions.googleSearch = toAgent.googleSearch;
+			}
+
+			await this.transport.transferSession(
+				{
+					instructions: resolvedInstructions,
+					tools: allTools,
+					providerOptions,
+				},
+				state,
+			);
+
+			// 7. Stop buffering and replay audio
 			const buffered = this.clientTransport.stopBuffering();
-
-			// 8. Replay conversation context
-			const replayContent = this.conversationContext.toReplayContent();
-			if (replayContent.length > 0) {
-				this.geminiTransport.sendClientContent(replayContent, false);
-			}
-
-			// 9. Replay buffered audio
 			for (const chunk of buffered) {
-				this.geminiTransport.sendAudio(chunk.toString('base64'));
+				this.transport.sendAudio(chunk.toString('base64'));
 			}
 
-			// 10. Transition to ACTIVE
+			// 8. Transition to ACTIVE
 			this.sessionManager.transitionTo('ACTIVE');
 			this._activeAgent = toAgent;
 
-			// 11. onEnter new agent
+			// 9. onEnter new agent
 			const newCtx = this.createContext(toAgent.name);
 			await toAgent.onEnter?.(newCtx);
 			this.eventBus.publish('agent.enter', {
@@ -137,14 +147,14 @@ export class AgentRouter {
 				agentName: toAgent.name,
 			});
 
-			// 12. Publish transfer event
+			// 10. Publish transfer event
 			this.eventBus.publish('agent.transfer', {
 				sessionId: this.sessionManager.sessionId,
 				fromAgent: fromAgent.name,
 				toAgent: toAgentName,
 			});
 		} catch (err) {
-			// Reconnect failed — session is broken, clean up and transition to CLOSED
+			// Transfer failed — session is broken, clean up and transition to CLOSED
 			this.clientTransport.stopBuffering();
 			this.sessionManager.transitionTo('CLOSED');
 			const error = new AgentError(
