@@ -33,8 +33,11 @@ export interface MainAgent {
 	instructions: string | (() => string);
 	/** Tools available to Gemini when this agent is active. */
 	tools: ToolDefinition[];
-	/** Enable Gemini's built-in Google Search grounding for this agent. */
+	/** Enable Gemini's built-in Google Search grounding for this agent.
+	 *  @deprecated Use providerOptions.googleSearch instead. */
 	googleSearch?: boolean;
+	/** Provider-specific options passed to the transport during agent transfer. */
+	providerOptions?: Record<string, unknown>;
 	/** IETF BCP 47 language tag for this agent (e.g., 'zh-CN', 'es-ES', 'ja-JP'). When set, a language directive is prepended to the system instruction. */
 	language?: string;
 	/** Called when this agent becomes the active agent (after a transfer or initial start). */

@@ -1,10 +1,10 @@
 # Subagent Patterns
 
-Subagents run in the background using the Vercel AI SDK while Gemini continues speaking to the user. They handle long-running operations that would otherwise block the voice stream.
+Subagents run in the background using the Vercel AI SDK while the voice model continues speaking to the user. They handle long-running operations that would otherwise block the voice stream.
 
 ## Why Subagents?
 
-Gemini's Live API is real-time — when you call an inline tool, the voice stream pauses until the tool returns. For operations that take more than a couple of seconds (report generation, multi-step workflows, image creation), subagents let the conversation continue naturally:
+The Realtime API is real-time — when you call an inline tool, the voice stream pauses until the tool returns. For operations that take more than a couple of seconds (report generation, multi-step workflows, image creation), subagents let the conversation continue naturally:
 
 ```
 User: "Generate a sales report for Q4"
@@ -25,7 +25,7 @@ The framework supports three subagent patterns, each for a different use case:
 
 ## Pattern 1: Task Subagent
 
-The simplest pattern. A background tool triggers a subagent that runs to completion and sends the result back to Gemini.
+The simplest pattern. A background tool triggers a subagent that runs to completion and sends the result back to the voice model.
 
 ### Setup
 
@@ -35,7 +35,7 @@ Define a background tool and a `SubagentConfig`:
 import { z } from 'zod';
 import type { ToolDefinition, SubagentConfig } from '@bodhi_agent/realtime-agent-framework';
 
-// The tool Gemini calls
+// The tool the model calls
 const generateReport: ToolDefinition = {
   name: 'generate_report',
   description: 'Generate an analytics report for a date range',
@@ -66,12 +66,12 @@ const reportSubagent: SubagentConfig = {
 
 ```
 1. User says "Generate a Q4 report"
-2. Gemini calls generate_report tool
-3. Framework sends pendingMessage to Gemini immediately
-4. Gemini says "I'm working on that report..."
+2. Model calls generate_report tool
+3. Framework sends pendingMessage to model immediately
+4. Model says "I'm working on that report..."
 5. Subagent runs in background (up to 5 LLM steps)
-6. Result is sent back to Gemini as a tool response
-7. Gemini says "Your report is ready! Here's the summary..."
+6. Result is sent back to model as a tool response
+7. Model says "Your report is ready! Here's the summary..."
 ```
 
 ## Pattern 2: Interactive Subagent
@@ -211,7 +211,7 @@ interface SubagentContextSnapshot {
 }
 ```
 
-This gives the subagent full context without direct access to the Gemini session.
+This gives the subagent full context without direct access to the voice session.
 
 ## Observability
 

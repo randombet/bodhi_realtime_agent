@@ -34,7 +34,7 @@ const assistant: MainAgent = {
 
 ## Step 4: Create and Start a Session
 
-A `VoiceSession` wires together the agent, Gemini connection, and client WebSocket server:
+A `VoiceSession` wires together the agent, LLM transport, and client WebSocket server. This example uses Gemini — see [Using OpenAI](#using-openai-instead) below for the alternative:
 
 ```typescript
 import { google } from '@ai-sdk/google';
@@ -56,7 +56,7 @@ console.log('Voice agent running on ws://localhost:9900');
 
 ## Step 5: Connect a Client
 
-Connect any WebSocket client that sends PCM audio (16-bit, 16kHz, mono) to `ws://localhost:9900`. The built-in [web client](/guide/running-examples) handles this for you.
+Connect any WebSocket client that sends PCM audio to `ws://localhost:9900`. The built-in [web client](/guide/running-examples) handles this for you — it auto-negotiates the correct sample rate for either Gemini or OpenAI.
 
 ## Putting It All Together
 
@@ -147,8 +147,39 @@ Now when you say "What time is it?", the agent will call the tool and speak the 
 Read the full [Tools guide](/guide/tools) to learn about inline vs background execution, Zod schemas, timeout, cancellation, and Google Search grounding.
 :::
 
+## Using OpenAI Instead
+
+To use OpenAI's Realtime API instead of Gemini, inject a pre-configured `OpenAIRealtimeTransport`:
+
+```typescript
+import { google } from '@ai-sdk/google';
+import { VoiceSession, OpenAIRealtimeTransport } from '@bodhi_agent/realtime-agent-framework';
+
+const transport = new OpenAIRealtimeTransport({
+  apiKey: process.env.OPENAI_API_KEY!,
+  model: 'gpt-4o-realtime-preview',
+  voice: 'coral',
+});
+
+const session = new VoiceSession({
+  sessionId: `session_${Date.now()}`,
+  userId: 'user_1',
+  apiKey: 'unused',              // Not needed when using a custom transport
+  agents: [assistant],
+  initialAgent: 'assistant',
+  port: 9900,
+  model: google('gemini-2.0-flash'),  // Subagent model (still needed)
+  transport,                     // Inject the OpenAI transport
+});
+
+await session.start();
+```
+
+Your agent code (instructions, tools, lifecycle hooks) is identical — only the transport differs. See [Transport](/guide/transport) for details on provider differences.
+
 ## Next Steps
 
-- [Running Examples](/guide/running-examples) — Try the full demo with tools, agent transfers, and image generation
+- [Running Examples](/guide/running-examples) — Try the full demos with Gemini or OpenAI
 - [Agents](/guide/agents) — Learn about multi-agent systems and transfers
 - [Tools](/guide/tools) — Explore inline, background, and built-in tools
+- [Transport](/guide/transport) — Understand provider differences and audio format negotiation

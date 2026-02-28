@@ -385,9 +385,12 @@ describe('VoiceSession', () => {
 		const items = session.conversationContext.items;
 		expect(items.some((i) => i.content === 'Hello agent' && i.role === 'user')).toBe(true);
 
-		// Check transcript was sent back to client
-		const transcripts = received.map((r) => JSON.parse(r)).filter((m) => m.type === 'transcript');
-		expect(transcripts.some((t) => t.role === 'user' && t.text === 'Hello agent')).toBe(true);
+		// No transcript echo for text input — the web client displays typed text locally.
+		// Verify no user transcript was sent back.
+		const transcripts = received
+			.map((r) => JSON.parse(r))
+			.filter((m) => m.type === 'transcript' && m.role === 'user');
+		expect(transcripts).toHaveLength(0);
 
 		ws.close();
 		await new Promise<void>((r) => ws.on('close', r));
@@ -1401,11 +1404,10 @@ describe('VoiceSession', () => {
 			// Set a resumption handle so reconnect path is taken
 			session.sessionManager.updateResumptionHandle('handle_1');
 
-			// Spy on geminiTransport.reconnect to make it reject
-			const transport = (
-				session as unknown as { geminiTransport: { reconnect: () => Promise<void> } }
-			).geminiTransport;
-			vi.spyOn(transport, 'reconnect').mockRejectedValueOnce(new Error('reconnect failed'));
+			// Spy on transport.reconnect to make it reject
+			const transportRef = (session as unknown as { transport: { reconnect: () => Promise<void> } })
+				.transport;
+			vi.spyOn(transportRef, 'reconnect').mockRejectedValueOnce(new Error('reconnect failed'));
 
 			// Fire goAway — triggers handleGoAway which calls reconnect
 			const { _getMessageHandler } = await import('@google/genai');
@@ -1442,17 +1444,17 @@ describe('VoiceSession', () => {
 			// Set a resumption handle so reconnect path is taken
 			session.sessionManager.updateResumptionHandle('handle_2');
 
-			// Spy on geminiTransport.reconnect to make it reject
-			const transport = (
-				session as unknown as { geminiTransport: { reconnect: () => Promise<void> } }
-			).geminiTransport;
-			vi.spyOn(transport, 'reconnect').mockRejectedValueOnce(new Error('reconnect failed'));
+			// Spy on transport.reconnect to make it reject
+			const transportRef = (session as unknown as { transport: { reconnect: () => Promise<void> } })
+				.transport;
+			vi.spyOn(transportRef, 'reconnect').mockRejectedValueOnce(new Error('reconnect failed'));
 
 			// Directly invoke the private handleTransportClose since the WebSocket onclose
 			// callback is internal to the transport and not exposed through the mock
 			(session as unknown as { handleTransportClose: () => void }).handleTransportClose();
 
-			await new Promise((r) => setTimeout(r, 100));
+			// Wait for backoff delay (1000ms for first attempt) + reconnect execution
+			await new Promise((r) => setTimeout(r, 1500));
 
 			expect(session.sessionManager.state).toBe('CLOSED');
 			expect(onError).toHaveBeenCalledWith(
