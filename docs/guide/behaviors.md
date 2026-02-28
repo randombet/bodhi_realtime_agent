@@ -15,12 +15,12 @@ const session = new VoiceSession({
 
 That's it. The user can now say "speak slower" and the framework:
 1. Generates a `set_speech_speed` tool with `slow` / `normal` / `fast` presets
-2. When Gemini calls it, sets a pacing directive that's reinforced every turn
+2. When the LLM calls it, sets a pacing directive that's reinforced every turn
 3. Notifies the client UI so it can update a speed indicator
 
 ## Architecture
 
-BehaviorManager sits between the ToolExecutor and the directive system. It auto-generates tools that Gemini can call, and manages state that flows to both the Gemini context (via directives) and the client UI (via WebSocket JSON).
+BehaviorManager sits between the ToolExecutor and the directive system. It auto-generates tools that the LLM can call, and manages state that flows to both the LLM context (via directives) and the client UI (via WebSocket JSON).
 
 ```mermaid
 graph TB
@@ -36,8 +36,8 @@ graph TB
         BM -- "setDirective()" --> AD
     end
 
-    subgraph Gemini
-        LLM[Gemini Live API]
+    subgraph LLMProvider["LLM Provider"]
+        LLM[LLM Transport]
     end
 
     subgraph Client
@@ -52,38 +52,38 @@ graph TB
     UI -- "behavior.set" --> BM
 ```
 
-Changes can come from two directions — the user's voice (via Gemini tool call) or the client UI (via WebSocket message). Both paths converge on the same BehaviorManager state.
+Changes can come from two directions — the user's voice (via LLM tool call) or the client UI (via WebSocket message). Both paths converge on the same BehaviorManager state.
 
 ## Data Flow: Voice Command
 
-When the user says "speak slower", the change flows through Gemini's tool calling:
+When the user says "speak slower", the change flows through the LLM's tool calling:
 
 ```mermaid
 sequenceDiagram
     participant User
-    participant Gemini
+    participant LLM as LLM Provider
     participant ToolExecutor
     participant BehaviorManager
     participant Directives as sessionDirectives
     participant Client as Client UI
 
-    User->>Gemini: "Speak slower"
-    Gemini->>ToolExecutor: set_speech_speed({ preset: "slow" })
+    User->>LLM: "Speak slower"
+    LLM->>ToolExecutor: set_speech_speed({ preset: "slow" })
     ToolExecutor->>BehaviorManager: execute()
     BehaviorManager->>Directives: setDirective("pacing", "PACING OVERRIDE: ...")
     BehaviorManager->>Client: { type: "behavior.changed", preset: "slow" }
     BehaviorManager-->>ToolExecutor: { status: "applied" }
-    ToolExecutor-->>Gemini: tool result
-    Gemini->>User: "I've slowed down for you."
+    ToolExecutor-->>LLM: tool result
+    LLM->>User: "I've slowed down for you."
 
-    Note over Directives,Gemini: Next turn
-    Directives->>Gemini: reinforceDirectives() via sendClientContent
-    Note over Gemini: Gemini maintains slow pacing
+    Note over Directives,LLM: Next turn
+    Directives->>LLM: reinforceDirectives() via sendContent
+    Note over LLM: Model maintains slow pacing
 ```
 
 ## Data Flow: Client UI Button
 
-When the user taps a speed button in the UI, the change bypasses Gemini entirely:
+When the user taps a speed button in the UI, the change bypasses the LLM entirely:
 
 ```mermaid
 sequenceDiagram
@@ -91,16 +91,16 @@ sequenceDiagram
     participant VoiceSession
     participant BehaviorManager
     participant Directives as sessionDirectives
-    participant Gemini
+    participant LLM as LLM Provider
 
     Client->>VoiceSession: { type: "behavior.set", key: "pacing", preset: "slow" }
     VoiceSession->>BehaviorManager: handleClientSet("pacing", "slow")
     BehaviorManager->>Directives: setDirective("pacing", "PACING OVERRIDE: ...")
     BehaviorManager->>Client: { type: "behavior.changed", preset: "slow" }
 
-    Note over Directives,Gemini: Next turn
-    Directives->>Gemini: reinforceDirectives() via sendClientContent
-    Note over Gemini: Gemini adopts slow pacing — no tool call needed
+    Note over Directives,LLM: Next turn
+    Directives->>LLM: reinforceDirectives() via sendContent
+    Note over LLM: Model adopts slow pacing — no tool call needed
 ```
 
 ## How It Works
@@ -126,7 +126,7 @@ const formality: BehaviorCategory = {
 };
 ```
 
-The framework creates one inline tool per category. When the LLM calls `set_formality({ preset: 'formal' })`, the directive is set and reinforced every turn via `sendClientContent`, preventing behavioral drift.
+The framework creates one inline tool per category. When the LLM calls `set_formality({ preset: 'formal' })`, the directive is set and reinforced every turn via `sendContent`, preventing behavioral drift.
 
 ## Configuration
 
@@ -297,7 +297,6 @@ const formality: BehaviorCategory = {
 A voice assistant with speech speed and verbosity controls:
 
 ```typescript
-import { google } from '@ai-sdk/google';
 import {
   VoiceSession,
   speechSpeed,
@@ -314,11 +313,10 @@ const agent: MainAgent = {
 const session = new VoiceSession({
   sessionId: `session_${Date.now()}`,
   userId: 'user_1',
-  apiKey: process.env.GEMINI_API_KEY!,
+  apiKey: process.env.GOOGLE_API_KEY!,
   agents: [agent],
   initialAgent: 'assistant',
   port: 9900,
-  model: google('gemini-2.0-flash'),
   behaviors: [speechSpeed(), verbosity()],
 });
 

@@ -2,7 +2,7 @@
 
 VoiceSession is the top-level orchestrator of the framework. Think of it as what `express()` is to Express.js — your single entry point that wires everything together.
 
-It manages the Gemini connection, client WebSocket server, agent routing, tool execution, and conversation context in a single object.
+It manages the LLM transport connection (Gemini or OpenAI), client WebSocket server, agent routing, tool execution, and conversation context in a single object.
 
 ## Basic Usage
 
@@ -20,7 +20,7 @@ const agent: MainAgent = {
 const session = new VoiceSession({
   sessionId: `session_${Date.now()}`,
   userId: 'user_1',
-  apiKey: process.env.GEMINI_API_KEY!,
+  apiKey: process.env.GOOGLE_API_KEY!,
   agents: [agent],
   initialAgent: 'assistant',
   port: 9900,
@@ -39,7 +39,7 @@ const session = new VoiceSession({
   // --- Required ---
   sessionId: `session_${Date.now()}`,     // Unique session identifier
   userId: 'user_1',                        // User identifier (used for memory)
-  apiKey: process.env.GEMINI_API_KEY!,     // Gemini API key
+  apiKey: process.env.GOOGLE_API_KEY!,     // LLM API key
   agents: [mainAgent, expertAgent],        // All agents in this session
   initialAgent: 'main',                    // Agent to start with
   port: 9900,                              // WebSocket port for client connections
@@ -64,6 +64,9 @@ const session = new VoiceSession({
     onError: (e) => console.error(`[${e.component}] ${e.error.message}`),
   },
 
+  // --- Optional: Custom LLM transport (e.g. OpenAI) ---
+  // transport: new OpenAIRealtimeTransport({ apiKey: '...', voice: 'coral' }),
+
   // --- Optional: Behaviors ---
   // behaviors: [speechSpeed(), verbosity()],  // See /guide/behaviors
 
@@ -75,7 +78,7 @@ const session = new VoiceSession({
 ```
 
 ::: tip
-You only need `sessionId`, `userId`, `apiKey`, `agents`, `initialAgent`, `port`, and `model` to get started. Everything else has sensible defaults.
+You only need `sessionId`, `userId`, `apiKey`, `agents`, `initialAgent`, `port`, and `model` to get started. Everything else has sensible defaults. To use OpenAI instead of Gemini, pass a `transport` option — see [Transport](/guide/transport#using-a-pre-configured-transport).
 :::
 
 ## Lifecycle
@@ -83,12 +86,12 @@ You only need `sessionId`, `userId`, `apiKey`, `agents`, `initialAgent`, `port`,
 ```
 new VoiceSession(config)    →  session created, nothing running
     │
-await session.start()       →  connects to Gemini, starts WebSocket server
+await session.start()       →  connects to LLM transport, starts WebSocket server
     │
     ▼
   ACTIVE                    →  audio flowing, tools available, agents ready
     │
-await session.close()       →  disconnects Gemini, stops WebSocket server
+await session.close()       →  disconnects LLM transport, stops WebSocket server
     │
     ▼
   CLOSED                    →  all resources released
@@ -107,15 +110,15 @@ CREATED ──→ CONNECTING ──→ ACTIVE ──→ RECONNECTING ──→ A
 ```
 
 - **RECONNECTING** — Triggered by GoAway signals or unexpected disconnects. Client audio is buffered and replayed after reconnection.
-- **TRANSFERRING** — Active during [agent transfers](/guide/agents). Client audio is buffered until the new agent's Gemini session is ready.
+- **TRANSFERRING** — Active during [agent transfers](/guide/agents). For Gemini, client audio is buffered until the new session is ready. For OpenAI, transfers use in-place `session.update` so this state is brief.
 
 ## Audio Fast-Path
 
-Audio flows directly between the client and Gemini, bypassing the EventBus for minimal latency:
+Audio flows directly between the client and LLM transport, bypassing the EventBus for minimal latency:
 
 ```
-Client WebSocket  ──binary frames──→  ClientTransport  ──→  GeminiLiveTransport  ──→  Gemini
-                  ←─binary frames──                    ←──                       ←──
+Client WebSocket  ──binary frames──→  ClientTransport  ──→  LLMTransport  ──→  LLM Provider
+                  ←─binary frames──                    ←──                ←──
 ```
 
 Everything else (tool calls, agent transfers, transcripts, GUI events) goes through the control plane.

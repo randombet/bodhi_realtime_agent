@@ -367,4 +367,182 @@ describe('GeminiLiveTransport', () => {
 			expect(mockSession.close).toHaveBeenCalled();
 		});
 	});
+
+	// =========================================================================
+	// LLMTransport interface tests
+	// =========================================================================
+
+	describe('LLMTransport capabilities', () => {
+		it('reports Gemini capabilities', () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			expect(transport.capabilities).toEqual({
+				messageTruncation: false,
+				turnDetection: true,
+				userTranscription: true,
+				inPlaceSessionUpdate: false,
+				sessionResumption: true,
+				contextCompression: true,
+				groundingMetadata: true,
+			});
+		});
+
+		it('reports Gemini audio format', () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			expect(transport.audioFormat).toEqual({
+				inputSampleRate: 16000,
+				outputSampleRate: 24000,
+				channels: 1,
+				bitDepth: 16,
+				encoding: 'pcm',
+			});
+		});
+	});
+
+	describe('sendContent', () => {
+		it('converts ContentTurn to Gemini format', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			transport.sendContent([
+				{ role: 'user', text: 'hello' },
+				{ role: 'assistant', text: 'hi there' },
+			]);
+
+			expect(mockSession.sendClientContent).toHaveBeenCalledWith({
+				turns: [
+					{ role: 'user', parts: [{ text: 'hello' }] },
+					{ role: 'model', parts: [{ text: 'hi there' }] },
+				],
+				turnComplete: true,
+			});
+		});
+
+		it('respects turnComplete parameter', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			transport.sendContent([{ role: 'user', text: 'hello' }], false);
+
+			expect(mockSession.sendClientContent).toHaveBeenCalledWith({
+				turns: [{ role: 'user', parts: [{ text: 'hello' }] }],
+				turnComplete: false,
+			});
+		});
+	});
+
+	describe('sendFile', () => {
+		it('wraps in inlineData format', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			transport.sendFile('base64imgdata', 'image/png');
+
+			expect(mockSession.sendClientContent).toHaveBeenCalledWith({
+				turns: [
+					{
+						role: 'user',
+						parts: [{ inlineData: { data: 'base64imgdata', mimeType: 'image/png' } }],
+					},
+				],
+				turnComplete: false,
+			});
+		});
+	});
+
+	describe('sendToolResult', () => {
+		it('wraps in functionResponses format', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			transport.sendToolResult({
+				id: 'fc_1',
+				name: 'search',
+				result: { results: ['a', 'b'] },
+				scheduling: 'when_idle',
+			});
+
+			expect(mockSession.sendToolResponse).toHaveBeenCalledWith({
+				functionResponses: [{ id: 'fc_1', name: 'search', response: { results: ['a', 'b'] } }],
+			});
+		});
+	});
+
+	describe('transferSession', () => {
+		it('disconnects, reconnects, and replays conversation history', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			mockSession.sendClientContent.mockClear();
+
+			await transport.transferSession(
+				{ instructions: 'New agent', tools: [] },
+				{
+					conversationHistory: [
+						{ type: 'text', role: 'user', text: 'hello' },
+						{ type: 'text', role: 'assistant', text: 'hi' },
+					],
+				},
+			);
+
+			// Should have reconnected (close + connect)
+			expect(mockSession.close).toHaveBeenCalled();
+
+			// Should have replayed the conversation history
+			expect(mockSession.sendClientContent).toHaveBeenCalledWith({
+				turns: [
+					{ role: 'user', parts: [{ text: 'hello' }] },
+					{ role: 'model', parts: [{ text: 'hi' }] },
+				],
+				turnComplete: false,
+			});
+		});
+	});
+
+	describe('LLMTransport callback properties', () => {
+		it('fires callback properties alongside constructor callbacks', async () => {
+			const constructorCb = vi.fn();
+			const propertyCb = vi.fn();
+
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key' },
+				{ onTurnComplete: constructorCb },
+			);
+			transport.onTurnComplete = propertyCb;
+			await transport.connect();
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({ serverContent: { turnComplete: true } });
+
+			expect(constructorCb).toHaveBeenCalledOnce();
+			expect(propertyCb).toHaveBeenCalledOnce();
+		});
+
+		it('fires onSessionReady alongside constructor onSetupComplete', async () => {
+			const onSetupComplete = vi.fn();
+			const onSessionReady = vi.fn();
+
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, { onSetupComplete });
+			transport.onSessionReady = onSessionReady;
+			await transport.connect();
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({ setupComplete: { sessionId: 'sid_dual' } });
+
+			expect(onSetupComplete).toHaveBeenCalledWith('sid_dual');
+			expect(onSessionReady).toHaveBeenCalledWith('sid_dual');
+		});
+	});
+
+	describe('no-op methods', () => {
+		it('commitAudio and clearAudio are no-ops', () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			// Should not throw
+			transport.commitAudio();
+			transport.clearAudio();
+		});
+
+		it('triggerGeneration is a no-op', () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			transport.triggerGeneration('some instructions');
+		});
+	});
 });

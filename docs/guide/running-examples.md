@@ -1,14 +1,14 @@
 # Running the Examples
 
-The framework includes a full-featured demo with multiple agents, tools, image generation, and a web client with audio playback.
+The framework includes full-featured demos for both Gemini and OpenAI, with multiple agents, tools, image generation, and a web client with audio playback.
 
 ## Prerequisites
 
 - Node.js 22+
-- A Google API key with Gemini Live API access
+- A Google API key with Gemini Live API access, **or** an OpenAI API key
 - Chrome (recommended for the web client)
 
-## Start the Agent Server
+## Start the Agent Server (Gemini)
 
 ```bash
 # Set your API key
@@ -41,6 +41,20 @@ Connect a WebSocket audio client and try saying:
 Press Ctrl+C to stop.
 ============================================================
 ```
+
+## Start the Agent Server (OpenAI)
+
+Alternatively, run the same tools and agents with OpenAI's Realtime API:
+
+```bash
+# Set your API key
+export OPENAI_API_KEY="your-key-here"
+
+# Start the voice agent
+pnpm tsx app/openai-realtime-tools.ts
+```
+
+The OpenAI example has the same tools (calculator, current time, image generation, slow search) and agents (main, math expert) as the Gemini example. The web client works with either server without changes — audio format is negotiated automatically via `session.config`.
 
 ## Start the Web Client
 
@@ -84,7 +98,8 @@ The main assistant is multilingual by default — speak in any language and it r
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `GEMINI_API_KEY` | (required) | Google AI Studio API key |
+| `GEMINI_API_KEY` | — | Google AI Studio API key (for Gemini example) |
+| `OPENAI_API_KEY` | — | OpenAI API key (for OpenAI example) |
 | `PORT` | `9900` | WebSocket port for the agent server |
 | `CLIENT_PORT` | `8080` | HTTP port for the web client |
 | `WS_URL` | `ws://localhost:9900` | Agent WebSocket URL (used by web client) |

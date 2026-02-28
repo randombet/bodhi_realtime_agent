@@ -29,7 +29,7 @@ ws.send(JSON.stringify({
 }));
 ```
 
-The framework forwards the image to Gemini's multimodal input, enabling use cases like:
+The framework forwards the image to the LLM's multimodal input, enabling use cases like:
 - "What's in this photo?"
 - "Read the text on this receipt"
 - "Identify this product"
@@ -132,7 +132,7 @@ Users can ask the voice agent to speak slower or faster during a conversation. T
 
 1. The user says something like "Can you speak slower?"
 2. The agent calls the `set_speech_speed` tool
-3. The tool sets an **active directive** via `ctx.setDirective()` — this injects pacing instructions into every subsequent turn, preventing Gemini from drifting back to its default pace
+3. The tool sets an **active directive** via `ctx.setDirective()` — this injects pacing instructions into every subsequent turn, preventing the model from drifting back to its default pace
 4. The client receives a `speech_speed` JSON message and adjusts its audio `playbackRate`
 
 ### Defining the Tool
@@ -166,7 +166,7 @@ const setSpeechSpeed: ToolDefinition = {
 
 ### Active Directives
 
-`ctx.setDirective(key, value)` stores a directive by category key. The framework automatically reinjects all active directives into Gemini's context at the start of every turn via `sendClientContent`. This prevents behavioral drift — without reinforcement, Gemini tends to revert to its default pacing after a few turns.
+`ctx.setDirective(key, value)` stores a directive by category key. The framework automatically reinjects all active directives into the model's context at the start of every turn via `sendContent`. This prevents behavioral drift — without reinforcement, the model tends to revert to its default pacing after a few turns.
 
 - Pass a string value to set or update a directive
 - Pass `null` to clear a directive (e.g., resetting speed to normal)

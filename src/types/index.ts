@@ -55,4 +55,20 @@ export type {
 
 export type { ToolContext, ToolDefinition, ToolExecution } from './tool.js';
 
+export type {
+	AudioFormatSpec,
+	ContentTurn,
+	LLMTransport,
+	LLMTransportConfig,
+	ReconnectState,
+	ReplayItem,
+	SessionUpdate,
+	TransportAuth,
+	TransportCapabilities,
+	LLMTransportError,
+	TransportPendingToolCall,
+	TransportToolCall,
+	TransportToolResult,
+} from './transport.js';
+
 export type { UIResponse } from './ui.js';
