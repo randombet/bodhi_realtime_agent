@@ -586,9 +586,9 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			if (this.onInputTranscription) this.onInputTranscription(event.transcript);
 		});
 
-		// --- Output transcription ---
-		rt.on('response.output_audio_transcript.done', (event) => {
-			if (this.onOutputTranscription) this.onOutputTranscription(event.transcript);
+		// --- Output transcription (streaming deltas) ---
+		rt.on('response.output_audio_transcript.delta', (event) => {
+			if (this.onOutputTranscription) this.onOutputTranscription(event.delta);
 		});
 
 		// NOTE: session.created is handled in connect() to control startup ordering.
