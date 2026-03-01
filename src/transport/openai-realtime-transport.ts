@@ -91,6 +91,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	onSessionReady?: (sessionId: string) => void;
 	onError?: (error: LLMTransportError) => void;
 	onClose?: (code?: number, reason?: string) => void;
+	onModelTurnStart?: () => void;
 	onGoAway?: (timeLeft: string) => void;
 	onResumptionUpdate?: (handle: string, resumable: boolean) => void;
 	onGroundingMetadata?: (metadata: Record<string, unknown>) => void;
@@ -431,6 +432,9 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		if (config.voice !== undefined) {
 			this.voice = config.voice;
 		}
+		if (config.transcription !== undefined) {
+			this.config.transcriptionModel = config.transcription.input === false ? null : undefined;
+		}
 	}
 
 	private buildSessionConfig(): RealtimeSessionCreateRequest {
@@ -495,6 +499,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		rt.on('response.created', () => {
 			this._isModelGenerating = true;
 			this._suppressAudio = false;
+			if (this.onModelTurnStart) this.onModelTurnStart();
 		});
 
 		// --- Track assistant output items for interruption ---

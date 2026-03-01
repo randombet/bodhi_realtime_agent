@@ -26,6 +26,21 @@ export class TranscriptManager {
 
 	constructor(private sink: TranscriptSink) {}
 
+	/** Handle a partial/interim transcript from a streaming STT provider.
+	 *  Sends to client for live display but does NOT accumulate in inputBuffer.
+	 *  The streaming provider manages its own partial state — each partial
+	 *  replaces the previous one on the client. */
+	handleInputPartial(text: string): void {
+		if (text.trim()) {
+			this.sink.sendToClient({
+				type: 'transcript',
+				role: 'user',
+				text: text.trim(),
+				partial: true,
+			});
+		}
+	}
+
 	/** Accumulate incoming user speech transcription and emit a partial transcript. */
 	handleInput(text: string): void {
 		if (text.trim()) {
