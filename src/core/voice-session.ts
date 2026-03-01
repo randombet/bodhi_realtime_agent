@@ -55,6 +55,8 @@ export interface VoiceSessionConfig {
 	compressionConfig?: { triggerTokens: number; targetTokens: number };
 	/** Enable server-side transcription of user audio input (default: true). */
 	inputAudioTranscription?: boolean;
+	/** Separate model for user input STT (e.g. "gemini-3-flash-preview"). Overrides built-in transcription. */
+	sttModel?: string;
 	/** Behavior categories for dynamic runtime tuning (speech speed, verbosity, etc.). */
 	behaviors?: BehaviorCategory[];
 	/** Enable memory distillation. Extracts durable user facts from conversation and persists them. */
@@ -221,6 +223,7 @@ export class VoiceSession {
 					speechConfig: config.speechConfig,
 					compressionConfig: config.compressionConfig,
 					inputAudioTranscription: config.inputAudioTranscription,
+					sttModel: config.sttModel,
 				},
 				{},
 			);

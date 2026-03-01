@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { GeminiLiveTransport } from '../../src/transport/gemini-live-transport.js';
 import type { ToolDefinition } from '../../src/types/tool.js';
+import { generateSilence, generateTone } from '../__tests__/helpers/test-audio.js';
 
 // Mock @google/genai
 let capturedConnectConfig: Record<string, unknown> = {};
@@ -13,6 +14,7 @@ const mockSession = {
 	sendClientContent: vi.fn(),
 	close: vi.fn(),
 };
+const mockGenerateContent = vi.fn();
 
 vi.mock('@google/genai', () => ({
 	GoogleGenAI: vi.fn().mockImplementation(() => ({
@@ -25,6 +27,9 @@ vi.mock('@google/genai', () => ({
 				setTimeout(() => cbs.onmessage?.({ setupComplete: { sessionId: 'mock_sid' } }), 1);
 				return mockSession;
 			}),
+		},
+		models: {
+			generateContent: mockGenerateContent,
 		},
 	})),
 }));
@@ -45,6 +50,7 @@ describe('GeminiLiveTransport', () => {
 		mockSession.sendToolResponse.mockClear();
 		mockSession.sendClientContent.mockClear();
 		mockSession.close.mockClear();
+		mockGenerateContent.mockReset();
 	});
 
 	describe('connect', () => {
@@ -133,6 +139,17 @@ describe('GeminiLiveTransport', () => {
 		it('omits inputAudioTranscription when explicitly disabled', async () => {
 			const transport = new GeminiLiveTransport(
 				{ apiKey: 'test-key', inputAudioTranscription: false },
+				{},
+			);
+			await transport.connect();
+
+			const config = capturedConnectConfig.config as Record<string, unknown>;
+			expect(config.inputAudioTranscription).toBeUndefined();
+		});
+
+		it('omits inputAudioTranscription when sttModel is set', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', sttModel: 'gemini-3-flash-preview' },
 				{},
 			);
 			await transport.connect();
@@ -543,6 +560,303 @@ describe('GeminiLiveTransport', () => {
 		it('triggerGeneration is a no-op', () => {
 			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
 			transport.triggerGeneration('some instructions');
+		});
+	});
+
+	describe('separate-model STT', () => {
+		// Generate 500ms of tone audio (well above 0.3s min duration, high RMS)
+		const toneAudio = generateTone(500);
+		const toneChunk = toneAudio.toString('base64');
+		// Generate 500ms of silence (low RMS)
+		const silenceAudio = generateSilence(500);
+		const silenceChunk = silenceAudio.toString('base64');
+
+		it('buffers audio when sttModel is configured', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', sttModel: 'gemini-3-flash-preview' },
+				{},
+			);
+			await transport.connect();
+
+			transport.sendAudio(toneChunk);
+			transport.sendAudio(toneChunk);
+
+			// Audio should still be forwarded to the live session
+			expect(mockSession.sendRealtimeInput).toHaveBeenCalledTimes(2);
+
+			// Access internal buffer via modelTurn trigger
+			mockGenerateContent.mockResolvedValue({
+				candidates: [{ content: { parts: [{ text: 'hello world' }] } }],
+			});
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({
+				serverContent: {
+					modelTurn: { parts: [{ inlineData: { data: 'audio_b64' } }] },
+				},
+			});
+
+			// generateContent should have been called with the buffered audio
+			expect(mockGenerateContent).toHaveBeenCalledOnce();
+			const callArgs = mockGenerateContent.mock.calls[0][0];
+			expect(callArgs.model).toBe('gemini-3-flash-preview');
+			expect(callArgs.contents[0].parts[0].inlineData.mimeType).toBe('audio/wav');
+		});
+
+		it('does not buffer audio when sttModel is not set', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			transport.sendAudio(toneChunk);
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({
+				serverContent: {
+					modelTurn: { parts: [{ inlineData: { data: 'audio_b64' } }] },
+				},
+			});
+
+			expect(mockGenerateContent).not.toHaveBeenCalled();
+		});
+
+		it('fires onInputTranscription with STT result', async () => {
+			const onInputTranscription = vi.fn();
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', sttModel: 'gemini-3-flash-preview' },
+				{ onInputTranscription },
+			);
+			await transport.connect();
+
+			transport.sendAudio(toneChunk);
+
+			mockGenerateContent.mockResolvedValue({
+				candidates: [{ content: { parts: [{ text: '  hello world  ' }] } }],
+			});
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({
+				serverContent: {
+					modelTurn: { parts: [{ inlineData: { data: 'audio_b64' } }] },
+				},
+			});
+
+			// Wait for the async generateContent promise
+			await vi.waitFor(() => {
+				expect(onInputTranscription).toHaveBeenCalledWith('hello world');
+			});
+		});
+
+		it('ignores built-in inputTranscription when sttModel is set', async () => {
+			const onInputTranscription = vi.fn();
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', sttModel: 'gemini-3-flash-preview' },
+				{ onInputTranscription },
+			);
+			await transport.connect();
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({
+				serverContent: { inputTranscription: { text: 'built-in text' } },
+			});
+
+			expect(onInputTranscription).not.toHaveBeenCalled();
+		});
+
+		it('clears audio buffer on disconnect', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', sttModel: 'gemini-3-flash-preview' },
+				{},
+			);
+			await transport.connect();
+
+			transport.sendAudio(toneChunk);
+			await transport.disconnect();
+
+			// Reconnect and trigger modelTurn — should have no buffered audio
+			await transport.connect();
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({
+				serverContent: {
+					modelTurn: { parts: [{ inlineData: { data: 'audio_b64' } }] },
+				},
+			});
+
+			expect(mockGenerateContent).not.toHaveBeenCalled();
+		});
+
+		it('handles STT failure gracefully', async () => {
+			const onInputTranscription = vi.fn();
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', sttModel: 'gemini-3-flash-preview' },
+				{ onInputTranscription },
+			);
+			await transport.connect();
+
+			transport.sendAudio(toneChunk);
+
+			mockGenerateContent.mockRejectedValue(new Error('API error'));
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({
+				serverContent: {
+					modelTurn: { parts: [{ inlineData: { data: 'audio_b64' } }] },
+				},
+			});
+
+			// Wait a tick for the promise to settle
+			await new Promise((r) => setTimeout(r, 10));
+
+			// Should not have called onInputTranscription, and should not throw
+			expect(onInputTranscription).not.toHaveBeenCalled();
+		});
+
+		it('clears audio buffer on natural turnComplete (no interruption)', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', sttModel: 'gemini-3-flash-preview' },
+				{},
+			);
+			await transport.connect();
+
+			transport.sendAudio(toneChunk);
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+
+			// Natural turnComplete (no preceding interrupted) should clear the buffer
+			cbs.onmessage({ serverContent: { turnComplete: true } });
+
+			// Now trigger modelTurn — buffer should be empty, no STT call
+			cbs.onmessage({
+				serverContent: {
+					modelTurn: { parts: [{ inlineData: { data: 'audio_b64' } }] },
+				},
+			});
+
+			expect(mockGenerateContent).not.toHaveBeenCalled();
+		});
+
+		it('preserves audio buffer when turn is interrupted', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', sttModel: 'gemini-3-flash-preview' },
+				{},
+			);
+			await transport.connect();
+
+			transport.sendAudio(toneChunk);
+
+			mockGenerateContent.mockResolvedValue({
+				candidates: [{ content: { parts: [{ text: 'hello world' }] } }],
+			});
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+
+			// User interrupts — interrupted fires, then turnComplete follows
+			cbs.onmessage({ serverContent: { interrupted: true } });
+			cbs.onmessage({ serverContent: { turnComplete: true } });
+
+			// Buffer should NOT have been cleared — user's speech is preserved
+			// Next modelTurn should trigger STT with the buffered audio
+			cbs.onmessage({
+				serverContent: {
+					modelTurn: { parts: [{ inlineData: { data: 'audio_b64' } }] },
+				},
+			});
+
+			expect(mockGenerateContent).toHaveBeenCalledOnce();
+		});
+
+		it('clears buffer on natural turnComplete after an interrupted turn', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', sttModel: 'gemini-3-flash-preview' },
+				{},
+			);
+			await transport.connect();
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+
+			// First turn: interrupted (flag resets after turnComplete)
+			cbs.onmessage({ serverContent: { interrupted: true } });
+			cbs.onmessage({ serverContent: { turnComplete: true } });
+
+			// Send new audio for the next turn
+			transport.sendAudio(toneChunk);
+
+			// Second turn: natural completion — should clear the buffer
+			cbs.onmessage({ serverContent: { turnComplete: true } });
+
+			// modelTurn should NOT trigger STT — buffer was cleared
+			cbs.onmessage({
+				serverContent: {
+					modelTurn: { parts: [{ inlineData: { data: 'audio_b64' } }] },
+				},
+			});
+
+			expect(mockGenerateContent).not.toHaveBeenCalled();
+		});
+
+		it('skips STT for silence audio (low RMS)', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', sttModel: 'gemini-3-flash-preview' },
+				{},
+			);
+			await transport.connect();
+
+			// Send 500ms of silence — passes duration check but fails RMS check
+			transport.sendAudio(silenceChunk);
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({
+				serverContent: {
+					modelTurn: { parts: [{ inlineData: { data: 'audio_b64' } }] },
+				},
+			});
+
+			expect(mockGenerateContent).not.toHaveBeenCalled();
+		});
+
+		it('skips STT for very short audio buffers', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', sttModel: 'gemini-3-flash-preview' },
+				{},
+			);
+			await transport.connect();
+
+			// Send only 100ms of tone — fails duration check (< 0.3s)
+			const shortTone = generateTone(100).toString('base64');
+			transport.sendAudio(shortTone);
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({
+				serverContent: {
+					modelTurn: { parts: [{ inlineData: { data: 'audio_b64' } }] },
+				},
+			});
+
+			expect(mockGenerateContent).not.toHaveBeenCalled();
+		});
+
+		it('filters [SILENCE] responses from STT model', async () => {
+			const onInputTranscription = vi.fn();
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', sttModel: 'gemini-3-flash-preview' },
+				{ onInputTranscription },
+			);
+			await transport.connect();
+
+			transport.sendAudio(toneChunk);
+
+			mockGenerateContent.mockResolvedValue({
+				candidates: [{ content: { parts: [{ text: '[SILENCE]' }] } }],
+			});
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({
+				serverContent: {
+					modelTurn: { parts: [{ inlineData: { data: 'audio_b64' } }] },
+				},
+			});
+
+			await new Promise((r) => setTimeout(r, 10));
+			expect(onInputTranscription).not.toHaveBeenCalled();
 		});
 	});
 });

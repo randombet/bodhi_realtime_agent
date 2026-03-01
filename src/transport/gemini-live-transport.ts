@@ -38,6 +38,9 @@ export interface GeminiTransportConfig {
 	googleSearch?: boolean;
 	/** Enable server-side transcription of user audio input (default: true). */
 	inputAudioTranscription?: boolean;
+	/** Separate model for user input STT (e.g. "gemini-3-flash-preview").
+	 *  When set, disables built-in inputAudioTranscription and uses this model instead. */
+	sttModel?: string;
 	/** Timeout in ms for connect() to receive setupComplete (default: 30000). */
 	connectTimeoutMs?: number;
 	/** Timeout in ms for the overall reconnect operation (default: 45000). */
@@ -92,6 +95,10 @@ export class GeminiLiveTransport implements LLMTransport {
 	private config: GeminiTransportConfig;
 	/** Resolves when setupComplete fires — used to make connect() await Gemini readiness. */
 	private setupResolver: (() => void) | null = null;
+	/** Buffered user audio chunks for separate-model STT (base64 PCM). */
+	private _audioChunks: string[] = [];
+	/** Tracks whether the current turn was interrupted (to skip buffer clearing on turnComplete). */
+	private _wasInterrupted = false;
 
 	// --- LLMTransport static properties ---
 
@@ -158,7 +165,7 @@ export class GeminiLiveTransport implements LLMTransport {
 			outputAudioTranscription: {},
 		};
 
-		if (this.config.inputAudioTranscription !== false) {
+		if (this.config.inputAudioTranscription !== false && !this.config.sttModel) {
 			connectConfig.inputAudioTranscription = {};
 		}
 
@@ -259,6 +266,8 @@ export class GeminiLiveTransport implements LLMTransport {
 	}
 
 	async disconnect(): Promise<void> {
+		this._audioChunks = [];
+		this._wasInterrupted = false;
 		if (this.session) {
 			try {
 				await this.session.close();
@@ -272,6 +281,9 @@ export class GeminiLiveTransport implements LLMTransport {
 	/** Send base64-encoded PCM audio to Gemini as realtime input. */
 	sendAudio(base64Data: string): void {
 		if (!this.session) return;
+		if (this.config.sttModel) {
+			this._audioChunks.push(base64Data);
+		}
 		this.session.sendRealtimeInput({
 			media: { data: base64Data, mimeType: 'audio/pcm;rate=16000' },
 		});
@@ -471,6 +483,56 @@ export class GeminiLiveTransport implements LLMTransport {
 		this.session.sendClientContent({ turns, turnComplete: false });
 	}
 
+	/** Transcribe buffered user audio using a separate Gemini model (fire-and-forget). */
+	private _transcribeBufferedAudio(): void {
+		const chunks = this._audioChunks;
+		this._audioChunks = [];
+
+		const sttModel = this.config.sttModel;
+		if (!sttModel) return;
+
+		const pcmBuf = Buffer.concat(chunks.map((c) => Buffer.from(c, 'base64')));
+		if (pcmBuf.length === 0) return;
+
+		// Skip STT if audio is too short (<0.3s) or too quiet (mostly silence/noise)
+		const MIN_DURATION_BYTES = 9600; // 0.3s at 32000 bytes/s (16kHz 16-bit mono)
+		const MIN_RMS_THRESHOLD = 300; // silence ~0-100, speech ~1000+
+		if (pcmBuf.length < MIN_DURATION_BYTES || pcmRms(pcmBuf) < MIN_RMS_THRESHOLD) return;
+
+		const wavBuf = pcmToWav(pcmBuf, 16000);
+
+		this.ai.models
+			.generateContent({
+				model: sttModel,
+				contents: [
+					{
+						role: 'user',
+						parts: [
+							{
+								inlineData: {
+									data: wavBuf.toString('base64'),
+									mimeType: 'audio/wav',
+								},
+							},
+							{
+								text: 'Transcribe the spoken words in this audio. If the audio contains only silence, background noise, or no clear speech, respond with exactly: [SILENCE]',
+							},
+						],
+					},
+				],
+			})
+			.then((response) => {
+				const text = response.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+				if (text && text !== '[SILENCE]') {
+					this.callbacks.onInputTranscription?.(text);
+					if (this.onInputTranscription) this.onInputTranscription(text);
+				}
+			})
+			.catch(() => {
+				// STT failure is non-fatal — user audio still processed by live model
+			});
+	}
+
 	// biome-ignore lint/suspicious/noExplicitAny: LiveServerMessage is a complex union type
 	private handleMessage(msg: any): void {
 		if (msg.setupComplete) {
@@ -490,6 +552,10 @@ export class GeminiLiveTransport implements LLMTransport {
 
 			// Audio output
 			if (content.modelTurn?.parts) {
+				// Trigger separate-model STT when model starts responding
+				if (this.config.sttModel && this._audioChunks.length > 0) {
+					this._transcribeBufferedAudio();
+				}
 				for (const part of content.modelTurn.parts) {
 					if (part.inlineData?.data) {
 						this.callbacks.onAudioOutput?.(part.inlineData.data);
@@ -504,8 +570,8 @@ export class GeminiLiveTransport implements LLMTransport {
 				if (this.onGroundingMetadata) this.onGroundingMetadata(content.groundingMetadata);
 			}
 
-			// Transcriptions
-			if (content.inputTranscription?.text) {
+			// Transcriptions — skip built-in input transcription when using separate STT model
+			if (content.inputTranscription?.text && !this.config.sttModel) {
 				this.callbacks.onInputTranscription?.(content.inputTranscription.text);
 				if (this.onInputTranscription) this.onInputTranscription(content.inputTranscription.text);
 			}
@@ -515,14 +581,23 @@ export class GeminiLiveTransport implements LLMTransport {
 					this.onOutputTranscription(content.outputTranscription.text);
 			}
 
-			// Turn signals
-			if (content.turnComplete) {
-				this.callbacks.onTurnComplete?.();
-				if (this.onTurnComplete) this.onTurnComplete();
-			}
+			// Turn signals — check interrupted BEFORE turnComplete so the flag
+			// is set correctly even if both arrive in the same server message
 			if (content.interrupted) {
+				this._wasInterrupted = true;
 				this.callbacks.onInterrupted?.();
 				if (this.onInterrupted) this.onInterrupted();
+			}
+			if (content.turnComplete) {
+				// Only clear STT buffer on NATURAL turn completion (not after interruption).
+				// When the user interrupts, their speech is in the buffer and must be
+				// preserved for the next modelTurn to trigger STT.
+				if (this.config.sttModel && !this._wasInterrupted) {
+					this._audioChunks = [];
+				}
+				this._wasInterrupted = false;
+				this.callbacks.onTurnComplete?.();
+				if (this.onTurnComplete) this.onTurnComplete();
 			}
 			return;
 		}
@@ -567,4 +642,36 @@ function toolToDeclaration(tool: ToolDefinition): Record<string, unknown> {
 		description: tool.description,
 		parameters: zodToJsonSchema(tool.parameters),
 	};
+}
+
+/** Calculate RMS (root mean square) energy of 16-bit signed PCM audio.
+ *  Returns 0 for empty buffers. Typical values: silence ~0-100, speech ~1000-5000. */
+function pcmRms(pcm: Buffer): number {
+	const sampleCount = pcm.length / 2;
+	if (sampleCount === 0) return 0;
+	let sumSquares = 0;
+	for (let i = 0; i < pcm.length; i += 2) {
+		const sample = pcm.readInt16LE(i);
+		sumSquares += sample * sample;
+	}
+	return Math.sqrt(sumSquares / sampleCount);
+}
+
+/** Wrap raw PCM (16-bit mono little-endian) in a minimal 44-byte WAV header. */
+function pcmToWav(pcm: Buffer, sampleRate: number): Buffer {
+	const header = Buffer.alloc(44);
+	header.write('RIFF', 0);
+	header.writeUInt32LE(pcm.length + 36, 4);
+	header.write('WAVE', 8);
+	header.write('fmt ', 12);
+	header.writeUInt32LE(16, 16); // chunk size
+	header.writeUInt16LE(1, 20); // PCM format
+	header.writeUInt16LE(1, 22); // mono
+	header.writeUInt32LE(sampleRate, 24);
+	header.writeUInt32LE(sampleRate * 2, 28); // byte rate
+	header.writeUInt16LE(2, 32); // block align
+	header.writeUInt16LE(16, 34); // bits per sample
+	header.write('data', 36);
+	header.writeUInt32LE(pcm.length, 40);
+	return Buffer.concat([header, pcm]);
 }
