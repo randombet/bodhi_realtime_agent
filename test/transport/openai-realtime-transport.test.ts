@@ -609,17 +609,20 @@ describe('OpenAIRealtimeTransport', () => {
 			expect(transcript).toBe('Hello world');
 		});
 
-		it('fires onOutputTranscription', () => {
-			let transcript = '';
+		it('fires onOutputTranscription on streaming deltas', () => {
+			const chunks: string[] = [];
 			transport.onOutputTranscription = (t) => {
-				transcript = t;
+				chunks.push(t);
 			};
 
-			mockRt.emit('response.output_audio_transcript.done', {
-				transcript: 'Hi there',
+			mockRt.emit('response.output_audio_transcript.delta', {
+				delta: 'Hi ',
+			});
+			mockRt.emit('response.output_audio_transcript.delta', {
+				delta: 'there',
 			});
 
-			expect(transcript).toBe('Hi there');
+			expect(chunks).toEqual(['Hi ', 'there']);
 		});
 	});
 

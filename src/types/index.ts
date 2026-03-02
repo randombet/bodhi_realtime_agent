@@ -63,6 +63,8 @@ export type {
 	ReconnectState,
 	ReplayItem,
 	SessionUpdate,
+	STTAudioConfig,
+	STTProvider,
 	TransportAuth,
 	TransportCapabilities,
 	LLMTransportError,

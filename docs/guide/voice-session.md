@@ -52,7 +52,11 @@ const session = new VoiceSession({
   speechConfig: { voiceName: 'Puck' },    // Gemini voice preset
 
   // --- Optional: Transcription ---
-  inputAudioTranscription: true,           // Server-side user speech transcription (default: true)
+  inputAudioTranscription: true,           // Built-in transport transcription (default: true)
+  sttProvider: new GeminiBatchSTTProvider({ // External STT provider (disables built-in)
+    apiKey: process.env.GEMINI_API_KEY!,
+    model: 'gemini-3-flash-preview',
+  }),
 
   // --- Optional: Observability ---
   hooks: {
@@ -114,14 +118,15 @@ CREATED ──→ CONNECTING ──→ ACTIVE ──→ RECONNECTING ──→ A
 
 ## Audio Fast-Path
 
-Audio flows directly between the client and LLM transport, bypassing the EventBus for minimal latency:
+Audio flows directly between the client and LLM transport, bypassing the EventBus for minimal latency. When an `sttProvider` is configured, audio is also forked to it for transcription:
 
 ```
+                                    ┌──→  STTProvider  ──→  TranscriptManager
 Client WebSocket  ──binary frames──→  ClientTransport  ──→  LLMTransport  ──→  LLM Provider
                   ←─binary frames──                    ←──                ←──
 ```
 
-Everything else (tool calls, agent transfers, transcripts, GUI events) goes through the control plane.
+Everything else (tool calls, agent transfers, transcripts, GUI events) goes through the control plane. See [Transport > STT Providers](/guide/transport#speech-to-text-stt-providers) for details.
 
 ## Accessing Components
 

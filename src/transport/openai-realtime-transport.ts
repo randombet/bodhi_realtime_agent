@@ -91,6 +91,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	onSessionReady?: (sessionId: string) => void;
 	onError?: (error: LLMTransportError) => void;
 	onClose?: (code?: number, reason?: string) => void;
+	onModelTurnStart?: () => void;
 	onGoAway?: (timeLeft: string) => void;
 	onResumptionUpdate?: (handle: string, resumable: boolean) => void;
 	onGroundingMetadata?: (metadata: Record<string, unknown>) => void;
@@ -431,6 +432,9 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		if (config.voice !== undefined) {
 			this.voice = config.voice;
 		}
+		if (config.transcription !== undefined) {
+			this.config.transcriptionModel = config.transcription.input === false ? null : undefined;
+		}
 	}
 
 	private buildSessionConfig(): RealtimeSessionCreateRequest {
@@ -495,6 +499,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		rt.on('response.created', () => {
 			this._isModelGenerating = true;
 			this._suppressAudio = false;
+			if (this.onModelTurnStart) this.onModelTurnStart();
 		});
 
 		// --- Track assistant output items for interruption ---
@@ -586,9 +591,9 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			if (this.onInputTranscription) this.onInputTranscription(event.transcript);
 		});
 
-		// --- Output transcription ---
-		rt.on('response.output_audio_transcript.done', (event) => {
-			if (this.onOutputTranscription) this.onOutputTranscription(event.transcript);
+		// --- Output transcription (streaming deltas) ---
+		rt.on('response.output_audio_transcript.delta', (event) => {
+			if (this.onOutputTranscription) this.onOutputTranscription(event.delta);
 		});
 
 		// NOTE: session.created is handled in connect() to control startup ordering.

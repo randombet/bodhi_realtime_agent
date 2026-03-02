@@ -63,15 +63,20 @@ graph LR
     VS --> HM[HooksManager]
     VS --> CC[ConversationContext]
     VS --> SM[SessionManager]
+    VS --> TM[TranscriptManager]
+    VS --> STT["STTProvider<br/>(optional)"]
     VS --> MD[MemoryDistiller]
     VS --> MS[MemoryStore]
 
     AR --> A["agents[]"]
     AR --> SR[SubagentRunner]
     CC --> CI["conversationItems[]"]
+    TM --> CC
     MD --> MS
 
     style VS fill:#3b82f6,color:#fff,stroke:#1d4ed8
+    style STT fill:#f472b6,stroke:#ec4899
+    style TM fill:#a78bfa,stroke:#7c3aed
 ```
 
 ## How Agents, Tools, and the LLM Interact
@@ -101,20 +106,29 @@ flowchart TD
 
 ## Data Flow: A Single Voice Turn
 
-This is what happens when a user speaks and gets a response:
+This is what happens when a user speaks and gets a response. Note how audio is forked to both the LLM and the STT provider simultaneously:
 
 ```mermaid
 sequenceDiagram
     participant C as Client App
     participant CT as ClientTransport
+    participant STT as STTProvider
+    participant TM as TranscriptManager
     participant GT as LLMTransport
     participant G as LLM Provider
     participant T as Tool
 
     C->>CT: Binary frame (PCM audio)
-    CT->>GT: Forward audio
+    CT->>GT: Forward audio to LLM
+    CT->>STT: feedAudio(base64)
     GT->>G: sendAudio(base64)
+
+    Note over STT: (Chrome STT shows<br/>real-time interim<br/>on client)
+
     Note over G: Process speech<br/>+ generate response
+
+    G->>GT: onModelTurnStart()
+    GT->>STT: commit(turnId)
 
     alt Tool call needed
         G->>GT: onToolCall(name, args)
@@ -123,11 +137,16 @@ sequenceDiagram
         GT->>G: sendToolResponse(result)
     end
 
+    STT->>TM: onTranscript(text, turnId)
+    TM->>CT: {type: transcript, role: user}
+    Note over C: Server text replaces<br/>Chrome STT interim
+
     G->>GT: onAudioOutput(base64)
     GT->>CT: Forward audio
     CT->>C: Binary frame (PCM audio)
 
     G->>GT: onTurnComplete()
+    TM->>CT: Final transcripts (user + assistant)
     Note over CT,GT: Turn complete,<br/>events published
 ```
 
@@ -189,6 +208,52 @@ flowchart LR
     style NS fill:#10b981,color:#fff
 ```
 
+## Transcription Pipeline
+
+User speech is transcribed through a dual-layer system: **Chrome STT** provides instant visual feedback on the client, while a **server-side STTProvider** produces the authoritative transcript stored in conversation history.
+
+```mermaid
+flowchart TB
+    subgraph Client["Client (Browser)"]
+        MIC["🎤 Microphone"]
+        CSTT["Chrome STT<br/>(SpeechRecognition API)"]
+        UI["Transcript Display"]
+    end
+
+    subgraph Server["Server (VoiceSession)"]
+        CT2["ClientTransport"]
+
+        subgraph STTPath["STT Path (one active per session)"]
+            direction LR
+            BUILT["Built-in<br/>(transport native)"]
+            EXT["External STTProvider<br/>(GeminiBatch / ElevenLabs)"]
+        end
+
+        TM2["TranscriptManager"]
+    end
+
+    MIC -->|"PCM audio"| CT2
+    MIC -->|"audio stream"| CSTT
+    CSTT -->|"real-time<br/>interim text"| UI
+
+    CT2 --> STTPath
+    STTPath -->|"onTranscript /<br/>onPartialTranscript"| TM2
+    TM2 -->|"transcript JSON<br/>(partial + final)"| UI
+
+    UI -.->|"Server final<br/>replaces Chrome<br/>STT interim"| UI
+
+    style Client fill:#e0e7ff,stroke:#6366f1
+    style Server fill:#f0f7ff,stroke:#3b82f6
+    style STTPath fill:#fef3c7,stroke:#f59e0b
+    style CSTT fill:#f472b6,stroke:#ec4899
+```
+
+**Key behaviors:**
+- Chrome STT shows what the user is saying in real-time (interim text, opacity 60%)
+- When the server sends its authoritative transcript, it replaces the Chrome STT text in-place
+- Orphaned Chrome STT interims (e.g., from assistant echo) are automatically removed on turn boundaries
+- Exactly one server-side STT path is active: either transport built-in or an external `STTProvider`
+
 ## EventBus Wiring
 
 All framework components communicate through the EventBus. Hooks provide a curated subset:
@@ -224,7 +289,7 @@ graph TB
 
 ## Transport Layer
 
-The `LLMTransport` interface abstracts provider differences. Two implementations are available:
+The `LLMTransport` interface abstracts provider differences. An optional `STTProvider` handles user speech transcription independently from the LLM:
 
 ```mermaid
 graph LR
@@ -243,6 +308,11 @@ graph LR
         ZS["Zod → JSON Schema<br/>converter"]
     end
 
+    subgraph STT["STTProvider (optional)"]
+        GBSTT["GeminiBatchSTT"]
+        ELSTT["ElevenLabsSTT"]
+    end
+
     subgraph Provider Side
         G["Gemini Live API"]
         O["OpenAI Realtime API"]
@@ -251,6 +321,7 @@ graph LR
     C <-->|"Binary: PCM audio<br/>Text: JSON messages"| WS
     WS <--> AB
     WS <--> LT
+    WS -.->|"audio fork"| STT
     ZS -->|"tool declarations"| GLT
     ZS -->|"tool declarations"| ORT
     GLT <-->|"16kHz in / 24kHz out"| G
@@ -258,6 +329,7 @@ graph LR
 
     style CT fill:#f0f7ff,stroke:#3b82f6
     style LT fill:#fef3c7,stroke:#f59e0b
+    style STT fill:#fdf2f8,stroke:#ec4899
 ```
 
 ## Session State Machine

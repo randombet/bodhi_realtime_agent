@@ -545,4 +545,117 @@ describe('GeminiLiveTransport', () => {
 			transport.triggerGeneration('some instructions');
 		});
 	});
+
+	describe('onModelTurnStart', () => {
+		it('fires on first modelTurn.parts per turn', async () => {
+			const onModelTurnStart = vi.fn();
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, { onModelTurnStart });
+			transport.onModelTurnStart = onModelTurnStart;
+			await transport.connect();
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+
+			// First modelTurn — should fire
+			cbs.onmessage({
+				serverContent: {
+					modelTurn: { parts: [{ inlineData: { data: 'audio_b64' } }] },
+				},
+			});
+
+			// Constructor callback + property callback = 2 calls
+			expect(onModelTurnStart).toHaveBeenCalledTimes(2);
+		});
+
+		it('fires only once per turn (not on subsequent modelTurn.parts)', async () => {
+			const onModelTurnStart = vi.fn();
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			transport.onModelTurnStart = onModelTurnStart;
+			await transport.connect();
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+
+			// First modelTurn — fires
+			cbs.onmessage({
+				serverContent: {
+					modelTurn: { parts: [{ inlineData: { data: 'chunk1' } }] },
+				},
+			});
+			// Second modelTurn in same turn — does NOT fire again
+			cbs.onmessage({
+				serverContent: {
+					modelTurn: { parts: [{ inlineData: { data: 'chunk2' } }] },
+				},
+			});
+
+			expect(onModelTurnStart).toHaveBeenCalledOnce();
+		});
+
+		it('fires on first toolCall if no audio preceded it', async () => {
+			const onModelTurnStart = vi.fn();
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			transport.onModelTurnStart = onModelTurnStart;
+			await transport.connect();
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+
+			cbs.onmessage({
+				toolCall: {
+					functionCalls: [{ id: 'fc_1', name: 'search', args: { q: 'test' } }],
+				},
+			});
+
+			expect(onModelTurnStart).toHaveBeenCalledOnce();
+		});
+
+		it('does not fire on toolCall if audio already fired it', async () => {
+			const onModelTurnStart = vi.fn();
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			transport.onModelTurnStart = onModelTurnStart;
+			await transport.connect();
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+
+			// Audio fires first
+			cbs.onmessage({
+				serverContent: {
+					modelTurn: { parts: [{ inlineData: { data: 'audio_b64' } }] },
+				},
+			});
+			expect(onModelTurnStart).toHaveBeenCalledOnce();
+
+			// Tool call should not fire again
+			cbs.onmessage({
+				toolCall: {
+					functionCalls: [{ id: 'fc_1', name: 'search', args: {} }],
+				},
+			});
+			expect(onModelTurnStart).toHaveBeenCalledOnce();
+		});
+
+		it('resets on turnComplete so next turn fires again', async () => {
+			const onModelTurnStart = vi.fn();
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			transport.onModelTurnStart = onModelTurnStart;
+			await transport.connect();
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+
+			// Turn 1
+			cbs.onmessage({
+				serverContent: {
+					modelTurn: { parts: [{ inlineData: { data: 'audio_b64' } }] },
+				},
+			});
+			cbs.onmessage({ serverContent: { turnComplete: true } });
+
+			// Turn 2
+			cbs.onmessage({
+				serverContent: {
+					modelTurn: { parts: [{ inlineData: { data: 'audio_b64' } }] },
+				},
+			});
+
+			expect(onModelTurnStart).toHaveBeenCalledTimes(2);
+		});
+	});
 });

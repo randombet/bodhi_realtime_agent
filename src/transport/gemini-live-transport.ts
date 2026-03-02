@@ -58,6 +58,8 @@ export interface GeminiTransportCallbacks {
 	onTurnComplete?(): void;
 	/** Model's response was interrupted by user speech. */
 	onInterrupted?(): void;
+	/** Model started a new response turn (first audio or tool call). */
+	onModelTurnStart?(): void;
 	/** Transcription of user's spoken input. */
 	onInputTranscription?(text: string): void;
 	/** Transcription of model's spoken output. */
@@ -92,6 +94,8 @@ export class GeminiLiveTransport implements LLMTransport {
 	private config: GeminiTransportConfig;
 	/** Resolves when setupComplete fires — used to make connect() await Gemini readiness. */
 	private setupResolver: (() => void) | null = null;
+	/** Tracks whether onModelTurnStart has already fired for the current turn. */
+	private _modelTurnStarted = false;
 
 	// --- LLMTransport static properties ---
 
@@ -125,6 +129,7 @@ export class GeminiLiveTransport implements LLMTransport {
 	onSessionReady?: (sessionId: string) => void;
 	onError?: (error: LLMTransportError) => void;
 	onClose?: (code?: number, reason?: string) => void;
+	onModelTurnStart?: () => void;
 	onGoAway?: (timeLeft: string) => void;
 	onResumptionUpdate?: (handle: string, resumable: boolean) => void;
 	onGroundingMetadata?: (metadata: Record<string, unknown>) => void;
@@ -259,6 +264,7 @@ export class GeminiLiveTransport implements LLMTransport {
 	}
 
 	async disconnect(): Promise<void> {
+		this._modelTurnStarted = false;
 		if (this.session) {
 			try {
 				await this.session.close();
@@ -488,8 +494,13 @@ export class GeminiLiveTransport implements LLMTransport {
 		if (msg.serverContent) {
 			const content = msg.serverContent;
 
-			// Audio output
+			// Audio output — fire onModelTurnStart on first modelTurn.parts per turn
 			if (content.modelTurn?.parts) {
+				if (!this._modelTurnStarted) {
+					this._modelTurnStarted = true;
+					this.callbacks.onModelTurnStart?.();
+					if (this.onModelTurnStart) this.onModelTurnStart();
+				}
 				for (const part of content.modelTurn.parts) {
 					if (part.inlineData?.data) {
 						this.callbacks.onAudioOutput?.(part.inlineData.data);
@@ -516,18 +527,25 @@ export class GeminiLiveTransport implements LLMTransport {
 			}
 
 			// Turn signals
-			if (content.turnComplete) {
-				this.callbacks.onTurnComplete?.();
-				if (this.onTurnComplete) this.onTurnComplete();
-			}
 			if (content.interrupted) {
 				this.callbacks.onInterrupted?.();
 				if (this.onInterrupted) this.onInterrupted();
+			}
+			if (content.turnComplete) {
+				this._modelTurnStarted = false;
+				this.callbacks.onTurnComplete?.();
+				if (this.onTurnComplete) this.onTurnComplete();
 			}
 			return;
 		}
 
 		if (msg.toolCall?.functionCalls?.length) {
+			// Fire onModelTurnStart on first toolCall if no audio preceded it
+			if (!this._modelTurnStarted) {
+				this._modelTurnStarted = true;
+				this.callbacks.onModelTurnStart?.();
+				if (this.onModelTurnStart) this.onModelTurnStart();
+			}
 			this.callbacks.onToolCall?.(msg.toolCall.functionCalls);
 			if (this.onToolCall) this.onToolCall(msg.toolCall.functionCalls);
 			return;

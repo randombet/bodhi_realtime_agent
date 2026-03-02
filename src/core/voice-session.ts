@@ -12,7 +12,7 @@ import type { MainAgent, SubagentConfig } from '../types/agent.js';
 import type { BehaviorCategory } from '../types/behavior.js';
 import type { FrameworkHooks } from '../types/hooks.js';
 import type { MemoryStore } from '../types/memory.js';
-import type { LLMTransport, LLMTransportError } from '../types/transport.js';
+import type { LLMTransport, LLMTransportError, STTProvider } from '../types/transport.js';
 import { BackgroundNotificationQueue } from './background-notification-queue.js';
 import { ConversationContext } from './conversation-context.js';
 import { DirectiveManager } from './directive-manager.js';
@@ -53,8 +53,14 @@ export interface VoiceSessionConfig {
 	speechConfig?: { voiceName?: string };
 	/** Context window compression thresholds. */
 	compressionConfig?: { triggerTokens: number; targetTokens: number };
-	/** Enable server-side transcription of user audio input (default: true). */
+	/** Enable server-side transcription of user audio input (default: true).
+	 *  Has no effect when sttProvider is set (built-in is disabled automatically).
+	 *  Use false to disable all input transcription for privacy or cost control. */
 	inputAudioTranscription?: boolean;
+	/** External STT provider for user input transcription.
+	 *  When set, transport built-in transcription is automatically disabled.
+	 *  When omitted, the transport's built-in transcription is used. */
+	sttProvider?: STTProvider;
 	/** Behavior categories for dynamic runtime tuning (speech speed, verbosity, etc.). */
 	behaviors?: BehaviorCategory[];
 	/** Enable memory distillation. Extracts durable user facts from conversation and persists them. */
@@ -107,6 +113,8 @@ export class VoiceSession {
 	private memoryDistiller?: MemoryDistiller;
 	private memoryCacheManager?: MemoryCacheManager;
 	private turnId = 0;
+	private sttProvider?: STTProvider;
+	private _commitFiredForTurn = false;
 	private config: VoiceSessionConfig;
 	private directiveManager = new DirectiveManager();
 	private transcriptManager!: TranscriptManager;
@@ -201,13 +209,23 @@ export class VoiceSession {
 		const behaviorTools = this.behaviorManager?.tools ?? [];
 		const allInitialTools = [...(initialAgent?.tools ?? []), ...behaviorTools];
 
+		// Determine inputAudioTranscription setting:
+		// When sttProvider is set, disable built-in transcription automatically.
+		const inputTranscription = config.sttProvider ? false : config.inputAudioTranscription;
+
 		if (config.transport) {
 			// Use pre-constructed transport (OpenAI, mock, etc.)
 			this.transport = config.transport;
-			// Sync tools and instructions so they're available at connect time
+			// Sync tools and instructions so they're available at connect time.
+			// When an external STT provider is active, also disable transport built-in
+			// transcription at the provider level (not just the callback) to avoid
+			// duplicate backend processing and unnecessary cost.
 			this.transport.updateSession({
 				instructions,
 				tools: allInitialTools.length ? allInitialTools : undefined,
+				...(inputTranscription === false && {
+					transcription: { input: false },
+				}),
 			});
 		} else {
 			// Construct GeminiLiveTransport from config (backward compatibility)
@@ -220,7 +238,7 @@ export class VoiceSession {
 					googleSearch: initialAgent?.googleSearch,
 					speechConfig: config.speechConfig,
 					compressionConfig: config.compressionConfig,
-					inputAudioTranscription: config.inputAudioTranscription,
+					inputAudioTranscription: inputTranscription,
 				},
 				{},
 			);
@@ -232,7 +250,6 @@ export class VoiceSession {
 		this.transport.onToolCallCancel = (ids) => this.toolCallRouter.handleToolCallCancellation(ids);
 		this.transport.onTurnComplete = () => this.handleTurnComplete();
 		this.transport.onInterrupted = () => this.handleInterrupted();
-		this.transport.onInputTranscription = (text) => this.transcriptManager.handleInput(text);
 		this.transport.onOutputTranscription = (text) => this.transcriptManager.handleOutput(text);
 		this.transport.onSessionReady = (sessionId) => this.handleSetupComplete(sessionId);
 		this.transport.onError = (error) => this.handleTransportError(error);
@@ -241,6 +258,46 @@ export class VoiceSession {
 		this.transport.onResumptionUpdate = (handle, resumable) =>
 			this.handleResumptionUpdate(handle, resumable);
 		this.transport.onGroundingMetadata = (metadata) => this.handleGroundingMetadata(metadata);
+
+		// Wire STT: exactly one transcript path is active per session.
+		if (config.sttProvider) {
+			this.sttProvider = config.sttProvider;
+
+			// Configure with the transport's actual audio format
+			this.sttProvider.configure({
+				sampleRate: this.transport.audioFormat.inputSampleRate,
+				bitDepth: this.transport.audioFormat.bitDepth,
+				channels: this.transport.audioFormat.channels,
+			});
+
+			// Wire callbacks — turn-aware ordering protection.
+			// Accept results from the current turn or the immediately preceding turn.
+			// Batch STT providers fire results asynchronously (e.g., generateContent API call)
+			// which may complete after handleTurnComplete increments this.turnId. Using
+			// `turnId < this.turnId - 1` prevents dropping valid late results while still
+			// rejecting truly stale transcripts from 2+ turns ago.
+			this.sttProvider.onTranscript = (text, turnId) => {
+				if (turnId !== undefined && turnId < this.turnId - 1) return; // Drop stale results (2+ turns old)
+				this.transcriptManager.handleInput(text);
+			};
+			this.sttProvider.onPartialTranscript = (text) => {
+				this.transcriptManager.handleInputPartial(text);
+			};
+
+			// Disable transport built-in input transcription
+			this.transport.onInputTranscription = undefined;
+		} else {
+			// No external STT — use transport built-in transcription
+			this.transport.onInputTranscription = (text) => this.transcriptManager.handleInput(text);
+		}
+
+		// Wire onModelTurnStart for STT commit trigger
+		this.transport.onModelTurnStart = () => {
+			if (this.sttProvider && !this._commitFiredForTurn) {
+				this._commitFiredForTurn = true;
+				this.sttProvider.commit(this.turnId);
+			}
+		};
 
 		// Set up client transport
 		this.clientTransport = new ClientTransport(
@@ -302,8 +359,9 @@ export class VoiceSession {
 		});
 	}
 
-	/** Start the client WebSocket server and connect to Gemini. */
+	/** Start the client WebSocket server and connect to the LLM transport. */
 	async start(): Promise<void> {
+		await this.sttProvider?.start();
 		await this.memoryCacheManager?.refresh();
 
 		// Restore behavior presets from structured directives (deterministic lookup)
@@ -368,6 +426,7 @@ export class VoiceSession {
 			}
 		}
 
+		await this.sttProvider?.stop();
 		await this.transport.disconnect();
 		await this.clientTransport.stop();
 
@@ -415,7 +474,9 @@ export class VoiceSession {
 
 	private handleAudioFromClient(data: Buffer): void {
 		if (this.sessionManager.isActive) {
-			this.transport.sendAudio(data.toString('base64'));
+			const base64 = data.toString('base64');
+			this.transport.sendAudio(base64);
+			this.sttProvider?.feedAudio(base64);
 		}
 	}
 
@@ -447,6 +508,18 @@ export class VoiceSession {
 	private handleTurnComplete(): void {
 		// A completed turn means the connection is healthy — reset reconnect counter
 		this.reconnectAttempts = 0;
+
+		// ORDERING: STT commit + cleanup BEFORE turnId increment.
+		// This ensures commit(turnId) uses the turn being completed, and
+		// stale-drop (turnId < this.turnId) correctly rejects prior-turn results.
+		if (this.sttProvider) {
+			if (!this._commitFiredForTurn) {
+				this.sttProvider.commit(this.turnId); // Safety-net commit
+			}
+			this.sttProvider.handleTurnComplete();
+			this._commitFiredForTurn = false;
+		}
+
 		this.transcriptManager.flush();
 		this.turnId++;
 		const turnIdStr = `turn_${this.turnId}`;
@@ -525,6 +598,7 @@ export class VoiceSession {
 
 	private handleInterrupted(): void {
 		this.log('Interrupted by user');
+		this.sttProvider?.handleInterrupted();
 		this.notificationQueue.resetAudio();
 		this.notificationQueue.markInterrupted();
 		this.transcriptManager.flush();
