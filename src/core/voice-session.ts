@@ -277,7 +277,7 @@ export class VoiceSession {
 			// `turnId < this.turnId - 1` prevents dropping valid late results while still
 			// rejecting truly stale transcripts from 2+ turns ago.
 			this.sttProvider.onTranscript = (text, turnId) => {
-				if (turnId < this.turnId - 1) return; // Drop stale results (2+ turns old)
+				if (turnId !== undefined && turnId < this.turnId - 1) return; // Drop stale results (2+ turns old)
 				this.transcriptManager.handleInput(text);
 			};
 			this.sttProvider.onPartialTranscript = (text) => {

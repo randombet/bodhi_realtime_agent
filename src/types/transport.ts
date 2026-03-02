@@ -69,8 +69,10 @@ export interface STTProvider {
 
 	/** Final transcription of user speech.
 	 *  @param text The transcribed text.
-	 *  @param turnId The turn this transcript belongs to (from commit()). */
-	onTranscript?: (text: string, turnId: number) => void;
+	 *  @param turnId The turn this transcript belongs to (from commit()).
+	 *               Undefined when a streaming provider's VAD auto-commits
+	 *               before the framework calls commit(). */
+	onTranscript?: (text: string, turnId: number | undefined) => void;
 
 	/** Partial/interim transcription (streaming providers only).
 	 *  Replaces any previous partial for the same turn. */

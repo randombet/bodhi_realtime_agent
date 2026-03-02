@@ -35,7 +35,7 @@ export class GeminiBatchSTTProvider implements STTProvider {
 	private _bufferBytes = 0;
 	private _wasInterrupted = false;
 
-	onTranscript?: (text: string, turnId: number) => void;
+	onTranscript?: (text: string, turnId: number | undefined) => void;
 	onPartialTranscript?: (text: string) => void;
 
 	constructor(config: GeminiBatchSTTConfig) {
