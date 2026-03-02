@@ -34,7 +34,7 @@ describe.skipIf(!HAS_API_KEY)('E2E: Voice Roundtrip', () => {
 			agents: [createEchoAgent()],
 			initialAgent: 'echo',
 			port,
-			model: google('gemini-2.0-flash'),
+			model: google('gemini-2.5-flash'),
 		});
 
 		await session.start();
@@ -68,7 +68,7 @@ describe.skipIf(!HAS_API_KEY)('E2E: Voice Roundtrip', () => {
 			agents: [createEchoAgent()],
 			initialAgent: 'echo',
 			port,
-			model: google('gemini-2.0-flash'),
+			model: google('gemini-2.5-flash'),
 		});
 
 		await session.start();

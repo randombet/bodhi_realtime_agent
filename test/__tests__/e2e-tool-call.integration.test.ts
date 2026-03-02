@@ -35,7 +35,7 @@ describe.skipIf(!HAS_API_KEY)('E2E: Tool Call', () => {
 			agents: [createToolAgent()],
 			initialAgent: 'tool-agent',
 			port,
-			model: google('gemini-2.0-flash'),
+			model: google('gemini-2.5-flash'),
 			hooks: { onToolCall },
 		});
 
@@ -59,7 +59,7 @@ describe.skipIf(!HAS_API_KEY)('E2E: Tool Call', () => {
 			agents: [createToolAgent()],
 			initialAgent: 'tool-agent',
 			port,
-			model: google('gemini-2.0-flash'),
+			model: google('gemini-2.5-flash'),
 		});
 
 		await session.start();

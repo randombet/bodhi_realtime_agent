@@ -24,7 +24,7 @@ const session = new VoiceSession({
   agents: [agent],
   initialAgent: 'assistant',
   port: 9900,
-  model: google('gemini-2.0-flash'),
+  model: google('gemini-2.5-flash'),
 });
 
 await session.start();
@@ -43,7 +43,7 @@ const session = new VoiceSession({
   agents: [mainAgent, expertAgent],        // All agents in this session
   initialAgent: 'main',                    // Agent to start with
   port: 9900,                              // WebSocket port for client connections
-  model: google('gemini-2.0-flash'),       // Vercel AI SDK model (for subagents)
+  model: google('gemini-2.5-flash'),       // Vercel AI SDK model (for subagents)
 
   // --- Optional: Gemini model ---
   geminiModel: 'gemini-2.5-flash-native-audio-preview',  // Native audio model
@@ -52,7 +52,11 @@ const session = new VoiceSession({
   speechConfig: { voiceName: 'Puck' },    // Gemini voice preset
 
   // --- Optional: Transcription ---
-  inputAudioTranscription: true,           // Server-side user speech transcription (default: true)
+  inputAudioTranscription: true,           // Built-in transport transcription (default: true)
+  sttProvider: new GeminiBatchSTTProvider({ // External STT provider (disables built-in)
+    apiKey: process.env.GEMINI_API_KEY!,
+    model: 'gemini-3-flash-preview',
+  }),
 
   // --- Optional: Observability ---
   hooks: {
@@ -114,14 +118,15 @@ CREATED ──→ CONNECTING ──→ ACTIVE ──→ RECONNECTING ──→ A
 
 ## Audio Fast-Path
 
-Audio flows directly between the client and LLM transport, bypassing the EventBus for minimal latency:
+Audio flows directly between the client and LLM transport, bypassing the EventBus for minimal latency. When an `sttProvider` is configured, audio is also forked to it for transcription:
 
 ```
+                                    ┌──→  STTProvider  ──→  TranscriptManager
 Client WebSocket  ──binary frames──→  ClientTransport  ──→  LLMTransport  ──→  LLM Provider
                   ←─binary frames──                    ←──                ←──
 ```
 
-Everything else (tool calls, agent transfers, transcripts, GUI events) goes through the control plane.
+Everything else (tool calls, agent transfers, transcripts, GUI events) goes through the control plane. See [Transport > STT Providers](/guide/transport#speech-to-text-stt-providers) for details.
 
 ## Accessing Components
 

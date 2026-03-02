@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { VoiceSession } from '../../src/core/voice-session.js';
 import type { MainAgent } from '../../src/types/agent.js';
+import type { STTProvider } from '../../src/types/transport.js';
 
 // Mock the external deps
 vi.mock('@google/genai', () => {
@@ -1704,6 +1705,486 @@ describe('VoiceSession', () => {
 				return arg.turns?.some((t) => t.parts?.some((p) => p.text?.includes('failed')));
 			});
 			expect(errorAfter).toBeDefined();
+		});
+	});
+
+	// =========================================================================
+	// STT provider wiring tests
+	// =========================================================================
+
+	describe('STT provider wiring', () => {
+		function createMockSTTProvider(): STTProvider & {
+			configure: ReturnType<typeof vi.fn>;
+			start: ReturnType<typeof vi.fn>;
+			stop: ReturnType<typeof vi.fn>;
+			feedAudio: ReturnType<typeof vi.fn>;
+			commit: ReturnType<typeof vi.fn>;
+			handleInterrupted: ReturnType<typeof vi.fn>;
+			handleTurnComplete: ReturnType<typeof vi.fn>;
+		} {
+			return {
+				configure: vi.fn(),
+				start: vi.fn(async () => {}),
+				stop: vi.fn(async () => {}),
+				feedAudio: vi.fn(),
+				commit: vi.fn(),
+				handleInterrupted: vi.fn(),
+				handleTurnComplete: vi.fn(),
+				onTranscript: undefined,
+				onPartialTranscript: undefined,
+			};
+		}
+
+		it('configure() called with transport audioFormat on construction', () => {
+			const stt = createMockSTTProvider();
+			session = new VoiceSession({
+				sessionId: 'sess_stt',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9910,
+				model: mockModel,
+				sttProvider: stt,
+			});
+
+			expect(stt.configure).toHaveBeenCalledWith({
+				sampleRate: 16000,
+				bitDepth: 16,
+				channels: 1,
+			});
+		});
+
+		it('start() and stop() lifecycle', async () => {
+			const stt = createMockSTTProvider();
+			session = new VoiceSession({
+				sessionId: 'sess_stt',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9911,
+				model: mockModel,
+				sttProvider: stt,
+			});
+
+			await session.start();
+			expect(stt.start).toHaveBeenCalled();
+
+			await session.close();
+			expect(stt.stop).toHaveBeenCalled();
+			session = null; // prevent double-close in afterEach
+		});
+
+		it('feedAudio() called when client sends audio', async () => {
+			const stt = createMockSTTProvider();
+			session = new VoiceSession({
+				sessionId: 'sess_stt',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9912,
+				model: mockModel,
+				sttProvider: stt,
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const WebSocket = (await import('ws')).default;
+			const ws = new WebSocket('ws://localhost:9912');
+			await new Promise<void>((r) => ws.on('open', r));
+
+			const audioData = Buffer.from([0x01, 0x02, 0x03, 0x04]);
+			ws.send(audioData);
+			await new Promise((r) => setTimeout(r, 50));
+
+			expect(stt.feedAudio).toHaveBeenCalledWith(audioData.toString('base64'));
+
+			ws.close();
+			await new Promise<void>((r) => ws.on('close', r));
+		});
+
+		it('commit() called via onModelTurnStart with current turnId', async () => {
+			const stt = createMockSTTProvider();
+			session = new VoiceSession({
+				sessionId: 'sess_stt',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9913,
+				model: mockModel,
+				sttProvider: stt,
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+			fire({
+				serverContent: {
+					modelTurn: { parts: [{ inlineData: { data: 'AAAA' } }] },
+				},
+			});
+
+			await new Promise((r) => setTimeout(r, 50));
+
+			expect(stt.commit).toHaveBeenCalledWith(0);
+		});
+
+		it('commit() fires only once per turn via onModelTurnStart guard', async () => {
+			const stt = createMockSTTProvider();
+			session = new VoiceSession({
+				sessionId: 'sess_stt',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9914,
+				model: mockModel,
+				sttProvider: stt,
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+			// Fire multiple model outputs in same turn
+			fire({
+				serverContent: {
+					modelTurn: { parts: [{ inlineData: { data: 'AAAA' } }] },
+				},
+			});
+			fire({
+				serverContent: {
+					modelTurn: { parts: [{ inlineData: { data: 'BBBB' } }] },
+				},
+			});
+
+			await new Promise((r) => setTimeout(r, 50));
+
+			// commit should be called exactly once (not twice)
+			expect(stt.commit).toHaveBeenCalledTimes(1);
+			expect(stt.commit).toHaveBeenCalledWith(0);
+		});
+
+		it('handleTurnComplete() called on turn complete', async () => {
+			const stt = createMockSTTProvider();
+			session = new VoiceSession({
+				sessionId: 'sess_stt',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9915,
+				model: mockModel,
+				sttProvider: stt,
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+			fire({ serverContent: { turnComplete: true } });
+			await new Promise((r) => setTimeout(r, 50));
+
+			expect(stt.handleTurnComplete).toHaveBeenCalled();
+		});
+
+		it('handleInterrupted() called on interrupted', async () => {
+			const stt = createMockSTTProvider();
+			session = new VoiceSession({
+				sessionId: 'sess_stt',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9916,
+				model: mockModel,
+				sttProvider: stt,
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+			fire({ serverContent: { interrupted: true } });
+			await new Promise((r) => setTimeout(r, 50));
+
+			expect(stt.handleInterrupted).toHaveBeenCalled();
+		});
+
+		it('safety-net commit on turnComplete when onModelTurnStart did not fire', async () => {
+			const stt = createMockSTTProvider();
+			session = new VoiceSession({
+				sessionId: 'sess_stt',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9917,
+				model: mockModel,
+				sttProvider: stt,
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+			// Don't fire any model output — just turnComplete directly
+			fire({ serverContent: { turnComplete: true } });
+			await new Promise((r) => setTimeout(r, 50));
+
+			// commit should be called as safety-net
+			expect(stt.commit).toHaveBeenCalledWith(0);
+			expect(stt.handleTurnComplete).toHaveBeenCalled();
+		});
+
+		it('accepts late results from the immediately preceding turn', async () => {
+			const stt = createMockSTTProvider();
+			session = new VoiceSession({
+				sessionId: 'sess_stt',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9918,
+				model: mockModel,
+				sttProvider: stt,
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+			// Complete turn 0 → turnId becomes 1
+			fire({ serverContent: { turnComplete: true } });
+			await new Promise((r) => setTimeout(r, 50));
+
+			// Late result from turn 0 arrives after turnId incremented to 1.
+			// Batch STT providers commonly fire results slightly late.
+			// Rule: turnId < this.turnId - 1 → 0 < 0 = false → ACCEPTED
+			stt.onTranscript?.('late but valid', 0);
+
+			// Flush via turnComplete so text appears in context
+			fire({ serverContent: { turnComplete: true } });
+			await new Promise((r) => setTimeout(r, 50));
+
+			const items = session.conversationContext.items;
+			expect(items.some((i) => i.content === 'late but valid')).toBe(true);
+		});
+
+		it('drops truly stale turnId results (2+ turns old)', async () => {
+			const stt = createMockSTTProvider();
+			session = new VoiceSession({
+				sessionId: 'sess_stt',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9923,
+				model: mockModel,
+				sttProvider: stt,
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+			// Complete 2 turns: turnId goes 0 → 1 → 2
+			fire({ serverContent: { turnComplete: true } });
+			await new Promise((r) => setTimeout(r, 50));
+			fire({ serverContent: { turnComplete: true } });
+			await new Promise((r) => setTimeout(r, 50));
+
+			// Result from turn 0 is now truly stale (2 turns old)
+			// Rule: turnId < this.turnId - 1 → 0 < 1 = true → DROPPED
+			stt.onTranscript?.('stale text', 0);
+
+			// Flush via turnComplete to ensure any buffered text would appear
+			fire({ serverContent: { turnComplete: true } });
+			await new Promise((r) => setTimeout(r, 50));
+
+			const items = session.conversationContext.items;
+			expect(items.some((i) => i.content === 'stale text')).toBe(false);
+		});
+
+		it('accepts current turnId results from STT provider', async () => {
+			const stt = createMockSTTProvider();
+			session = new VoiceSession({
+				sessionId: 'sess_stt',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9919,
+				model: mockModel,
+				sttProvider: stt,
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+			// Complete a turn to increment turnId from 0 to 1
+			fire({ serverContent: { turnComplete: true } });
+			await new Promise((r) => setTimeout(r, 50));
+
+			// Invoke onTranscript with current turnId (1)
+			stt.onTranscript?.('current text', 1);
+
+			// Flush via turnComplete so the text appears in conversation context
+			fire({ serverContent: { turnComplete: true } });
+			await new Promise((r) => setTimeout(r, 50));
+
+			const items = session.conversationContext.items;
+			expect(items.some((i) => i.content === 'current text')).toBe(true);
+		});
+
+		it('disables transport onInputTranscription when sttProvider is set', async () => {
+			const stt = createMockSTTProvider();
+			session = new VoiceSession({
+				sessionId: 'sess_stt',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9920,
+				model: mockModel,
+				sttProvider: stt,
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const WebSocket = (await import('ws')).default;
+			const ws = new WebSocket('ws://localhost:9920');
+			await new Promise<void>((r) => ws.on('open', r));
+
+			const received: string[] = [];
+			ws.on('message', (data, isBinary) => {
+				if (!isBinary) received.push(data.toString());
+			});
+
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+			// Fire inputTranscription from Gemini — should be ignored since sttProvider is set
+			fire({ serverContent: { inputTranscription: { text: 'should be ignored' } } });
+			await new Promise((r) => setTimeout(r, 50));
+
+			// No user transcript should be sent to client
+			const transcripts = received
+				.map((r) => JSON.parse(r))
+				.filter((m: Record<string, unknown>) => m.type === 'transcript' && m.role === 'user');
+			expect(transcripts).toHaveLength(0);
+
+			ws.close();
+			await new Promise<void>((r) => ws.on('close', r));
+		});
+
+		it('partial transcripts from STT provider reach client', async () => {
+			const stt = createMockSTTProvider();
+			session = new VoiceSession({
+				sessionId: 'sess_stt',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9921,
+				model: mockModel,
+				sttProvider: stt,
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const WebSocket = (await import('ws')).default;
+			const ws = new WebSocket('ws://localhost:9921');
+			await new Promise<void>((r) => ws.on('open', r));
+
+			const received: string[] = [];
+			ws.on('message', (data, isBinary) => {
+				if (!isBinary) received.push(data.toString());
+			});
+
+			// Invoke onPartialTranscript — should reach client as partial transcript
+			stt.onPartialTranscript?.('partial speech');
+			await new Promise((r) => setTimeout(r, 50));
+
+			const transcripts = received
+				.map((r) => JSON.parse(r))
+				.filter((m: Record<string, unknown>) => m.type === 'transcript' && m.role === 'user');
+			expect(transcripts).toHaveLength(1);
+			expect(transcripts[0]).toEqual({
+				type: 'transcript',
+				role: 'user',
+				text: 'partial speech',
+				partial: true,
+			});
+
+			ws.close();
+			await new Promise<void>((r) => ws.on('close', r));
+		});
+
+		it('_commitFiredForTurn resets after turnComplete for next turn', async () => {
+			const stt = createMockSTTProvider();
+			session = new VoiceSession({
+				sessionId: 'sess_stt',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9922,
+				model: mockModel,
+				sttProvider: stt,
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+			// Turn 0: model starts → commit(0) via onModelTurnStart
+			fire({
+				serverContent: {
+					modelTurn: { parts: [{ inlineData: { data: 'AAAA' } }] },
+				},
+			});
+			fire({ serverContent: { turnComplete: true } });
+			await new Promise((r) => setTimeout(r, 50));
+
+			expect(stt.commit).toHaveBeenCalledWith(0);
+
+			// Turn 1: model starts again → should commit(1)
+			fire({
+				serverContent: {
+					modelTurn: { parts: [{ inlineData: { data: 'CCCC' } }] },
+				},
+			});
+			await new Promise((r) => setTimeout(r, 50));
+
+			expect(stt.commit).toHaveBeenCalledWith(1);
+			expect(stt.commit).toHaveBeenCalledTimes(2);
 		});
 	});
 });

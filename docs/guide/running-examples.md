@@ -112,7 +112,12 @@ Make sure you click the **Connect** button directly — Chrome requires a user g
 
 ### No user transcription
 
-The web client uses Chrome's Speech Recognition API for user input transcription. This only works in Chrome with a working microphone. Server-side input transcription is also enabled by default.
+User speech transcription uses a two-layer approach:
+
+1. **Chrome STT** (client-side) — the browser's `SpeechRecognition` API provides real-time interim text during speech. Only works in Chrome with a working microphone.
+2. **Server STT** (server-side) — `GeminiBatchSTTProvider` produces the authoritative transcript after each turn, replacing the Chrome STT text.
+
+If you see no transcription at all, check that you're using Chrome and that microphone access is granted. The server STT transcript appears after the model starts responding (not during speech).
 
 ### Agent doesn't call tools
 

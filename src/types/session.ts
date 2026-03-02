@@ -28,7 +28,7 @@ export interface SessionConfig {
 	sessionId: string;
 	/** User identifier for this session. */
 	userId: string;
-	/** Gemini model to use (e.g. "gemini-2.0-flash-live-001"). */
+	/** Gemini model to use (e.g. "gemini-2.5-flash-live-001"). */
 	geminiModel?: string;
 	/** Name of the agent to activate when the session starts. */
 	initialAgent: string;

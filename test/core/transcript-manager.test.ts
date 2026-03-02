@@ -140,6 +140,55 @@ describe('TranscriptManager', () => {
 		expect(sink.messages).toHaveLength(0);
 	});
 
+	describe('handleInputPartial', () => {
+		it('sends partial transcript to client', () => {
+			const sink = createSink();
+			const mgr = new TranscriptManager(sink);
+
+			mgr.handleInputPartial('searching for');
+
+			expect(sink.messages).toHaveLength(1);
+			expect(sink.messages[0]).toEqual({
+				type: 'transcript',
+				role: 'user',
+				text: 'searching for',
+				partial: true,
+			});
+		});
+
+		it('does NOT accumulate in input buffer', () => {
+			const sink = createSink();
+			const mgr = new TranscriptManager(sink);
+
+			mgr.handleInputPartial('partial text');
+			mgr.flush();
+
+			// No user message should be recorded — partials don't accumulate
+			expect(sink.userMessages).toHaveLength(0);
+		});
+
+		it('ignores whitespace-only partials', () => {
+			const sink = createSink();
+			const mgr = new TranscriptManager(sink);
+
+			mgr.handleInputPartial('   ');
+			expect(sink.messages).toHaveLength(0);
+		});
+
+		it('does not interfere with handleInput accumulation', () => {
+			const sink = createSink();
+			const mgr = new TranscriptManager(sink);
+
+			// Mix partials and regular input
+			mgr.handleInputPartial('interim result');
+			mgr.handleInput('final text');
+			mgr.flush();
+
+			// Only handleInput text should be in user messages
+			expect(sink.userMessages).toEqual(['final text']);
+		});
+	});
+
 	it('handles no-overlap prefix + buffer by joining with space', () => {
 		const sink = createSink();
 		const mgr = new TranscriptManager(sink);

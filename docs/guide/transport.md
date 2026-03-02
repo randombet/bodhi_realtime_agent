@@ -231,6 +231,181 @@ OpenAI supports in-place session updates (`inPlaceSessionUpdate: true`). Agent t
 | Interruption | Server fires `interrupted` event | Client must `conversation.item.truncate` |
 | Audio rate | 16kHz input, 24kHz output | 24kHz input, 24kHz output |
 
+## Speech-to-Text (STT) Providers
+
+The framework decouples user speech transcription from the LLM transport. An optional `STTProvider` receives the same audio the LLM gets and produces transcripts independently.
+
+### How It Works
+
+```mermaid
+flowchart LR
+    subgraph Audio["Client Audio (PCM)"]
+        MIC["Microphone"]
+    end
+
+    MIC -->|"sendAudio()"| LLM["LLMTransport<br/>(voice understanding)"]
+    MIC -->|"feedAudio()"| STT["STTProvider<br/>(transcription)"]
+
+    STT -->|"onTranscript(text, turnId)"| TM["TranscriptManager"]
+    STT -->|"onPartialTranscript(text)"| TM
+    TM -->|"partial: true"| CLIENT["Client Display"]
+    TM -->|"partial: false"| CC["ConversationContext"]
+
+    style STT fill:#f472b6,stroke:#ec4899
+    style LLM fill:#6366f1,color:#fff
+    style TM fill:#a78bfa,stroke:#7c3aed
+```
+
+Audio is forked to both the LLM transport and the STT provider simultaneously. The LLM uses the audio for voice understanding and response generation; the STT provider produces human-readable transcripts for display and conversation history.
+
+### STTProvider Interface
+
+```typescript
+interface STTProvider {
+  configure(audio: STTAudioConfig): void;  // Set sample rate, bit depth, channels
+  start(): Promise<void>;                  // Open connection (if needed)
+  stop(): Promise<void>;                   // Close connection
+
+  feedAudio(base64Pcm: string): void;      // Stream audio chunks
+  commit(turnId: number): void;            // Trigger transcription for this turn
+  handleInterrupted(): void;               // User interrupted — preserve buffer
+  handleTurnComplete(): void;              // Turn done — clear buffer
+
+  onTranscript?: (text: string, turnId: number | undefined) => void;
+  onPartialTranscript?: (text: string) => void;
+}
+```
+
+### Built-in Providers
+
+Two providers ship with the framework:
+
+```mermaid
+flowchart LR
+    subgraph Batch["GeminiBatchSTTProvider"]
+        direction TB
+        B1["Buffers all audio"]
+        B2["Transcribes on commit()"]
+        B3["One result per turn"]
+        B1 --> B2 --> B3
+    end
+
+    subgraph Streaming["ElevenLabsSTTProvider"]
+        direction TB
+        S1["Streams audio in real-time"]
+        S2["Partial results during speech"]
+        S3["VAD-based auto-commit"]
+        S1 --> S2 --> S3
+    end
+
+    style Batch fill:#dbeafe,stroke:#3b82f6
+    style Streaming fill:#fce7f3,stroke:#ec4899
+```
+
+| | GeminiBatchSTTProvider | ElevenLabsSTTProvider |
+|---|---|---|
+| **Protocol** | HTTP (`generateContent`) | WebSocket (persistent) |
+| **Latency** | Higher (batch after silence) | Lower (streaming partials) |
+| **Partial results** | No | Yes (`onPartialTranscript`) |
+| **Sample rates** | Any (via WAV header) | 8-48 kHz native PCM |
+| **Dependencies** | `@google/genai` | `ws` |
+| **Cost** | Uses Gemini API quota | Uses ElevenLabs API quota |
+
+### Configuration
+
+```typescript
+import {
+  GeminiBatchSTTProvider,
+  ElevenLabsSTTProvider,
+} from '@bodhi_agent/realtime-agent-framework';
+
+// Option A: Gemini batch transcription (default in demo)
+const session = new VoiceSession({
+  // ...
+  sttProvider: new GeminiBatchSTTProvider({
+    apiKey: process.env.GEMINI_API_KEY!,
+    model: 'gemini-3-flash-preview',
+  }),
+});
+
+// Option B: ElevenLabs streaming transcription
+const session = new VoiceSession({
+  // ...
+  sttProvider: new ElevenLabsSTTProvider({
+    apiKey: process.env.ELEVENLABS_API_KEY!,
+    model: 'scribe_v2',         // default
+    languageCode: 'en',         // BCP-47 code, default
+  }),
+});
+
+// Option C: No external STT — use transport's built-in transcription
+const session = new VoiceSession({
+  // ... (omit sttProvider)
+  inputAudioTranscription: true,  // default
+});
+```
+
+When `sttProvider` is set, the transport's built-in input transcription is automatically disabled to avoid duplicates.
+
+### Dual-Display: Chrome STT + Server STT
+
+The web client uses a two-layer transcription strategy for the best user experience:
+
+```mermaid
+sequenceDiagram
+    participant User as User Speaking
+    participant Chrome as Chrome STT
+    participant Display as UI Element
+    participant Server as Server STT
+
+    User->>Chrome: Audio stream
+    Chrome->>Display: "hello how are" (interim, 60% opacity)
+    Chrome->>Display: "hello how are you" (interim, 60% opacity)
+
+    Note over User: User stops speaking
+
+    User->>Server: Audio via WebSocket
+    Server->>Server: GeminiBatch transcribes
+    Server->>Display: "Hello, how are you?" (replaces Chrome text)
+
+    Note over Display: turn.end
+    Display->>Display: Finalize as "You: Hello, how are you?"
+```
+
+- **Chrome STT** provides instant visual feedback using the browser's `SpeechRecognition` API
+- **Server STT** provides the authoritative, higher-quality transcript
+- Both write to the same DOM element — server text replaces Chrome text seamlessly
+- Orphaned Chrome STT interims (from assistant echo) are cleaned up on turn boundaries
+
+### Custom STT Provider
+
+Implement the `STTProvider` interface for any transcription service:
+
+```typescript
+import type { STTProvider, STTAudioConfig } from '@bodhi_agent/realtime-agent-framework';
+
+class MySTTProvider implements STTProvider {
+  onTranscript?: (text: string, turnId: number | undefined) => void;
+  onPartialTranscript?: (text: string) => void;
+
+  configure(audio: STTAudioConfig): void { /* store audio format */ }
+  async start(): Promise<void> { /* connect to your service */ }
+  async stop(): Promise<void> { /* disconnect */ }
+
+  feedAudio(base64Pcm: string): void { /* send audio to your service */ }
+  commit(turnId: number): void { /* trigger transcription */ }
+  handleInterrupted(): void { /* preserve or clear buffer */ }
+  handleTurnComplete(): void { /* clear buffer */ }
+}
+```
+
+VoiceSession automatically:
+- Calls `configure()` with the LLM transport's audio format
+- Calls `start()`/`stop()` on session lifecycle
+- Forks every audio chunk to `feedAudio()`
+- Calls `commit(turnId)` when the model starts responding
+- Protects against stale results (drops transcripts from 2+ turns ago)
+
 ## Audio Format
 
 Each transport advertises its native audio format via `transport.audioFormat`. Input and output sample rates may differ:

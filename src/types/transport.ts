@@ -20,6 +20,65 @@ export interface TransportCapabilities {
 	groundingMetadata: boolean;
 }
 
+/** Audio format descriptor passed to an STT provider at configuration time. */
+export interface STTAudioConfig {
+	/** Sample rate in Hz (e.g. 16000 for Gemini, 24000 for OpenAI). */
+	sampleRate: number;
+	/** Bits per sample (16). */
+	bitDepth: number;
+	/** Number of channels (1 = mono). */
+	channels: number;
+}
+
+/**
+ * Provider-agnostic interface for pluggable speech-to-text providers.
+ *
+ * VoiceSession creates the provider, calls configure() with the transport's
+ * audio format, then start(). Audio flows via feedAudio(); turn signals via
+ * commit()/handleInterrupted()/handleTurnComplete(). Results arrive via the
+ * onTranscript/onPartialTranscript callbacks.
+ */
+export interface STTProvider {
+	/** Configure the audio format that feedAudio() will deliver.
+	 *  Called once before start(). The provider MUST resample or reject
+	 *  if it cannot handle the given format. */
+	configure(audio: STTAudioConfig): void;
+
+	/** Start the STT session (e.g. open WebSocket). */
+	start(): Promise<void>;
+	/** Stop the STT session (e.g. close WebSocket). */
+	stop(): Promise<void>;
+
+	/** Feed audio data. Format matches the STTAudioConfig from configure().
+	 *  @param base64Pcm Base64-encoded PCM audio chunk. */
+	feedAudio(base64Pcm: string): void;
+
+	/** Signal that the user's turn has ended (model started responding).
+	 *  For batch providers, this triggers transcription.
+	 *  For streaming providers, this may trigger a manual commit.
+	 *  @param turnId Monotonically increasing turn counter for ordering. */
+	commit(turnId: number): void;
+
+	/** Signal that the current turn was interrupted by the user.
+	 *  Providers MUST preserve buffered audio for the next commit(). */
+	handleInterrupted(): void;
+
+	/** Signal a natural turn completion (model finished, no interruption).
+	 *  Batch providers SHOULD clear buffers. Streaming providers may no-op. */
+	handleTurnComplete(): void;
+
+	/** Final transcription of user speech.
+	 *  @param text The transcribed text.
+	 *  @param turnId The turn this transcript belongs to (from commit()).
+	 *               Undefined when a streaming provider's VAD auto-commits
+	 *               before the framework calls commit(). */
+	onTranscript?: (text: string, turnId: number | undefined) => void;
+
+	/** Partial/interim transcription (streaming providers only).
+	 *  Replaces any previous partial for the same turn. */
+	onPartialTranscript?: (text: string) => void;
+}
+
 /** Simple text turn for injection (greetings, directives, text input). */
 export interface ContentTurn {
 	role: 'user' | 'assistant';
@@ -184,6 +243,11 @@ export interface LLMTransport {
 	onSessionReady?: (sessionId: string) => void;
 	onError?: (error: LLMTransportError) => void;
 	onClose?: (code?: number, reason?: string) => void;
+
+	// --- Turn lifecycle callbacks ---
+	/** Fires when the model begins any response (audio, tool call, etc.).
+	 *  Used by VoiceSession to trigger STT provider commit. */
+	onModelTurnStart?: () => void;
 
 	// --- Optional capability callbacks (only fired by supporting transports) ---
 	onGoAway?: (timeLeft: string) => void;
