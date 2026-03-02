@@ -18,7 +18,7 @@ hero:
 
 features:
   - title: Real-Time Voice
-    details: Bidirectional audio streaming via a provider-agnostic LLMTransport interface. Supports Google Gemini Live and OpenAI Realtime APIs with server-side turn detection and sub-500ms latency.
+    details: Bidirectional audio streaming via a provider-agnostic LLMTransport interface. Supports Google Gemini Live and OpenAI Realtime APIs with server-side turn detection, pluggable STT providers, and sub-500ms latency.
   - title: Multi-Agent
     details: Define multiple agents with distinct personas and tool sets. Transfer between them mid-conversation with automatic context preservation.
   - title: Function Tools
