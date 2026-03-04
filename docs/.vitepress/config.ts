@@ -55,7 +55,7 @@ export default withMermaid(
 			},
 
 			socialLinks: [
-				{ icon: 'github', link: 'https://github.com/BodhiAgent/realtime_agent_framework' },
+				{ icon: 'github', link: 'https://github.com/randombet/bodhi_realtime_agent' },
 			],
 
 			search: {

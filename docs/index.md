@@ -14,7 +14,7 @@ hero:
       link: /api/
     - theme: alt
       text: GitHub
-      link: https://github.com/BodhiAgent/realtime_agent_framework
+      link: https://github.com/randombet/bodhi_realtime_agent
 
 features:
   - title: Real-Time Voice
