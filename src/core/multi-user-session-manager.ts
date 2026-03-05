@@ -58,9 +58,7 @@ export class MultiUserSessionManager {
 	): Promise<VoiceSession> {
 		// Check total session limit
 		if (this.sessions.size >= this.config.maxTotalSessions) {
-			throw new Error(
-				`Maximum total sessions (${this.config.maxTotalSessions}) reached`,
-			);
+			throw new Error(`Maximum total sessions (${this.config.maxTotalSessions}) reached`);
 		}
 
 		// Check per-user session limit
@@ -157,7 +155,14 @@ export class MultiUserSessionManager {
 	 */
 	async closeAllSessionsForUser(userId: string, reason = 'user_logout'): Promise<void> {
 		const sessions = this.getAllSessionsForUser(userId);
-		await Promise.all(sessions.map((s) => this.closeSession(s['config'].sessionId, reason)));
+		await Promise.all(
+			sessions.map((s) =>
+				this.closeSession(
+					(s as VoiceSession & { config: { sessionId: string } }).config.sessionId,
+					reason,
+				),
+			),
+		);
 	}
 
 	/**
@@ -190,6 +195,13 @@ export class MultiUserSessionManager {
 			oldestSession,
 			newestSession,
 		};
+	}
+
+	/**
+	 * Get all session metadata for dashboard/API.
+	 */
+	getAllSessionMetadata(): SessionMetadata[] {
+		return Array.from(this.sessionMetadata.values());
 	}
 
 	/**

@@ -716,6 +716,15 @@ export class VoiceSession {
 		this.clientConnected = false;
 	}
 
+	/**
+	 * Notify the session that the client is connected.
+	 * Used by the multi-user server when the internal ClientTransport does not
+	 * run its own listener (connection is handled by MultiClientTransport).
+	 */
+	notifyClientConnected(): void {
+		this.handleClientConnected();
+	}
+
 	// --- Error handling ---
 
 	private handleTransportError(error: Error | LLMTransportError): void {

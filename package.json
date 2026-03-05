@@ -23,6 +23,7 @@
     "dist"
   ],
   "scripts": {
+    "start": "tsx app/multi-user-server.ts",
     "build": "tsup",
     "test": "vitest run",
     "test:watch": "vitest",

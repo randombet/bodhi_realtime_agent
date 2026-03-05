@@ -5,8 +5,8 @@
  * Routes messages to the correct VoiceSession based on connection mapping.
  */
 
+import type { IncomingMessage } from 'node:http';
 import { type WebSocket, WebSocketServer } from 'ws';
-import type { IncomingMessage } from 'http';
 
 export interface ConnectionContext {
 	webSocketId: string;
@@ -24,7 +24,11 @@ export interface MultiClientTransportCallbacks {
 	/** Called when binary audio data is received from a client */
 	onAudioFromClient?(ws: WebSocket, data: Buffer, context: ConnectionContext): void;
 	/** Called when a JSON message is received from a client */
-	onJsonFromClient?(ws: WebSocket, message: Record<string, unknown>, context: ConnectionContext): void;
+	onJsonFromClient?(
+		ws: WebSocket,
+		message: Record<string, unknown>,
+		context: ConnectionContext,
+	): void;
 	/** Called when a WebSocket error occurs */
 	onError?(ws: WebSocket, error: Error, context: ConnectionContext): void;
 }
@@ -41,7 +45,7 @@ export class MultiClientTransport {
 	constructor(
 		private port: number,
 		private callbacks: MultiClientTransportCallbacks,
-		private host: string = '0.0.0.0',
+		private host = '0.0.0.0',
 	) {}
 
 	/**
@@ -222,13 +226,13 @@ export class MultiClientTransport {
 
 		// Handle errors
 		ws.on('error', (error) => {
-			console.error(`[MultiClientTransport] WebSocket error for ${webSocketId}:`, error);
+			console.error('[MultiClientTransport] WebSocket error for', webSocketId, error);
 			this.callbacks.onError?.(ws, error, context);
 		});
 
 		// Notify callback
 		this.callbacks.onConnection?.(ws, context).catch((error) => {
-			console.error(`[MultiClientTransport] Connection callback error:`, error);
+			console.error('[MultiClientTransport] Connection callback error:', error);
 		});
 	}
 }

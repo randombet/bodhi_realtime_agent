@@ -9,6 +9,8 @@ export interface ServerConfig {
 	port: number;
 	/** WebSocket server host */
 	host: string;
+	/** Dashboard HTTP server port (0 = disabled) */
+	dashboardPort: number;
 	/** Gemini API key */
 	apiKey: string;
 	/** Maximum concurrent sessions per user */
@@ -69,9 +71,12 @@ export function loadConfig(): ServerConfig {
 		| 'supabase'
 		| 'anonymous';
 
+	const dashboardPort = Number(process.env.DASHBOARD_PORT) ?? 9901;
+
 	const config: ServerConfig = {
 		port,
 		host,
+		dashboardPort,
 		apiKey,
 		maxSessionsPerUser: Number(process.env.MAX_SESSIONS_PER_USER) || 5,
 		maxTotalSessions: Number(process.env.MAX_TOTAL_SESSIONS) || 1000,
@@ -82,19 +87,21 @@ export function loadConfig(): ServerConfig {
 			method: authMethod,
 			apiKey: process.env.AUTH_API_KEY,
 			jwtSecret: process.env.JWT_SECRET,
-			supabase: process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY
-				? {
-						url: process.env.SUPABASE_URL,
-						anonKey: process.env.SUPABASE_ANON_KEY,
-					}
-				: undefined,
-			oauth: process.env.OAUTH_CLIENT_ID && process.env.OAUTH_CLIENT_SECRET
-				? {
-						clientId: process.env.OAUTH_CLIENT_ID,
-						clientSecret: process.env.OAUTH_CLIENT_SECRET,
-						tokenEndpoint: process.env.OAUTH_TOKEN_ENDPOINT || '',
-					}
-				: undefined,
+			supabase:
+				process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY
+					? {
+							url: process.env.SUPABASE_URL,
+							anonKey: process.env.SUPABASE_ANON_KEY,
+						}
+					: undefined,
+			oauth:
+				process.env.OAUTH_CLIENT_ID && process.env.OAUTH_CLIENT_SECRET
+					? {
+							clientId: process.env.OAUTH_CLIENT_ID,
+							clientSecret: process.env.OAUTH_CLIENT_SECRET,
+							tokenEndpoint: process.env.OAUTH_TOKEN_ENDPOINT || '',
+						}
+					: undefined,
 		},
 		rateLimiting: {
 			enabled: process.env.RATE_LIMITING_ENABLED !== 'false',
@@ -148,5 +155,9 @@ export function validateConfig(config: ServerConfig): void {
 
 	if (config.cleanupIntervalMs < 1000) {
 		throw new Error('CLEANUP_INTERVAL_MS must be at least 1000ms');
+	}
+
+	if (config.dashboardPort < 0 || config.dashboardPort > 65535) {
+		throw new Error(`Invalid dashboard port: ${config.dashboardPort}`);
 	}
 }
