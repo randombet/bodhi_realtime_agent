@@ -136,6 +136,10 @@ export class VoiceSession {
 			addUserMessage: (text) => this.conversationContext.addUserMessage(text),
 			addAssistantMessage: (text) => this.conversationContext.addAssistantMessage(text),
 		});
+		// NotificationQueue is created early but messageTruncation is not known until
+		// transport is configured below. It defaults to false and is updated after
+		// transport setup in the 'Wire LLMTransport' section. For pre-constructed
+		// transports, capabilities are available immediately so we pass them here.
 		this.notificationQueue = new BackgroundNotificationQueue(
 			(turns, turnComplete) => {
 				// Convert the Gemini-format turns from the notification queue to ContentTurn[]
@@ -146,6 +150,7 @@ export class VoiceSession {
 				this.transport.sendContent(contentTurns, turnComplete);
 			},
 			(msg) => this.log(msg),
+			config.transport?.capabilities?.messageTruncation ?? false,
 		);
 
 		if (config.hooks) {
