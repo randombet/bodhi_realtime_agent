@@ -61,7 +61,7 @@ function buildSystemPrompt(context: SubagentContextSnapshot): string {
  * Create an AI SDK `tool()` that lets the subagent ask the user a question
  * and wait for a response via the interactive SubagentSession.
  */
-function createAskUserTool(session: SubagentSession, maxInputRetries: number) {
+export function createAskUserTool(session: SubagentSession, maxInputRetries: number) {
 	let consecutiveTimeouts = 0;
 
 	return tool({

@@ -3,12 +3,12 @@
 type Turn = { role: string; parts: Array<{ text: string }> };
 
 /** Priority for notification delivery. */
-export type NotificationPriority = 'normal' | 'high';
+export type QueuePriority = 'normal' | 'high';
 
 /** Options for sendOrQueue. */
 export interface SendOrQueueOptions {
 	/** Delivery priority. 'high' attempts immediate delivery or front-of-queue. Default: 'normal'. */
-	priority?: NotificationPriority;
+	priority?: QueuePriority;
 }
 
 /**
@@ -23,8 +23,7 @@ export interface SendOrQueueOptions {
  * response cancellation internally).
  */
 export class BackgroundNotificationQueue {
-	private queue: Array<{ turns: Turn[]; turnComplete: boolean; priority: NotificationPriority }> =
-		[];
+	private queue: Array<{ turns: Turn[]; turnComplete: boolean; priority: QueuePriority }> = [];
 	private audioReceived = false;
 	private interrupted = false;
 

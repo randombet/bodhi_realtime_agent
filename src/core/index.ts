@@ -12,6 +12,7 @@ export {
 export type { ErrorSeverity } from './errors.js';
 
 export { BackgroundNotificationQueue } from './background-notification-queue.js';
+export type { SendOrQueueOptions } from './background-notification-queue.js';
 
 export {
 	DEFAULT_CONNECT_TIMEOUT_MS,
