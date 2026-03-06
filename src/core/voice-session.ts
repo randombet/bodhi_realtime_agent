@@ -317,6 +317,15 @@ export class VoiceSession {
 			this.clientTransport.sendJsonToClient({ type: 'ui.payload', payload: payload.payload });
 		});
 
+		// Bind STT lifecycle to session state: start when ACTIVE (agent ready), stop when disconnecting
+		this.eventBus.subscribe('session.stateChange', (payload: { toState: string }) => {
+			if (payload.toState === 'ACTIVE') {
+				this.startSttProvider();
+			} else if (payload.toState === 'RECONNECTING' || payload.toState === 'TRANSFERRING') {
+				void this.sttProvider?.stop();
+			}
+		});
+
 		// Set up tool executor
 		this.toolExecutor = this.createToolExecutor(config.initialAgent);
 
@@ -356,7 +365,8 @@ export class VoiceSession {
 
 	/** Start the client WebSocket server and connect to the LLM transport. */
 	async start(): Promise<void> {
-		await this.sttProvider?.start();
+		// STT is started only when session becomes ACTIVE (in handleSetupComplete / reconnect),
+		// so it is bound to agent readiness, not connection establishment.
 
 		// Load memory and directives in parallel with Gemini connect so session starts fast
 		this._memoryReadyPromise = this.loadMemoryAndDirectives();
@@ -501,6 +511,12 @@ export class VoiceSession {
 		if (this.clientConnected) {
 			this._memoryReadyPromise.then(() => this.sendGreeting());
 		}
+	}
+
+	/** Start STT when session becomes ACTIVE (agent ready). Fire-and-forget. */
+	private startSttProvider(): void {
+		if (!this.sttProvider) return;
+		this.sttProvider.start().catch((err) => this.reportError('stt', err));
 	}
 
 	private handleTurnComplete(): void {
