@@ -220,6 +220,7 @@ export class AgentRouter {
 				hooks: this.hooks,
 				model: this.model,
 				abortSignal: controller.signal,
+				session,
 			});
 
 			return result;
