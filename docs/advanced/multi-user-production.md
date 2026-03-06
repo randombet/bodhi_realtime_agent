@@ -4,13 +4,9 @@
 
 This document outlines the production-ready architecture for supporting multiple concurrent users in the Bodhi Realtime Agent Framework.
 
-## Current State (Single-User)
+## Current State
 
-The current implementation (`app/gemini-realtime-tools.ts`) creates a single `VoiceSession` instance that handles one WebSocket connection. Multiple users would conflict because:
-
-1. **Single Session ID**: One `SESSION_ID` shared across all connections
-2. **Single ClientTransport**: Only tracks one WebSocket connection
-3. **Shared Conversation Context**: All users would share the same conversation history
+The production server (`app/multi-user-server.ts`) is the single entry point (`pnpm start`). Each WebSocket connection gets its own `VoiceSession`; agent and tool definitions live in `app/agents/bodhi-session.ts` and are used via `createBodhiSessionConfig()`.
 
 ## Production Architecture
 
@@ -257,8 +253,9 @@ export interface ServerConfig {
 
 ```
 app/
-  multi-user-server.ts          # Main production server
-  gemini-realtime-tools.ts      # Original single-user demo (keep for reference)
+  multi-user-server.ts          # Production server (single entry: pnpm start)
+  agents/
+    bodhi-session.ts            # Bodhi tools, agents, createBodhiSessionConfig()
 
 src/
   core/
@@ -284,10 +281,9 @@ src/
 
 ## Migration Path
 
-1. **Keep existing code**: `gemini-realtime-tools.ts` remains as single-user demo
-2. **Create new server**: `multi-user-server.ts` for production
-3. **Gradual rollout**: Test with limited users, then scale up
-4. **Feature parity**: Ensure all tools/agents work in multi-user mode
+1. **Single path**: Use `pnpm start` → `multi-user-server.ts` for all deployments.
+2. **Custom agents**: Replace or extend `createBodhiSessionConfig()` in `app/agents/bodhi-session.ts` as needed.
+3. **Gradual rollout**: Test with limited users, then scale up.
 
 ## Testing Strategy
 

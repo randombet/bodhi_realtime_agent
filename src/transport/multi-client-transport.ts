@@ -188,7 +188,7 @@ export class MultiClientTransport {
 	/**
 	 * Handle a new WebSocket connection.
 	 */
-	private handleConnection(ws: WebSocket, req: IncomingMessage): void {
+	private handleConnection(ws: WebSocket, _req: IncomingMessage): void {
 		const webSocketId = `ws_${Date.now()}_${++this.connectionCounter}`;
 		const context: ConnectionContext = {
 			webSocketId,
@@ -231,7 +231,7 @@ export class MultiClientTransport {
 		});
 
 		// Notify callback
-		this.callbacks.onConnection?.(ws, context).catch((error) => {
+		Promise.resolve(this.callbacks.onConnection?.(ws, context)).catch((error: unknown) => {
 			console.error('[MultiClientTransport] Connection callback error:', error);
 		});
 	}

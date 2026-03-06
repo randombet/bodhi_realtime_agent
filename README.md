@@ -26,54 +26,19 @@ pnpm add @bodhi_agent/realtime-agent-framework
 
 ## Quick Start
 
-```typescript
-import { google } from '@ai-sdk/google';
-import { z } from 'zod';
-import { VoiceSession } from '@bodhi_agent/realtime-agent-framework';
-import type { MainAgent, ToolDefinition } from '@bodhi_agent/realtime-agent-framework';
+Sessions are created with a `clientSender` (your server owns the client connection and feeds audio/JSON). The repo includes a production server that does this:
 
-// 1. Define tools
-const getCurrentTime: ToolDefinition = {
-  name: 'get_current_time',
-  description: 'Get the current date and time.',
-  parameters: z.object({
-    timezone: z.string().optional().describe('Timezone name'),
-  }),
-  execution: 'inline',
-  execute: async (args) => {
-    const { timezone } = args as { timezone?: string };
-    const now = new Date();
-    return {
-      time: now.toLocaleString('en-US', {
-        timeZone: timezone ?? undefined,
-        dateStyle: 'full',
-        timeStyle: 'long',
-      }),
-    };
-  },
-};
+```bash
+# Required
+export GEMINI_API_KEY=your_api_key
 
-// 2. Define agents
-const mainAgent: MainAgent = {
-  name: 'main',
-  instructions: 'You are a helpful voice assistant.',
-  tools: [getCurrentTime],
-};
-
-// 3. Create and start a session
-const session = new VoiceSession({
-  sessionId: `session_${Date.now()}`,
-  userId: 'user_1',
-  apiKey: process.env.GOOGLE_API_KEY!,
-  agents: [mainAgent],
-  initialAgent: 'main',
-  port: 9900,
-  model: google('gemini-2.5-flash'),
-});
-
-await session.start();
-// Connect a WebSocket audio client to ws://localhost:9900
+pnpm install
+pnpm start
 ```
+
+The server listens for WebSocket connections (default port 9900). Each connection gets its own `VoiceSession`. Clients send PCM 16-bit 16 kHz mono audio and receive agent audio and JSON events. See **app/README.md** for configuration and deployment.
+
+To integrate the framework into your own backend: use `MultiClientTransport` to accept WebSockets, build a `SessionClientSender` per connection, and create a `VoiceSession` with that sender plus your agents and tools. See `app/multi-user-server.ts` and `app/agents/bodhi-session.ts` for the full pattern.
 
 ## Core Concepts
 
@@ -287,15 +252,6 @@ pnpm lint           # Check with Biome
 pnpm lint:fix       # Auto-fix lint issues
 pnpm typecheck      # TypeScript type checking
 ```
-
-### Running the Example
-
-```bash
-export GOOGLE_API_KEY=your_api_key
-pnpm tsx app/gemini-realtime-tools.ts
-```
-
-Then connect a WebSocket audio client to `ws://localhost:9900` sending PCM 16-bit 16kHz mono audio.
 
 ### Integration Tests
 

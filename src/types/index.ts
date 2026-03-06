@@ -45,6 +45,11 @@ export type { MemoryCategory, MemoryFact, MemoryStore } from './memory.js';
 export type { QueuedNotification } from './notification.js';
 
 export type {
+	IClientChannel,
+	SessionClientSender,
+} from './session-client.js';
+
+export type {
 	PendingToolCall,
 	ResumptionState,
 	ResumptionUpdate,

@@ -6,7 +6,7 @@ import { AgentError } from '../core/errors.js';
 import type { IEventBus } from '../core/event-bus.js';
 import type { HooksManager } from '../core/hooks.js';
 import type { SessionManager } from '../core/session-manager.js';
-import type { ClientTransport } from '../transport/client-transport.js';
+import type { IClientChannel } from '../types/session-client.js';
 import type { MainAgent, SubagentConfig } from '../types/agent.js';
 import type { SubagentResult, ToolCall } from '../types/conversation.js';
 import type { ToolDefinition } from '../types/tool.js';
@@ -44,7 +44,7 @@ export class AgentRouter {
 		private hooks: HooksManager,
 		private conversationContext: ConversationContext,
 		private transport: LLMTransport,
-		private clientTransport: ClientTransport,
+		private clientTransport: IClientChannel,
 		private model: LanguageModelV1,
 		private getInstructionSuffix?: () => string,
 		private extraTools: ToolDefinition[] = [],

@@ -32,7 +32,8 @@ describe('module smoke test', () => {
 
 		// Transport
 		expect(mod.GeminiLiveTransport).toBeDefined();
-		expect(mod.ClientTransport).toBeDefined();
+		expect(mod.MultiClientTransport).toBeDefined();
+		expect(mod.ClientSenderAdapter).toBeDefined();
 		expect(mod.AudioBuffer).toBeDefined();
 		expect(mod.zodToJsonSchema).toBeDefined();
 

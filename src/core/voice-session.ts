@@ -6,7 +6,9 @@ import { AgentRouter } from '../agent/agent-router.js';
 import { BehaviorManager } from '../behaviors/behavior-manager.js';
 import { MemoryDistiller } from '../memory/memory-distiller.js';
 import { ToolExecutor } from '../tools/tool-executor.js';
-import { ClientTransport } from '../transport/client-transport.js';
+import type { IClientChannel } from '../types/session-client.js';
+import type { SessionClientSender } from '../types/session-client.js';
+import { ClientSenderAdapter } from '../transport/client-sender-adapter.js';
 import { GeminiLiveTransport } from '../transport/gemini-live-transport.js';
 import type { MainAgent, SubagentConfig } from '../types/agent.js';
 import type { BehaviorCategory } from '../types/behavior.js';
@@ -41,10 +43,11 @@ export interface VoiceSessionConfig {
 	subagentConfigs?: Record<string, SubagentConfig>;
 	/** Lifecycle hooks for observability. */
 	hooks?: FrameworkHooks;
-	/** Port for the client WebSocket server. */
-	port: number;
-	/** Host for the client WebSocket server (default: '0.0.0.0' for all interfaces). */
-	host?: string;
+	/**
+	 * Sender for all output to the client. The server owns the socket and feeds input
+	 * via feedAudioFromClient / feedJsonFromClient and notifyClientConnected / notifyClientDisconnected.
+	 */
+	clientSender: SessionClientSender;
 	/** LLM model name (e.g. "gemini-live-2.5-flash-preview"). */
 	geminiModel?: string;
 	/** Vercel AI SDK model for subagent text generation. */
@@ -104,7 +107,7 @@ export class VoiceSession {
 	readonly conversationContext: ConversationContext;
 	readonly hooks: HooksManager;
 	private transport: LLMTransport;
-	private clientTransport: ClientTransport;
+	private clientTransport: IClientChannel;
 	private agentRouter: AgentRouter;
 	private toolExecutor: ToolExecutor;
 	private toolCallRouter!: ToolCallRouter;
@@ -125,6 +128,8 @@ export class VoiceSession {
 	private reconnectAttempts = 0;
 	private static readonly MAX_RECONNECT_ATTEMPTS = 3;
 	private static readonly RECONNECT_BACKOFF_MS = [1000, 2000, 4000];
+	/** Resolves when memory/directives are loaded; used so greeting is sent after load without blocking connect. */
+	private _memoryReadyPromise: Promise<void> = Promise.resolve();
 
 	constructor(config: VoiceSessionConfig) {
 		this.config = config;
@@ -299,17 +304,7 @@ export class VoiceSession {
 			}
 		};
 
-		// Set up client transport
-		this.clientTransport = new ClientTransport(
-			config.port,
-			{
-				onAudioFromClient: (data) => this.handleAudioFromClient(data),
-				onJsonFromClient: (message) => this.handleJsonFromClient(message),
-				onClientConnected: () => this.handleClientConnected(),
-				onClientDisconnected: () => this.handleClientDisconnected(),
-			},
-			config.host ?? '0.0.0.0',
-		);
+		this.clientTransport = new ClientSenderAdapter(config.clientSender);
 
 		// Forward GUI events from EventBus to the client as JSON text frames
 		this.eventBus.subscribe('gui.update', (payload) => {
@@ -362,9 +357,27 @@ export class VoiceSession {
 	/** Start the client WebSocket server and connect to the LLM transport. */
 	async start(): Promise<void> {
 		await this.sttProvider?.start();
-		await this.memoryCacheManager?.refresh();
 
-		// Restore behavior presets from structured directives (deterministic lookup)
+		// Load memory and directives in parallel with Gemini connect so session starts fast
+		this._memoryReadyPromise = this.loadMemoryAndDirectives();
+
+		await this.clientTransport.start();
+		this.log('Connecting to LLM transport...');
+		this.sessionManager.transitionTo('CONNECTING');
+		if (this.config.transport) {
+			await this.transport.connect();
+		} else {
+			await this.transport.connect({
+				auth: { type: 'api_key', apiKey: this.config.apiKey },
+				model: this.config.geminiModel ?? 'gemini-live-2.5-flash-preview',
+			});
+		}
+		this.log('LLM transport connected and setup complete');
+	}
+
+	/** Load memory cache and restore behavior directives; used in parallel with connect(). */
+	private async loadMemoryAndDirectives(): Promise<void> {
+		await this.memoryCacheManager?.refresh();
 		if (this.config.memory && this.behaviorManager) {
 			try {
 				const directives = await this.config.memory.store.getDirectives(this.config.userId);
@@ -381,22 +394,6 @@ export class VoiceSession {
 				// Best-effort — directive loading failure is non-fatal
 			}
 		}
-
-		this.log('Starting WS server...');
-		await this.clientTransport.start();
-		this.log('WS server ready. Connecting to LLM transport...');
-		this.sessionManager.transitionTo('CONNECTING');
-		if (this.config.transport) {
-			// Pre-constructed transport — already configured, just connect
-			await this.transport.connect();
-		} else {
-			// Default Gemini transport — pass config for backward compatibility
-			await this.transport.connect({
-				auth: { type: 'api_key', apiKey: this.config.apiKey },
-				model: this.config.geminiModel ?? 'gemini-live-2.5-flash-preview',
-			});
-		}
-		this.log('LLM transport connected and setup complete');
 	}
 
 	/** Gracefully shut down: disconnect Gemini, stop the WebSocket server, transition to CLOSED. */
@@ -500,8 +497,9 @@ export class VoiceSession {
 		) {
 			return;
 		}
+		// Send greeting after memory/directives are loaded (no blocking of connect)
 		if (this.clientConnected) {
-			this.sendGreeting();
+			this._memoryReadyPromise.then(() => this.sendGreeting());
 		}
 	}
 
@@ -716,13 +714,29 @@ export class VoiceSession {
 		this.clientConnected = false;
 	}
 
-	/**
-	 * Notify the session that the client is connected.
-	 * Used by the multi-user server when the internal ClientTransport does not
-	 * run its own listener (connection is handled by MultiClientTransport).
-	 */
+	/** Feed client audio into the session (LLM + STT). Used when the server owns the socket (multi-user). */
+	feedAudioFromClient(data: Buffer): void {
+		this.handleAudioFromClient(data);
+	}
+
+	/** Feed client JSON (text_input, file_upload, etc.) into the session. Used when the server owns the socket. */
+	feedJsonFromClient(message: Record<string, unknown>): void {
+		this.handleJsonFromClient(message);
+	}
+
+	/** Notify the session that the client connected. Used when the server owns the socket (multi-user). */
 	notifyClientConnected(): void {
 		this.handleClientConnected();
+	}
+
+	/** Notify the session that the client disconnected. Used when the server owns the socket (multi-user). */
+	notifyClientDisconnected(): void {
+		this.handleClientDisconnected();
+	}
+
+	/** Session ID for logging and multi-user association. */
+	getSessionId(): string {
+		return this.config.sessionId;
 	}
 
 	// --- Error handling ---

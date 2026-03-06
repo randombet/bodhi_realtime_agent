@@ -155,14 +155,7 @@ export class MultiUserSessionManager {
 	 */
 	async closeAllSessionsForUser(userId: string, reason = 'user_logout'): Promise<void> {
 		const sessions = this.getAllSessionsForUser(userId);
-		await Promise.all(
-			sessions.map((s) =>
-				this.closeSession(
-					(s as VoiceSession & { config: { sessionId: string } }).config.sessionId,
-					reason,
-				),
-			),
-		);
+		await Promise.all(sessions.map((s) => this.closeSession(s.getSessionId(), reason)));
 	}
 
 	/**
@@ -198,7 +191,7 @@ export class MultiUserSessionManager {
 	}
 
 	/**
-	 * Get all session metadata for dashboard/API.
+	 * Get all session metadata for API.
 	 */
 	getAllSessionMetadata(): SessionMetadata[] {
 		return Array.from(this.sessionMetadata.values());

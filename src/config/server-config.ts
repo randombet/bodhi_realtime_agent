@@ -9,8 +9,6 @@ export interface ServerConfig {
 	port: number;
 	/** WebSocket server host */
 	host: string;
-	/** Dashboard HTTP server port (0 = disabled) */
-	dashboardPort: number;
 	/** Gemini API key */
 	apiKey: string;
 	/** Maximum concurrent sessions per user */
@@ -71,12 +69,9 @@ export function loadConfig(): ServerConfig {
 		| 'supabase'
 		| 'anonymous';
 
-	const dashboardPort = Number(process.env.DASHBOARD_PORT) ?? 9901;
-
 	const config: ServerConfig = {
 		port,
 		host,
-		dashboardPort,
 		apiKey,
 		maxSessionsPerUser: Number(process.env.MAX_SESSIONS_PER_USER) || 5,
 		maxTotalSessions: Number(process.env.MAX_TOTAL_SESSIONS) || 1000,
@@ -155,9 +150,5 @@ export function validateConfig(config: ServerConfig): void {
 
 	if (config.cleanupIntervalMs < 1000) {
 		throw new Error('CLEANUP_INTERVAL_MS must be at least 1000ms');
-	}
-
-	if (config.dashboardPort < 0 || config.dashboardPort > 65535) {
-		throw new Error(`Invalid dashboard port: ${config.dashboardPort}`);
 	}
 }
