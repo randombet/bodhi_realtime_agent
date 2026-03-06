@@ -23,6 +23,9 @@ export {
 
 export { DirectiveManager } from './directive-manager.js';
 
+export { InteractionModeManager } from './interaction-mode.js';
+export type { SessionInteractionMode } from './interaction-mode.js';
+
 export { EventBus } from './event-bus.js';
 export type { EventHandler, IEventBus } from './event-bus.js';
 

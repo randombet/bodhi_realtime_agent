@@ -13,12 +13,16 @@ import type { ToolDefinition } from '../types/tool.js';
 import type { LLMTransport } from '../types/transport.js';
 import { createAgentContext, resolveInstructions } from './agent-context.js';
 import { runSubagent } from './subagent-runner.js';
+import type { SubagentSession } from './subagent-session.js';
+import { SubagentSessionImpl } from './subagent-session.js';
 
 /** Tracks a running background subagent so it can be cancelled. */
 interface ActiveSubagent {
 	controller: AbortController;
 	toolCallId: string;
 	configName: string;
+	/** Present when the subagent is interactive (config.interactive === true). */
+	session?: SubagentSession;
 }
 
 /**
@@ -172,13 +176,23 @@ export class AgentRouter {
 		}
 	}
 
+	/** Look up the SubagentSession for an active interactive subagent, or null. */
+	getSubagentSession(toolCallId: string): SubagentSession | null {
+		return this.activeSubagents.get(toolCallId)?.session ?? null;
+	}
+
 	/** Spawn a background subagent to handle a tool call asynchronously. */
 	async handoff(toolCall: ToolCall, subagentConfig: SubagentConfig): Promise<SubagentResult> {
 		const controller = new AbortController();
+		const session = subagentConfig.interactive
+			? new SubagentSessionImpl(toolCall.toolCallId, subagentConfig)
+			: undefined;
+
 		this.activeSubagents.set(toolCall.toolCallId, {
 			controller,
 			toolCallId: toolCall.toolCallId,
 			configName: subagentConfig.name,
+			session,
 		});
 
 		this.eventBus.publish('agent.handoff', {
@@ -218,6 +232,7 @@ export class AgentRouter {
 	cancelSubagent(toolCallId: string): void {
 		const sub = this.activeSubagents.get(toolCallId);
 		if (sub) {
+			sub.session?.cancel();
 			sub.controller.abort();
 			this.activeSubagents.delete(toolCallId);
 		}
