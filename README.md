@@ -24,21 +24,7 @@ TypeScript framework for building real-time voice agent applications using the G
 pnpm add @bodhi_agent/realtime-agent-framework
 ```
 
-## Quick Start
-
-Sessions are created with a `clientSender` (your server owns the client connection and feeds audio/JSON). The repo includes a production server that does this:
-
-```bash
-# Required
-export GEMINI_API_KEY=your_api_key
-
-pnpm install
-pnpm start
-```
-
-The server listens for WebSocket connections (default port 9900). Each connection gets its own `VoiceSession`. Clients send PCM 16-bit 16 kHz mono audio and receive agent audio and JSON events. See **app/README.md** for configuration and deployment.
-
-To integrate the framework into your own backend: use `MultiClientTransport` to accept WebSockets, build a `SessionClientSender` per connection, and create a `VoiceSession` with that sender plus your agents and tools. See `app/multi-user-server.ts` and `app/agents/bodhi-session.ts` for the full pattern.
+To integrate the framework into your own backend: use `MultiClientTransport` to accept WebSockets, build a `SessionClientSender` per connection, and create a `VoiceSession` with that sender plus your agents and tools. A reference app (server + web client) lives in **app/** — see **app/README.md** for how to run it.
 
 ## Core Concepts
 

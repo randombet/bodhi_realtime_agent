@@ -4,13 +4,19 @@
  * Configuration management for the multi-user production server.
  */
 
+export type LLMProvider = 'gemini' | 'openai';
+
 export interface ServerConfig {
 	/** WebSocket server port */
 	port: number;
 	/** WebSocket server host */
 	host: string;
-	/** Gemini API key */
+	/** Which live voice transport to use (default: gemini). */
+	llmProvider: LLMProvider;
+	/** Gemini API key (required for gemini; also used for image/video subagents when provider is openai). */
 	apiKey: string;
+	/** OpenAI API key (required when llmProvider is openai). */
+	openaiApiKey?: string;
 	/** Maximum concurrent sessions per user */
 	maxSessionsPerUser: number;
 	/** Maximum total concurrent sessions */
@@ -54,10 +60,16 @@ export interface ServerConfig {
 export function loadConfig(): ServerConfig {
 	const port = Number(process.env.PORT) || 9900;
 	const host = process.env.HOST || '0.0.0.0';
+	const llmProvider: LLMProvider =
+		process.env.LLM_PROVIDER === 'openai' ? 'openai' : 'gemini';
 	const apiKey = process.env.GEMINI_API_KEY || '';
+	const openaiApiKey = process.env.OPENAI_API_KEY || '';
 
 	if (!apiKey) {
 		throw new Error('GEMINI_API_KEY environment variable is required');
+	}
+	if (llmProvider === 'openai' && !openaiApiKey) {
+		throw new Error('OPENAI_API_KEY environment variable is required when LLM_PROVIDER=openai');
 	}
 
 	// Authentication config (disabled by default - enable when ready for Supabase/auth)
@@ -72,7 +84,9 @@ export function loadConfig(): ServerConfig {
 	const config: ServerConfig = {
 		port,
 		host,
+		llmProvider,
 		apiKey,
+		openaiApiKey: llmProvider === 'openai' ? openaiApiKey : undefined,
 		maxSessionsPerUser: Number(process.env.MAX_SESSIONS_PER_USER) || 5,
 		maxTotalSessions: Number(process.env.MAX_TOTAL_SESSIONS) || 1000,
 		sessionTimeoutMs: Number(process.env.SESSION_TIMEOUT_MS) || 30 * 60 * 1000, // 30 minutes
