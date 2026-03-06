@@ -88,6 +88,18 @@ export class ConversationContext {
 		this.checkpointIndex = this._items.length;
 	}
 
+	/**
+	 * Load existing items (e.g. when resuming from persisted history).
+	 * Appends to the timeline and advances the checkpoint so these items are not
+	 * re-flushed by ConversationHistoryWriter.
+	 */
+	loadItems(items: ConversationItem[]): void {
+		for (const item of items) {
+			this._items.push(item);
+		}
+		this.checkpointIndex = this._items.length;
+	}
+
 	/** Store a compressed summary and evict all items before the current checkpoint. */
 	setSummary(summary: string): void {
 		this._summary = summary;

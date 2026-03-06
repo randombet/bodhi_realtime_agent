@@ -12,11 +12,18 @@ import { ClientSenderAdapter } from '../transport/client-sender-adapter.js';
 import { GeminiLiveTransport } from '../transport/gemini-live-transport.js';
 import type { MainAgent, SubagentConfig } from '../types/agent.js';
 import type { BehaviorCategory } from '../types/behavior.js';
+import type { ConversationHistoryStore } from '../types/history.js';
 import type { FrameworkHooks } from '../types/hooks.js';
 import type { MemoryStore } from '../types/memory.js';
 import type { LLMTransport, LLMTransportError, STTProvider } from '../types/transport.js';
+import type {
+	ArtifactRef,
+	ArtifactStore,
+	SaveArtifactParams,
+} from '../types/workspace.js';
 import { BackgroundNotificationQueue } from './background-notification-queue.js';
 import { ConversationContext } from './conversation-context.js';
+import { ConversationHistoryWriter } from './conversation-history-writer.js';
 import { DirectiveManager } from './directive-manager.js';
 import { EventBus } from './event-bus.js';
 import { HooksManager } from './hooks.js';
@@ -73,6 +80,10 @@ export interface VoiceSessionConfig {
 		/** Extract every N turns (default: 5). */
 		turnFrequency?: number;
 	};
+	/** When provided, conversation items are persisted at turn boundaries and on session close. */
+	conversationHistoryStore?: ConversationHistoryStore;
+	/** When provided, agents/tools can persist artifacts (images, docs, etc.) via session.workspace.saveArtifact(). */
+	artifactStore?: ArtifactStore;
 	/** Pre-constructed LLM transport. If provided, apiKey/geminiModel/speechConfig/compressionConfig are ignored. */
 	transport?: LLMTransport;
 }
@@ -206,6 +217,18 @@ export class VoiceSession {
 				},
 			);
 			this.log(`Memory distillation enabled (every ${freq} turns)`);
+		}
+
+		// Persist conversation history when store is provided (writer subscribes to EventBus; disposes on session.close)
+		if (config.conversationHistoryStore) {
+			new ConversationHistoryWriter(
+				config.sessionId,
+				config.userId,
+				config.initialAgent,
+				this.eventBus,
+				this.conversationContext,
+				config.conversationHistoryStore,
+			);
 		}
 
 		// Set up LLM transport
@@ -404,6 +427,29 @@ export class VoiceSession {
 				// Best-effort — directive loading failure is non-fatal
 			}
 		}
+	}
+
+	/**
+	 * Workspace API for persisting artifacts (images, videos, docs, etc.) produced by agents/tools.
+	 * When no artifactStore is configured, saveArtifact returns null without persisting.
+	 */
+	get workspace(): {
+		saveArtifact(params: SaveArtifactParams): Promise<ArtifactRef | null>;
+	} {
+		const sessionId = this.config.sessionId;
+		const userId = this.config.userId;
+		const store = this.config.artifactStore;
+		return {
+			async saveArtifact(params: SaveArtifactParams): Promise<ArtifactRef | null> {
+				if (!store) return null;
+				const full: SaveArtifactParams = {
+					...params,
+					sessionId: params.sessionId ?? sessionId,
+					userId: params.userId ?? userId,
+				};
+				return store.saveArtifact(full);
+			},
+		};
 	}
 
 	/** Gracefully shut down: disconnect Gemini, stop the WebSocket server, transition to CLOSED. */

@@ -79,3 +79,5 @@ export type {
 } from './transport.js';
 
 export type { UIResponse } from './ui.js';
+
+export type { ArtifactRef, ArtifactStore, SaveArtifactParams } from './workspace.js';

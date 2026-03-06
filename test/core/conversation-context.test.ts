@@ -95,6 +95,23 @@ describe('ConversationContext', () => {
 		});
 	});
 
+	describe('loadItems', () => {
+		it('appends items and advances checkpoint so they are not re-flushed', () => {
+			const ctx = new ConversationContext();
+			const loaded = [
+				{ role: 'user' as const, content: 'resumed', timestamp: 1000 },
+				{ role: 'assistant' as const, content: 'welcome back', timestamp: 1001 },
+			];
+			ctx.loadItems(loaded);
+			expect(ctx.items).toHaveLength(2);
+			expect(ctx.items[0].content).toBe('resumed');
+			expect(ctx.getItemsSinceCheckpoint()).toHaveLength(0);
+			ctx.addUserMessage('new');
+			expect(ctx.getItemsSinceCheckpoint()).toHaveLength(1);
+			expect(ctx.getItemsSinceCheckpoint()[0].content).toBe('new');
+		});
+	});
+
 	describe('setSummary', () => {
 		it('stores summary and evicts old items', () => {
 			const ctx = new ConversationContext();

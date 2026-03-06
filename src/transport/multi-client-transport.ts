@@ -14,6 +14,8 @@ export interface ConnectionContext {
 	userId: string | null;
 	connectedAt: number;
 	lastActivityAt: number;
+	/** HTTP upgrade request (for auth to read URL query, e.g. ?userId=). */
+	request?: IncomingMessage;
 }
 
 export interface MultiClientTransportCallbacks {
@@ -188,7 +190,7 @@ export class MultiClientTransport {
 	/**
 	 * Handle a new WebSocket connection.
 	 */
-	private handleConnection(ws: WebSocket, _req: IncomingMessage): void {
+	private handleConnection(ws: WebSocket, req: IncomingMessage): void {
 		const webSocketId = `ws_${Date.now()}_${++this.connectionCounter}`;
 		const context: ConnectionContext = {
 			webSocketId,
@@ -196,6 +198,7 @@ export class MultiClientTransport {
 			userId: null,
 			connectedAt: Date.now(),
 			lastActivityAt: Date.now(),
+			request: req,
 		};
 
 		this.connections.set(ws, context);
