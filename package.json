@@ -1,6 +1,6 @@
 {
   "name": "bodhi-realtime-agent",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Voice agent framework with parallel background subagents — your agent keeps talking while long-running tasks run in the background. Built on Gemini Live API.",
   "keywords": [
     "ai",
