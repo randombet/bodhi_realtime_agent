@@ -12,6 +12,7 @@ export {
 export type { ErrorSeverity } from './errors.js';
 
 export { BackgroundNotificationQueue } from './background-notification-queue.js';
+export type { SendOrQueueOptions } from './background-notification-queue.js';
 
 export {
 	DEFAULT_CONNECT_TIMEOUT_MS,
@@ -22,6 +23,9 @@ export {
 } from './constants.js';
 
 export { DirectiveManager } from './directive-manager.js';
+
+export { InteractionModeManager } from './interaction-mode.js';
+export type { SessionInteractionMode } from './interaction-mode.js';
 
 export { EventBus } from './event-bus.js';
 export type { EventHandler, IEventBus } from './event-bus.js';

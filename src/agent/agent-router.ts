@@ -13,12 +13,24 @@ import type { ToolDefinition } from '../types/tool.js';
 import type { LLMTransport } from '../types/transport.js';
 import { createAgentContext, resolveInstructions } from './agent-context.js';
 import { runSubagent } from './subagent-runner.js';
+import type { SubagentMessage, SubagentSession } from './subagent-session.js';
+import { SubagentSessionImpl } from './subagent-session.js';
 
 /** Tracks a running background subagent so it can be cancelled. */
 interface ActiveSubagent {
 	controller: AbortController;
 	toolCallId: string;
 	configName: string;
+	/** Present when the subagent is interactive (config.interactive === true). */
+	session?: SubagentSession;
+}
+
+/** Callbacks for interactive subagent lifecycle events. */
+export interface SubagentEventCallbacks {
+	/** Fired when a subagent sends a message (question, progress) to the user. */
+	onMessage?: (toolCallId: string, msg: SubagentMessage) => void;
+	/** Fired when a subagent session transitions to a terminal state (completed/cancelled). */
+	onSessionEnd?: (toolCallId: string) => void;
 }
 
 /**
@@ -48,6 +60,7 @@ export class AgentRouter {
 		private model: LanguageModelV1,
 		private getInstructionSuffix?: () => string,
 		private extraTools: ToolDefinition[] = [],
+		private subagentCallbacks?: SubagentEventCallbacks,
 	) {}
 
 	registerAgents(agents: MainAgent[]): void {
@@ -172,13 +185,38 @@ export class AgentRouter {
 		}
 	}
 
+	/** Look up the SubagentSession for an active interactive subagent, or null. */
+	getSubagentSession(toolCallId: string): SubagentSession | null {
+		return this.activeSubagents.get(toolCallId)?.session ?? null;
+	}
+
 	/** Spawn a background subagent to handle a tool call asynchronously. */
 	async handoff(toolCall: ToolCall, subagentConfig: SubagentConfig): Promise<SubagentResult> {
 		const controller = new AbortController();
+		const session = subagentConfig.interactive
+			? new SubagentSessionImpl(toolCall.toolCallId, subagentConfig)
+			: undefined;
+
+		// Wire interactive session callbacks so VoiceSession can relay
+		// subagent questions to the user and clean up interaction mode.
+		if (session) {
+			if (this.subagentCallbacks?.onMessage) {
+				session.onMessage((msg) => this.subagentCallbacks?.onMessage?.(toolCall.toolCallId, msg));
+			}
+			if (this.subagentCallbacks?.onSessionEnd) {
+				session.onStateChange((newState) => {
+					if (newState === 'completed' || newState === 'cancelled') {
+						this.subagentCallbacks?.onSessionEnd?.(toolCall.toolCallId);
+					}
+				});
+			}
+		}
+
 		this.activeSubagents.set(toolCall.toolCallId, {
 			controller,
 			toolCallId: toolCall.toolCallId,
 			configName: subagentConfig.name,
+			session,
 		});
 
 		this.eventBus.publish('agent.handoff', {
@@ -206,6 +244,7 @@ export class AgentRouter {
 				hooks: this.hooks,
 				model: this.model,
 				abortSignal: controller.signal,
+				session,
 			});
 
 			return result;
@@ -218,6 +257,7 @@ export class AgentRouter {
 	cancelSubagent(toolCallId: string): void {
 		const sub = this.activeSubagents.get(toolCallId);
 		if (sub) {
+			sub.session?.cancel();
 			sub.controller.abort();
 			this.activeSubagents.delete(toolCallId);
 		}

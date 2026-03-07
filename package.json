@@ -69,6 +69,7 @@
     "@ai-sdk/google": "^1.2.0",
     "@google/genai": "^1.41.0",
     "ai": "^4.3.0",
+    "dotenv": "^17.3.1",
     "openai": "^6.25.0",
     "write-file-atomic": "^6.0.0",
     "ws": "^8.18.0",

@@ -3,6 +3,7 @@
 import type { LanguageModelV1 } from 'ai';
 import { resolveInstructions } from '../agent/agent-context.js';
 import { AgentRouter } from '../agent/agent-router.js';
+import type { SubagentMessage } from '../agent/subagent-session.js';
 import { BehaviorManager } from '../behaviors/behavior-manager.js';
 import { MemoryDistiller } from '../memory/memory-distiller.js';
 import { ToolExecutor } from '../tools/tool-executor.js';
@@ -18,6 +19,7 @@ import { ConversationContext } from './conversation-context.js';
 import { DirectiveManager } from './directive-manager.js';
 import { EventBus } from './event-bus.js';
 import { HooksManager } from './hooks.js';
+import { InteractionModeManager } from './interaction-mode.js';
 import { MemoryCacheManager } from './memory-cache-manager.js';
 import { SessionManager } from './session-manager.js';
 import { ToolCallRouter } from './tool-call-router.js';
@@ -121,6 +123,7 @@ export class VoiceSession {
 	/** Whether a client WebSocket connection is currently active. */
 	private clientConnected = false;
 	private notificationQueue!: BackgroundNotificationQueue;
+	private interactionMode = new InteractionModeManager();
 	/** Tracks consecutive reconnect attempts to prevent infinite reconnect storms. */
 	private reconnectAttempts = 0;
 	private static readonly MAX_RECONNECT_ATTEMPTS = 3;
@@ -136,6 +139,25 @@ export class VoiceSession {
 			addUserMessage: (text) => this.conversationContext.addUserMessage(text),
 			addAssistantMessage: (text) => this.conversationContext.addAssistantMessage(text),
 		});
+
+		// Relay finalized user speech to an interactive subagent when one is
+		// waiting for input. The callback captures `this` via closure and is only
+		// invoked at runtime (agentRouter is initialized before any transcript fires).
+		this.transcriptManager.onInputFinalized = (text) => {
+			const activeId = this.interactionMode.getActiveToolCallId();
+			if (activeId) {
+				const session = this.agentRouter.getSubagentSession(activeId);
+				if (session && session.state === 'waiting_for_input') {
+					session.sendToSubagent(text);
+					this.interactionMode.deactivate(activeId);
+				}
+			}
+		};
+
+		// NotificationQueue is created early but messageTruncation is not known until
+		// transport is configured below. It defaults to false and is updated after
+		// transport setup in the 'Wire LLMTransport' section. For pre-constructed
+		// transports, capabilities are available immediately so we pass them here.
 		this.notificationQueue = new BackgroundNotificationQueue(
 			(turns, turnComplete) => {
 				// Convert the Gemini-format turns from the notification queue to ContentTurn[]
@@ -146,6 +168,7 @@ export class VoiceSession {
 				this.transport.sendContent(contentTurns, turnComplete);
 			},
 			(msg) => this.log(msg),
+			config.transport?.capabilities?.messageTruncation ?? false,
 		);
 
 		if (config.hooks) {
@@ -340,6 +363,10 @@ export class VoiceSession {
 			config.model,
 			() => this.directiveManager.getSessionSuffix(),
 			behaviorTools,
+			{
+				onMessage: (toolCallId, msg) => this.handleSubagentMessage(toolCallId, msg),
+				onSessionEnd: (toolCallId) => this.interactionMode.deactivate(toolCallId),
+			},
 		);
 		this.agentRouter.registerAgents(config.agents);
 		this.agentRouter.setInitialAgent(config.initialAgent);
@@ -609,6 +636,22 @@ export class VoiceSession {
 		this.clientTransport.sendJsonToClient({ type: 'turn.interrupted' });
 	}
 
+	/** Handle a message from an interactive subagent (question, progress update). */
+	private handleSubagentMessage(toolCallId: string, msg: SubagentMessage): void {
+		if (msg.type === 'result') return; // Results are delivered by ToolCallRouter
+
+		if (msg.blocking) {
+			this.interactionMode.activate(toolCallId);
+		}
+
+		const label = msg.type === 'question' ? 'SUBAGENT QUESTION' : 'SUBAGENT UPDATE';
+		this.notificationQueue.sendOrQueue(
+			[{ role: 'user', parts: [{ text: `[${label}]: ${msg.text}` }] }],
+			true,
+			{ priority: msg.blocking ? 'high' : 'normal' },
+		);
+	}
+
 	private handleGroundingMetadata(metadata: Record<string, unknown>): void {
 		this.clientTransport.sendJsonToClient({ type: 'grounding', payload: metadata });
 	}
@@ -686,13 +729,21 @@ export class VoiceSession {
 	private handleTextInput(text: string): void {
 		if (!this.sessionManager.isActive || !text.trim()) return;
 
-		// Send text to the LLM
-		this.transport.sendContent([{ role: 'user', text: text.trim() }], true);
+		const trimmed = text.trim();
 
-		// Record in conversation context
-		this.conversationContext.addUserMessage(text.trim());
+		// Relay to interactive subagent if one is waiting for input
+		const activeId = this.interactionMode.getActiveToolCallId();
+		if (activeId) {
+			const session = this.agentRouter.getSubagentSession(activeId);
+			if (session && session.state === 'waiting_for_input') {
+				session.sendToSubagent(trimmed);
+				this.interactionMode.deactivate(activeId);
+			}
+		}
 
-		// No transcript echo — the web client already displays typed text locally.
+		// Always send to main LLM so it stays informed of user messages
+		this.transport.sendContent([{ role: 'user', text: trimmed }], true);
+		this.conversationContext.addUserMessage(trimmed);
 	}
 
 	private handleClientConnected(): void {

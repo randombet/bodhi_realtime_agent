@@ -189,6 +189,53 @@ describe('TranscriptManager', () => {
 		});
 	});
 
+	describe('onInputFinalized', () => {
+		it('fires on flushInput() with finalized text', () => {
+			const sink = createSink();
+			const mgr = new TranscriptManager(sink);
+			const finalized: string[] = [];
+			mgr.onInputFinalized = (text) => finalized.push(text);
+
+			mgr.handleInput('hello world');
+			mgr.flushInput();
+
+			expect(finalized).toEqual(['hello world']);
+		});
+
+		it('fires on flush() with finalized input text', () => {
+			const sink = createSink();
+			const mgr = new TranscriptManager(sink);
+			const finalized: string[] = [];
+			mgr.onInputFinalized = (text) => finalized.push(text);
+
+			mgr.handleInput('question');
+			mgr.handleOutput('answer');
+			mgr.flush();
+
+			expect(finalized).toEqual(['question']);
+		});
+
+		it('does not fire when input buffer is empty', () => {
+			const sink = createSink();
+			const mgr = new TranscriptManager(sink);
+			const finalized: string[] = [];
+			mgr.onInputFinalized = (text) => finalized.push(text);
+
+			mgr.handleOutput('answer');
+			mgr.flush();
+
+			expect(finalized).toEqual([]);
+		});
+
+		it('does not fire when callback is not set', () => {
+			const sink = createSink();
+			const mgr = new TranscriptManager(sink);
+			// No onInputFinalized set — should not throw
+			mgr.handleInput('text');
+			expect(() => mgr.flushInput()).not.toThrow();
+		});
+	});
+
 	it('handles no-overlap prefix + buffer by joining with space', () => {
 		const sink = createSink();
 		const mgr = new TranscriptManager(sink);

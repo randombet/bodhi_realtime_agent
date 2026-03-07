@@ -24,6 +24,13 @@ export class TranscriptManager {
 	/** Pre-tool-call output text, saved when a tool call splits a turn. */
 	private outputPrefix = '';
 
+	/**
+	 * Optional callback fired when user input is finalized (committed as a non-partial message).
+	 * Triggers from both `flushInput()` and the input-flushing section of `flush()`.
+	 * Used by VoiceSession to relay finalized user text to interactive subagent sessions.
+	 */
+	onInputFinalized?: (text: string) => void;
+
 	constructor(private sink: TranscriptSink) {}
 
 	/** Handle a partial/interim transcript from a streaming STT provider.
@@ -86,27 +93,31 @@ export class TranscriptManager {
 	 */
 	flushInput(): void {
 		if (this.inputBuffer.trim()) {
-			this.sink.addUserMessage(this.inputBuffer.trim());
+			const text = this.inputBuffer.trim();
+			this.sink.addUserMessage(text);
 			this.sink.sendToClient({
 				type: 'transcript',
 				role: 'user',
-				text: this.inputBuffer.trim(),
+				text,
 				partial: false,
 			});
 			this.inputBuffer = '';
+			this.onInputFinalized?.(text);
 		}
 	}
 
 	/** Flush all transcript buffers — finalize user and assistant messages. */
 	flush(): void {
 		if (this.inputBuffer.trim()) {
-			this.sink.addUserMessage(this.inputBuffer.trim());
+			const text = this.inputBuffer.trim();
+			this.sink.addUserMessage(text);
 			this.sink.sendToClient({
 				type: 'transcript',
 				role: 'user',
-				text: this.inputBuffer.trim(),
+				text,
 				partial: false,
 			});
+			this.onInputFinalized?.(text);
 		}
 		const outputText = this.combineOutput();
 		if (outputText) {

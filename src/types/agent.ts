@@ -68,6 +68,8 @@ export interface SubagentConfig {
 	timeout?: number;
 	/** Override the model used for this subagent (defaults to session model). */
 	model?: string;
+	/** When true, a SubagentSession with user interaction capabilities is created. */
+	interactive?: boolean;
 }
 
 /**

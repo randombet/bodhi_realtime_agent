@@ -3,20 +3,25 @@
 import type { LanguageModelV1 } from 'ai';
 import { describe, expect, it, vi } from 'vitest';
 import { _buildSystemPromptForTest, runSubagent } from '../../src/agent/subagent-runner.js';
+import { SubagentSessionImpl } from '../../src/agent/subagent-session.js';
 import { HooksManager } from '../../src/core/hooks.js';
 import type { SubagentContextSnapshot } from '../../src/types/conversation.js';
 
 // Mock the ai module
-vi.mock('ai', () => ({
-	generateText: vi.fn(async (opts: { onStepFinish?: (step: unknown) => void }) => {
-		// Simulate one step
-		opts.onStepFinish?.({
-			toolCalls: [{ toolName: 'search' }],
-			usage: { totalTokens: 100 },
-		});
-		return { text: 'Subagent completed the task.' };
-	}),
-}));
+vi.mock('ai', async (importOriginal) => {
+	const actual = (await importOriginal()) as Record<string, unknown>;
+	return {
+		...actual,
+		generateText: vi.fn(async (opts: { onStepFinish?: (step: unknown) => void }) => {
+			// Simulate one step
+			opts.onStepFinish?.({
+				toolCalls: [{ toolName: 'search' }],
+				usage: { totalTokens: 100 },
+			});
+			return { text: 'Subagent completed the task.' };
+		}),
+	};
+});
 
 const mockModel = { modelId: 'test-model' } as unknown as LanguageModelV1;
 
@@ -271,5 +276,115 @@ describe('runSubagent', () => {
 		});
 
 		expect(capturedSignal).toBeDefined();
+	});
+
+	describe('interactive session (ask_user)', () => {
+		it('injects ask_user tool when config.interactive is true', async () => {
+			const { generateText } = await import('ai');
+			const hooks = new HooksManager();
+			const session = new SubagentSessionImpl('tc-1', {
+				name: 'interactive-agent',
+				instructions: '',
+				tools: {},
+				interactive: true,
+			});
+
+			await runSubagent({
+				config: {
+					name: 'interactive-agent',
+					instructions: 'Test',
+					tools: {},
+					interactive: true,
+				},
+				context: createTestContext(),
+				hooks,
+				model: mockModel,
+				session,
+			});
+
+			expect(generateText).toHaveBeenCalledWith(
+				expect.objectContaining({
+					tools: expect.objectContaining({
+						ask_user: expect.anything(),
+					}),
+				}),
+			);
+		});
+
+		it('does not inject ask_user when config.interactive is false', async () => {
+			const { generateText } = await import('ai');
+			const hooks = new HooksManager();
+
+			await runSubagent({
+				config: {
+					name: 'non-interactive',
+					instructions: 'Test',
+					tools: {},
+				},
+				context: createTestContext(),
+				hooks,
+				model: mockModel,
+			});
+
+			const callArgs = vi.mocked(generateText).mock.calls.at(-1)?.[0] as {
+				tools?: Record<string, unknown>;
+			};
+			expect(callArgs.tools?.ask_user).toBeUndefined();
+		});
+
+		it('completes session after successful generateText()', async () => {
+			const hooks = new HooksManager();
+			const session = new SubagentSessionImpl('tc-1', {
+				name: 'test',
+				instructions: '',
+				tools: {},
+				interactive: true,
+			});
+
+			await runSubagent({
+				config: {
+					name: 'test',
+					instructions: 'Test',
+					tools: {},
+					interactive: true,
+				},
+				context: createTestContext(),
+				hooks,
+				model: mockModel,
+				session,
+			});
+
+			expect(session.state).toBe('completed');
+		});
+
+		it('cancels session on error', async () => {
+			const { generateText } = await import('ai');
+			vi.mocked(generateText).mockRejectedValueOnce(new Error('LLM error'));
+
+			const hooks = new HooksManager();
+			const session = new SubagentSessionImpl('tc-1', {
+				name: 'test',
+				instructions: '',
+				tools: {},
+				interactive: true,
+			});
+
+			await expect(
+				runSubagent({
+					config: {
+						name: 'test',
+						instructions: 'Test',
+						tools: {},
+						interactive: true,
+					},
+					context: createTestContext(),
+					hooks,
+					model: mockModel,
+					session,
+				}),
+			).rejects.toThrow('LLM error');
+
+			expect(session.state).toBe('cancelled');
+		});
 	});
 });

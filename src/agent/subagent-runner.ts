@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: MIT
 
 import type { LanguageModelV1 } from 'ai';
-import { generateText } from 'ai';
+import { generateText, tool } from 'ai';
+import { z } from 'zod';
 import { DEFAULT_SUBAGENT_TIMEOUT_MS } from '../core/constants.js';
 import type { HooksManager } from '../core/hooks.js';
 import type { SubagentConfig } from '../types/agent.js';
 import type { SubagentContextSnapshot, SubagentResult } from '../types/conversation.js';
+import { InputTimeoutError } from './subagent-session.js';
+import type { InteractiveSubagentConfig, SubagentSession } from './subagent-session.js';
 
 /** Options for running a background subagent via the Vercel AI SDK. */
 export interface RunSubagentOptions {
@@ -19,6 +22,8 @@ export interface RunSubagentOptions {
 	model: LanguageModelV1;
 	/** Signal to abort the subagent execution (e.g. on tool cancellation). */
 	abortSignal?: AbortSignal;
+	/** Interactive session for user input. Required when config.interactive is true. */
+	session?: SubagentSession;
 }
 
 /**
@@ -53,12 +58,54 @@ function buildSystemPrompt(context: SubagentContextSnapshot): string {
 }
 
 /**
+ * Create an AI SDK `tool()` that lets the subagent ask the user a question
+ * and wait for a response via the interactive SubagentSession.
+ */
+export function createAskUserTool(session: SubagentSession, maxInputRetries: number) {
+	let consecutiveTimeouts = 0;
+
+	return tool({
+		description:
+			'Ask the user a question and wait for their response. Use this when you need information from the user to proceed.',
+		parameters: z.object({
+			question: z.string().describe('The question to ask the user'),
+		}),
+		execute: async ({ question }) => {
+			consecutiveTimeouts = 0; // Reset on new question
+			session.sendToUser({ type: 'question', text: question, blocking: true });
+
+			try {
+				const text = await session.waitForInput();
+				return { userResponse: text };
+			} catch (err) {
+				if (err instanceof InputTimeoutError) {
+					consecutiveTimeouts++;
+					if (consecutiveTimeouts >= maxInputRetries) {
+						throw new Error(
+							`User did not respond after ${consecutiveTimeouts} attempts. Aborting.`,
+						);
+					}
+					return {
+						error: `The user did not respond in time. You may re-ask or try a different question. (attempt ${consecutiveTimeouts}/${maxInputRetries})`,
+					};
+				}
+				throw err;
+			}
+		},
+	});
+}
+
+/**
  * Execute a background subagent using the Vercel AI SDK's generateText.
  * Fires onSubagentStep hooks after each LLM step.
  * Returns the final text result and step count.
+ *
+ * When `config.interactive` is true and a `session` is provided, an `ask_user`
+ * tool is injected and this function owns the session's terminal transitions
+ * (complete on success, cancel on error).
  */
 export async function runSubagent(options: RunSubagentOptions): Promise<SubagentResult> {
-	const { config, context, hooks, model, abortSignal } = options;
+	const { config, context, hooks, model, abortSignal, session } = options;
 	const maxSteps = config.maxSteps ?? 5;
 	const timeoutMs = config.timeout ?? DEFAULT_SUBAGENT_TIMEOUT_MS;
 
@@ -67,6 +114,13 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 	const timer = setTimeout(() => controller.abort(), timeoutMs);
 	const onCallerAbort = () => controller.abort();
 	abortSignal?.addEventListener('abort', onCallerAbort);
+
+	// Build tool set — inject ask_user when interactive
+	const tools = { ...config.tools } as Record<string, unknown>;
+	if (config.interactive && session) {
+		const maxRetries = (config as InteractiveSubagentConfig).maxInputRetries ?? 3;
+		(tools as Record<string, unknown>).ask_user = createAskUserTool(session, maxRetries);
+	}
 
 	let stepCount = 0;
 
@@ -78,7 +132,7 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 				Object.keys(context.task.args).length > 0
 					? `Execute the task: ${context.task.description}\nArguments: ${JSON.stringify(context.task.args)}`
 					: `Execute the task: ${context.task.description}`,
-			tools: config.tools as Parameters<typeof generateText>[0]['tools'],
+			tools: tools as Parameters<typeof generateText>[0]['tools'],
 			maxSteps,
 			abortSignal: controller.signal,
 			onStepFinish: (step) => {
@@ -94,10 +148,23 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 			},
 		});
 
-		return {
+		const subagentResult: SubagentResult = {
 			text: result.text,
 			stepCount,
 		};
+
+		// Terminal transition: complete on success
+		if (session) {
+			session.complete(subagentResult);
+		}
+
+		return subagentResult;
+	} catch (err) {
+		// Terminal transition: cancel on error
+		if (session) {
+			session.cancel();
+		}
+		throw err;
 	} finally {
 		clearTimeout(timer);
 		abortSignal?.removeEventListener('abort', onCallerAbort);
