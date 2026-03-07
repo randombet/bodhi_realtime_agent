@@ -201,12 +201,12 @@ export class AgentRouter {
 		// subagent questions to the user and clean up interaction mode.
 		if (session) {
 			if (this.subagentCallbacks?.onMessage) {
-				session.onMessage((msg) => this.subagentCallbacks!.onMessage!(toolCall.toolCallId, msg));
+				session.onMessage((msg) => this.subagentCallbacks?.onMessage?.(toolCall.toolCallId, msg));
 			}
 			if (this.subagentCallbacks?.onSessionEnd) {
 				session.onStateChange((newState) => {
 					if (newState === 'completed' || newState === 'cancelled') {
-						this.subagentCallbacks!.onSessionEnd!(toolCall.toolCallId);
+						this.subagentCallbacks?.onSessionEnd?.(toolCall.toolCallId);
 					}
 				});
 			}
