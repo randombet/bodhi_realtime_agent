@@ -8,8 +8,11 @@ export default withMermaid(
 		description: 'TypeScript framework for real-time voice agents — supports Google Gemini Live and OpenAI Realtime APIs',
 		base: '/bodhi_realtime_agent/',
 		ignoreDeadLinks: [/^http:\/\/localhost/],
+		head: [['link', { rel: 'icon', href: '/bodhi_realtime_agent/images/icon.svg' }]],
 
 		themeConfig: {
+			logo: '/images/icon.svg',
+
 			nav: [
 				{ text: 'Guide', link: '/guide/' },
 				{ text: 'Advanced', link: '/advanced/subagents' },

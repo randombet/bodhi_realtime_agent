@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/images/icon.png" alt="Bodhi Agent" width="120" />
+</p>
+
 # Bodhi Realtime Agent Framework
 
 [![npm version](https://img.shields.io/npm/v/bodhi-realtime-agent.svg)](https://www.npmjs.com/package/bodhi-realtime-agent)
