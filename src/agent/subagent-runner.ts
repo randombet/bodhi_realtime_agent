@@ -5,8 +5,9 @@ import { generateText, tool } from 'ai';
 import { z } from 'zod';
 import { DEFAULT_SUBAGENT_TIMEOUT_MS } from '../core/constants.js';
 import type { HooksManager } from '../core/hooks.js';
-import type { SubagentConfig } from '../types/agent.js';
+import type { ClaudeCodeSubagentConfig, SubagentConfig } from '../types/agent.js';
 import type { SubagentContextSnapshot, SubagentResult } from '../types/conversation.js';
+import { runClaudeCodeSubagent } from './claude-subagent-runner.js';
 import { InputTimeoutError } from './subagent-session.js';
 import type { InteractiveSubagentConfig, SubagentSession } from './subagent-session.js';
 
@@ -106,6 +107,16 @@ export function createAskUserTool(session: SubagentSession, maxInputRetries: num
  */
 export async function runSubagent(options: RunSubagentOptions): Promise<SubagentResult> {
 	const { config, context, hooks, model, abortSignal, session } = options;
+
+	if (config.runtime === 'claude_code') {
+		return runClaudeCodeSubagent({
+			config: config as ClaudeCodeSubagentConfig,
+			context,
+			hooks,
+			abortSignal,
+			session,
+		});
+	}
 	const maxSteps = config.maxSteps ?? 5;
 	const timeoutMs = config.timeout ?? DEFAULT_SUBAGENT_TIMEOUT_MS;
 

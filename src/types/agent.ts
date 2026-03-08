@@ -70,6 +70,31 @@ export interface SubagentConfig {
 	model?: string;
 	/** When true, a SubagentSession with user interaction capabilities is created. */
 	interactive?: boolean;
+	/** Runtime used for execution. Defaults to `ai_sdk` (Vercel AI SDK). */
+	runtime?: 'ai_sdk' | 'claude_code';
+}
+
+/** Claude Code CLI specific options used when `runtime: 'claude_code'`. */
+export interface ClaudeCodeSubagentOptions {
+	/** CLI command path. Defaults to `claude`. */
+	command?: string;
+	/** Optional working directory for the Claude process. */
+	cwd?: string;
+	/** Model passed through to Claude CLI (`--model`). */
+	model?: string;
+	/** Permission mode passed to Claude CLI (`--permission-mode`). */
+	permissionMode?: 'default' | 'acceptEdits' | 'bypassPermissions';
+	/** Optional allow-list for tools (`--allowedTools`). */
+	allowedTools?: string[];
+	/** Max turns handled by Claude per invocation (`--max-turns`). */
+	maxTurns?: number;
+	/** Extra args appended verbatim after framework-managed args. */
+	extraArgs?: string[];
+}
+
+export interface ClaudeCodeSubagentConfig extends SubagentConfig {
+	runtime: 'claude_code';
+	claude?: ClaudeCodeSubagentOptions;
 }
 
 /**
