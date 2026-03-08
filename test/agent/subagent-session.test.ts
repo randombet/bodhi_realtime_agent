@@ -244,4 +244,70 @@ describe('SubagentSession', () => {
 			'Only one pending waitForInput()/nextUserInput() at a time',
 		);
 	});
+
+	// -- trySendToSubagent --------------------------------------------------
+
+	it('trySendToSubagent returns true and resolves input in waiting_for_input state', async () => {
+		const s = createSession();
+		s.sendToUser({ type: 'question', text: 'q?', blocking: true });
+		const p = s.waitForInput(5000);
+		const ok = s.trySendToSubagent('answer');
+		expect(ok).toBe(true);
+		expect(s.state).toBe('running');
+		await expect(p).resolves.toBe('answer');
+	});
+
+	it('trySendToSubagent returns false in running state', () => {
+		const s = createSession();
+		expect(s.trySendToSubagent('text')).toBe(false);
+		expect(s.state).toBe('running');
+	});
+
+	it('trySendToSubagent returns false in completed state', () => {
+		const s = createSession();
+		s.complete({});
+		expect(s.trySendToSubagent('text')).toBe(false);
+	});
+
+	it('trySendToSubagent returns false in cancelled state', () => {
+		const s = createSession();
+		s.cancel();
+		expect(s.trySendToSubagent('text')).toBe(false);
+	});
+
+	// -- UI request registry ------------------------------------------------
+
+	it('registerUiRequest + hasUiRequest', () => {
+		const s = createSession();
+		expect(s.hasUiRequest('req-1')).toBe(false);
+
+		s.registerUiRequest('req-1', [
+			{ id: 'opt_0', label: 'Yes', description: 'Accept' },
+			{ id: 'opt_1', label: 'No', description: 'Decline' },
+		]);
+		expect(s.hasUiRequest('req-1')).toBe(true);
+		expect(s.hasUiRequest('req-2')).toBe(false);
+	});
+
+	it('resolveOption returns the matching option', () => {
+		const s = createSession();
+		s.registerUiRequest('req-1', [
+			{ id: 'opt_0', label: 'Yes', description: 'Accept' },
+			{ id: 'opt_1', label: 'No', description: 'Decline' },
+		]);
+
+		const opt = s.resolveOption('req-1', 'opt_1');
+		expect(opt).toEqual({ id: 'opt_1', label: 'No', description: 'Decline' });
+	});
+
+	it('resolveOption returns undefined for unknown requestId', () => {
+		const s = createSession();
+		expect(s.resolveOption('unknown', 'opt_0')).toBeUndefined();
+	});
+
+	it('resolveOption returns undefined for unknown optionId', () => {
+		const s = createSession();
+		s.registerUiRequest('req-1', [{ id: 'opt_0', label: 'Yes', description: 'Accept' }]);
+		expect(s.resolveOption('req-1', 'opt_99')).toBeUndefined();
+	});
 });

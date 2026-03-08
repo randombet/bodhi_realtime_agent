@@ -60,19 +60,53 @@ function buildSystemPrompt(context: SubagentContextSnapshot): string {
 /**
  * Create an AI SDK `tool()` that lets the subagent ask the user a question
  * and wait for a response via the interactive SubagentSession.
+ *
+ * Supports optional structured `options` with stable IDs for dual-channel
+ * delivery (voice + UI buttons). When options are present, a `uiPayload`
+ * is included so the client can render clickable buttons.
  */
 export function createAskUserTool(session: SubagentSession, maxInputRetries: number) {
 	let consecutiveTimeouts = 0;
 
 	return tool({
 		description:
-			'Ask the user a question and wait for their response. Use this when you need information from the user to proceed.',
+			'Ask the user a question and wait for their response. Use this when you need information from the user to proceed. Optionally provide structured options for UI buttons.',
 		parameters: z.object({
 			question: z.string().describe('The question to ask the user'),
+			options: z
+				.array(
+					z.object({
+						id: z.string().describe('Stable identifier for this option (e.g. "opt_0")'),
+						label: z.string().describe('Short display label'),
+						description: z.string().describe('What this option means'),
+					}),
+				)
+				.optional()
+				.describe(
+					'Structured choices for the user. If present, sent via UI payload for clickable buttons.',
+				),
 		}),
-		execute: async ({ question }) => {
+		execute: async ({ question, options }) => {
 			consecutiveTimeouts = 0; // Reset on new question
-			session.sendToUser({ type: 'question', text: question, blocking: true });
+
+			// Build uiPayload when structured options are present
+			const requestId = options ? crypto.randomUUID() : undefined;
+			if (options && requestId) {
+				session.registerUiRequest(requestId, options);
+			}
+
+			session.sendToUser({
+				type: 'question',
+				text: question,
+				blocking: true,
+				uiPayload: options
+					? {
+							type: 'choice' as const,
+							requestId,
+							data: { options },
+						}
+					: undefined,
+			});
 
 			try {
 				const text = await session.waitForInput();
@@ -114,6 +148,13 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 	const timer = setTimeout(() => controller.abort(), timeoutMs);
 	const onCallerAbort = () => controller.abort();
 	abortSignal?.addEventListener('abort', onCallerAbort);
+
+	// Fire-and-forget dispose on abort (can't await inside event listener).
+	// The finally block also awaits dispose, so cleanup completes either way.
+	const onAbortDispose = () => {
+		config.dispose?.();
+	};
+	controller.signal.addEventListener('abort', onAbortDispose);
 
 	// Build tool set — inject ask_user when interactive
 	const tools = { ...config.tools } as Record<string, unknown>;
@@ -168,6 +209,8 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 	} finally {
 		clearTimeout(timer);
 		abortSignal?.removeEventListener('abort', onCallerAbort);
+		controller.signal.removeEventListener('abort', onAbortDispose);
+		await config.dispose?.();
 	}
 }
 

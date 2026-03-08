@@ -70,6 +70,8 @@ export interface SubagentConfig {
 	model?: string;
 	/** When true, a SubagentSession with user interaction capabilities is created. */
 	interactive?: boolean;
+	/** Optional cleanup function called when the subagent run ends (success, error, or abort). */
+	dispose?: () => Promise<void> | void;
 }
 
 /**

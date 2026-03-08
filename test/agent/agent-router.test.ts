@@ -275,4 +275,28 @@ describe('AgentRouter', () => {
 			expect(router.activeSubagentCount).toBe(0);
 		});
 	});
+
+	describe('findSessionByRequestId', () => {
+		it('returns null when no active subagents', () => {
+			const { router } = setup();
+			router.registerAgents([createTestAgent('general')]);
+			router.setInitialAgent('general');
+
+			expect(router.findSessionByRequestId('req-1')).toBeNull();
+		});
+
+		it('returns null when no subagent has the given requestId', async () => {
+			const { router } = setup();
+			router.registerAgents([createTestAgent('general')]);
+			router.setInitialAgent('general');
+
+			// Handoff with a non-interactive subagent (no session)
+			await router.handoff(
+				{ toolCallId: 'tc_1', toolName: 'search', args: {} },
+				{ name: 'search-agent', instructions: 'Search', tools: {} },
+			);
+
+			expect(router.findSessionByRequestId('req-1')).toBeNull();
+		});
+	});
 });
