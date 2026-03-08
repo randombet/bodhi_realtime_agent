@@ -5,6 +5,8 @@ export type { BehaviorCategory, BehaviorPreset } from './behavior.js';
 
 export type {
 	AgentContext,
+	ClaudeCodingOptions,
+	ClaudeCodingSubagentConfig,
 	EventSourceConfig,
 	ExternalEvent,
 	MainAgent,

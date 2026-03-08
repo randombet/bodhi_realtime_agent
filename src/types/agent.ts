@@ -70,6 +70,24 @@ export interface SubagentConfig {
 	model?: string;
 	/** When true, a SubagentSession with user interaction capabilities is created. */
 	interactive?: boolean;
+	/** Execution runtime for this subagent. Defaults to `ai_sdk`. */
+	runtime?: 'ai_sdk' | 'claude_code';
+}
+
+/** Claude Code specific options used when `runtime: 'claude_code'`. */
+export interface ClaudeCodingOptions {
+	pythonBin?: string;
+	bridgeScriptPath?: string;
+	cwd?: string;
+	model?: string;
+	permissionMode?: 'default' | 'acceptEdits' | 'bypassPermissions';
+	allowedTools?: string[];
+	maxTurns?: number;
+}
+
+export interface ClaudeCodingSubagentConfig extends SubagentConfig {
+	runtime: 'claude_code';
+	claude?: ClaudeCodingOptions;
 }
 
 /**

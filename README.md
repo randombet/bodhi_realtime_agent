@@ -56,7 +56,7 @@ Main Agent: "Done! The script is saved as hn_scraper.py..."  ← announces resul
 
 ## Features
 
-- **Background subagents**: Mark any tool as `execution: 'background'` — it hands off to a Vercel AI SDK subagent with its own tool-use loop (`maxSteps`), running in parallel while the voice agent continues the conversation. Subagents can be **interactive** — asking the user follow-up questions via voice mid-task
+- **Background subagents**: Mark any tool as `execution: 'background'` — it hands off to a Vercel AI SDK subagent with its own tool-use loop (`maxSteps`), running in parallel while the voice agent continues the conversation. Subagents can be **interactive** — asking the user follow-up questions via voice. Runtime options include the default Vercel AI SDK and a Claude coding runtime via `claude-agent-sdk-python` mid-task
 - **Real-time voice**: Bidirectional audio streaming with Gemini Live API, server-side VAD and turn detection
 - **Multi-agent transfers**: Define specialist agents with distinct personas and tools; transfer mid-conversation with context replay and audio buffering
 - **Inline + background tools**: `inline` tools block the turn (fast lookups); `background` tools run async (image/video generation, data analysis)

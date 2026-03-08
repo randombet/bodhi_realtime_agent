@@ -184,6 +184,31 @@ Events can be `normal` or `urgent`:
 | `normal` | Notification queued, delivered at next turn boundary |
 | `urgent` | May interrupt the current turn to notify immediately |
 
+
+## Claude Coding Runtime
+
+In addition to the default Vercel AI SDK subagent runtime, you can run a subagent with Anthropic's `claude-agent-sdk-python` by setting `runtime: "claude_code"`:
+
+```typescript
+const claudeCodingSubagent: SubagentConfig = {
+  name: 'claude_coder',
+  runtime: 'claude_code',
+  interactive: true,
+  instructions: 'You are a senior coding agent. Ask concise clarifying questions when needed.',
+  tools: {}, // Not used by claude_code runtime
+  maxSteps: 8,
+  claude: {
+    pythonBin: 'python3',
+    cwd: '/path/to/repo',
+    model: 'claude-sonnet-4-5',
+    permissionMode: 'acceptEdits',
+    allowedTools: ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep'],
+  },
+};
+```
+
+See `docs/advanced/claude-coding-subagent.md` for a full capability/limitation matrix.
+
 ## SubagentConfig Reference
 
 ```typescript
@@ -194,6 +219,15 @@ interface SubagentConfig {
   maxSteps?: number;      // Max LLM steps (default 5)
   timeout?: number;       // Execution timeout in ms
   model?: string;         // Override session model
+  runtime?: 'ai_sdk' | 'claude_code';
+  claude?: {
+    pythonBin?: string;
+    cwd?: string;
+    model?: string;
+    permissionMode?: 'default' | 'acceptEdits' | 'bypassPermissions';
+    allowedTools?: string[];
+    maxTurns?: number;
+  };
 }
 ```
 
