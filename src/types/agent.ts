@@ -68,8 +68,31 @@ export interface SubagentConfig {
 	timeout?: number;
 	/** Override the model used for this subagent (defaults to session model). */
 	model?: string;
+	/** Subagent runtime provider. Defaults to `ai-sdk`. */
+	provider?: 'ai-sdk' | 'codex';
 	/** When true, a SubagentSession with user interaction capabilities is created. */
 	interactive?: boolean;
+	/** Codex runtime options (used when provider is `codex`). */
+	codex?: {
+		/** Optional Codex API key (falls back to environment if omitted). */
+		apiKey?: string;
+		/** Optional base URL for Codex/OpenAI-compatible endpoint. */
+		baseUrl?: string;
+		/** Override model for the Codex thread. */
+		model?: string;
+		/** Codex sandbox mode. */
+		sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
+		/** Codex approval policy for command execution. */
+		approvalPolicy?: 'untrusted' | 'on-failure' | 'on-request' | 'never';
+		/** Working directory where Codex should run. */
+		workingDirectory?: string;
+		/** Allow network access in workspace-write mode. */
+		networkAccessEnabled?: boolean;
+		/** Skip git repository requirement. */
+		skipGitRepoCheck?: boolean;
+		/** Additional raw Codex CLI config overrides. */
+		config?: Record<string, unknown>;
+	};
 }
 
 /**

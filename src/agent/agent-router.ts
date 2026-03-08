@@ -12,6 +12,7 @@ import type { SubagentResult, ToolCall } from '../types/conversation.js';
 import type { ToolDefinition } from '../types/tool.js';
 import type { LLMTransport } from '../types/transport.js';
 import { createAgentContext, resolveInstructions } from './agent-context.js';
+import { runCodexSubagent } from './codex-subagent-runner.js';
 import { runSubagent } from './subagent-runner.js';
 import type { SubagentMessage, SubagentSession } from './subagent-session.js';
 import { SubagentSessionImpl } from './subagent-session.js';
@@ -238,14 +239,23 @@ export class AgentRouter {
 				[],
 			);
 
-			const result = await runSubagent({
-				config: subagentConfig,
-				context,
-				hooks: this.hooks,
-				model: this.model,
-				abortSignal: controller.signal,
-				session,
-			});
+			const result =
+				subagentConfig.provider === 'codex'
+					? await runCodexSubagent({
+							config: subagentConfig,
+							context,
+							hooks: this.hooks,
+							abortSignal: controller.signal,
+							session,
+						})
+					: await runSubagent({
+							config: subagentConfig,
+							context,
+							hooks: this.hooks,
+							model: this.model,
+							abortSignal: controller.signal,
+							session,
+						});
 
 			return result;
 		} finally {

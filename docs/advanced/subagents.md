@@ -224,3 +224,46 @@ hooks: {
   },
 }
 ```
+
+
+## Codex Coding Subagent (Experimental)
+
+You can run a background subagent with Codex by setting `provider: "codex"` in `SubagentConfig`.
+The framework uses `@openai/codex-sdk` to start a Codex thread and stream progress items.
+
+```typescript
+const codingSubagent: SubagentConfig = {
+  name: 'codex_coder',
+  provider: 'codex',
+  instructions: 'You are a careful coding assistant. Make minimal, tested changes.',
+  tools: {}, // unused by Codex provider
+  interactive: true,
+  codex: {
+    model: 'gpt-5-codex',
+    sandboxMode: 'workspace-write',
+    approvalPolicy: 'never',
+    workingDirectory: process.cwd(),
+    networkAccessEnabled: true,
+  },
+};
+```
+
+### What works well
+
+- File editing and patch application in the repository.
+- Shell command execution and progress streaming to the user.
+- Multi-turn coding sessions when `interactive: true` (MainAgent can relay follow-up instructions to the same Codex thread).
+
+### Current limitations
+
+- Codex provider does **not** consume Vercel AI SDK `tools` (`config.tools` is ignored).
+- No native `ask_user` tool inside Codex turns; interaction is orchestrated at turn boundaries by the framework.
+- Token accounting in `onSubagentStep` is currently reported as `0` for Codex events.
+
+### Can it support an email-sending skill?
+
+Yes, but with caveats:
+
+- **Possible now**: configure an MCP server (or CLI/script) that sends email, and let Codex call it during a turn.
+- **Not automatic**: this framework does not inject a first-class `send_email` tool into Codex the way AI SDK tools are injected for `provider: "ai-sdk"`.
+- **Recommended safety**: keep approval policy strict (`on-request`/`untrusted`) for side-effectful tools like sending email.
