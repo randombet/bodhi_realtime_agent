@@ -190,6 +190,16 @@ export class AgentRouter {
 		return this.activeSubagents.get(toolCallId)?.session ?? null;
 	}
 
+	/** Find the SubagentSession that has a pending UI request with the given requestId. */
+	findSessionByRequestId(requestId: string): SubagentSession | null {
+		for (const sub of this.activeSubagents.values()) {
+			if (sub.session?.hasUiRequest(requestId)) {
+				return sub.session;
+			}
+		}
+		return null;
+	}
+
 	/** Spawn a background subagent to handle a tool call asynchronously. */
 	async handoff(toolCall: ToolCall, subagentConfig: SubagentConfig): Promise<SubagentResult> {
 		const controller = new AbortController();
