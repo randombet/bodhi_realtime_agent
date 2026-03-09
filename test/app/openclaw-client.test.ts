@@ -5,7 +5,7 @@ import {
 	type ChatEvent,
 	type GatewayChatEventRaw,
 	normalizeEvent,
-} from '../../app/lib/openclaw-client.js';
+} from '../../examples/openclaw/lib/openclaw-client.js';
 
 describe('normalizeEvent', () => {
 	const baseRaw: GatewayChatEventRaw = {

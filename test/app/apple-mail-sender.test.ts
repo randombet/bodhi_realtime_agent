@@ -5,7 +5,7 @@ import {
 	assertMacOS,
 	buildEmailScript,
 	escapeAppleScript,
-} from '../../app/lib/apple-mail-sender.js';
+} from '../../examples/claude_code/apple-mail-sender.js';
 
 describe('apple-mail-sender', () => {
 	describe('escapeAppleScript', () => {

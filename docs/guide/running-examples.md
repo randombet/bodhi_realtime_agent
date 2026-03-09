@@ -148,7 +148,7 @@ export GEMINI_API_KEY="your-gemini-key"
 export ANTHROPIC_API_KEY="your-anthropic-key"
 export PROJECT_DIR="/path/to/your/project"  # optional, defaults to cwd
 
-pnpm tsx app/claude-demo.ts
+pnpm tsx examples/claude_code/claude-demo.ts
 ```
 
 You should see:
@@ -163,7 +163,7 @@ Bodhi + Claude Code — Voice-Driven Coding Assistant
   Session ID:      session_1234567890
 
 Start the web client in another terminal:
-  pnpm tsx app/web-client.ts
+  pnpm tsx examples/openclaw/web-client.ts
 
 Then open http://localhost:8080 and try saying:
   - 'Fix the bug in auth.py'                 (Claude Code)
@@ -181,7 +181,7 @@ Then open http://localhost:8080 and try saying:
 Same as the Gemini demo — the web client is shared:
 
 ```bash
-pnpm tsx app/web-client.ts
+pnpm tsx examples/openclaw/web-client.ts
 ```
 
 Open [http://localhost:8080](http://localhost:8080) in Chrome and click **Connect**.

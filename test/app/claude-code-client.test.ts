@@ -9,7 +9,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
 }));
 
 // Must import AFTER vi.mock
-const { ClaudeCodeSession } = await import('../../app/lib/claude-code-client.js');
+const { ClaudeCodeSession } = await import('../../examples/claude_code/claude-code-client.js');
 
 // ---------------------------------------------------------------------------
 // Helpers — create mock async generators that simulate SDK behavior
