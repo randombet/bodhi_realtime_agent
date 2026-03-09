@@ -60,68 +60,6 @@ function setupSimpleQuery(messages: unknown[]) {
 	});
 }
 
-/**
- * Setup a blocking query mock for AskUserQuestion interception.
- * The generator blocks at the canUseTool call until externally unblocked.
- */
-function setupBlockingQuery(
-	messagesBeforePause: unknown[],
-	messagesAfterResume: unknown[],
-	questionInput?: Record<string, unknown>,
-) {
-	let canUseToolFn:
-		| ((toolName: string, input: Record<string, unknown>) => Promise<unknown>)
-		| null = null;
-	let resolveBlock: (() => void) | null = null;
-
-	mockQuery.mockImplementation((args: { options?: { canUseTool?: typeof canUseToolFn } }) => {
-		canUseToolFn = args.options?.canUseTool ?? null;
-
-		const gen = {
-			async *[Symbol.asyncIterator]() {
-				for (const msg of messagesBeforePause) {
-					yield msg;
-				}
-
-				if (canUseToolFn) {
-					const askInput = questionInput ?? {
-						questions: [
-							{
-								question: 'Which file to fix?',
-								header: 'File',
-								options: [
-									{ label: 'auth.py', description: 'Auth module' },
-									{ label: 'main.py', description: 'Main module' },
-								],
-								multiSelect: false,
-							},
-						],
-					};
-					const toolPromise = canUseToolFn('AskUserQuestion', askInput);
-
-					await new Promise<void>((resolve) => {
-						resolveBlock = () => resolve();
-					});
-
-					await toolPromise;
-
-					for (const msg of messagesAfterResume) {
-						yield msg;
-					}
-				}
-			},
-			close: vi.fn(),
-			interrupt: vi.fn(),
-		};
-
-		return gen;
-	});
-
-	return {
-		unblock: () => resolveBlock?.(),
-	};
-}
-
 // ---------------------------------------------------------------------------
 // askClaudeTool
 // ---------------------------------------------------------------------------
@@ -204,32 +142,9 @@ describe('createClaudeCodeSubagentConfig', () => {
 			expect(result.text).toBe('Done!');
 		});
 
-		it('returns needs_input with question on AskUserQuestion', async () => {
-			const { unblock } = setupBlockingQuery(
-				[createMockInitMessage(), createMockAssistantMessage('Looking...')],
-				[createMockResultMessage()],
-			);
-
-			const config = createClaudeCodeSubagentConfig({ projectDir: '/test' });
-			const tools = config.tools as Record<
-				string,
-				{ execute: (args: Record<string, unknown>) => Promise<unknown> }
-			>;
-			const result = (await tools.claude_code_start.execute({
-				task: 'Fix the bug',
-			})) as Record<string, unknown>;
-
-			expect(result.status).toBe('needs_input');
-			expect(result.question).toBe('Which file to fix?');
-			expect(result.questionOptions).toEqual([
-				{ label: 'auth.py', description: 'Auth module' },
-				{ label: 'main.py', description: 'Main module' },
-			]);
-
-			// Clean up
-			unblock();
-			await config.dispose?.();
-		});
+		// NOTE: AskUserQuestion interception via canUseTool was removed because
+		// the SDK adds --permission-prompt-tool stdio when canUseTool is present,
+		// which conflicts with single-turn query mode and prevents ALL tool calls.
 
 		it('passes options through to ClaudeCodeSession', async () => {
 			setupSimpleQuery([createMockInitMessage(), createMockResultMessage()]);
@@ -318,83 +233,6 @@ describe('createClaudeCodeSubagentConfig', () => {
 	// -- claude_code_respond -------------------------------------------------
 
 	describe('claude_code_respond', () => {
-		it('sends response and returns completed', async () => {
-			let canUseToolFn:
-				| ((toolName: string, input: Record<string, unknown>) => Promise<unknown>)
-				| null = null;
-			let resolveBlock: (() => void) | null = null;
-
-			mockQuery.mockImplementation(
-				(args: {
-					options?: {
-						canUseTool?: typeof canUseToolFn;
-					};
-				}) => {
-					canUseToolFn = args.options?.canUseTool ?? null;
-					let toolResolved = false;
-
-					return {
-						async *[Symbol.asyncIterator]() {
-							yield createMockInitMessage();
-							yield createMockAssistantMessage('Working...');
-
-							if (canUseToolFn) {
-								const promise = canUseToolFn('AskUserQuestion', {
-									questions: [
-										{
-											question: 'Pick a file',
-											header: 'File',
-											options: [],
-											multiSelect: false,
-										},
-									],
-								});
-
-								await new Promise<void>((resolve) => {
-									resolveBlock = () => {
-										toolResolved = true;
-										resolve();
-									};
-								});
-
-								await promise;
-							}
-
-							if (toolResolved) {
-								yield createMockAssistantMessage(' Fixed!');
-								yield createMockResultMessage({ num_turns: 4 });
-							}
-						},
-						close: vi.fn(),
-					};
-				},
-			);
-
-			const config = createClaudeCodeSubagentConfig({ projectDir: '/test' });
-			const tools = config.tools as Record<
-				string,
-				{ execute: (args: Record<string, unknown>) => Promise<unknown> }
-			>;
-
-			// Start — should pause on question
-			const startResult = (await tools.claude_code_start.execute({
-				task: 'Fix bug',
-			})) as Record<string, unknown>;
-			expect(startResult.status).toBe('needs_input');
-
-			// Unblock the generator, then respond
-			resolveBlock?.();
-
-			const respondResult = (await tools.claude_code_respond.execute({
-				sessionId: startResult.sessionId as string,
-				response: 'auth.py',
-			})) as Record<string, unknown>;
-
-			expect(respondResult.status).toBe('completed');
-			expect(respondResult.text).toBe('Working... Fixed!');
-			expect(respondResult.turns).toBe(4);
-		});
-
 		it('throws for unknown sessionId', async () => {
 			const config = createClaudeCodeSubagentConfig({ projectDir: '/test' });
 			const tools = config.tools as Record<
@@ -414,37 +252,6 @@ describe('createClaudeCodeSubagentConfig', () => {
 	// -- dispose -------------------------------------------------------------
 
 	describe('dispose', () => {
-		it('aborts all active sessions and clears the map', async () => {
-			const { unblock } = setupBlockingQuery(
-				[createMockInitMessage(), createMockAssistantMessage('Working...')],
-				[createMockResultMessage()],
-			);
-
-			const config = createClaudeCodeSubagentConfig({ projectDir: '/test' });
-			const tools = config.tools as Record<
-				string,
-				{ execute: (args: Record<string, unknown>) => Promise<unknown> }
-			>;
-
-			// Start a session that will pause
-			const result = (await tools.claude_code_start.execute({
-				task: 'Task',
-			})) as Record<string, unknown>;
-			expect(result.status).toBe('needs_input');
-
-			// Dispose should abort the session
-			unblock();
-			await config.dispose?.();
-
-			// The session should be gone — respond should throw
-			await expect(
-				tools.claude_code_respond.execute({
-					sessionId: result.sessionId as string,
-					response: 'answer',
-				}),
-			).rejects.toThrow('No active Claude Code session');
-		});
-
 		it('is idempotent', async () => {
 			const config = createClaudeCodeSubagentConfig({ projectDir: '/test' });
 

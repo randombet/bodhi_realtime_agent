@@ -60,68 +60,6 @@ function setupSimpleQuery(messages: unknown[]) {
 	return mockGen;
 }
 
-/**
- * Create a mock query that pauses mid-stream when canUseTool blocks.
- * Yields messages until the pause point, then waits for canUseTool
- * to be resolved before yielding remaining messages.
- */
-function setupBlockingQuery(messagesBeforePause: unknown[], messagesAfterResume: unknown[]) {
-	let canUseToolCallback:
-		| ((toolName: string, input: Record<string, unknown>) => Promise<unknown>)
-		| null = null;
-	let pendingResolve: ((value: unknown) => void) | null = null;
-
-	mockQuery.mockImplementation((args: { options?: { canUseTool?: typeof canUseToolCallback } }) => {
-		canUseToolCallback = args.options?.canUseTool ?? null;
-
-		return {
-			async *[Symbol.asyncIterator]() {
-				for (const msg of messagesBeforePause) {
-					yield msg;
-				}
-
-				// Trigger canUseTool for AskUserQuestion — this will block
-				if (canUseToolCallback) {
-					const askInput = {
-						questions: [
-							{
-								question: 'What color?',
-								header: 'Color',
-								options: [
-									{ label: 'Red', description: 'The color red' },
-									{ label: 'Blue', description: 'The color blue' },
-								],
-								multiSelect: false,
-							},
-						],
-					};
-					// Call canUseTool — the session will block here
-					const toolPromise = canUseToolCallback('AskUserQuestion', askInput);
-
-					// Wait for external resolution
-					await new Promise<void>((resolve) => {
-						pendingResolve = () => resolve();
-					});
-
-					// Wait for the tool promise to resolve (respond() resolves it)
-					await toolPromise;
-
-					// Continue yielding remaining messages
-					for (const msg of messagesAfterResume) {
-						yield msg;
-					}
-				}
-			},
-			close: vi.fn(),
-			interrupt: vi.fn(),
-		};
-	});
-
-	return {
-		resolveBlock: () => pendingResolve?.(),
-	};
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -150,30 +88,10 @@ describe('ClaudeCodeSession', () => {
 		expect(result.turns).toBe(1);
 	});
 
-	it('start() returns needs_input when AskUserQuestion intercepted', async () => {
-		const { resolveBlock } = setupBlockingQuery(
-			[createMockInitMessage(), createMockAssistantMessage('Working...')],
-			[createMockResultMessage()],
-		);
-
-		const session = new ClaudeCodeSession({ cwd: '/test' });
-		const resultPromise = session.start('Fix the bug');
-
-		// The start() should resolve once canUseTool blocks
-		const result = await resultPromise;
-
-		expect(result.status).toBe('needs_input');
-		expect(result.question).toBe('What color?');
-		expect(result.questionOptions).toEqual([
-			{ label: 'Red', description: 'The color red' },
-			{ label: 'Blue', description: 'The color blue' },
-		]);
-		expect(result.sdkSessionId).toBe('test-session-123');
-		expect(result.text).toBe('Working...');
-
-		// Clean up
-		resolveBlock();
-	});
+	// NOTE: AskUserQuestion interception via canUseTool was removed because
+	// the SDK adds --permission-prompt-tool stdio when canUseTool is present,
+	// which conflicts with single-turn query mode and prevents ALL tool calls.
+	// Tests for needs_input / respond() / auto-approve were removed.
 
 	it('start() accumulates text from multiple assistant messages', async () => {
 		setupSimpleQuery([
@@ -213,76 +131,6 @@ describe('ClaudeCodeSession', () => {
 
 		expect(result.status).toBe('error');
 		expect(result.error).toBe('Exceeded max turns');
-	});
-
-	// -- respond() --------------------------------------------------------------
-
-	it('respond() sends answer and returns completed', async () => {
-		let canUseToolFn:
-			| ((toolName: string, input: Record<string, unknown>) => Promise<unknown>)
-			| null = null;
-		let canUseToolResolve: ((value: unknown) => void) | null = null;
-
-		mockQuery.mockImplementation((args: { options?: { canUseTool?: typeof canUseToolFn } }) => {
-			canUseToolFn = args.options?.canUseTool ?? null;
-			let toolResolved = false;
-
-			return {
-				async *[Symbol.asyncIterator]() {
-					yield createMockInitMessage();
-					yield createMockAssistantMessage('Analyzing...');
-
-					// Trigger AskUserQuestion
-					if (canUseToolFn) {
-						const promise = canUseToolFn('AskUserQuestion', {
-							questions: [
-								{
-									question: 'Which file?',
-									header: 'File',
-									options: [
-										{ label: 'auth.py', description: 'Auth module' },
-										{ label: 'main.py', description: 'Main module' },
-									],
-									multiSelect: false,
-								},
-							],
-						});
-
-						// Signal that we're blocked
-						await new Promise<void>((resolve) => {
-							canUseToolResolve = () => {
-								toolResolved = true;
-								resolve();
-							};
-						});
-
-						await promise;
-					}
-
-					if (toolResolved) {
-						yield createMockAssistantMessage(' Fixed auth.py.');
-						yield createMockResultMessage({ num_turns: 3 });
-					}
-				},
-				close: vi.fn(),
-			};
-		});
-
-		const session = new ClaudeCodeSession({ cwd: '/test' });
-
-		// start() should return needs_input
-		const r1 = await session.start('Fix bug');
-		expect(r1.status).toBe('needs_input');
-		expect(r1.question).toBe('Which file?');
-
-		// respond() should send answer and complete
-		// First unblock the generator
-		canUseToolResolve?.();
-
-		const r2 = await session.respond('auth.py');
-		expect(r2.status).toBe('completed');
-		expect(r2.text).toBe('Analyzing... Fixed auth.py.');
-		expect(r2.turns).toBe(3);
 	});
 
 	it('respond() throws when no pending question', async () => {
@@ -432,44 +280,5 @@ describe('ClaudeCodeSession', () => {
 
 		expect(result.status).toBe('error');
 		expect(result.error).toBe('API rate limited');
-	});
-
-	// -- canUseTool auto-approve ------------------------------------------------
-
-	it('auto-approves non-AskUserQuestion tools', async () => {
-		let bashApproved = false;
-
-		mockQuery.mockImplementation(
-			(args: {
-				options?: {
-					canUseTool?: (toolName: string, input: Record<string, unknown>) => Promise<unknown>;
-				};
-			}) => {
-				const canUseTool = args.options?.canUseTool;
-				return {
-					async *[Symbol.asyncIterator]() {
-						yield createMockInitMessage();
-
-						// Simulate the SDK calling canUseTool for Bash
-						if (canUseTool) {
-							const result = (await canUseTool('Bash', { command: 'echo test' })) as {
-								behavior: string;
-							};
-							if (result.behavior === 'allow') {
-								bashApproved = true;
-							}
-						}
-
-						yield createMockResultMessage();
-					},
-					close: vi.fn(),
-				};
-			},
-		);
-
-		const session = new ClaudeCodeSession({ cwd: '/test' });
-		await session.start('Task');
-
-		expect(bashApproved).toBe(true);
 	});
 });

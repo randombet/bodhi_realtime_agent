@@ -166,9 +166,13 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 	let stepCount = 0;
 
 	try {
+		const systemPrompt = buildSystemPrompt(context);
+		console.log(`[Subagent:${config.name}] system prompt:\n${systemPrompt}`);
+		console.log(`[Subagent:${config.name}] available tools: [${Object.keys(tools).join(', ')}]`);
+
 		const result = await generateText({
 			model,
-			system: buildSystemPrompt(context),
+			system: systemPrompt,
 			prompt:
 				Object.keys(context.task.args).length > 0
 					? `Execute the task: ${context.task.description}\nArguments: ${JSON.stringify(context.task.args)}`
@@ -178,6 +182,27 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 			abortSignal: controller.signal,
 			onStepFinish: (step) => {
 				stepCount++;
+				// Debug logging: tool calls with args and results
+				if (step.toolCalls?.length) {
+					for (const tc of step.toolCalls) {
+						console.log(
+							`[Subagent:${config.name}] step#${stepCount} tool=${tc.toolName} args=${JSON.stringify(tc.args)}`,
+						);
+					}
+				}
+				if (step.toolResults?.length) {
+					for (const tr of step.toolResults as Array<{ toolName: string; result: unknown }>) {
+						const resultStr = JSON.stringify(tr.result);
+						const truncated = resultStr.length > 500 ? `${resultStr.slice(0, 500)}...` : resultStr;
+						console.log(
+							`[Subagent:${config.name}] step#${stepCount} result(${tr.toolName})=${truncated}`,
+						);
+					}
+				}
+				if (step.text) {
+					const truncated = step.text.length > 300 ? `${step.text.slice(0, 300)}...` : step.text;
+					console.log(`[Subagent:${config.name}] step#${stepCount} text=${truncated}`);
+				}
 				if (hooks.onSubagentStep) {
 					hooks.onSubagentStep({
 						subagentName: config.name,
