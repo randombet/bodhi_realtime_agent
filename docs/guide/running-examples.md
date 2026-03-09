@@ -61,7 +61,7 @@ The OpenAI example has the same tools (calculator, current time, image generatio
 In a second terminal:
 
 ```bash
-pnpm tsx examples/openclaw/web-client.ts
+pnpm tsx app/web-client.ts
 ```
 
 Open [http://localhost:8080](http://localhost:8080) in Chrome and click **Connect**.
@@ -130,3 +130,84 @@ The model must invoke the `transfer_to_agent` function call, not just say it ver
 ### Image generation fails
 
 Image generation uses the Imagen API (`imagen-3.0-generate-002`). Some API keys may not have access. Check the server logs for `[Tool] Imagen failed` messages.
+
+## Claude Code Demo — Voice-Driven Coding
+
+A voice assistant backed by Claude Code (Anthropic's AI coding agent). This demo uses the [relay subagent pattern](/advanced/subagents#pattern-3-relay-subagent) — an interactive subagent bridges the voice model to Claude Code's stateful SDK, managing session lifecycles and question relay.
+
+### Prerequisites
+
+- A Google API key (Gemini Live API)
+- An Anthropic API key (Claude Agent SDK)
+- macOS (for Apple Mail email integration)
+
+### Start the Agent Server
+
+```bash
+export GEMINI_API_KEY="your-gemini-key"
+export ANTHROPIC_API_KEY="your-anthropic-key"
+export PROJECT_DIR="/path/to/your/project"  # optional, defaults to cwd
+
+pnpm tsx examples/claude_code/claude-demo.ts
+```
+
+You should see:
+
+```
+============================================================
+Bodhi + Claude Code — Voice-Driven Coding Assistant
+============================================================
+
+  Voice agent:     ws://localhost:9900
+  Project dir:     /path/to/your/project
+  Session ID:      session_1234567890
+
+Start the web client in another terminal:
+  pnpm tsx examples/openclaw/web-client.ts
+
+Then open http://localhost:8080 and try saying:
+  - 'Fix the bug in auth.py'                 (Claude Code)
+  - 'Add input validation to the login form' (Claude Code)
+  - 'Run the tests and fix any failures'     (Claude Code)
+  - 'Email me a summary of the README'       (Email via Mail.app)
+  - 'What is the weather in San Francisco?'  (Google Search)
+  - 'Draw me a picture of a sunset'          (Image generation)
+  - 'Goodbye'
+============================================================
+```
+
+### Start the Web Client
+
+Same as the Gemini demo — the web client is shared:
+
+```bash
+pnpm tsx examples/openclaw/web-client.ts
+```
+
+Open [http://localhost:8080](http://localhost:8080) in Chrome and click **Connect**.
+
+### Things to Try
+
+| Say this | What happens |
+|----------|-------------|
+| "Fix the bug in auth.py" | Claude reads files, edits code, runs tests |
+| "Add input validation to the login form" | Claude creates or modifies files |
+| "Run the tests and fix any failures" | Claude runs bash commands and iterates |
+| "Summarize the README and email it to user@example.com" | Claude reads files and sends via Apple Mail |
+| "What's the weather in San Francisco?" | Google Search (Gemini native) |
+| "Draw me a picture of a sunset" | Image generation subagent |
+| "Goodbye" | Graceful session end |
+
+### How It Works
+
+1. You speak a coding request → Gemini calls the `ask_claude` background tool
+2. The relay subagent receives the task and calls `claude_code_start`
+3. Claude Code runs autonomously: reads files, edits code, runs commands
+4. If Claude asks a follow-up question, the relay calls `ask_user` → you hear the question and answer by voice
+5. When Claude finishes, the relay summarizes the result → Gemini speaks it to you
+
+### Troubleshooting
+
+**Claude makes zero tool calls:** Verify `ANTHROPIC_API_KEY` is set. Check server logs for `[ClaudeCode] SDK init message:` to confirm the SDK initialized correctly.
+
+**Email not sending:** Requires macOS with Mail.app configured. First use triggers a system permission dialog. Check for `[MCP:send_email] Tool invoked!` in logs.

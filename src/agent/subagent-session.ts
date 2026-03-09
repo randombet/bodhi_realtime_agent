@@ -71,6 +71,13 @@ type StateChangeHandler = (newState: SubagentSessionState, oldState: SubagentSes
 // SubagentSession interface
 // ---------------------------------------------------------------------------
 
+/** Structured option for UI button choices. */
+export interface SubagentOption {
+	id: string;
+	label: string;
+	description: string;
+}
+
 /** Public interface for interacting with an interactive subagent session. */
 export interface SubagentSession {
 	readonly toolCallId: string;
@@ -78,6 +85,8 @@ export interface SubagentSession {
 
 	sendToUser(msg: SubagentMessage): void;
 	sendToSubagent(input: string): void;
+	/** Non-throwing variant: returns false if state is not 'waiting_for_input'. */
+	trySendToSubagent(input: string): boolean;
 
 	waitForInput(timeoutMs?: number): Promise<string>;
 	nextUserInput(): Promise<string>;
@@ -85,6 +94,13 @@ export interface SubagentSession {
 
 	onMessage(handler: MessageHandler): void;
 	onStateChange(handler: StateChangeHandler): void;
+
+	/** Register a UI request for option-based responses (requestId → options mapping). */
+	registerUiRequest(requestId: string, options: SubagentOption[]): void;
+	/** Look up an option by requestId and selectedOptionId. */
+	resolveOption(requestId: string, selectedOptionId: string): SubagentOption | undefined;
+	/** Check if this session has a pending UI request with the given requestId. */
+	hasUiRequest(requestId: string): boolean;
 
 	cancel(): void;
 	complete(result: unknown): void;
@@ -112,6 +128,9 @@ export class SubagentSessionImpl implements SubagentSession {
 
 	/** Pending cancellation() Promise — rejects on cancel(). */
 	private pendingCancellation: PendingInput | null = null;
+
+	/** UI request registry: requestId → options for mapping button clicks back to labels. */
+	private readonly uiRequests = new Map<string, SubagentOption[]>();
 
 	constructor(toolCallId: string, config?: InteractiveSubagentConfig) {
 		this.toolCallId = toolCallId;
@@ -156,6 +175,28 @@ export class SubagentSessionImpl implements SubagentSession {
 			this.pendingInput = null;
 			resolve(input);
 		}
+	}
+
+	trySendToSubagent(input: string): boolean {
+		if (this._state !== 'waiting_for_input') return false;
+		this.sendToSubagent(input);
+		return true;
+	}
+
+	// -- UI request registry ------------------------------------------------
+
+	registerUiRequest(requestId: string, options: SubagentOption[]): void {
+		this.uiRequests.set(requestId, options);
+	}
+
+	resolveOption(requestId: string, selectedOptionId: string): SubagentOption | undefined {
+		const options = this.uiRequests.get(requestId);
+		if (!options) return undefined;
+		return options.find((opt) => opt.id === selectedOptionId);
+	}
+
+	hasUiRequest(requestId: string): boolean {
+		return this.uiRequests.has(requestId);
 	}
 
 	// -- Async input waiting ------------------------------------------------

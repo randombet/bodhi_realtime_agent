@@ -96,6 +96,7 @@ export class ToolCallRouter {
 
 	/** Abort one or more pending tool executions and subagents. */
 	handleToolCallCancellation(ids: string[]): void {
+		this.deps.log(`Tool call cancellations from LLM: [${ids.join(', ')}]`);
 		this.deps.toolExecutor.cancel(ids);
 		for (const id of ids) {
 			this.deps.agentRouter.cancelSubagent(id);
@@ -155,18 +156,26 @@ export class ToolCallRouter {
 		}
 
 		// Find subagent config
-		const subagentConfig = this.deps.subagentConfigs[call.toolName];
-		if (!subagentConfig) {
+		const registeredConfig = this.deps.subagentConfigs[call.toolName];
+		if (!registeredConfig) {
 			// Fallback: run as inline tool
 			this.handleInlineToolCall(call);
 			return;
 		}
 
+		// Build an isolated config instance per handoff when requested.
+		const subagentConfig = registeredConfig.createInstance
+			? registeredConfig.createInstance()
+			: registeredConfig;
+
+		// Record tool call before handoff starts so reconnect replay includes
+		// in-flight background tasks and avoids duplicate re-execution.
+		this.deps.conversationContext.addToolCall(call);
+
 		// Handoff to subagent
 		this.deps.agentRouter
 			.handoff(call, subagentConfig)
 			.then((result) => {
-				this.deps.conversationContext.addToolCall(call);
 				this.deps.conversationContext.addToolResult({
 					toolCallId: call.toolCallId,
 					toolName: call.toolName,
@@ -201,6 +210,12 @@ export class ToolCallRouter {
 			})
 			.catch((err) => {
 				this.deps.reportError('subagent-runner', err);
+				this.deps.conversationContext.addToolResult({
+					toolCallId: call.toolCallId,
+					toolName: call.toolName,
+					result: null,
+					error: err instanceof Error ? err.message : String(err),
+				});
 				if (hasPendingMessage) {
 					this.deps.notificationQueue.sendOrQueue(
 						[

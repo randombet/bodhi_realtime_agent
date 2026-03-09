@@ -345,6 +345,25 @@ export class VoiceSession {
 			this.clientTransport.sendJsonToClient({ type: 'ui.payload', payload: payload.payload });
 		});
 
+		// Route UI button responses back to the waiting SubagentSession
+		this.eventBus.subscribe(
+			'subagent.ui.response',
+			(payload: {
+				sessionId: string;
+				response: { requestId: string; selectedOptionId?: string };
+			}) => {
+				const { requestId, selectedOptionId } = payload.response;
+				if (!requestId || !selectedOptionId) return;
+
+				const session = this.agentRouter.findSessionByRequestId(requestId);
+				if (!session) return;
+
+				const option = session.resolveOption(requestId, selectedOptionId);
+				const answerText = option?.label ?? selectedOptionId;
+				session.trySendToSubagent(answerText);
+			},
+		);
+
 		// Set up tool executor
 		this.toolExecutor = this.createToolExecutor(config.initialAgent);
 
@@ -731,12 +750,13 @@ export class VoiceSession {
 
 		const trimmed = text.trim();
 
-		// Relay to interactive subagent if one is waiting for input
+		// Relay to interactive subagent if one is waiting for input.
+		// Use trySendToSubagent for race safety — a UI button response may
+		// have already resolved the waiting ask_user.
 		const activeId = this.interactionMode.getActiveToolCallId();
 		if (activeId) {
 			const session = this.agentRouter.getSubagentSession(activeId);
-			if (session && session.state === 'waiting_for_input') {
-				session.sendToSubagent(trimmed);
+			if (session?.trySendToSubagent(trimmed)) {
 				this.interactionMode.deactivate(activeId);
 			}
 		}
