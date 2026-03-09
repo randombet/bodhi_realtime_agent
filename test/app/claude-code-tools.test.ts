@@ -116,6 +116,19 @@ describe('createClaudeCodeSubagentConfig', () => {
 		expect(tools.claude_code_respond).toBeDefined();
 	});
 
+	it('createInstance returns isolated config objects', () => {
+		const config = createClaudeCodeSubagentConfig({ projectDir: '/test' });
+		expect(typeof config.createInstance).toBe('function');
+
+		const a = config.createInstance?.();
+		const b = config.createInstance?.();
+
+		expect(a).toBeDefined();
+		expect(b).toBeDefined();
+		expect(a).not.toBe(b);
+		expect(a?.tools).not.toBe(b?.tools);
+	});
+
 	// -- claude_code_start ---------------------------------------------------
 
 	describe('claude_code_start', () => {

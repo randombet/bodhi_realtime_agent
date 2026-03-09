@@ -133,6 +133,17 @@ describe('ClaudeCodeSession', () => {
 		expect(result.error).toBe('Exceeded max turns');
 	});
 
+	it('start() returns error when stream ends without terminal result', async () => {
+		setupSimpleQuery([createMockInitMessage(), createMockAssistantMessage('Working...')]);
+
+		const session = new ClaudeCodeSession({ cwd: '/test' });
+		const result = await session.start('Task');
+
+		expect(result.status).toBe('error');
+		expect(result.text).toBe('Working...');
+		expect(result.error).toContain('terminal result message');
+	});
+
 	it('respond() throws when no pending question', async () => {
 		setupSimpleQuery([createMockInitMessage(), createMockResultMessage()]);
 
