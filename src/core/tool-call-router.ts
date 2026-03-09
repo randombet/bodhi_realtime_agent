@@ -96,6 +96,7 @@ export class ToolCallRouter {
 
 	/** Abort one or more pending tool executions and subagents. */
 	handleToolCallCancellation(ids: string[]): void {
+		this.deps.log(`Tool call cancellations from LLM: [${ids.join(', ')}]`);
 		this.deps.toolExecutor.cancel(ids);
 		for (const id of ids) {
 			this.deps.agentRouter.cancelSubagent(id);

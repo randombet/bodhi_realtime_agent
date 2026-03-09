@@ -59,15 +59,19 @@ export const askClaudeTool: ToolDefinition = {
 const RELAY_INSTRUCTIONS = `You are a relay agent that bridges between a voice assistant and Claude Code (an AI coding agent).
 
 Your workflow:
-1. Call claude_code_start with the user's coding task.
-2. Examine the result:
+1. If the task is ONLY a status/progress check for a previously started Claude task
+   (for example "check progress", "how's it going"), do NOT call claude_code_start.
+   Explain briefly that this relay cannot inspect other running Claude sessions and
+   that the main assistant should wait for the background completion notification.
+2. Otherwise, call claude_code_start with the user's coding task.
+3. Examine the result:
    - If status is "completed": summarize the result for the user. Include the sdkSessionId in your final answer so the system can resume later.
    - If status is "error": report the error briefly to the user.
    - If status is "needs_input":
      a. If questionOptions are present: call ask_user with the question text and pass questionOptions as options (add stable id fields: "opt_0", "opt_1", etc.).
      b. If no questionOptions: call ask_user with just the question text.
-3. After the user answers, call claude_code_respond with the sessionId and the user's response.
-4. Repeat from step 2 until the task completes or errors.
+4. After the user answers, call claude_code_respond with the sessionId and the user's response.
+5. Repeat from step 3 until the task completes or errors.
 
 Important rules:
 - Always pass the exact sessionId from claude_code_start to claude_code_respond.

@@ -2,8 +2,8 @@
  * Web Audio Client for Bodhi Voice Agent
  *
  * Usage:
- *   1. Start the voice agent:  pnpm tsx examples/openclaw/openclaw-demo.ts
- *   2. Start this client:      pnpm tsx examples/openclaw/web-client.ts
+ *   1. Start the voice agent:  pnpm tsx app/gemini-realtime-tools.ts
+ *   2. Start this client:      pnpm tsx app/web-client.ts
  *   3. Open http://localhost:8080 in your browser
  *   4. Click "Connect" and allow microphone access
  */

@@ -48,6 +48,61 @@ function ts(): string {
 	return new Date().toISOString().slice(11, 23);
 }
 
+interface PendingToolCall {
+	toolCallId: string;
+	toolName: string;
+	startedAt: number;
+	args: Record<string, unknown>;
+}
+
+/**
+ * Derive pending tool calls from ConversationContext.
+ *
+ * A call is considered pending if a `tool_call` exists without a matching
+ * `tool_result` for the same toolCallId.
+ */
+function getPendingToolCalls(toolName?: string): PendingToolCall[] {
+	const items = sessionRef?.conversationContext.items ?? [];
+	const calls = new Map<string, PendingToolCall>();
+	const completed = new Set<string>();
+
+	for (const item of items) {
+		if (item.role === 'tool_call') {
+			try {
+				const parsed = JSON.parse(item.content) as Partial<{
+					toolCallId: string;
+					toolName: string;
+					args: Record<string, unknown>;
+				}>;
+				if (typeof parsed.toolCallId === 'string' && typeof parsed.toolName === 'string') {
+					calls.set(parsed.toolCallId, {
+						toolCallId: parsed.toolCallId,
+						toolName: parsed.toolName,
+						startedAt: item.timestamp,
+						args: parsed.args ?? {},
+					});
+				}
+			} catch {
+				// Ignore malformed historical entries.
+			}
+		}
+
+		if (item.role === 'tool_result') {
+			try {
+				const parsed = JSON.parse(item.content) as Partial<{ toolCallId: string }>;
+				if (typeof parsed.toolCallId === 'string') {
+					completed.add(parsed.toolCallId);
+				}
+			} catch {
+				// Ignore malformed historical entries.
+			}
+		}
+	}
+
+	const pending = [...calls.values()].filter((call) => !completed.has(call.toolCallId));
+	return toolName ? pending.filter((call) => call.toolName === toolName) : pending;
+}
+
 // =============================================================================
 // Configuration
 // =============================================================================
@@ -86,6 +141,33 @@ const getCurrentTime: ToolDefinition = {
 	execute: async () => {
 		return {
 			time: new Date().toLocaleString('en-US', { dateStyle: 'full', timeStyle: 'long' }),
+		};
+	},
+};
+
+const getClaudeTaskStatus: ToolDefinition = {
+	name: 'get_claude_task_status',
+	description:
+		'Check whether Claude currently has an in-progress ask_claude task. ' +
+		'Use this for status/progress questions. Do NOT call ask_claude only to check progress.',
+	parameters: z.object({}),
+	execution: 'inline',
+	execute: async () => {
+		const pendingClaudeCalls = getPendingToolCalls('ask_claude');
+		const oldestStartedAt =
+			pendingClaudeCalls.length > 0
+				? Math.min(...pendingClaudeCalls.map((call) => call.startedAt))
+				: null;
+		const elapsedSeconds = oldestStartedAt ? Math.floor((Date.now() - oldestStartedAt) / 1000) : 0;
+
+		return {
+			inProgress: pendingClaudeCalls.length > 0,
+			pendingCount: pendingClaudeCalls.length,
+			elapsedSeconds,
+			pendingTasks: pendingClaudeCalls
+				.map((call) => (typeof call.args.task === 'string' ? call.args.task : ''))
+				.filter((text) => text.length > 0)
+				.slice(0, 3),
 		};
 	},
 };
@@ -179,35 +261,38 @@ const mainAgent: MainAgent = {
 		'run commands, and search code. Mention you can also look things up on the web',
 		'and generate images. Keep the greeting brief — 2-3 sentences max.]',
 	].join(' '),
-	instructions: [
-		'You are Bodhi, a voice-powered coding assistant backed by Claude Code.',
-		'Claude has full access to the local project codebase. It can read, edit, create,',
-		'and delete files, run shell commands, search code, and send emails via Apple Mail.',
-		'',
-		'TOOL ROUTING:',
-		'- Google Search: Use for quick factual lookups — weather, news, documentation,',
-		'  "who is X", "what is Y". Gemini handles this natively (no tool call needed).',
-		'- generate_image: When the user asks for any picture, image, card, or illustration.',
-		'- get_current_time: For the current date/time.',
-		'- ask_claude: For ALL coding tasks — editing files, fixing bugs, refactoring,',
-		'  debugging, code review, adding features, running tests, reading code,',
-		'  explaining code, creating new files, searching the codebase.',
-		'  Also for sending emails — Claude can send email via Apple Mail.',
-		'  When in doubt about whether something is a coding task, route to Claude.',
-		'- end_session: When the user says goodbye.',
-		'',
-		'VOICE RULES:',
+		instructions: [
+			'You are Bodhi, a voice-powered coding assistant backed by Claude Code.',
+			'Claude has full access to the local project codebase. It can read, edit, create,',
+			'and delete files, run shell commands, search code, and send emails via Apple Mail.',
+			'',
+			'TOOL ROUTING:',
+			'- Google Search: Use for quick factual lookups — weather, news, documentation,',
+			'  "who is X", "what is Y". Gemini handles this natively (no tool call needed).',
+			'- generate_image: When the user asks for any picture, image, card, or illustration.',
+			'- get_current_time: For the current date/time.',
+			'- get_claude_task_status: For progress/status questions about an ongoing Claude task.',
+			'  If it reports inProgress=true, tell the user Claude is still working and',
+			'  do NOT start a new ask_claude task just to check progress.',
+			'- ask_claude: For ALL coding tasks — editing files, fixing bugs, refactoring,',
+			'  debugging, code review, adding features, running tests, reading code,',
+			'  explaining code, creating new files, searching the codebase.',
+			'  Also for sending emails — Claude can send email via Apple Mail.',
+			'  When in doubt about whether something is a coding task, route to Claude.',
+			'- end_session: When the user says goodbye.',
+			'',
+			'VOICE RULES:',
 		'- Keep responses short and clear (2-3 sentences).',
 		'- Do NOT read code aloud — summarize what was done.',
 		'- When relaying results from Claude, focus on the outcome: "Claude fixed the bug',
 		'  in auth.py by adding null checking" — not the raw diff.',
 		'- If Claude asks a follow-up question, relay it naturally to the user.',
-		'',
-		'IMPORTANT:',
-		'- Claude may ask follow-up questions — these will be relayed to the user via voice.',
-		'- For image generation, warn the user it may take a moment.',
-	].join('\n'),
-	tools: [askClaudeTool, getCurrentTime, generateImage, endSession],
+			'',
+			'IMPORTANT:',
+			'- Claude may ask follow-up questions — these will be relayed to the user via voice.',
+			'- For image generation, warn the user it may take a moment.',
+		].join('\n'),
+	tools: [askClaudeTool, getClaudeTaskStatus, getCurrentTime, generateImage, endSession],
 	googleSearch: true,
 	onEnter: async () => {
 		console.log(`${ts()} [Agent] Main agent entered`);
