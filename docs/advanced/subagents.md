@@ -457,7 +457,7 @@ hooks: {
 
 ## Claude Code Demo
 
-The `app/claude-demo.ts` example implements a complete relay subagent that delegates coding tasks to Claude Code (Anthropic's AI coding agent). Claude has full codebase access — read, edit, create files, run commands, search code, and send emails via Apple Mail.
+The `examples/claude_code/claude-demo.ts` example implements a complete relay subagent that delegates coding tasks to Claude Code (Anthropic's AI coding agent). Claude has full codebase access — read, edit, create files, run commands, search code, and send emails via Apple Mail.
 
 ### Architecture
 
@@ -484,9 +484,9 @@ User speaks ──► Gemini Live (main LLM)
 
 ### Key Components
 
-**`ClaudeCodeSession`** (`app/lib/claude-code-client.ts`) — Stateful wrapper around the Claude Agent SDK's `query()` function. Manages the async generator lifecycle and translates SDK messages into simple `{ status, text, question }` results.
+**`ClaudeCodeSession`** (`examples/claude_code/claude-code-client.ts`) — Stateful wrapper around the Claude Agent SDK's `query()` function. Manages the async generator lifecycle and translates SDK messages into simple `{ status, text, question }` results.
 
-**`createClaudeCodeSubagentConfig()`** (`app/lib/claude-code-tools.ts`) — Factory that creates the relay `SubagentConfig` with `claude_code_start` and `claude_code_respond` tools, plus `createInstance()` for concurrent isolation.
+**`createClaudeCodeSubagentConfig()`** (`examples/claude_code/claude-code-tools.ts`) — Factory that creates the relay `SubagentConfig` with `claude_code_start` and `claude_code_respond` tools, plus `createInstance()` for concurrent isolation.
 
 **MCP integration** — Claude Code can use MCP (Model Context Protocol) servers for additional capabilities. The demo includes an email MCP server that sends email via Apple Mail.app:
 
@@ -516,10 +516,10 @@ export ANTHROPIC_API_KEY="your-anthropic-key"
 export PROJECT_DIR="/path/to/your/project"
 
 # Start the voice agent
-pnpm tsx app/claude-demo.ts
+pnpm tsx examples/claude_code/claude-demo.ts
 
 # In another terminal, start the web client
-pnpm tsx app/web-client.ts
+pnpm tsx examples/web-client.ts
 
 # Open http://localhost:8080 in Chrome
 ```
