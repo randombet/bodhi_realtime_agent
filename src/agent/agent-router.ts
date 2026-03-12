@@ -88,6 +88,9 @@ export class AgentRouter {
 	 * Transfer the active LLM session to a different agent.
 	 * Uses transport.transferSession() — the transport decides whether to
 	 * apply in-place (OpenAI session.update) or reconnect-based (Gemini).
+	 *
+	 * @deprecated Use `MainAgentActor` via `RuntimeOrchestrator` instead.
+	 * Retained for backward compatibility during the actor runtime transition.
 	 */
 	async transfer(toAgentName: string): Promise<void> {
 		const toAgent = this.agents.get(toAgentName);
@@ -200,7 +203,12 @@ export class AgentRouter {
 		return null;
 	}
 
-	/** Spawn a background subagent to handle a tool call asynchronously. */
+	/**
+	 * Spawn a background subagent to handle a tool call asynchronously.
+	 *
+	 * @deprecated Use `SubagentSupervisorActor` via `RuntimeOrchestrator` instead.
+	 * Retained for backward compatibility during the actor runtime transition.
+	 */
 	async handoff(toolCall: ToolCall, subagentConfig: SubagentConfig): Promise<SubagentResult> {
 		const controller = new AbortController();
 		const session = subagentConfig.interactive

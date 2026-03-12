@@ -33,6 +33,10 @@ export interface ToolCallRouterDeps {
  *
  * Extracted from VoiceSession to reduce its line count and isolate
  * tool call routing as a self-contained concern.
+ *
+ * @deprecated Use `ToolRouterActor` from `src/runtime/` instead.
+ * This class is retained for backward compatibility during the transition
+ * to the actor-based orchestration layer (`RuntimeOrchestrator`).
  */
 export class ToolCallRouter {
 	private deps: ToolCallRouterDeps;
