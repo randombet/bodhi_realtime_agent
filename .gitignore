@@ -12,4 +12,5 @@ docs/.vitepress/dist/
 docs/api/
 /memory/
 /history/
+/workspaces/
 /scripts/
