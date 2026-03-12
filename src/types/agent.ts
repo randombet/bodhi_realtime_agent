@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 
+import type { SubagentLifetimeMode } from '../agent/persistent-subagent-types.js';
 import type { ConversationItem } from './conversation.js';
 import type { MemoryFact } from './memory.js';
 import type { ToolDefinition } from './tool.js';
@@ -77,6 +78,12 @@ export interface SubagentConfig {
 	createInstance?: () => SubagentConfig;
 	/** Optional cleanup function called when the subagent run ends (success, error, or abort). */
 	dispose?: () => Promise<void> | void;
+	/**
+	 * Subagent lifetime mode.
+	 * - `'ephemeral'` (default): one instance per tool call, disposed after completion.
+	 * - `'persistent_session'`: instance persists across multiple tool calls within the same VoiceSession.
+	 */
+	lifetime?: SubagentLifetimeMode;
 }
 
 /**
