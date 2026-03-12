@@ -44,6 +44,7 @@
   "license": "UNLICENSED",
   "dependencies": {
     "@ai-sdk/google": "^1.2.0",
+    "@anthropic-ai/claude-agent-sdk": "^0.2.71",
     "@google/genai": "^1.41.0",
     "ai": "^4.3.0",
     "dotenv": "^16.4.5",

@@ -68,6 +68,15 @@ export interface SubagentConfig {
 	timeout?: number;
 	/** Override the model used for this subagent (defaults to session model). */
 	model?: string;
+	/** When true, a SubagentSession with user interaction capabilities is created. */
+	interactive?: boolean;
+	/**
+	 * Optional factory that returns an isolated subagent config instance per handoff.
+	 * Use this when tool state must not be shared across concurrent background runs.
+	 */
+	createInstance?: () => SubagentConfig;
+	/** Optional cleanup function called when the subagent run ends (success, error, or abort). */
+	dispose?: () => Promise<void> | void;
 }
 
 /**
