@@ -138,6 +138,31 @@ describe('VoiceSession', () => {
 		expect(session.conversationContext).toBeDefined();
 	});
 
+	it('notifyBackground forwards to notification queue with default label/priority', () => {
+		session = new VoiceSession({
+			sessionId: 'sess_1',
+			userId: 'user_1',
+			apiKey: 'test-key',
+			agents: [createEchoAgent()],
+			initialAgent: 'echo',
+			port: 9876,
+			model: mockModel,
+		});
+
+		const notificationQueue = (
+			session as unknown as { notificationQueue: { sendOrQueue: (...args: unknown[]) => void } }
+		).notificationQueue;
+		const sendOrQueueSpy = vi.spyOn(notificationQueue, 'sendOrQueue');
+
+		session.notifyBackground('Task queued');
+
+		expect(sendOrQueueSpy).toHaveBeenCalledWith(
+			[{ role: 'user', parts: [{ text: '[SUBAGENT UPDATE]: Task queued' }] }],
+			true,
+			{ priority: 'normal' },
+		);
+	});
+
 	it('starts and transitions to ACTIVE', async () => {
 		session = new VoiceSession({
 			sessionId: 'sess_1',

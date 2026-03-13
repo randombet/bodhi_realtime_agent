@@ -145,6 +145,29 @@ console.log(session.sessionManager.state); // 'ACTIVE'
 const items = session.conversationContext.items;
 ```
 
+## Background Notifications
+
+Use `notifyBackground()` to deliver a spoken message to the user from outside the normal tool flow — for example, when a queued task starts or an external event fires:
+
+```typescript
+// Queue a voice notification — delivered immediately if the model is idle,
+// otherwise after the current turn finishes.
+session.notifyBackground('Your task is queued and will start shortly.');
+
+// High-priority notification (on OpenAI, interrupts the current response):
+session.notifyBackground('Urgent: your meeting starts in 5 minutes.', {
+  priority: 'high',
+  label: 'SUBAGENT UPDATE',
+});
+```
+
+| Option | Values | Default | Description |
+|--------|--------|---------|-------------|
+| `priority` | `'normal'` \| `'high'` | `'normal'` | High-priority attempts immediate delivery on OpenAI; queued at front on Gemini |
+| `label` | `'SUBAGENT UPDATE'` \| `'SUBAGENT QUESTION'` | `'SUBAGENT UPDATE'` | Tag prepended to the system message injected into the model's context |
+
+Under the hood, `notifyBackground()` wraps `BackgroundNotificationQueue.sendOrQueue()` — the same queue used by background tool completion notifications. See [Subagents > Concurrent Execution](/advanced/subagents#concurrent-execution) for how notifications are paced.
+
 ## Shutdown
 
 Always close sessions cleanly to release resources:
