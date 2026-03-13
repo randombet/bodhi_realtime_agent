@@ -431,6 +431,37 @@ generate_image subagent ──────► result queued   ↓
 
 **Notification pacing:** Results are flushed one per turn boundary to avoid overwhelming the user with a burst of audio notifications.
 
+### Parallel Tasking with External Agents
+
+When delegating to an external agent (like OpenClaw), concurrent background calls can interfere if they share a single session key. The OpenClaw demo solves this with an `OpenClawTaskManager` that provides:
+
+- **Per-task session isolation** — Each background handoff gets its own OpenClaw session key via a thread registry, preventing cross-task context contamination.
+- **Concurrency limiting** — A semaphore (default max 10) prevents unbounded fan-out. Queued tasks get voice and GUI notifications.
+- **Write lock serialization** — Mutating operations on the same resource (e.g., two calendar reschedules) are serialized while independent tasks (calendar read + email send) run in parallel.
+- **Thread reuse for follow-ups** — A heuristic resolver matches follow-up requests (e.g., "confirm that reschedule") to the correct thread by domain and recency, without requiring the model to pass a thread ID.
+- **Retry on empty response** — Retries once when the external agent returns an empty completion, a common failure mode when sessions overlap.
+
+The task manager operates entirely in example code (`examples/openclaw/lib/openclaw-task-manager.ts`) — no framework API changes are needed. It hooks into the existing `createInstance()` factory pattern:
+
+```typescript
+const createInstance = (): SubagentConfig => {
+  const runState: OpenClawRunState = {};  // Isolated per handoff
+  return {
+    name: 'openclaw',
+    interactive: true,
+    instructions: relayInstructions,
+    tools: {
+      openclaw_chat: createOpenClawChatTool(client, taskManager, runState),
+    },
+  };
+};
+
+const baseConfig = createInstance();
+baseConfig.createInstance = createInstance;
+```
+
+Queue events are surfaced to the user via `session.notifyBackground()` (voice) and `gui.notification` (UI) so the user knows when tasks are waiting. See [VoiceSession > Background Notifications](/guide/voice-session#background-notifications).
+
 ## Error Handling
 
 | Error | Behavior |

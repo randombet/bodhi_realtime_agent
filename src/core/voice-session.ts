@@ -405,6 +405,22 @@ export class VoiceSession {
 		});
 	}
 
+	/**
+	 * Queue a short spoken update for the user.
+	 * Delivered immediately when possible, otherwise after the current turn.
+	 */
+	notifyBackground(
+		text: string,
+		options?: { priority?: 'normal' | 'high'; label?: 'SUBAGENT UPDATE' | 'SUBAGENT QUESTION' },
+	): void {
+		const label = options?.label ?? 'SUBAGENT UPDATE';
+		this.notificationQueue.sendOrQueue(
+			[{ role: 'user', parts: [{ text: `[${label}]: ${text}` }] }],
+			true,
+			{ priority: options?.priority ?? 'normal' },
+		);
+	}
+
 	/** Start the client WebSocket server and connect to the LLM transport. */
 	async start(): Promise<void> {
 		await this.sttProvider?.start();
