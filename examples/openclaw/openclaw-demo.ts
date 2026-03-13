@@ -271,7 +271,7 @@ const mainAgent: MainAgent = {
 		'- get_current_time: For the current date/time.',
 		'- generate_image: When the user asks for any picture, image, card, or illustration.',
 		'- generate_video: When the user asks for a video, animation, or movie clip.',
-		'- Google Search: Use only for quick factual lookups where the user only wants an answer',
+		'- Google Search: Use for factual lookups where the user wants an answer',
 		'  (weather, news, sports scores, "who is X", "what is Y") and no follow-up action.',
 		'- ask_openclaw: ALWAYS use this for any email intent — send, draft, rewrite, reply,',
 		'  forward, or "email this to ...". Do NOT handle email requests directly yourself.',
