@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 
+import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Mock the SDK before importing the module under test
@@ -9,7 +10,9 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
 }));
 
 // Must import AFTER vi.mock
-const { ClaudeCodeSession } = await import('../../app/lib/claude-code-client.js');
+const { ClaudeCodeSession, resolveClaudeCodeExecutablePath } = await import(
+	'../../app/lib/claude-code-client.js'
+);
 
 // ---------------------------------------------------------------------------
 // Helpers — create mock async generators that simulate SDK behavior
@@ -59,6 +62,41 @@ function setupSimpleQuery(messages: unknown[]) {
 	mockQuery.mockReturnValue(mockGen);
 	return mockGen;
 }
+
+describe('resolveClaudeCodeExecutablePath', () => {
+	it('uses CLAUDE_PATH when explicitly set', () => {
+		const resolved = resolveClaudeCodeExecutablePath(
+			{
+				CLAUDE_PATH: '/custom/bin/claude',
+				PATH: '/usr/bin',
+			},
+			() => false,
+		);
+		expect(resolved).toBe('/custom/bin/claude');
+	});
+
+	it('resolves claude from PATH when CLAUDE_PATH is unset', () => {
+		const targetDir = process.platform === 'win32' ? 'C:\\claude-bin' : '/claude-bin';
+		const pathValue = [`${targetDir}_missing`, targetDir].join(path.delimiter);
+		const resolved = resolveClaudeCodeExecutablePath(
+			{
+				PATH: pathValue,
+			},
+			(candidate) => candidate.startsWith(targetDir) && candidate.toLowerCase().includes('claude'),
+		);
+		expect(resolved.startsWith(targetDir)).toBe(true);
+	});
+
+	it('falls back to "claude" when no PATH match is found', () => {
+		const resolved = resolveClaudeCodeExecutablePath(
+			{
+				PATH: '/missing/a:/missing/b',
+			},
+			() => false,
+		);
+		expect(resolved).toBe('claude');
+	});
+});
 
 // ---------------------------------------------------------------------------
 // Tests
