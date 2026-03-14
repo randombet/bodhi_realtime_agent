@@ -3,9 +3,11 @@
  *
  * WebSocket server that handles multiple concurrent client connections.
  * Routes messages to the correct VoiceSession based on connection mapping.
+ * Can run standalone (start) or attached to an HTTP server (attachToHttpServer).
  */
 
 import type { IncomingMessage } from 'node:http';
+import type { Server as HttpServer } from 'node:http';
 import { type WebSocket, WebSocketServer } from 'ws';
 
 export interface ConnectionContext {
@@ -51,7 +53,7 @@ export class MultiClientTransport {
 	) {}
 
 	/**
-	 * Start the WebSocket server.
+	 * Start the WebSocket server on its own port (standalone).
 	 */
 	async start(): Promise<void> {
 		return new Promise((resolve, reject) => {
@@ -80,6 +82,34 @@ export class MultiClientTransport {
 	}
 
 	/**
+	 * Attach to an existing HTTP server; handle WebSocket upgrade on the given path.
+	 * Call this instead of start() when you serve HTTP (e.g. /api) and WS on the same port.
+	 */
+	attachToHttpServer(httpServer: HttpServer, wsPath = '/'): void {
+		this.wss = new WebSocketServer({ noServer: true });
+
+		this.wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
+			this.handleConnection(ws, req);
+		});
+
+		httpServer.on(
+			'upgrade',
+			(req: IncomingMessage, socket: import('node:net').Socket, head: Buffer) => {
+				const pathname = req.url?.split('?')[0] ?? '';
+				if (pathname !== wsPath) {
+					socket.destroy();
+					return;
+				}
+				this.wss?.handleUpgrade(req, socket, head, (ws) => {
+					this.wss?.emit('connection', ws, req);
+				});
+			},
+		);
+
+		console.log(`[MultiClientTransport] WebSocket attached to HTTP server on path ${wsPath}`);
+	}
+
+	/**
 	 * Stop the WebSocket server and close all connections.
 	 */
 	async stop(): Promise<void> {
@@ -94,7 +124,7 @@ export class MultiClientTransport {
 		}
 		this.connections.clear();
 
-		// Close server
+		// Close WebSocket server (do not close HTTP server when attached)
 		if (this.wss) {
 			return new Promise((resolve) => {
 				this.wss?.close(() => {

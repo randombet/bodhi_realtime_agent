@@ -51,7 +51,8 @@
     "openai": "^6.25.0",
     "write-file-atomic": "^6.0.0",
     "ws": "^8.18.0",
-    "zod": "^3.24.0"
+    "zod": "^3.24.0",
+    "@supabase/supabase-js": "^2.47.0"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.0",
