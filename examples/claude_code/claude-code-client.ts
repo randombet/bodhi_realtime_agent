@@ -2,6 +2,8 @@
 
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { PermissionMode } from '@anthropic-ai/claude-agent-sdk';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -96,6 +98,36 @@ interface SDKResultErrorMessage {
 	total_cost_usd: number;
 	num_turns: number;
 	errors?: string[];
+}
+
+function resolveClaudeExecutablePath(): string {
+	const explicitPath = process.env.CLAUDE_PATH?.trim();
+	if (explicitPath) {
+		return explicitPath;
+	}
+
+	const pathEnv = process.env.PATH;
+	if (!pathEnv) {
+		return 'claude';
+	}
+
+	const binaryNames =
+		process.platform === 'win32'
+			? ['claude.exe', 'claude.cmd', 'claude.bat', 'claude']
+			: ['claude'];
+
+	for (const rawDir of pathEnv.split(path.delimiter)) {
+		const dir = rawDir.trim();
+		if (!dir) continue;
+		for (const binaryName of binaryNames) {
+			const candidate = path.join(dir, binaryName);
+			if (existsSync(candidate)) {
+				return candidate;
+			}
+		}
+	}
+
+	return 'claude';
 }
 
 // ---------------------------------------------------------------------------
@@ -253,7 +285,7 @@ export class ClaudeCodeSession {
 		];
 
 		const opts: Record<string, unknown> = {
-			pathToClaudeCodeExecutable: process.env.CLAUDE_PATH ?? 'claude',
+			pathToClaudeCodeExecutable: resolveClaudeExecutablePath(),
 			allowedTools,
 			permissionMode: (this.options.permissionMode ?? 'bypassPermissions') as PermissionMode,
 			allowDangerouslySkipPermissions:

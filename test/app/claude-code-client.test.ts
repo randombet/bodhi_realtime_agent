@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Mock the SDK before importing the module under test
 const mockQuery = vi.fn();
@@ -10,6 +13,8 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
 
 // Must import AFTER vi.mock
 const { ClaudeCodeSession } = await import('../../examples/claude_code/claude-code-client.js');
+const ORIGINAL_CLAUDE_PATH = process.env.CLAUDE_PATH;
+const ORIGINAL_PATH = process.env.PATH;
 
 // ---------------------------------------------------------------------------
 // Helpers — create mock async generators that simulate SDK behavior
@@ -67,6 +72,20 @@ function setupSimpleQuery(messages: unknown[]) {
 describe('ClaudeCodeSession', () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
+	});
+
+	afterEach(() => {
+		if (ORIGINAL_CLAUDE_PATH === undefined) {
+			process.env.CLAUDE_PATH = undefined;
+		} else {
+			process.env.CLAUDE_PATH = ORIGINAL_CLAUDE_PATH;
+		}
+
+		if (ORIGINAL_PATH === undefined) {
+			process.env.PATH = undefined;
+		} else {
+			process.env.PATH = ORIGINAL_PATH;
+		}
 	});
 
 	// -- start() ---------------------------------------------------------------
@@ -262,6 +281,53 @@ describe('ClaudeCodeSession', () => {
 				}),
 			}),
 		);
+	});
+
+	it('uses explicit CLAUDE_PATH when provided', async () => {
+		setupSimpleQuery([createMockInitMessage(), createMockResultMessage()]);
+		process.env.CLAUDE_PATH = '/custom/claude/path';
+
+		const session = new ClaudeCodeSession({ cwd: '/test' });
+		await session.start('Task');
+
+		expect(mockQuery).toHaveBeenCalledWith(
+			expect.objectContaining({
+				options: expect.objectContaining({
+					pathToClaudeCodeExecutable: '/custom/claude/path',
+				}),
+			}),
+		);
+	});
+
+	it('resolves Claude executable from PATH when CLAUDE_PATH is unset', async () => {
+		setupSimpleQuery([createMockInitMessage(), createMockResultMessage()]);
+		process.env.CLAUDE_PATH = undefined;
+
+		const tempDir = mkdtempSync(path.join(os.tmpdir(), 'claude-path-test-'));
+		const binaryName = process.platform === 'win32' ? 'claude.cmd' : 'claude';
+		const binaryPath = path.join(tempDir, binaryName);
+
+		try {
+			writeFileSync(binaryPath, process.platform === 'win32' ? '@echo off\r\n' : '#!/bin/sh\n');
+			if (process.platform !== 'win32') {
+				chmodSync(binaryPath, 0o755);
+			}
+
+			process.env.PATH = ORIGINAL_PATH ? `${tempDir}${path.delimiter}${ORIGINAL_PATH}` : tempDir;
+
+			const session = new ClaudeCodeSession({ cwd: '/test' });
+			await session.start('Task');
+
+			expect(mockQuery).toHaveBeenCalledWith(
+				expect.objectContaining({
+					options: expect.objectContaining({
+						pathToClaudeCodeExecutable: binaryPath,
+					}),
+				}),
+			);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
 	});
 
 	// -- sdkSessionId -----------------------------------------------------------

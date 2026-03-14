@@ -117,6 +117,7 @@ if (GEMINI_API_KEY.length === 0) {
 const PORT = Number(process.env.PORT) || 9900;
 const HOST = process.env.HOST || '0.0.0.0';
 const PROJECT_DIR = process.env.PROJECT_DIR || process.cwd();
+const CLAUDE_DEFAULT_THREAD_KEY = process.env.CLAUDE_DEFAULT_THREAD_KEY || 'claude_demo_main';
 
 const SESSION_ID = `session_${Date.now()}`;
 const google = createGoogleGenerativeAI({ apiKey: GEMINI_API_KEY });
@@ -274,6 +275,9 @@ const mainAgent: MainAgent = {
 			'  explaining code, creating new files, searching the codebase.',
 			'  Also for sending emails — Claude can send email via Apple Mail.',
 			'  When in doubt about whether something is a coding task, route to Claude.',
+			`  Continuity contract: use threadKey "${CLAUDE_DEFAULT_THREAD_KEY}" for follow-ups on`,
+			'  the same coding task with continuityMode "resume_if_available".',
+			'  For unrelated new coding tasks, use continuityMode "force_fresh" and a new threadKey.',
 			'- end_session: When the user says goodbye.',
 			'',
 			'VOICE RULES:',
@@ -307,6 +311,7 @@ async function main() {
 	// (the SDK's Protocol can only be connected to one transport at a time).
 	const claudeSubagent = createClaudeCodeSubagentConfig({
 		projectDir: PROJECT_DIR,
+		model: 'claude-opus-4-5',
 		mcpServerFactory: () => {
 			console.log('[MCP Factory] Creating fresh email MCP server');
 			return {
@@ -447,6 +452,7 @@ async function main() {
 	console.log();
 	console.log('Then open http://localhost:8080 and try saying:');
 	console.log("  - 'Fix the bug in auth.py'                 (Claude Code)");
+	console.log("  - 'Now add tests for that fix'             (same thread resume)");
 	console.log("  - 'Add input validation to the login form' (Claude Code)");
 	console.log("  - 'Run the tests and fix any failures'     (Claude Code)");
 	console.log("  - 'Email me a summary of the README'       (Email via Mail.app)");

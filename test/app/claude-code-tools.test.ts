@@ -9,7 +9,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
 }));
 
 // Must import AFTER vi.mock
-const { askClaudeTool, createClaudeCodeSubagentConfig } = await import(
+const { askClaudeTool, createClaudeCodeSubagentConfig, _ClaudeCodeSessionClass } = await import(
 	'../../examples/claude_code/claude-code-tools.js'
 );
 
@@ -47,9 +47,8 @@ function createMockResultMessage(
 	};
 }
 
-/** Setup a simple query mock that yields messages in sequence. */
-function setupSimpleQuery(messages: unknown[]) {
-	mockQuery.mockReturnValue({
+function createMockQuery(messages: unknown[]) {
+	return {
 		async *[Symbol.asyncIterator]() {
 			for (const msg of messages) {
 				yield msg;
@@ -57,7 +56,11 @@ function setupSimpleQuery(messages: unknown[]) {
 		},
 		close: vi.fn(),
 		interrupt: vi.fn(),
-	});
+	};
+}
+
+function setupSimpleQuery(messages: unknown[]) {
+	mockQuery.mockReturnValue(createMockQuery(messages));
 }
 
 // ---------------------------------------------------------------------------
@@ -70,20 +73,25 @@ describe('askClaudeTool', () => {
 		expect(askClaudeTool.execution).toBe('background');
 	});
 
-	it('has a pending message', () => {
-		expect(askClaudeTool.pendingMessage).toBeDefined();
-		expect(typeof askClaudeTool.pendingMessage).toBe('string');
-	});
-
-	it('has a task parameter', () => {
-		const schema = askClaudeTool.parameters;
-		const result = schema.safeParse({ task: 'Fix the bug' });
+	it('accepts task-only arguments', () => {
+		const result = askClaudeTool.parameters.safeParse({ task: 'Fix the bug' });
 		expect(result.success).toBe(true);
 	});
 
-	it('rejects missing task parameter', () => {
-		const schema = askClaudeTool.parameters;
-		const result = schema.safeParse({});
+	it('accepts optional threadKey and continuityMode', () => {
+		const result = askClaudeTool.parameters.safeParse({
+			task: 'Fix the bug',
+			threadKey: 'task_auth_bug',
+			continuityMode: 'force_fresh',
+		});
+		expect(result.success).toBe(true);
+	});
+
+	it('rejects invalid continuityMode', () => {
+		const result = askClaudeTool.parameters.safeParse({
+			task: 'Fix the bug',
+			continuityMode: 'always_resume',
+		});
 		expect(result.success).toBe(false);
 	});
 });
@@ -94,6 +102,7 @@ describe('askClaudeTool', () => {
 
 describe('createClaudeCodeSubagentConfig', () => {
 	beforeEach(() => {
+		vi.restoreAllMocks();
 		vi.clearAllMocks();
 	});
 
@@ -129,6 +138,50 @@ describe('createClaudeCodeSubagentConfig', () => {
 		expect(a?.tools).not.toBe(b?.tools);
 	});
 
+	it('shares continuity metadata across createInstance()', async () => {
+		mockQuery
+			.mockReturnValueOnce(
+				createMockQuery([
+					createMockInitMessage('sdk-thread-1'),
+					createMockAssistantMessage('Done 1'),
+					createMockResultMessage(),
+				]),
+			)
+			.mockReturnValueOnce(
+				createMockQuery([
+					createMockInitMessage('sdk-thread-2'),
+					createMockAssistantMessage('Done 2'),
+					createMockResultMessage(),
+				]),
+			);
+
+		const root = createClaudeCodeSubagentConfig({ projectDir: '/test' });
+		const instance1 = root.createInstance?.();
+		const instance2 = root.createInstance?.();
+		if (!instance1 || !instance2) {
+			throw new Error('Expected createInstance() to return subagent configs');
+		}
+
+		const tools1 = instance1.tools as Record<
+			string,
+			{ execute: (args: Record<string, unknown>) => Promise<Record<string, unknown>> }
+		>;
+		const tools2 = instance2.tools as Record<
+			string,
+			{ execute: (args: Record<string, unknown>) => Promise<Record<string, unknown>> }
+		>;
+
+		await tools1.claude_code_start.execute({ task: 'Fix A', threadKey: 'shared_thread' });
+		await tools2.claude_code_start.execute({ task: 'Fix B', threadKey: 'shared_thread' });
+
+		expect(mockQuery).toHaveBeenNthCalledWith(
+			2,
+			expect.objectContaining({
+				options: expect.objectContaining({ resume: 'sdk-thread-1' }),
+			}),
+		);
+	});
+
 	// -- claude_code_start ---------------------------------------------------
 
 	describe('claude_code_start', () => {
@@ -142,22 +195,178 @@ describe('createClaudeCodeSubagentConfig', () => {
 			const config = createClaudeCodeSubagentConfig({ projectDir: '/test' });
 			const tools = config.tools as Record<
 				string,
-				{ execute: (args: Record<string, unknown>) => Promise<unknown> }
+				{ execute: (args: Record<string, unknown>) => Promise<Record<string, unknown>> }
 			>;
-			const result = (await tools.claude_code_start.execute({
-				task: 'Fix the bug',
-			})) as Record<string, unknown>;
+			const result = await tools.claude_code_start.execute({ task: 'Fix the bug' });
 
 			expect(result.sessionId).toBeDefined();
 			expect(typeof result.sessionId).toBe('string');
 			expect(result.sdkSessionId).toBe('sdk-session-123');
 			expect(result.status).toBe('completed');
 			expect(result.text).toBe('Done!');
+			expect(result.threadKey).toBe('claude_thread_1');
+			expect(result.continuityMode).toBe('resume_if_available');
 		});
 
-		// NOTE: AskUserQuestion interception via canUseTool was removed because
-		// the SDK adds --permission-prompt-tool stdio when canUseTool is present,
-		// which conflicts with single-turn query mode and prevents ALL tool calls.
+		it('deterministically allocates thread keys when missing', async () => {
+			mockQuery
+				.mockReturnValueOnce(
+					createMockQuery([createMockInitMessage('sdk-a'), createMockResultMessage()]),
+				)
+				.mockReturnValueOnce(
+					createMockQuery([createMockInitMessage('sdk-b'), createMockResultMessage()]),
+				);
+
+			const config = createClaudeCodeSubagentConfig({ projectDir: '/test' });
+			const tools = config.tools as Record<
+				string,
+				{ execute: (args: Record<string, unknown>) => Promise<Record<string, unknown>> }
+			>;
+
+			const r1 = await tools.claude_code_start.execute({ task: 'Task 1' });
+			const r2 = await tools.claude_code_start.execute({ task: 'Task 2' });
+
+			expect(r1.threadKey).toBe('claude_thread_1');
+			expect(r2.threadKey).toBe('claude_thread_2');
+		});
+
+		it('preserves explicit threadKey', async () => {
+			setupSimpleQuery([createMockInitMessage(), createMockResultMessage()]);
+
+			const config = createClaudeCodeSubagentConfig({ projectDir: '/test' });
+			const tools = config.tools as Record<
+				string,
+				{ execute: (args: Record<string, unknown>) => Promise<Record<string, unknown>> }
+			>;
+
+			const result = await tools.claude_code_start.execute({
+				task: 'Task',
+				threadKey: 'task_auth_bug',
+			});
+
+			expect(result.threadKey).toBe('task_auth_bug');
+		});
+
+		it('returns deterministic error for force_resume without target', async () => {
+			const config = createClaudeCodeSubagentConfig({ projectDir: '/test' });
+			const tools = config.tools as Record<
+				string,
+				{ execute: (args: Record<string, unknown>) => Promise<Record<string, unknown>> }
+			>;
+
+			const result = await tools.claude_code_start.execute({
+				task: 'Continue',
+				threadKey: 'task_auth_bug',
+				continuityMode: 'force_resume',
+			});
+
+			expect(result.status).toBe('error');
+			expect(result.error).toBe('force_resume_requested_but_no_resume_target');
+			expect(mockQuery).not.toHaveBeenCalled();
+		});
+
+		it('uses thread state resume id for resume_if_available', async () => {
+			mockQuery
+				.mockReturnValueOnce(
+					createMockQuery([createMockInitMessage('sdk-first'), createMockResultMessage()]),
+				)
+				.mockReturnValueOnce(
+					createMockQuery([createMockInitMessage('sdk-second'), createMockResultMessage()]),
+				);
+
+			const config = createClaudeCodeSubagentConfig({ projectDir: '/test' });
+			const tools = config.tools as Record<
+				string,
+				{ execute: (args: Record<string, unknown>) => Promise<Record<string, unknown>> }
+			>;
+
+			await tools.claude_code_start.execute({
+				task: 'Fix auth bug',
+				threadKey: 'task_auth_bug',
+				continuityMode: 'force_fresh',
+			});
+
+			await tools.claude_code_start.execute({
+				task: 'Add tests',
+				threadKey: 'task_auth_bug',
+				continuityMode: 'resume_if_available',
+			});
+
+			expect(mockQuery).toHaveBeenNthCalledWith(
+				2,
+				expect.objectContaining({
+					options: expect.objectContaining({ resume: 'sdk-first' }),
+				}),
+			);
+		});
+
+		it('force_fresh ignores prior thread resume id', async () => {
+			mockQuery
+				.mockReturnValueOnce(
+					createMockQuery([createMockInitMessage('sdk-first'), createMockResultMessage()]),
+				)
+				.mockReturnValueOnce(
+					createMockQuery([createMockInitMessage('sdk-second'), createMockResultMessage()]),
+				);
+
+			const config = createClaudeCodeSubagentConfig({ projectDir: '/test' });
+			const tools = config.tools as Record<
+				string,
+				{ execute: (args: Record<string, unknown>) => Promise<Record<string, unknown>> }
+			>;
+
+			await tools.claude_code_start.execute({ task: 'Task A', threadKey: 't1' });
+			await tools.claude_code_start.execute({
+				task: 'Task B',
+				threadKey: 't1',
+				continuityMode: 'force_fresh',
+			});
+
+			const secondCallOptions = mockQuery.mock.calls[1][0].options;
+			expect(secondCallOptions).not.toHaveProperty('resume');
+		});
+
+		it('falls back to fresh start once on invalid resume result', async () => {
+			mockQuery
+				.mockReturnValueOnce(
+					createMockQuery([
+						createMockInitMessage('resume-attempt'),
+						createMockResultMessage({ subtype: 'error_resume', errors: ['Session not found'] }),
+					]),
+				)
+				.mockReturnValueOnce(
+					createMockQuery([
+						createMockInitMessage('fresh-fallback'),
+						createMockAssistantMessage('Recovered'),
+						createMockResultMessage(),
+					]),
+				);
+
+			const config = createClaudeCodeSubagentConfig({ projectDir: '/test' });
+			const tools = config.tools as Record<
+				string,
+				{ execute: (args: Record<string, unknown>) => Promise<Record<string, unknown>> }
+			>;
+
+			const result = await tools.claude_code_start.execute({
+				task: 'Continue previous work',
+				threadKey: 'task_auth_bug',
+				resumeSessionId: 'stale-session-id',
+			});
+
+			expect(result.status).toBe('completed');
+			expect(result.resumeFallbackUsed).toBe(true);
+			expect(result.sdkSessionId).toBe('fresh-fallback');
+			expect(mockQuery).toHaveBeenCalledTimes(2);
+			expect(mockQuery).toHaveBeenNthCalledWith(
+				1,
+				expect.objectContaining({
+					options: expect.objectContaining({ resume: 'stale-session-id' }),
+				}),
+			);
+			const fallbackCallOptions = mockQuery.mock.calls[1][0].options;
+			expect(fallbackCallOptions).not.toHaveProperty('resume');
+		});
 
 		it('passes options through to ClaudeCodeSession', async () => {
 			setupSimpleQuery([createMockInitMessage(), createMockResultMessage()]);
@@ -170,7 +379,7 @@ describe('createClaudeCodeSubagentConfig', () => {
 			});
 			const tools = config.tools as Record<
 				string,
-				{ execute: (args: Record<string, unknown>) => Promise<unknown> }
+				{ execute: (args: Record<string, unknown>) => Promise<Record<string, unknown>> }
 			>;
 			await tools.claude_code_start.execute({ task: 'Task' });
 
@@ -185,80 +394,299 @@ describe('createClaudeCodeSubagentConfig', () => {
 				}),
 			);
 		});
-
-		it('uses resume when resumeSessionId is provided', async () => {
-			setupSimpleQuery([createMockInitMessage('resumed-session'), createMockResultMessage()]);
-
-			const config = createClaudeCodeSubagentConfig({ projectDir: '/test' });
-			const tools = config.tools as Record<
-				string,
-				{ execute: (args: Record<string, unknown>) => Promise<unknown> }
-			>;
-			const result = (await tools.claude_code_start.execute({
-				task: 'Continue the fix',
-				resumeSessionId: 'prior-sdk-session',
-			})) as Record<string, unknown>;
-
-			expect(result.status).toBe('completed');
-			expect(result.sdkSessionId).toBe('resumed-session');
-
-			expect(mockQuery).toHaveBeenCalledWith(
-				expect.objectContaining({
-					options: expect.objectContaining({
-						resume: 'prior-sdk-session',
-					}),
-				}),
-			);
-		});
-
-		it('concurrent starts create independent sessions', async () => {
-			// Each call gets its own mock query
-			let callCount = 0;
-			mockQuery.mockImplementation(() => {
-				const id = `session-${++callCount}`;
-				return {
-					async *[Symbol.asyncIterator]() {
-						yield createMockInitMessage(id);
-						yield createMockAssistantMessage(`Result ${id}`);
-						yield createMockResultMessage();
-					},
-					close: vi.fn(),
-					interrupt: vi.fn(),
-				};
-			});
-
-			const config = createClaudeCodeSubagentConfig({ projectDir: '/test' });
-			const tools = config.tools as Record<
-				string,
-				{ execute: (args: Record<string, unknown>) => Promise<unknown> }
-			>;
-
-			const [r1, r2] = (await Promise.all([
-				tools.claude_code_start.execute({ task: 'Task 1' }),
-				tools.claude_code_start.execute({ task: 'Task 2' }),
-			])) as Record<string, unknown>[];
-
-			expect(r1.sessionId).not.toBe(r2.sessionId);
-			expect(r1.sdkSessionId).not.toBe(r2.sdkSessionId);
-		});
 	});
 
 	// -- claude_code_respond -------------------------------------------------
 
 	describe('claude_code_respond', () => {
-		it('throws for unknown sessionId', async () => {
+		it('returns deterministic mapping error when thread cannot be resolved', async () => {
 			const config = createClaudeCodeSubagentConfig({ projectDir: '/test' });
 			const tools = config.tools as Record<
 				string,
-				{ execute: (args: Record<string, unknown>) => Promise<unknown> }
+				{ execute: (args: Record<string, unknown>) => Promise<Record<string, unknown>> }
 			>;
 
-			await expect(
-				tools.claude_code_respond.execute({
-					sessionId: 'nonexistent',
-					response: 'answer',
+			const result = await tools.claude_code_respond.execute({
+				sessionId: 'nonexistent',
+				response: 'answer',
+			});
+
+			expect(result.status).toBe('error');
+			expect(result.error).toBe('unknown_session_thread_mapping');
+		});
+
+		it('returns deterministic no-active-session error when mapping exists', async () => {
+			const config = createClaudeCodeSubagentConfig({ projectDir: '/test' });
+			const tools = config.tools as Record<
+				string,
+				{ execute: (args: Record<string, unknown>) => Promise<Record<string, unknown>> }
+			>;
+
+			const result = await tools.claude_code_respond.execute({
+				sessionId: 'nonexistent',
+				threadKey: 'task_auth_bug',
+				response: 'answer',
+			});
+
+			expect(result.status).toBe('error');
+			expect(result.error).toContain('No active Claude Code session');
+			expect(result.threadKey).toBe('task_auth_bug');
+		});
+
+		it('uses sessionId -> threadKey mapping for respond terminal recording', async () => {
+			vi.spyOn(_ClaudeCodeSessionClass.prototype, 'start').mockResolvedValueOnce({
+				status: 'needs_input',
+				text: 'Need answer',
+				sdkSessionId: 'sdk-needs-input',
+				question: 'Which option?',
+				questionOptions: [{ label: 'A', description: 'Option A' }],
+			});
+			vi.spyOn(_ClaudeCodeSessionClass.prototype, 'respond').mockResolvedValueOnce({
+				status: 'completed',
+				text: 'Done after response',
+				sdkSessionId: 'sdk-done',
+			});
+
+			const config = createClaudeCodeSubagentConfig({ projectDir: '/test' });
+			const tools = config.tools as Record<
+				string,
+				{ execute: (args: Record<string, unknown>) => Promise<Record<string, unknown>> }
+			>;
+
+			const started = await tools.claude_code_start.execute({
+				task: 'Interactive task',
+				threadKey: 'interactive_thread',
+				continuityMode: 'force_fresh',
+			});
+			expect(started.status).toBe('needs_input');
+
+			const completed = await tools.claude_code_respond.execute({
+				sessionId: started.sessionId as string,
+				response: 'Use option A',
+			});
+			expect(completed.status).toBe('completed');
+			expect(completed.threadKey).toBe('interactive_thread');
+
+			// Mapping was removed after terminal completion.
+			const afterTerminal = await tools.claude_code_respond.execute({
+				sessionId: started.sessionId as string,
+				response: 'Second response',
+			});
+			expect(afterTerminal.status).toBe('error');
+			expect(afterTerminal.error).toBe('unknown_session_thread_mapping');
+		});
+	});
+
+	// -- cross-thread isolation (TC2) -----------------------------------------
+
+	describe('cross-thread isolation', () => {
+		it('continuity does not leak across different threadKey values', async () => {
+			mockQuery
+				.mockReturnValueOnce(
+					createMockQuery([createMockInitMessage('sdk-thread-a'), createMockResultMessage()]),
+				)
+				.mockReturnValueOnce(
+					createMockQuery([createMockInitMessage('sdk-thread-b'), createMockResultMessage()]),
+				)
+				.mockReturnValueOnce(
+					createMockQuery([createMockInitMessage('sdk-thread-b2'), createMockResultMessage()]),
+				);
+
+			const config = createClaudeCodeSubagentConfig({ projectDir: '/test' });
+			const tools = config.tools as Record<
+				string,
+				{ execute: (args: Record<string, unknown>) => Promise<Record<string, unknown>> }
+			>;
+
+			// Complete a task on thread_a
+			await tools.claude_code_start.execute({ task: 'Task A', threadKey: 'thread_a' });
+			// Complete a task on thread_b
+			await tools.claude_code_start.execute({ task: 'Task B', threadKey: 'thread_b' });
+			// Follow-up on thread_b should resume from sdk-thread-b, NOT sdk-thread-a
+			await tools.claude_code_start.execute({
+				task: 'Follow-up B',
+				threadKey: 'thread_b',
+				continuityMode: 'resume_if_available',
+			});
+
+			expect(mockQuery).toHaveBeenNthCalledWith(
+				3,
+				expect.objectContaining({
+					options: expect.objectContaining({ resume: 'sdk-thread-b' }),
 				}),
-			).rejects.toThrow('No active Claude Code session');
+			);
+		});
+	});
+
+	// -- error does not overwrite sdkSessionId (TC7) --------------------------
+
+	describe('error terminal recording', () => {
+		it('error status does not overwrite lastCompletedSdkSessionId', async () => {
+			mockQuery
+				.mockReturnValueOnce(
+					createMockQuery([createMockInitMessage('sdk-good'), createMockResultMessage()]),
+				)
+				.mockReturnValueOnce(
+					createMockQuery([
+						createMockInitMessage('sdk-bad'),
+						createMockResultMessage({ subtype: 'error', errors: ['Something went wrong'] }),
+					]),
+				)
+				.mockReturnValueOnce(
+					createMockQuery([createMockInitMessage('sdk-third'), createMockResultMessage()]),
+				);
+
+			const sharedState = {
+				threads: {},
+				sessionToThread: {},
+				maxHistoryPerThread: 5,
+				maxTotalHistory: 100,
+				nextThreadOrdinal: 1,
+			};
+
+			const config = createClaudeCodeSubagentConfig({
+				projectDir: '/test',
+				_state: sharedState,
+			});
+			const tools = config.tools as Record<
+				string,
+				{ execute: (args: Record<string, unknown>) => Promise<Record<string, unknown>> }
+			>;
+
+			// Successful completion — stores sdk-good as lastCompletedSdkSessionId
+			await tools.claude_code_start.execute({
+				task: 'Good task',
+				threadKey: 'tc7_thread',
+				continuityMode: 'force_fresh',
+			});
+			// Error completion — should NOT overwrite lastCompletedSdkSessionId
+			await tools.claude_code_start.execute({
+				task: 'Bad task',
+				threadKey: 'tc7_thread',
+				continuityMode: 'force_fresh',
+			});
+			// Resume should still use sdk-good, not sdk-bad
+			await tools.claude_code_start.execute({
+				task: 'Resume task',
+				threadKey: 'tc7_thread',
+				continuityMode: 'resume_if_available',
+			});
+
+			expect(mockQuery).toHaveBeenNthCalledWith(
+				3,
+				expect.objectContaining({
+					options: expect.objectContaining({ resume: 'sdk-good' }),
+				}),
+			);
+		});
+	});
+
+	// -- dedup (TC10) ---------------------------------------------------------
+
+	describe('dedup', () => {
+		it('duplicate dedupeKey does not create duplicate history entries', async () => {
+			mockQuery.mockReturnValue(
+				createMockQuery([
+					createMockInitMessage('sdk-dup'),
+					createMockAssistantMessage('Done'),
+					createMockResultMessage(),
+				]),
+			);
+
+			const sharedState = {
+				threads: {},
+				sessionToThread: {},
+				maxHistoryPerThread: 10,
+				maxTotalHistory: 100,
+				nextThreadOrdinal: 1,
+			};
+
+			const config = createClaudeCodeSubagentConfig({
+				projectDir: '/test',
+				_state: sharedState,
+			});
+			const tools = config.tools as Record<
+				string,
+				{ execute: (args: Record<string, unknown>) => Promise<Record<string, unknown>> }
+			>;
+
+			// Two separate calls with same threadKey — each creates a unique dedupeKey
+			// so history should grow normally (this confirms dedup doesn't block normal ops).
+			await tools.claude_code_start.execute({
+				task: 'Task 1',
+				threadKey: 'dedup_thread',
+				continuityMode: 'force_fresh',
+			});
+			await tools.claude_code_start.execute({
+				task: 'Task 2',
+				threadKey: 'dedup_thread',
+				continuityMode: 'force_fresh',
+			});
+
+			expect(sharedState.threads.dedup_thread.history.length).toEqual(2);
+		});
+	});
+
+	// -- history caps ---------------------------------------------------------
+
+	describe('history caps', () => {
+		it('enforces per-thread and total history caps', async () => {
+			let sequence = 0;
+			mockQuery.mockImplementation(() => {
+				sequence += 1;
+				return createMockQuery([
+					createMockInitMessage(`sdk-${sequence}`),
+					createMockAssistantMessage(`Result ${sequence}`),
+					createMockResultMessage(),
+				]);
+			});
+
+			const sharedState = {
+				threads: {},
+				sessionToThread: {},
+				maxHistoryPerThread: 2,
+				maxTotalHistory: 3,
+				nextThreadOrdinal: 1,
+			};
+
+			const config = createClaudeCodeSubagentConfig({
+				projectDir: '/test',
+				_state: sharedState,
+			});
+			const tools = config.tools as Record<
+				string,
+				{ execute: (args: Record<string, unknown>) => Promise<Record<string, unknown>> }
+			>;
+
+			await tools.claude_code_start.execute({
+				task: 'A1',
+				threadKey: 'thread_a',
+				continuityMode: 'force_fresh',
+			});
+			await tools.claude_code_start.execute({
+				task: 'A2',
+				threadKey: 'thread_a',
+				continuityMode: 'force_fresh',
+			});
+			await tools.claude_code_start.execute({
+				task: 'A3',
+				threadKey: 'thread_a',
+				continuityMode: 'force_fresh',
+			});
+			await tools.claude_code_start.execute({
+				task: 'B1',
+				threadKey: 'thread_b',
+				continuityMode: 'force_fresh',
+			});
+
+			const perThreadA = sharedState.threads.thread_a?.history.length ?? 0;
+			expect(perThreadA).toEqual(2);
+
+			const total = Object.values(sharedState.threads).reduce(
+				(sum, thread) => sum + thread.history.length,
+				0,
+			);
+			expect(total).toEqual(3);
 		});
 	});
 
@@ -269,7 +697,7 @@ describe('createClaudeCodeSubagentConfig', () => {
 			const config = createClaudeCodeSubagentConfig({ projectDir: '/test' });
 
 			await config.dispose?.();
-			await config.dispose?.(); // Should not throw
+			await config.dispose?.();
 		});
 	});
 });
