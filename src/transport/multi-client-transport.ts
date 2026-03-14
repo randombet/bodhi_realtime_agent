@@ -82,11 +82,13 @@ export class MultiClientTransport {
 	}
 
 	/**
-	 * Attach to an existing HTTP server; handle WebSocket upgrade on the given path.
+	 * Attach to an existing HTTP server; handle WebSocket upgrade on the given path(s).
 	 * Call this instead of start() when you serve HTTP (e.g. /api) and WS on the same port.
+	 * Accepts both '/' and '/ws' so client works with same-origin (/) and reverse-proxy (/ws) setups.
 	 */
-	attachToHttpServer(httpServer: HttpServer, wsPath = '/'): void {
+	attachToHttpServer(httpServer: HttpServer, wsPaths: string | string[] = '/'): void {
 		this.wss = new WebSocketServer({ noServer: true });
+		const paths = Array.isArray(wsPaths) ? wsPaths : [wsPaths];
 
 		this.wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
 			this.handleConnection(ws, req);
@@ -96,7 +98,7 @@ export class MultiClientTransport {
 			'upgrade',
 			(req: IncomingMessage, socket: import('node:net').Socket, head: Buffer) => {
 				const pathname = req.url?.split('?')[0] ?? '';
-				if (pathname !== wsPath) {
+				if (!paths.includes(pathname)) {
 					socket.destroy();
 					return;
 				}
@@ -106,7 +108,7 @@ export class MultiClientTransport {
 			},
 		);
 
-		console.log(`[MultiClientTransport] WebSocket attached to HTTP server on path ${wsPath}`);
+		console.log(`[MultiClientTransport] WebSocket attached to HTTP server on path(s) ${paths.join(', ')}`);
 	}
 
 	/**
