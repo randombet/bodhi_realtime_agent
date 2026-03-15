@@ -108,7 +108,9 @@ export class MultiClientTransport {
 			},
 		);
 
-		console.log(`[MultiClientTransport] WebSocket attached to HTTP server on path(s) ${paths.join(', ')}`);
+		console.log(
+			`[MultiClientTransport] WebSocket attached to HTTP server on path(s) ${paths.join(', ')}`,
+		);
 	}
 
 	/**
