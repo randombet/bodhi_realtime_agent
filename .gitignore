@@ -1,4 +1,6 @@
 node_modules/
+.pnpm-store/
+pnpm-store/
 dist/
 *.tsbuildinfo
 .env
@@ -12,4 +14,8 @@ docs/.vitepress/dist/
 docs/api/
 /memory/
 /history/
+/workspaces/
 /scripts/
+
+# Optional local pnpm config (e.g. store-dir); do not commit
+.npmrc

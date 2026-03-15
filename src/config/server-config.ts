@@ -34,6 +34,8 @@ export interface ServerConfig {
 		supabase?: {
 			url: string;
 			anonKey: string;
+			/** Service role key for server-side Supabase client (history store, bypass RLS). */
+			serviceRoleKey?: string;
 		};
 		oauth?: {
 			clientId: string;
@@ -100,6 +102,7 @@ export function loadConfig(): ServerConfig {
 					? {
 							url: process.env.SUPABASE_URL,
 							anonKey: process.env.SUPABASE_ANON_KEY,
+							serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY,
 						}
 					: undefined,
 			oauth:

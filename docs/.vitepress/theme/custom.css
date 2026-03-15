@@ -1,0 +1,40 @@
+:root {
+  /* Brand colors — dark green from the Bodhi leaf icon */
+  --vp-c-brand-1: #1e5128;
+  --vp-c-brand-2: #276832;
+  --vp-c-brand-3: #2d7a3a;
+  --vp-c-brand-soft: rgba(30, 81, 40, 0.14);
+
+  /* Brand button (e.g. "Get Started") */
+  --vp-button-brand-border: transparent;
+  --vp-button-brand-text: #fff;
+  --vp-button-brand-bg: #1e5128;
+  --vp-button-brand-hover-border: transparent;
+  --vp-button-brand-hover-text: #fff;
+  --vp-button-brand-hover-bg: #276832;
+  --vp-button-brand-active-border: transparent;
+  --vp-button-brand-active-text: #fff;
+  --vp-button-brand-active-bg: #174220;
+
+  /* Home hero name gradient */
+  --vp-home-hero-name-color: transparent;
+  --vp-home-hero-name-background: linear-gradient(135deg, #1e5128, #2d7a3a);
+
+  /* Home hero image glow */
+  --vp-home-hero-image-background-image: linear-gradient(135deg, rgba(30, 81, 40, 0.2), rgba(45, 122, 58, 0.2));
+  --vp-home-hero-image-filter: blur(56px);
+}
+
+.dark {
+  --vp-c-brand-1: #3ba55c;
+  --vp-c-brand-2: #4ecca3;
+  --vp-c-brand-3: #5fd68d;
+  --vp-c-brand-soft: rgba(58, 181, 92, 0.16);
+
+  --vp-button-brand-bg: #1e5128;
+  --vp-button-brand-hover-bg: #276832;
+  --vp-button-brand-active-bg: #174220;
+
+  --vp-home-hero-name-background: linear-gradient(135deg, #3ba55c, #4ecca3);
+  --vp-home-hero-image-background-image: linear-gradient(135deg, rgba(58, 181, 92, 0.3), rgba(30, 81, 40, 0.3));
+}
