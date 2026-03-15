@@ -6,8 +6,6 @@ import { AgentRouter } from '../agent/agent-router.js';
 import { BehaviorManager } from '../behaviors/behavior-manager.js';
 import { MemoryDistiller } from '../memory/memory-distiller.js';
 import { ToolExecutor } from '../tools/tool-executor.js';
-import type { IClientChannel } from '../types/session-client.js';
-import type { SessionClientSender } from '../types/session-client.js';
 import { ClientSenderAdapter } from '../transport/client-sender-adapter.js';
 import { GeminiLiveTransport } from '../transport/gemini-live-transport.js';
 import type { MainAgent, SubagentConfig } from '../types/agent.js';
@@ -15,12 +13,10 @@ import type { BehaviorCategory } from '../types/behavior.js';
 import type { ConversationHistoryStore } from '../types/history.js';
 import type { FrameworkHooks } from '../types/hooks.js';
 import type { MemoryStore } from '../types/memory.js';
+import type { IClientChannel } from '../types/session-client.js';
+import type { SessionClientSender } from '../types/session-client.js';
 import type { LLMTransport, LLMTransportError, STTProvider } from '../types/transport.js';
-import type {
-	ArtifactRef,
-	ArtifactStore,
-	SaveArtifactParams,
-} from '../types/workspace.js';
+import type { ArtifactRef, ArtifactStore, SaveArtifactParams } from '../types/workspace.js';
 import { BackgroundNotificationQueue } from './background-notification-queue.js';
 import { ConversationContext } from './conversation-context.js';
 import { ConversationHistoryWriter } from './conversation-history-writer.js';

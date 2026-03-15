@@ -124,7 +124,8 @@ export class MemoryDistiller {
 					abortSignal: controller.signal,
 				});
 
-				const facts: MemoryFact[] = object.facts.map((f) => ({
+				const parsed = object as z.infer<typeof factsSchema>;
+				const facts: MemoryFact[] = parsed.facts.map((f) => ({
 					...f,
 					timestamp: Date.now(),
 				}));

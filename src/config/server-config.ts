@@ -60,8 +60,7 @@ export interface ServerConfig {
 export function loadConfig(): ServerConfig {
 	const port = Number(process.env.PORT) || 9900;
 	const host = process.env.HOST || '0.0.0.0';
-	const llmProvider: LLMProvider =
-		process.env.LLM_PROVIDER === 'openai' ? 'openai' : 'gemini';
+	const llmProvider: LLMProvider = process.env.LLM_PROVIDER === 'openai' ? 'openai' : 'gemini';
 	const apiKey = process.env.GEMINI_API_KEY || '';
 	const openaiApiKey = process.env.OPENAI_API_KEY || '';
 
