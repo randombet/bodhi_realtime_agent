@@ -6,10 +6,10 @@ import type { ConversationHistoryStore } from '../../src/types/history.js';
 import type { ToolContext, ToolDefinition } from '../../src/types/tool.js';
 
 /**
- * Build a minimal session config and extract the downloadHistory tool
+ * Build a minimal session config and extract the session_data_action tool
  * from the main agent's tools array.
  */
-function getDownloadHistoryTool(
+function getSessionDataActionTool(
 	conversationHistoryStore?: ConversationHistoryStore,
 ): ToolDefinition {
 	const config = createBodhiSessionConfig({
@@ -28,8 +28,8 @@ function getDownloadHistoryTool(
 		getSessionRef: () => null,
 	});
 	const mainAgent = config.agents[0];
-	const tool = mainAgent.tools.find((t) => t.name === 'download_conversation_history');
-	if (!tool) throw new Error('download_conversation_history tool not found');
+	const tool = mainAgent.tools.find((t) => t.name === 'session_data_action');
+	if (!tool) throw new Error('session_data_action tool not found');
 	return tool;
 }
 
@@ -69,14 +69,14 @@ function createMockStore(overrides?: Partial<ConversationHistoryStore>): Convers
 	};
 }
 
-describe('download_conversation_history tool', () => {
+describe('session_data_action tool (download_history)', () => {
 	it('sends conversation history to client and returns success', async () => {
 		const store = createMockStore();
-		const tool = getDownloadHistoryTool(store);
+		const tool = getSessionDataActionTool(store);
 		const ctx = createMockCtx();
 		const before = Date.now();
 
-		const result = await tool.execute({}, ctx);
+		const result = await tool.execute({ action: 'download_history' }, ctx);
 
 		expect(ctx.sendJsonToClient).toHaveBeenCalledOnce();
 		const call = (ctx.sendJsonToClient as ReturnType<typeof vi.fn>).mock.calls[0][0];
@@ -95,10 +95,10 @@ describe('download_conversation_history tool', () => {
 	});
 
 	it('returns error when conversationHistoryStore is undefined', async () => {
-		const tool = getDownloadHistoryTool(undefined);
+		const tool = getSessionDataActionTool(undefined);
 		const ctx = createMockCtx();
 
-		const result = await tool.execute({}, ctx);
+		const result = await tool.execute({ action: 'download_history' }, ctx);
 
 		expect(result).toEqual({
 			status: 'error',
@@ -109,10 +109,10 @@ describe('download_conversation_history tool', () => {
 
 	it('returns error when sendJsonToClient is unavailable', async () => {
 		const store = createMockStore();
-		const tool = getDownloadHistoryTool(store);
+		const tool = getSessionDataActionTool(store);
 		const ctx = createMockCtx({ sendJsonToClient: undefined });
 
-		const result = await tool.execute({}, ctx);
+		const result = await tool.execute({ action: 'download_history' }, ctx);
 
 		expect(result).toEqual({
 			status: 'error',
@@ -125,10 +125,10 @@ describe('download_conversation_history tool', () => {
 			getSession: vi.fn(async () => null),
 			getSessionItems: vi.fn(async () => []),
 		});
-		const tool = getDownloadHistoryTool(store);
+		const tool = getSessionDataActionTool(store);
 		const ctx = createMockCtx();
 
-		const result = await tool.execute({}, ctx);
+		const result = await tool.execute({ action: 'download_history' }, ctx);
 
 		expect(ctx.sendJsonToClient).toHaveBeenCalledOnce();
 		const call = (ctx.sendJsonToClient as ReturnType<typeof vi.fn>).mock.calls[0][0];
@@ -153,10 +153,13 @@ describe('download_conversation_history tool', () => {
 		const store = createMockStore({
 			getSessionItems: vi.fn(async () => largeItems),
 		});
-		const tool = getDownloadHistoryTool(store);
+		const tool = getSessionDataActionTool(store);
 		const ctx = createMockCtx();
 
-		const result = (await tool.execute({}, ctx)) as { status: string; message: string };
+		const result = (await tool.execute({ action: 'download_history' }, ctx)) as {
+			status: string;
+			message: string;
+		};
 
 		expect(result.status).toBe('error');
 		expect(result.message).toMatch(/too large/);
@@ -165,10 +168,10 @@ describe('download_conversation_history tool', () => {
 
 	it('calls getSession and getSessionItems with ctx.sessionId', async () => {
 		const store = createMockStore();
-		const tool = getDownloadHistoryTool(store);
+		const tool = getSessionDataActionTool(store);
 		const ctx = createMockCtx();
 
-		await tool.execute({}, ctx);
+		await tool.execute({ action: 'download_history' }, ctx);
 
 		expect(store.getSession).toHaveBeenCalledWith('sess_test');
 		expect(store.getSessionItems).toHaveBeenCalledWith('sess_test');
