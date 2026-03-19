@@ -59,7 +59,7 @@
     "lint": "biome check src/ test/",
     "lint:fix": "biome check --fix src/ test/",
     "typecheck": "tsc --noEmit",
-    "prepare": "git config core.hooksPath .githooks",
+    "prepare": "git rev-parse --git-dir > /dev/null 2>&1 && git config core.hooksPath .githooks || true",
     "prepublishOnly": "pnpm build && pnpm test",
     "docs:dev": "vitepress dev docs",
     "docs:build": "typedoc && vitepress build docs",
