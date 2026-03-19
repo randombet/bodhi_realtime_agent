@@ -60,6 +60,7 @@
     "lint:fix": "biome check --fix src/ test/",
     "typecheck": "tsc --noEmit",
     "prepare": "git rev-parse --git-dir > /dev/null 2>&1 && git config core.hooksPath .githooks || true",
+    "postinstall": "[ -d dist ] || (command -v tsup > /dev/null 2>&1 && tsup || true)",
     "prepublishOnly": "pnpm build && pnpm test",
     "docs:dev": "vitepress dev docs",
     "docs:build": "typedoc && vitepress build docs",
