@@ -121,13 +121,13 @@ export class VoiceSession {
 	private directiveManager = new DirectiveManager();
 	private transcriptManager!: TranscriptManager;
 	/** Whether a client WebSocket connection is currently active. */
-	private clientConnected = false;
+	private _clientConnected = false;
+	/** Whether a browser client is currently connected via WebSocket. */
+	get clientConnected(): boolean {
+		return this._clientConnected;
+	}
 	private notificationQueue!: BackgroundNotificationQueue;
 	private interactionMode = new InteractionModeManager();
-	/** Tracks consecutive reconnect attempts to prevent infinite reconnect storms. */
-	private reconnectAttempts = 0;
-	private static readonly MAX_RECONNECT_ATTEMPTS = 3;
-	private static readonly RECONNECT_BACKOFF_MS = [1000, 2000, 4000];
 
 	constructor(config: VoiceSessionConfig) {
 		this.config = config;
@@ -463,6 +463,10 @@ export class VoiceSession {
 
 	/** Gracefully shut down: disconnect Gemini, stop the WebSocket server, transition to CLOSED. */
 	async close(_reason = 'normal'): Promise<void> {
+		this.log(
+			`close() called (reason=${_reason}, state=${this.sessionManager.state}, stack=${new Error().stack?.split('\n')[2]?.trim()})`,
+		);
+
 		// Drop any queued background notifications — session is ending
 		this.notificationQueue.clear();
 
@@ -516,7 +520,7 @@ export class VoiceSession {
 		this.directiveManager.clearAgent();
 
 		// Send the new agent's greeting if configured
-		if (this.clientConnected) {
+		if (this._clientConnected) {
 			this.sendGreeting();
 		}
 	}
@@ -551,7 +555,7 @@ export class VoiceSession {
 	// --- Gemini event handlers ---
 
 	private handleSetupComplete(_sessionId: string): void {
-		this.log(`Gemini setup complete (clientConnected=${this.clientConnected})`);
+		this.log(`Gemini setup complete (clientConnected=${this._clientConnected})`);
 		if (this.sessionManager.state === 'CONNECTING') {
 			this.sessionManager.transitionTo('ACTIVE');
 		}
@@ -562,15 +566,12 @@ export class VoiceSession {
 		) {
 			return;
 		}
-		if (this.clientConnected) {
+		if (this._clientConnected) {
 			this.sendGreeting();
 		}
 	}
 
 	private handleTurnComplete(): void {
-		// A completed turn means the connection is healthy — reset reconnect counter
-		this.reconnectAttempts = 0;
-
 		// ORDERING: STT commit + cleanup BEFORE turnId increment.
 		// This ensures commit(turnId) uses the turn being completed, and
 		// stale-drop (turnId < this.turnId) correctly rejects prior-turn results.
@@ -783,8 +784,10 @@ export class VoiceSession {
 	}
 
 	private handleClientConnected(): void {
-		this.log(`Client connected (geminiActive=${this.sessionManager.isActive})`);
-		this.clientConnected = true;
+		this.log(
+			`Client connected (geminiActive=${this.sessionManager.isActive}, state=${this.sessionManager.state})`,
+		);
+		this._clientConnected = true;
 
 		// Send audio format config so the client can negotiate correct sample rates
 		this.clientTransport.sendJsonToClient({
@@ -794,13 +797,76 @@ export class VoiceSession {
 
 		this.behaviorManager?.sendCatalog();
 		if (this.sessionManager.isActive) {
-			this.sendGreeting();
+			if (this.turnId === 0) {
+				this.sendGreeting();
+			} else {
+				// Client reconnected mid-session — replay context summary silently
+				const items = this.conversationContext.items;
+				const recent = items
+					.filter((item) => item.role === 'user' || item.role === 'assistant')
+					.slice(-10)
+					.map((item) => `${item.role}: ${item.content.slice(0, 150)}`)
+					.join('\n');
+				if (recent) {
+					this.transport.sendContent(
+						[
+							{
+								role: 'user',
+								text: `[System: The client reconnected. Here is the recent conversation for context. Do not repeat or acknowledge this — just continue naturally.]\n${recent}`,
+							},
+						],
+						false,
+					);
+					this.log('Injected conversation context on client reconnect');
+				}
+			}
+		} else if (this.sessionManager.state === 'CLOSED') {
+			// Gemini connection dropped (idle timeout / GoAway) — reconnect fresh
+			this.log('Gemini inactive — reconnecting for new client...');
+			this.sessionManager.transitionTo('CONNECTING');
+			const connectPromise = this.config.transport
+				? this.transport.connect()
+				: this.transport.connect({
+						auth: { type: 'api_key', apiKey: this.config.apiKey },
+						model: this.config.geminiModel ?? 'gemini-live-2.5-flash-preview',
+					});
+			connectPromise
+				.then(() => {
+					this.log('Gemini reconnected for client');
+					// Build a condensed context from conversation history
+					const items = this.conversationContext.items;
+					const recentMessages = items
+						.filter((item) => item.role === 'user' || item.role === 'assistant')
+						.slice(-10)
+						.map((item) => `${item.role}: ${item.content.slice(0, 150)}`)
+						.join('\n');
+					const contextSummary = recentMessages
+						? `\n\nPrevious conversation summary (for context, do not repeat):\n${recentMessages}`
+						: '';
+					this.transport.sendContent(
+						[
+							{
+								role: 'user',
+								text: `[System: You just reconnected after being idle. Say "I'm back" briefly. Do NOT repeat the full introduction.]${contextSummary}`,
+							},
+						],
+						true,
+					);
+				})
+				.catch((err) => {
+					this.log(`Gemini reconnect failed: ${err instanceof Error ? err.message : err}`);
+					this.reportError(
+						'reconnect-on-client',
+						err instanceof Error ? err : new Error(String(err)),
+					);
+					this.sessionManager.transitionTo('CLOSED');
+				});
 		}
 	}
 
 	private handleClientDisconnected(): void {
 		this.log('Client disconnected');
-		this.clientConnected = false;
+		this._clientConnected = false;
 	}
 
 	// --- Error handling ---
@@ -814,35 +880,11 @@ export class VoiceSession {
 	private handleTransportClose(code?: number, reason?: string): void {
 		const detail = code != null ? ` code=${code}${reason ? ` reason="${reason}"` : ''}` : '';
 		this.log(`Transport closed (state=${this.sessionManager.state}${detail})`);
-		if (this.sessionManager.state === 'ACTIVE') {
-			// Unexpected close — try to reconnect with backoff and retry limit
-			const handle = this.sessionManager.resumptionHandle;
-			if (handle && this.reconnectAttempts < VoiceSession.MAX_RECONNECT_ATTEMPTS) {
-				const attempt = this.reconnectAttempts++;
-				const delay = VoiceSession.RECONNECT_BACKOFF_MS[attempt] ?? 4000;
-				this.log(
-					`Reconnect attempt ${attempt + 1}/${VoiceSession.MAX_RECONNECT_ATTEMPTS} in ${delay}ms`,
-				);
-				this.sessionManager.transitionTo('RECONNECTING');
-				setTimeout(() => {
-					this.transport
-						.reconnect({ conversationHistory: this.conversationContext.toReplayContent() })
-						.then(() => {
-							this.sessionManager.transitionTo('ACTIVE');
-						})
-						.catch((err) => {
-							this.reportError('reconnect', err);
-							this.sessionManager.transitionTo('CLOSED');
-						});
-				}, delay);
-			} else {
-				if (this.reconnectAttempts >= VoiceSession.MAX_RECONNECT_ATTEMPTS) {
-					this.log(
-						`Reconnect limit reached (${VoiceSession.MAX_RECONNECT_ATTEMPTS} attempts), giving up`,
-					);
-				}
-				this.sessionManager.transitionTo('CLOSED');
-			}
+		if (this.sessionManager.state === 'ACTIVE' || this.sessionManager.state === 'RECONNECTING') {
+			// Go to CLOSED — the client-reconnect path in handleClientConnected()
+			// will do a fresh connect (no history replay) when a client connects.
+			this.log('Gemini disconnected — will reconnect fresh when client connects');
+			this.sessionManager.transitionTo('CLOSED');
 		}
 	}
 

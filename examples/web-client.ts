@@ -20,7 +20,7 @@ const HTML = /* html */ `<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Bodhi Voice Agent</title>
+<title>Sutando</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -122,8 +122,8 @@ const HTML = /* html */ `<!DOCTYPE html>
 </head>
 <body>
 
-<h1>Bodhi Voice Agent</h1>
-<p class="sub">Real-time voice client for testing</p>
+<h1>Sutando</h1>
+<p class="sub">Your personal AI</p>
 
 <div class="panel">
   <div class="row">
@@ -382,9 +382,14 @@ function int16ToFloat32(buf) {
 
 // ─── Audio playback (gapless scheduling) ──────────────────
 function playChunk(arrayBuf) {
-  if (!audioCtx) {
-    dbg('playChunk: no audioCtx!', 'err');
-    return;
+  if (!audioCtx || audioCtx.state === 'closed') {
+    try {
+      audioCtx = new AudioContext();
+      dbg('playChunk: created new AudioContext: ' + audioCtx.sampleRate + ' Hz');
+    } catch (e) {
+      dbg('playChunk: failed to create AudioContext: ' + e, 'err');
+      return;
+    }
   }
   if (audioCtx.state === 'suspended') {
     audioCtx.resume();
@@ -568,7 +573,9 @@ function connectWs() {
           serverUserTextReceived = false;
         } else if (msg.type === 'gui.update') {
           const guiData = msg.payload?.data;
-          if (guiData?.type === 'image' && guiData.base64) {
+          if (guiData?.type === 'subprocess_log' && guiData.line) {
+            dbg('subprocess  ' + guiData.line, 'audio');
+          } else if (guiData?.type === 'image' && guiData.base64) {
             const imgEl = document.createElement('div');
             imgEl.className = 't-entry t-system';
             const img = document.createElement('img');
@@ -665,8 +672,22 @@ function connectWs() {
 
   ws.onclose = (e) => {
     dbg('WS closed: code=' + e.code);
-    addSystem('Disconnected from agent.');
+    const wasUserDisconnect = !connected; // user already clicked Disconnect
     doCleanup();
+    if (wasUserDisconnect) {
+      addSystem('Disconnected.');
+    } else {
+      // Unexpected drop (Gemini timeout) — auto-reconnect
+      addSystem('Connection lost — reconnecting in 3s...');
+      setStatus('Reconnecting...', 'error');
+      setTimeout(() => {
+        if (!connected) {
+          dbg('Auto-reconnecting...');
+          addSystem('Reconnecting...');
+          toggle();
+        }
+      }, 3000);
+    }
   };
 
   ws.onerror = () => {
@@ -697,6 +718,7 @@ function toggle() {
     doCleanup();
   } else {
     // Create AudioContext HERE in the click handler so browsers allow playback
+    // Use system default sample rate — it handles resampling from OUTPUT_RATE internally
     audioCtx = new AudioContext();
     dbg('AudioContext created on click: state=' + audioCtx.state + ' sampleRate=' + audioCtx.sampleRate);
 
