@@ -124,6 +124,34 @@ hooks: {
 }
 ```
 
+## Production Best Practices
+
+### Session Routing for Multi-Session Agents
+
+When integrating with stateful external agents (like OpenClaw), each user request may need to be routed to an existing session or a new one. The framework supports this with three components:
+
+- **Session Registry** — Tracks active sessions per user with status (`active`, `completed`, `error`, `stale`), recent conversation turns, and task domain. Caps at 20 sessions with oldest-first eviction.
+- **Session Classifier** — An LLM call (with 3-second hard timeout) that decides whether to continue an existing session, join a provisioning route, or create a new session. Falls back to `create_new` on any error.
+- **Routing Mutex** — Serializes classifier + registry mutations to prevent race conditions when multiple requests arrive simultaneously.
+
+### Concurrent Task Management
+
+For parallel background tasks, use a task manager pattern:
+
+- **Semaphore** — Cap concurrent tasks (default: 10) to prevent unbounded fan-out
+- **Write-lock serialization** — Mutating operations on the same domain (e.g., two calendar reschedules) are serialized, while independent tasks run in parallel
+- **Queue notifications** — When slots are full, notify users via voice and GUI that tasks are queued
+- **Thread TTL** — Idle threads expire after 10 minutes (configurable)
+
+### Artifact Lifecycle
+
+Generated artifacts (images, files) are stored in-memory per session:
+
+- Max 20 artifacts or 50 MB total per session
+- 30-minute TTL with FIFO eviction
+- Artifacts are not persisted to disk — they exist only for the session's lifetime
+- Call `artifactRegistry.dispose()` on session close
+
 ## GitHub Pages Deployment
 
 The documentation site can be deployed to GitHub Pages. See the GitHub Actions workflow in `.github/workflows/docs.yml` for automated deployment on push to `main`.

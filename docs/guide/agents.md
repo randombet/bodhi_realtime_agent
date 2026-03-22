@@ -173,6 +173,36 @@ const newsAgent: MainAgent = {
 
 When `googleSearch` is enabled, Gemini can ground its responses in live search results. This is handled natively by the Gemini API — no additional tool setup needed.
 
+## Persistent Agents (Relay Pattern)
+
+For stateful external agents that maintain their own session (e.g., Claude Code, OpenClaw), use the **relay subagent** pattern. A relay subagent bridges the voice model to the external agent's SDK, managing session lifecycles and question relay.
+
+```typescript
+const askExternalAgent: ToolDefinition = {
+  name: 'ask_agent',
+  description: 'Delegate a task to the external agent',
+  parameters: z.object({
+    task: z.string().describe('The task to perform'),
+    artifactIds: z.array(z.string()).optional().describe('Artifact IDs to attach'),
+  }),
+  execution: 'background',
+  pendingMessage: "I'm working on that now.",
+  async execute(args) {
+    return { task: args.task, artifactIds: args.artifactIds };
+  },
+};
+```
+
+The relay subagent handles the multi-turn conversation with the external agent:
+1. Receives the task via background handoff
+2. Starts an external session (`agent_start`)
+3. If the external agent asks a question, relays it to the user via `ask_user`
+4. Continues until the external agent completes
+
+**Session isolation:** Use `createInstance()` to ensure each concurrent handoff gets its own session state. Without it, concurrent runs share closures and can cause cross-talk.
+
+**Session routing:** For multi-session external agents, an LLM classifier can route follow-up requests to the correct existing session. See [Subagent Patterns](/advanced/subagents#parallel-tasking-with-external-agents) for the full pattern.
+
 ## Multiple Agents Example
 
 Here's a complete multi-agent setup:

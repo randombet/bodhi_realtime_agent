@@ -439,6 +439,20 @@ generate_image subagent ──────► result queued   ↓
 
 **Notification pacing:** Results are flushed one per turn boundary to avoid overwhelming the user with a burst of audio notifications.
 
+### Artifact Passing Between Tools
+
+When a background tool produces an artifact (e.g., a generated image), subsequent tools can reference it by ID via the `artifactIds` parameter:
+
+```typescript
+// Step 1: generate_image stores artifact, returns { artifactId: "art_xxx" }
+// Step 2: User says "email that image to me"
+// Step 3: Main LLM calls ask_openclaw({ task: "email...", artifactIds: ["art_xxx"] })
+// Step 4: Relay subagent resolves artifact from ArtifactRegistry
+// Step 5: chatSend() attaches base64 image to the external agent message
+```
+
+This uses **structured artifact IDs** rather than embedding base64 inline or parsing text descriptions. The `ArtifactRegistry` is per-session, in-memory, with FIFO eviction (max 20 artifacts or 50 MB, 30-min TTL). See [Tools > Artifact Pipeline](/guide/tools#artifact-pipeline-cross-tool-data-flow) for implementation details.
+
 ## Error Handling
 
 | Error | Behavior |
