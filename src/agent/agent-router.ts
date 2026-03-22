@@ -209,11 +209,20 @@ export class AgentRouter {
 	 * @deprecated Use `SubagentSupervisorActor` via `RuntimeOrchestrator` instead.
 	 * Retained for backward compatibility during the actor runtime transition.
 	 */
-	async handoff(toolCall: ToolCall, subagentConfig: SubagentConfig): Promise<SubagentResult> {
+	async handoff(
+		toolCall: ToolCall,
+		subagentConfig: SubagentConfig,
+		externalSignal?: AbortSignal,
+	): Promise<SubagentResult> {
 		const controller = new AbortController();
 		const session = subagentConfig.interactive
 			? new SubagentSessionImpl(toolCall.toolCallId, subagentConfig)
 			: undefined;
+		const onExternalAbort = () => {
+			session?.cancel();
+			controller.abort();
+		};
+		externalSignal?.addEventListener('abort', onExternalAbort);
 
 		// Wire interactive session callbacks so VoiceSession can relay
 		// subagent questions to the user and clean up interaction mode.
@@ -267,6 +276,7 @@ export class AgentRouter {
 
 			return result;
 		} finally {
+			externalSignal?.removeEventListener('abort', onExternalAbort);
 			this.activeSubagents.delete(toolCall.toolCallId);
 		}
 	}

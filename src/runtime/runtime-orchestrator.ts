@@ -19,6 +19,7 @@ import type { AgentDefinition, MainAgentHooks } from './actors/main-agent-actor.
 import { SessionActor } from './actors/session-actor.js';
 import type { ReconnectPolicy } from './actors/session-actor.js';
 import { SubagentSupervisorActor } from './actors/subagent-supervisor-actor.js';
+import type { SubagentExecutionHandler } from './actors/subagent-supervisor-actor.js';
 import { ToolRouterActor } from './actors/tool-router-actor.js';
 import type { InlineToolExecutor, ToolRoutingInfo } from './actors/tool-router-actor.js';
 import { TransportActor } from './actors/transport-actor.js';
@@ -47,6 +48,10 @@ export interface OrchestratorConfig {
 	reconnectPolicy?: Partial<ReconnectPolicy>;
 	/** Agent lifecycle hooks. */
 	hooks?: MainAgentHooks;
+	/** Optional transfer callback used by ToolRouterActor for transfer_to_agent. */
+	onTransferRequested?: (toAgent: string) => Promise<void> | void;
+	/** Optional execution bridge for background subagent workflows. */
+	backgroundExecutor?: SubagentExecutionHandler;
 }
 
 /**
@@ -110,12 +115,14 @@ export class RuntimeOrchestrator {
 			'transport',
 			'subagent-supervisor',
 			'main-agent',
+			config.onTransferRequested,
 		);
 		this.subagentSupervisor = new SubagentSupervisorActor(
 			'subagent-supervisor',
 			sendFn,
 			'transport',
 			'session',
+			config.backgroundExecutor,
 		);
 		this.mainAgentActor = new MainAgentActor(
 			'main-agent',

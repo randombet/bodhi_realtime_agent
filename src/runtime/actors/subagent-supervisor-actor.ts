@@ -13,13 +13,31 @@ import type { Actor } from '../actor-runtime.js';
 import type { ActorId, Envelope } from '../envelope.js';
 import type { RuntimeMessage } from '../messages.js';
 
+/** Execution request emitted when a background subagent workflow is spawned. */
+export interface SubagentExecutionRequest {
+	toolCallId: string;
+	workflowId: string;
+	toolName: string;
+	args: Record<string, unknown>;
+	configName: string;
+	lifetime: 'ephemeral' | 'persistent_session';
+}
+
+/** Optional execution bridge that runs real subagent work for a spawned workflow. */
+export type SubagentExecutionHandler = (
+	request: SubagentExecutionRequest,
+	signal: AbortSignal,
+) => Promise<string>;
+
 /** Tracks a single subagent workflow. */
 interface SubagentWorkflow {
 	toolCallId: string;
 	workflowId: string;
+	toolName: string;
 	configName: string;
 	lifetime: 'ephemeral' | 'persistent_session';
 	state: 'pending' | 'running' | 'waiting_input' | 'completed' | 'failed' | 'cancelled';
+	controller?: AbortController;
 }
 
 export class SubagentSupervisorActor implements Actor {
@@ -32,6 +50,7 @@ export class SubagentSupervisorActor implements Actor {
 		private sendMessage: (type: RuntimeMessage['type'], payload: unknown, to: ActorId) => void,
 		private transportActorId: ActorId,
 		private sessionActorId: ActorId,
+		private executionHandler?: SubagentExecutionHandler,
 	) {
 		this.id = id;
 	}
@@ -111,6 +130,7 @@ export class SubagentSupervisorActor implements Actor {
 		const workflow: SubagentWorkflow = {
 			toolCallId: p.toolCallId,
 			workflowId,
+			toolName: p.toolName,
 			configName: p.configName,
 			lifetime: p.lifetime,
 			state: 'running',
@@ -122,6 +142,13 @@ export class SubagentSupervisorActor implements Actor {
 			{ toolCallId: p.toolCallId, workflowId },
 			this.sessionActorId,
 		);
+
+		// Optional execution bridge: run real subagent work and emit terminal events.
+		if (this.executionHandler) {
+			const controller = new AbortController();
+			workflow.controller = controller;
+			void this.runExecution(workflow, p.args, controller.signal);
+		}
 	}
 
 	private handleCancelRequest(toolCallId: string): void {
@@ -135,6 +162,7 @@ export class SubagentSupervisorActor implements Actor {
 			return;
 		}
 
+		workflow.controller?.abort();
 		workflow.state = 'cancelled';
 		this.sendMessage(
 			'subagent.cancelled',
@@ -202,6 +230,44 @@ export class SubagentSupervisorActor implements Actor {
 
 	private isTerminal(state: SubagentWorkflow['state']): boolean {
 		return state === 'completed' || state === 'failed' || state === 'cancelled';
+	}
+
+	private async runExecution(
+		workflow: SubagentWorkflow,
+		args: Record<string, unknown>,
+		signal: AbortSignal,
+	): Promise<void> {
+		const request: SubagentExecutionRequest = {
+			toolCallId: workflow.toolCallId,
+			workflowId: workflow.workflowId,
+			toolName: workflow.toolName,
+			args,
+			configName: workflow.configName,
+			lifetime: workflow.lifetime,
+		};
+
+		try {
+			const result = await this.executionHandler!(request, signal);
+
+			// Workflow may have been cancelled while execution was in flight.
+			const current = this.workflows.get(workflow.toolCallId);
+			if (!current || this.isTerminal(current.state)) return;
+
+			this.handleCompleted({
+				toolCallId: workflow.toolCallId,
+				workflowId: workflow.workflowId,
+				result,
+			});
+		} catch (err) {
+			// Ignore expected aborts after cancellation.
+			if (signal.aborted || !this.workflows.has(workflow.toolCallId)) return;
+
+			this.handleFailed({
+				toolCallId: workflow.toolCallId,
+				workflowId: workflow.workflowId,
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
 	}
 
 	/** Get the number of active workflows (for observability). */

@@ -3,9 +3,13 @@
 import type { LanguageModelV1 } from 'ai';
 import { resolveInstructions } from '../agent/agent-context.js';
 import { AgentRouter } from '../agent/agent-router.js';
+import { PersistentSubagentManager } from '../agent/persistent-subagent-manager.js';
 import type { SubagentMessage } from '../agent/subagent-session.js';
 import { BehaviorManager } from '../behaviors/behavior-manager.js';
 import { MemoryDistiller } from '../memory/memory-distiller.js';
+import { RuntimeOrchestrator } from '../runtime/runtime-orchestrator.js';
+import { GeminiTransportAdapter } from '../runtime/adapters/gemini-transport-adapter.js';
+import type { ToolRoutingInfo } from '../runtime/actors/tool-router-actor.js';
 import { ToolExecutor } from '../tools/tool-executor.js';
 import { ClientTransport } from '../transport/client-transport.js';
 import { GeminiLiveTransport } from '../transport/gemini-live-transport.js';
@@ -74,6 +78,8 @@ export interface VoiceSessionConfig {
 	};
 	/** Pre-constructed LLM transport. If provided, apiKey/geminiModel/speechConfig/compressionConfig are ignored. */
 	transport?: LLMTransport;
+	/** Orchestration engine for tool routing/subagent lifecycle (default: legacy). */
+	orchestrationMode?: 'legacy' | 'actor';
 }
 
 /**
@@ -109,8 +115,11 @@ export class VoiceSession {
 	private clientTransport: ClientTransport;
 	private agentRouter: AgentRouter;
 	private toolExecutor: ToolExecutor;
-	private toolCallRouter!: ToolCallRouter;
+	private toolCallRouter?: ToolCallRouter;
+	private runtimeOrchestrator?: RuntimeOrchestrator;
+	private runtimeToolRegistry?: Map<string, ToolRoutingInfo>;
 	private subagentConfigs: Record<string, SubagentConfig>;
+	private persistentSubagents = new PersistentSubagentManager();
 	private behaviorManager?: BehaviorManager;
 	private memoryDistiller?: MemoryDistiller;
 	private memoryCacheManager?: MemoryCacheManager;
@@ -269,8 +278,21 @@ export class VoiceSession {
 
 		// Wire LLMTransport property callbacks — works for both injected and default transports
 		this.transport.onAudioOutput = (data) => this.handleAudioOutput(data);
-		this.transport.onToolCall = (calls) => this.toolCallRouter.handleToolCalls(calls);
-		this.transport.onToolCallCancel = (ids) => this.toolCallRouter.handleToolCallCancellation(ids);
+		this.transport.onToolCall = (calls) => {
+			if (this.runtimeOrchestrator) {
+				const names = calls.map((c) => c.name).join(', ');
+				this.log(`Tool calls from LLM: [${names}]`);
+				this.transcriptManager.flushInput();
+				this.transcriptManager.saveOutputPrefix();
+			}
+			this.toolCallRouter?.handleToolCalls(calls);
+		};
+		this.transport.onToolCallCancel = (ids) => {
+			if (this.runtimeOrchestrator) {
+				this.toolExecutor.cancel(ids);
+			}
+			this.toolCallRouter?.handleToolCallCancellation(ids);
+		};
 		this.transport.onTurnComplete = () => this.handleTurnComplete();
 		this.transport.onInterrupted = () => this.handleInterrupted();
 		this.transport.onOutputTranscription = (text) => this.transcriptManager.handleOutput(text);
@@ -390,25 +412,175 @@ export class VoiceSession {
 		this.agentRouter.registerAgents(config.agents);
 		this.agentRouter.setInitialAgent(config.initialAgent);
 
-		// Set up tool call router
-		this.toolCallRouter = new ToolCallRouter({
-			toolExecutor: this.toolExecutor,
-			agentRouter: this.agentRouter,
-			conversationContext: this.conversationContext,
-			notificationQueue: this.notificationQueue,
-			transcriptManager: this.transcriptManager,
-			subagentConfigs: this.subagentConfigs,
-			sendToolResult: (result) => this.transport.sendToolResult(result),
-			transfer: (toAgent) => this.transfer(toAgent),
-			reportError: (component, error) => this.reportError(component, error),
-			log: (msg) => this.log(msg),
-		});
+		if (config.orchestrationMode === 'actor') {
+			this.runtimeToolRegistry = this.buildRuntimeToolRegistry([
+				...(initialAgent?.tools ?? []),
+				...behaviorTools,
+			]);
+
+			this.runtimeOrchestrator = new RuntimeOrchestrator({
+				adapter: new GeminiTransportAdapter(this.transport),
+				tools: this.runtimeToolRegistry,
+				inlineExecutor: {
+					execute: async (call) => {
+						const toolCall = {
+							toolCallId: call.toolCallId,
+							toolName: call.toolName,
+							args: call.args,
+						};
+						const result = await this.toolExecutor.handleToolCall(toolCall);
+						this.conversationContext.addToolCall(toolCall);
+						this.conversationContext.addToolResult(result);
+						return {
+							result: result.error ? { error: result.error } : result.result,
+							error: result.error,
+						};
+					},
+				},
+				clientSend: (message) => this.clientTransport.sendJsonToClient(message),
+				onTransferRequested: async (toAgent) => {
+					await this.transfer(toAgent);
+				},
+				backgroundExecutor: async (request, signal) => {
+					const toolCall = {
+						toolCallId: request.toolCallId,
+						toolName: request.toolName,
+						args: request.args,
+					};
+					const registeredConfig = this.subagentConfigs[request.toolName];
+					if (!registeredConfig) {
+						throw new Error(`No subagent config for tool "${request.toolName}"`);
+					}
+					const hasPendingMessage = !!this.runtimeToolRegistry?.get(request.toolName)?.pendingMessage;
+					this.log(
+						`Background task started: ${request.toolName} (toolCallId=${request.toolCallId}, lifetime=${request.lifetime})`,
+					);
+
+					this.conversationContext.addToolCall(toolCall);
+					try {
+						let resultText: string;
+						const usePersistentRuntimePath =
+							request.lifetime === 'persistent_session' && !!registeredConfig.persistentFactory;
+
+						if (usePersistentRuntimePath) {
+							const persistentKey = request.configName;
+							const factory = registeredConfig.persistentFactory!;
+							await this.persistentSubagents.acquirePersistent(
+								persistentKey,
+								registeredConfig,
+								factory,
+							);
+							resultText = await this.persistentSubagents.invoke(
+								persistentKey,
+								`Execute tool: ${request.toolName}`,
+								request.args,
+								signal,
+							);
+						} else {
+							const subagentConfig = registeredConfig.createInstance
+								? registeredConfig.createInstance()
+								: registeredConfig;
+							const result = await this.agentRouter.handoff(toolCall, subagentConfig, signal);
+							resultText = result.text;
+						}
+
+						this.conversationContext.addToolResult({
+							toolCallId: toolCall.toolCallId,
+							toolName: toolCall.toolName,
+							result: resultText,
+						});
+						if (hasPendingMessage) {
+							this.notificationQueue.sendOrQueue(
+								[
+									{
+										role: 'user',
+										parts: [
+											{
+												text: `[SYSTEM: Background task "${request.toolName}" completed successfully. Result: ${resultText}. Please inform the user now.]`,
+											},
+										],
+									},
+								],
+								true,
+							);
+						}
+						this.log(
+							`Background task completed: ${request.toolName} (toolCallId=${request.toolCallId})`,
+						);
+						return resultText;
+					} catch (err) {
+						this.conversationContext.addToolResult({
+							toolCallId: toolCall.toolCallId,
+							toolName: toolCall.toolName,
+							result: null,
+							error: err instanceof Error ? err.message : String(err),
+						});
+						if (hasPendingMessage) {
+							const msg = err instanceof Error ? err.message : String(err);
+							this.notificationQueue.sendOrQueue(
+								[
+									{
+										role: 'user',
+										parts: [
+											{
+												text: `[SYSTEM: Background task "${request.toolName}" failed: ${msg}. Please apologize and ask how to proceed.]`,
+											},
+										],
+									},
+								],
+								true,
+							);
+						}
+						this.log(
+							`Background task failed: ${request.toolName} (toolCallId=${request.toolCallId})`,
+						);
+						throw err;
+					}
+				},
+				agents: config.agents.map((agent) => ({
+					name: agent.name,
+					instructions: resolveInstructions(agent),
+					tools: agent.tools,
+					providerOptions: agent.providerOptions,
+					onEnter: async () => agent.onEnter?.(this.createAgentContext(agent.name)),
+					onExit: async () => agent.onExit?.(this.createAgentContext(agent.name)),
+				})),
+				initialAgent: config.initialAgent,
+				hooks: {
+					onAgentTransfer: (info) => {
+						this.eventBus.publish('agent.transfer', {
+							sessionId: this.sessionManager.sessionId,
+							fromAgent: info.fromAgent,
+							toAgent: info.toAgent,
+						});
+					},
+					onError: (info) => this.reportError(info.component, info.error),
+				},
+			});
+		} else {
+			// Set up legacy tool call router
+			this.toolCallRouter = new ToolCallRouter({
+				toolExecutor: this.toolExecutor,
+				agentRouter: this.agentRouter,
+				conversationContext: this.conversationContext,
+				notificationQueue: this.notificationQueue,
+				transcriptManager: this.transcriptManager,
+				subagentConfigs: this.subagentConfigs,
+				sendToolResult: (result) => this.transport.sendToolResult(result),
+				transfer: (toAgent) => this.transfer(toAgent),
+				reportError: (component, error) => this.reportError(component, error),
+				log: (msg) => this.log(msg),
+			});
+		}
 	}
 
 	/** Start the client WebSocket server and connect to the LLM transport. */
 	async start(): Promise<void> {
 		await this.sttProvider?.start();
 		await this.memoryCacheManager?.refresh();
+		if (this.runtimeOrchestrator) {
+			await this.runtimeOrchestrator.start();
+		}
 
 		// Restore behavior presets from structured directives (deterministic lookup)
 		if (this.config.memory && this.behaviorManager) {
@@ -473,6 +645,10 @@ export class VoiceSession {
 		}
 
 		await this.sttProvider?.stop();
+		if (this.runtimeOrchestrator) {
+			await this.runtimeOrchestrator.stop();
+		}
+		await this.persistentSubagents.disposeAllPersistent();
 		await this.transport.disconnect();
 		await this.clientTransport.stop();
 
@@ -494,7 +670,18 @@ export class VoiceSession {
 		this.toolExecutor = this.createToolExecutor(agent.name);
 		const behaviorTools = this.behaviorManager?.tools ?? [];
 		this.toolExecutor.register([...agent.tools, ...behaviorTools]);
-		this.toolCallRouter.toolExecutor = this.toolExecutor;
+		if (this.toolCallRouter) {
+			this.toolCallRouter.toolExecutor = this.toolExecutor;
+		}
+		if (this.runtimeToolRegistry) {
+			this.runtimeToolRegistry.clear();
+			for (const [name, info] of this.buildRuntimeToolRegistry([
+				...agent.tools,
+				...behaviorTools,
+			])) {
+				this.runtimeToolRegistry.set(name, info);
+			}
+		}
 
 		// Clear agent-scoped directives on transfer; session-scoped directives persist
 		this.directiveManager.clearAgent();
@@ -514,6 +701,32 @@ export class VoiceSession {
 			(msg) => this.clientTransport.sendJsonToClient(msg),
 			(key, value, scope) => this.directiveManager.set(key, value, scope),
 		);
+	}
+
+	private createAgentContext(agentName: string) {
+		return {
+			sessionId: this.config.sessionId,
+			agentName,
+			injectSystemMessage: (text: string) =>
+				this.conversationContext.addAssistantMessage(`[system] ${text}`),
+			getRecentTurns: (count = 10) => [...this.conversationContext.items].slice(-count),
+			getMemoryFacts: () => this.memoryCacheManager?.facts ?? [],
+		};
+	}
+
+	private buildRuntimeToolRegistry(tools: { name: string; execution: 'inline' | 'background'; pendingMessage?: string }[]): Map<string, ToolRoutingInfo> {
+		const registry = new Map<string, ToolRoutingInfo>();
+		for (const tool of tools) {
+			registry.set(tool.name, {
+				name: tool.name,
+				execution: tool.execution,
+				// Keep the transport tool result name aligned with the model-facing tool name.
+				configName: tool.name,
+				pendingMessage: tool.pendingMessage,
+				lifetime: this.subagentConfigs[tool.name]?.lifetime,
+			});
+		}
+		return registry;
 	}
 
 	// --- Audio fast-path (no EventBus) ---

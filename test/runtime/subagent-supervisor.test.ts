@@ -330,4 +330,32 @@ describe('SubagentSupervisorActor', () => {
 			expect(cancelled).toBeDefined();
 		});
 	});
+
+	// -- Execution bridge -----------------------------------------------------
+
+	describe('execution bridge', () => {
+		it('runs executionHandler and emits completion tool result', async () => {
+			const bridgeMessages: SentMessage[] = [];
+			const send = (type: string, payload: unknown, to: string) => {
+				bridgeMessages.push({ type, payload, to });
+			};
+			const actorWithBridge = new SubagentSupervisorActor(
+				'subagent-supervisor',
+				send,
+				'transport',
+				'session',
+				async () => 'background done',
+			);
+
+			await actorWithBridge.onMessage(spawnEnvelope('tc-bridge', 'ask_openclaw'));
+
+			await new Promise((r) => setTimeout(r, 10));
+			const toolResult = bridgeMessages.find((m) => m.type === 'transport.send_tool_result');
+			expect(toolResult).toBeDefined();
+			expect((toolResult?.payload as { id: string }).id).toBe('tc-bridge');
+			expect(
+				(toolResult?.payload as { result: { result: string } }).result.result,
+			).toBe('background done');
+		});
+	});
 });

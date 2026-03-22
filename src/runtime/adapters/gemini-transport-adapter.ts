@@ -23,15 +23,43 @@ export class GeminiTransportAdapter implements TransportAdapter {
 	onClosed?: (reason?: string) => void;
 
 	constructor(private transport: LLMTransport) {
-		// Wire LLMTransport callbacks to adapter callbacks
-		this.transport.onSessionReady = () => this.onSessionReady?.();
-		this.transport.onTurnComplete = () => this.onTurnComplete?.();
-		this.transport.onInterrupted = () => this.onInterrupted?.();
-		this.transport.onToolCall = (calls) =>
+		// Chain existing LLMTransport callbacks so VoiceSession handlers continue to run.
+		const prevOnSessionReady = this.transport.onSessionReady;
+		const prevOnTurnComplete = this.transport.onTurnComplete;
+		const prevOnInterrupted = this.transport.onInterrupted;
+		const prevOnToolCall = this.transport.onToolCall;
+		const prevOnToolCallCancel = this.transport.onToolCallCancel;
+		const prevOnError = this.transport.onError;
+		const prevOnClose = this.transport.onClose;
+
+		this.transport.onSessionReady = (sessionId: string) => {
+			prevOnSessionReady?.(sessionId);
+			this.onSessionReady?.();
+		};
+		this.transport.onTurnComplete = () => {
+			prevOnTurnComplete?.();
+			this.onTurnComplete?.();
+		};
+		this.transport.onInterrupted = () => {
+			prevOnInterrupted?.();
+			this.onInterrupted?.();
+		};
+		this.transport.onToolCall = (calls) => {
+			prevOnToolCall?.(calls);
 			this.onToolCallReceived?.(calls.map((c) => ({ id: c.id, name: c.name, args: c.args })));
-		this.transport.onToolCallCancel = (ids) => this.onToolCallCancelled?.(ids);
-		this.transport.onError = (err) => this.onError?.(err.error.message, err.recoverable);
-		this.transport.onClose = (_code, reason) => this.onClosed?.(reason);
+		};
+		this.transport.onToolCallCancel = (ids) => {
+			prevOnToolCallCancel?.(ids);
+			this.onToolCallCancelled?.(ids);
+		};
+		this.transport.onError = (err) => {
+			prevOnError?.(err);
+			this.onError?.(err.error.message, err.recoverable);
+		};
+		this.transport.onClose = (code, reason) => {
+			prevOnClose?.(code, reason);
+			this.onClosed?.(reason);
+		};
 	}
 
 	// -- Outbound commands ---------------------------------------------------

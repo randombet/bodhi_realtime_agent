@@ -44,6 +44,7 @@ export class ToolRouterActor implements Actor {
 		private transportActorId: ActorId,
 		private subagentSupervisorId: ActorId,
 		private mainAgentActorId: ActorId,
+		private onTransferRequested?: (toAgent: string) => Promise<void> | void,
 	) {
 		this.id = id;
 	}
@@ -82,26 +83,45 @@ export class ToolRouterActor implements Actor {
 	}): Promise<void> {
 		// Check for transfer tool
 		if (call.name === 'transfer_to_agent' && call.args.agent_name) {
-			const transferCorrelationId = `transfer-${Date.now()}-${call.id}`;
-			this.sendMessage(
-				'agent.transfer_requested',
-				{
-					toAgent: call.args.agent_name as string,
-					transferCorrelationId,
-				},
-				this.mainAgentActorId,
-			);
-			// Send immediate acknowledgement to transport
-			this.sendMessage(
-				'transport.send_tool_result',
-				{
-					id: call.id,
-					name: call.name,
-					result: { status: 'transferred' },
-					scheduling: 'immediate',
-				},
-				this.transportActorId,
-			);
+			const toAgent = call.args.agent_name as string;
+			try {
+				if (this.onTransferRequested) {
+					await this.onTransferRequested(toAgent);
+				} else {
+					const transferCorrelationId = `transfer-${Date.now()}-${call.id}`;
+					this.sendMessage(
+						'agent.transfer_requested',
+						{
+							toAgent,
+							transferCorrelationId,
+						},
+						this.mainAgentActorId,
+					);
+				}
+				// Send immediate acknowledgement to transport
+				this.sendMessage(
+					'transport.send_tool_result',
+					{
+						id: call.id,
+						name: call.name,
+						result: { status: 'transferred' },
+						scheduling: 'immediate',
+					},
+					this.transportActorId,
+				);
+			} catch (err) {
+				const errorMsg = err instanceof Error ? err.message : String(err);
+				this.sendMessage(
+					'transport.send_tool_result',
+					{
+						id: call.id,
+						name: call.name,
+						result: { error: errorMsg },
+						scheduling: 'immediate',
+					},
+					this.transportActorId,
+				);
+			}
 			return;
 		}
 

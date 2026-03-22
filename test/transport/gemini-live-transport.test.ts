@@ -465,6 +465,22 @@ describe('GeminiLiveTransport', () => {
 				functionResponses: [{ id: 'fc_1', name: 'search', response: { results: ['a', 'b'] } }],
 			});
 		});
+
+		it('wraps primitive results into an object payload', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			transport.sendToolResult({
+				id: 'fc_2',
+				name: 'ask_openclaw',
+				result: 'done',
+				scheduling: 'when_idle',
+			});
+
+			expect(mockSession.sendToolResponse).toHaveBeenCalledWith({
+				functionResponses: [{ id: 'fc_2', name: 'ask_openclaw', response: { result: 'done' } }],
+			});
+		});
 	});
 
 	describe('transferSession', () => {
@@ -491,6 +507,30 @@ describe('GeminiLiveTransport', () => {
 				turns: [
 					{ role: 'user', parts: [{ text: 'hello' }] },
 					{ role: 'model', parts: [{ text: 'hi' }] },
+				],
+				turnComplete: false,
+			});
+		});
+
+		it('replay wraps primitive tool results into functionResponse objects', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			mockSession.sendClientContent.mockClear();
+
+			await transport.transferSession(
+				{ instructions: 'New agent', tools: [] },
+				{
+					conversationHistory: [
+						{ type: 'tool_call', id: 'tc_1', name: 'ask_openclaw', args: { task: 'x' } },
+						{ type: 'tool_result', id: 'tc_1', name: 'ask_openclaw', result: 'sent' },
+					],
+				},
+			);
+
+			expect(mockSession.sendClientContent).toHaveBeenCalledWith({
+				turns: [
+					{ role: 'model', parts: [{ functionCall: { name: 'ask_openclaw', args: { task: 'x' } } }] },
+					{ role: 'user', parts: [{ functionResponse: { name: 'ask_openclaw', response: { result: 'sent' } } }] },
 				],
 				turnComplete: false,
 			});
