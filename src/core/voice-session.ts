@@ -80,6 +80,17 @@ export interface VoiceSessionConfig {
 	transport?: LLMTransport;
 	/** Orchestration engine for tool routing/subagent lifecycle (default: legacy). */
 	orchestrationMode?: 'legacy' | 'actor';
+	/** Optional per-session artifact registry for cross-tool binary sharing (images, documents). */
+	artifactRegistry?: {
+		store(
+			base64: string,
+			mimeType: string,
+			description: string,
+			source?: string,
+			fileName?: string,
+		): string;
+		dispose(): void;
+	};
 }
 
 /**
@@ -653,6 +664,7 @@ export class VoiceSession {
 			await this.runtimeOrchestrator.stop();
 		}
 		await this.persistentSubagents.disposeAllPersistent();
+		this.config.artifactRegistry?.dispose();
 		await this.transport.disconnect();
 		await this.clientTransport.stop();
 
@@ -962,6 +974,26 @@ export class VoiceSession {
 
 		// Record in conversation context
 		this.conversationContext.addUserMessage(`[Uploaded file: ${fileName ?? 'file'}]`);
+
+		// Store in artifact registry for cross-tool access (supported binary image types only).
+		if (this.config.artifactRegistry && mimeType.startsWith('image/')) {
+			try {
+				this.config.artifactRegistry.store(
+					base64,
+					mimeType,
+					fileName ?? `upload_${Date.now()}`,
+					'uploaded',
+					fileName,
+				);
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				this.log(`Failed to store artifact: ${msg}`);
+				this.eventBus.publish('gui.notification', {
+					sessionId: this.config.sessionId,
+					message: `File uploaded to voice session but cannot be forwarded to agents: ${msg}`,
+				});
+			}
+		}
 	}
 
 	private handleTextInput(text: string): void {
