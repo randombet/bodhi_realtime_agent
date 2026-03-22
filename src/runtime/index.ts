@@ -36,6 +36,7 @@ export type { ClientSendFn } from './actors/client-gateway-actor.js';
 // ---------------------------------------------------------------------------
 
 export type { TransportAdapter, AdapterToolCall } from './adapters/transport-adapter.js';
+export { BaseTransportAdapter } from './adapters/base-transport-adapter.js';
 
 // ---------------------------------------------------------------------------
 // Utilities
