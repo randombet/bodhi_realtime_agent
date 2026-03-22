@@ -2,6 +2,14 @@
 
 Subagents run in the background using the Vercel AI SDK while the voice model continues speaking to the user. They handle long-running operations that would otherwise block the voice stream.
 
+::: tip Persistent Runtime Flow
+For the actor-runtime persistent path (instance reuse, lifecycle states, and OpenClaw example), see [Persistent Subagent Lifecycle](/advanced/persistent-subagent-lifecycle).
+:::
+
+::: info OpenClaw Demo Routing Note
+In `app/openclaw-demo.ts`, OpenClaw is not configured to generate images or videos. Media generation requests should route to `generate_image` / `generate_video`, even if the user explicitly mentions OpenClaw.
+:::
+
 ## Why Subagents?
 
 The Realtime API is real-time — when you call an inline tool, the voice stream pauses until the tool returns. For operations that take more than a couple of seconds (report generation, multi-step workflows, coding tasks), subagents let the conversation continue naturally:
