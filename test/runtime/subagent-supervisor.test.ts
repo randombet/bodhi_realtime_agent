@@ -353,9 +353,9 @@ describe('SubagentSupervisorActor', () => {
 			const toolResult = bridgeMessages.find((m) => m.type === 'transport.send_tool_result');
 			expect(toolResult).toBeDefined();
 			expect((toolResult?.payload as { id: string }).id).toBe('tc-bridge');
-			expect(
-				(toolResult?.payload as { result: { result: string } }).result.result,
-			).toBe('background done');
+			expect((toolResult?.payload as { result: { result: string } }).result.result).toBe(
+				'background done',
+			);
 		});
 	});
 });

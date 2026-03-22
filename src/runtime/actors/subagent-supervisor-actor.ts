@@ -247,7 +247,10 @@ export class SubagentSupervisorActor implements Actor {
 		};
 
 		try {
-			const result = await this.executionHandler!(request, signal);
+			// Guard: runExecution is only called when executionHandler is defined
+			// (checked in handleSpawnRequest), but guard defensively.
+			if (!this.executionHandler) return;
+			const result = await this.executionHandler(request, signal);
 
 			// Workflow may have been cancelled while execution was in flight.
 			const current = this.workflows.get(workflow.toolCallId);

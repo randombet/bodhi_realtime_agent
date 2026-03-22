@@ -529,8 +529,14 @@ describe('GeminiLiveTransport', () => {
 
 			expect(mockSession.sendClientContent).toHaveBeenCalledWith({
 				turns: [
-					{ role: 'model', parts: [{ functionCall: { name: 'ask_openclaw', args: { task: 'x' } } }] },
-					{ role: 'user', parts: [{ functionResponse: { name: 'ask_openclaw', response: { result: 'sent' } } }] },
+					{
+						role: 'model',
+						parts: [{ functionCall: { name: 'ask_openclaw', args: { task: 'x' } } }],
+					},
+					{
+						role: 'user',
+						parts: [{ functionResponse: { name: 'ask_openclaw', response: { result: 'sent' } } }],
+					},
 				],
 				turnComplete: false,
 			});

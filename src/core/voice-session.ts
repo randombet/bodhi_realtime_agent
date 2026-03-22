@@ -7,9 +7,9 @@ import { PersistentSubagentManager } from '../agent/persistent-subagent-manager.
 import type { SubagentMessage } from '../agent/subagent-session.js';
 import { BehaviorManager } from '../behaviors/behavior-manager.js';
 import { MemoryDistiller } from '../memory/memory-distiller.js';
-import { RuntimeOrchestrator } from '../runtime/runtime-orchestrator.js';
-import { GeminiTransportAdapter } from '../runtime/adapters/gemini-transport-adapter.js';
 import type { ToolRoutingInfo } from '../runtime/actors/tool-router-actor.js';
+import { GeminiTransportAdapter } from '../runtime/adapters/gemini-transport-adapter.js';
+import { RuntimeOrchestrator } from '../runtime/runtime-orchestrator.js';
 import { ToolExecutor } from '../tools/tool-executor.js';
 import { ClientTransport } from '../transport/client-transport.js';
 import { GeminiLiveTransport } from '../transport/gemini-live-transport.js';
@@ -451,7 +451,8 @@ export class VoiceSession {
 					if (!registeredConfig) {
 						throw new Error(`No subagent config for tool "${request.toolName}"`);
 					}
-					const hasPendingMessage = !!this.runtimeToolRegistry?.get(request.toolName)?.pendingMessage;
+					const hasPendingMessage = !!this.runtimeToolRegistry?.get(request.toolName)
+						?.pendingMessage;
 					this.log(
 						`Background task started: ${request.toolName} (toolCallId=${request.toolCallId}, lifetime=${request.lifetime})`,
 					);
@@ -464,7 +465,10 @@ export class VoiceSession {
 
 						if (usePersistentRuntimePath) {
 							const persistentKey = request.configName;
-							const factory = registeredConfig.persistentFactory!;
+							// Safe: usePersistentRuntimePath checks !!registeredConfig.persistentFactory above
+							const factory = registeredConfig.persistentFactory as NonNullable<
+								typeof registeredConfig.persistentFactory
+							>;
 							await this.persistentSubagents.acquirePersistent(
 								persistentKey,
 								registeredConfig,
@@ -714,7 +718,9 @@ export class VoiceSession {
 		};
 	}
 
-	private buildRuntimeToolRegistry(tools: { name: string; execution: 'inline' | 'background'; pendingMessage?: string }[]): Map<string, ToolRoutingInfo> {
+	private buildRuntimeToolRegistry(
+		tools: { name: string; execution: 'inline' | 'background'; pendingMessage?: string }[],
+	): Map<string, ToolRoutingInfo> {
 		const registry = new Map<string, ToolRoutingInfo>();
 		for (const tool of tools) {
 			registry.set(tool.name, {
