@@ -1275,6 +1275,12 @@ var SessionManager = class {
   get resumptionHandle() {
     return this._resumptionHandle;
   }
+  /** Reset to CREATED state — allows a fresh session after CLOSED. */
+  reset() {
+    this._state = "CREATED";
+    this._resumptionHandle = null;
+    this._bufferedMessages = [];
+  }
   transitionTo(newState) {
     const allowed = VALID_TRANSITIONS[this._state];
     if (!allowed.includes(newState)) {
@@ -3274,7 +3280,8 @@ ${recent}`
         }
       }
     } else if (this.sessionManager.state === "CLOSED") {
-      this.log("Gemini inactive \u2014 reconnecting for new client...");
+      this.log("Gemini inactive \u2014 resetting session and reconnecting for new client...");
+      this.sessionManager.reset();
       this.sessionManager.transitionTo("CONNECTING");
       const connectPromise = this.config.transport ? this.transport.connect() : this.transport.connect({
         auth: { type: "api_key", apiKey: this.config.apiKey },

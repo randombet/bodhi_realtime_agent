@@ -829,7 +829,8 @@ export class VoiceSession {
 			}
 		} else if (this.sessionManager.state === 'CLOSED') {
 			// Gemini connection dropped (idle timeout / GoAway) — reconnect fresh
-			this.log('Gemini inactive — reconnecting for new client...');
+			this.log('Gemini inactive — resetting session and reconnecting for new client...');
+			this.sessionManager.reset();
 			this.sessionManager.transitionTo('CONNECTING');
 			const connectPromise = this.config.transport
 				? this.transport.connect()

@@ -966,6 +966,8 @@ declare class SessionManager {
     get isActive(): boolean;
     get isDisconnected(): boolean;
     get resumptionHandle(): string | null;
+    /** Reset to CREATED state — allows a fresh session after CLOSED. */
+    reset(): void;
     transitionTo(newState: SessionState): void;
     updateResumptionHandle(handle: string): void;
     bufferMessage(message: ClientMessage): void;

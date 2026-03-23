@@ -57,6 +57,13 @@ export class SessionManager {
 		return this._resumptionHandle;
 	}
 
+	/** Reset to CREATED state — allows a fresh session after CLOSED. */
+	reset(): void {
+		this._state = 'CREATED';
+		this._resumptionHandle = null;
+		this._bufferedMessages = [];
+	}
+
 	transitionTo(newState: SessionState): void {
 		const allowed = VALID_TRANSITIONS[this._state];
 		if (!allowed.includes(newState)) {
