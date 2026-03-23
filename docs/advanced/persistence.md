@@ -102,6 +102,29 @@ interface SessionStore {
 }
 ```
 
+## ConversationHistoryWriter
+
+The framework includes a `ConversationHistoryWriter` that subscribes to EventBus events and batches writes to `ConversationHistoryStore` at turn boundaries:
+
+```
+EventBus                          ConversationHistoryWriter         Store
+  │                                         │                        │
+  │──── turn.end ──────────────────►        │                        │
+  │                                  getItemsSinceCheckpoint()       │
+  │                                         │── batch insert ──────► │
+  │──── agent.transfer ────────────►        │                        │
+  │                                  flush pending items             │
+  │                                         │── batch insert ──────► │
+  │──── session.close ─────────────►        │                        │
+  │                                  final flush + SessionReport     │
+  │                                         │── write report ──────► │
+```
+
+**Key rules:**
+- Never call `ConversationHistoryStore.save()` directly — the writer handles all persistence
+- New modules that produce conversation items must emit via EventBus, not write to storage directly
+- Only `VoiceSession` and its direct children should mutate `ConversationContext`
+
 ## Putting It All Together
 
 ```typescript

@@ -168,6 +168,47 @@ ctx.setDirective?.('pacing', null);
 
 Directives can be scoped to `'session'` (persists across agent transfers) or `'agent'` (cleared on transfer). For a declarative, zero-code approach to common behaviors like speech speed and verbosity, see [Behaviors](/guide/behaviors).
 
+## Artifact Pipeline (Cross-Tool Data Flow)
+
+Tools can produce artifacts (e.g., generated images) that other tools consume later in the same session. The `ArtifactRegistry` stores artifacts in memory with automatic eviction:
+
+```typescript
+// Image generation tool stores artifact
+const generateImage: ToolDefinition = {
+  name: 'generate_image',
+  description: 'Generate an image from a text prompt',
+  parameters: z.object({
+    prompt: z.string().describe('Image description'),
+  }),
+  execution: 'background',
+  pendingMessage: "I'm generating that image now.",
+  async execute(args) {
+    const imageBase64 = await imagenGenerate(args.prompt);
+    const artifactId = artifactRegistry.store(imageBase64, 'image/png', args.prompt);
+    return { artifactId, description: args.prompt };
+  },
+};
+
+// Another tool references the artifact by ID
+const askAgent: ToolDefinition = {
+  name: 'ask_agent',
+  description: 'Delegate a task to an external agent, optionally with image attachments',
+  parameters: z.object({
+    task: z.string(),
+    artifactIds: z.array(z.string()).optional().describe('Artifact IDs to attach'),
+  }),
+  execution: 'background',
+  pendingMessage: "Working on it.",
+  async execute(args) {
+    return { task: args.task, artifactIds: args.artifactIds };
+  },
+};
+```
+
+**Why structured IDs?** Artifact references use explicit `artifactIds` parameters rather than text parsing. This prevents the LLM from paraphrasing or hallucinating artifact references.
+
+**Registry limits:** Max 20 artifacts or 50 MB total (whichever first), with 30-minute TTL and FIFO eviction.
+
 ## Zod Schemas
 
 The `parameters` field accepts any Zod schema. The framework converts it to JSON Schema for the provider's function declaration format and validates arguments at runtime:
