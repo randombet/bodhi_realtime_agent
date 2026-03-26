@@ -22,11 +22,13 @@ features:
   - title: Multi-Agent
     details: Define multiple agents with distinct personas and tool sets. Transfer between them mid-conversation with automatic context preservation.
   - title: Function Tools
-    details: Inline (blocking) and background (non-blocking) tool execution. Zod schema validation, timeout, cancellation, and abort signals.
+    details: Inline (blocking) and background (non-blocking) tool execution. Zod schema validation, timeout, cancellation, and abort signals. Artifact pipeline for cross-tool data flow.
+  - title: Persistent Agents
+    details: Relay subagent pattern for bridging to stateful external agents like Claude Code and OpenClaw. Session routing, concurrent task isolation, and write-lock serialization.
   - title: Memory
     details: Automatic extraction and persistence of durable user facts across sessions. LLM-powered distillation with configurable triggers.
   - title: Observability
     details: Type-safe EventBus and lifecycle hooks for logging, metrics, and debugging. Zero overhead when unattached.
   - title: Multimodal
-    details: Voice, text input, file upload, and image generation on a single WebSocket connection. Mixed-mode interaction out of the box.
+    details: Voice, text input, file upload, image generation, and artifact attachments on a single WebSocket connection. Mixed-mode interaction out of the box.
 ---

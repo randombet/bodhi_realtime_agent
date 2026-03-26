@@ -65,6 +65,28 @@ const generateImage: ToolDefinition = {
 };
 ```
 
+## Image Artifacts and Cross-Tool Data Flow
+
+When a tool generates an image, it can be stored in the session's `ArtifactRegistry` for later use by other tools — enabling flows like "generate an image, then email it":
+
+```
+generate_image  ──►  ArtifactRegistry.store()  ──►  artifactId returned
+                          │
+ask_agent({ task: "email this", artifactIds: ["art_xxx"] })
+                          │
+relay subagent  ──►  ArtifactRegistry.get("art_xxx")  ──►  base64 resolved
+                          │
+external agent  ──►  receives image as attachment  ──►  action taken
+```
+
+**Key design decisions:**
+- **Structured artifact IDs** — Tools pass `artifactIds: string[]` rather than embedding base64 inline or relying on text parsing. This prevents LLM paraphrasing losses.
+- **In-memory storage** — Artifacts live in `ArtifactRegistry` for the session duration. No disk persistence.
+- **Fail-fast on missing artifacts** — If all requested artifacts are missing, the tool returns an error ("please regenerate") rather than silently continuing without them.
+- **Size limits** — Max 5 MB per artifact (gateway limit), 20 artifacts or 50 MB total per session, 30-minute TTL with FIFO eviction.
+
+See [Tools > Artifact Pipeline](/guide/tools#artifact-pipeline-cross-tool-data-flow) for implementation examples.
+
 ## GUI Events
 
 The WebSocket supports bidirectional JSON messages alongside audio, enabling rich client interfaces:

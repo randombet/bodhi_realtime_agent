@@ -360,6 +360,64 @@ stateDiagram-v2
 | RECONNECTING | Buffering audio | Reconnecting |
 | CLOSED | Stopped | Disconnected |
 
+## Session Routing (OpenClaw Integration)
+
+When integrating with persistent external agents, follow-up requests must be routed to the correct existing session. The routing pipeline serializes classification and session creation:
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant G as Main LLM
+    participant TM as TaskManager
+    participant C as Classifier
+    participant R as Registry
+    participant OC as OpenClaw
+
+    U->>G: "Confirm that reschedule"
+    G->>TM: ask_openclaw({ task })
+    TM->>TM: acquire semaphore slot
+
+    TM->>R: withRoutingMutex()
+    R->>C: classifyRouting(message, candidates)
+    C-->>R: { action: continue_existing, threadId }
+
+    alt Stale thread
+        R->>R: mark stale, re-classify (max 1 retry)
+    end
+
+    R-->>TM: threadId + sessionKey
+    TM->>TM: acquire write lock (if mutating)
+    TM->>OC: chatSend(sessionKey, message)
+    OC-->>TM: result
+    TM->>G: tool result (queued for next turn boundary)
+    G->>U: speaks result
+```
+
+## Artifact Pipeline
+
+Generated artifacts (images) flow through the `ArtifactRegistry` for cross-tool data transfer:
+
+```mermaid
+flowchart LR
+    GI["generate_image<br/>tool"] -->|"base64 + mime"| AR["ArtifactRegistry<br/>(in-memory)"]
+    AR -->|"artifactId"| GI
+    GI -->|"gui.update"| CLIENT["Client UI<br/>(displays image)"]
+
+    ASK["ask_openclaw<br/>tool"] -->|"artifactIds[]"| RELAY["Relay Subagent"]
+    RELAY -->|"resolve IDs"| AR
+    AR -->|"base64 data"| RELAY
+    RELAY -->|"chatSend +<br/>attachments"| OC["OpenClaw<br/>Gateway"]
+
+    style AR fill:#fef3c7,stroke:#f59e0b
+    style GI fill:#10b981,color:#fff
+    style ASK fill:#ec4899,color:#fff
+```
+
+**Key properties:**
+- Structured `artifactIds` parameter (not text parsing) prevents LLM paraphrasing losses
+- Max 20 artifacts or 50 MB total, 30-min TTL, FIFO eviction
+- Fail-fast if all requested artifacts are missing
+
 ## How Concepts Connect
 
 ### Agents → Tools → Subagents
@@ -415,9 +473,11 @@ graph TB
 If you're new to the framework, read the docs in this order:
 
 1. **[VoiceSession](/guide/voice-session)** — The entry point. Understand how everything is wired.
-2. **[Agents](/guide/agents)** — Define personalities and route conversations.
-3. **[Tools](/guide/tools)** — Give agents the ability to take actions.
+2. **[Agents](/guide/agents)** — Define personalities, route conversations, and persistent agent patterns.
+3. **[Tools](/guide/tools)** — Give agents the ability to take actions. Includes artifact pipeline.
 4. **[Memory](/guide/memory)** — Remember users across sessions.
 5. **[Events & Hooks](/guide/events)** — Observe and react to everything happening.
 6. **[Transport](/guide/transport)** — Understand the audio and message plumbing.
-7. **[Subagent Patterns](/advanced/subagents)** — Background execution for complex tasks.
+7. **[Subagent Patterns](/advanced/subagents)** — Background execution, relay agents, and concurrent task management.
+8. **[Persistence](/advanced/persistence)** — Memory, conversation history, and session recovery.
+9. **[Deployment](/advanced/deployment)** — Production best practices, session routing, and artifact lifecycle.

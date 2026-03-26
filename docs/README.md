@@ -142,6 +142,7 @@ docs/
     architecture.md           # Architecture overview with diagrams
   advanced/                 # Advanced topics
     subagents.md              # Background subagent patterns
+    persistent-subagent-lifecycle.md # Actor-runtime persistent subagent flow
     persistence.md            # Storage adapters
     multimodal.md             # Image, text, file upload
     deployment.md             # Production deployment

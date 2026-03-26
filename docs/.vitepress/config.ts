@@ -45,6 +45,7 @@ export default withMermaid(
 						text: 'Advanced Topics',
 						items: [
 							{ text: 'Subagent Patterns', link: '/advanced/subagents' },
+							{ text: 'Persistent Subagent Lifecycle', link: '/advanced/persistent-subagent-lifecycle' },
 							{ text: 'Persistence', link: '/advanced/persistence' },
 							{ text: 'Multimodal Features', link: '/advanced/multimodal' },
 							{ text: 'Deployment', link: '/advanced/deployment' },

@@ -247,4 +247,61 @@ describe('TranscriptManager', () => {
 
 		expect(sink.assistantMessages[0]).toBe('First part. Second part.');
 	});
+
+	describe('correctInput', () => {
+		it('replaces input buffer with authoritative transcript', () => {
+			const sink = createSink();
+			const mgr = new TranscriptManager(sink);
+
+			// STT provides initial (incorrect) transcript
+			mgr.handleInput('Hola mi nombre es Juan');
+			// Gemini corrects it
+			mgr.correctInput('Hello my name is John');
+			mgr.flush();
+
+			expect(sink.userMessages).toEqual(['Hello my name is John']);
+		});
+
+		it('sends corrected partial to client', () => {
+			const sink = createSink();
+			const mgr = new TranscriptManager(sink);
+
+			mgr.correctInput('corrected text');
+
+			const correctionMsg = sink.messages.find(
+				(m) => m.corrected === true,
+			);
+			expect(correctionMsg).toEqual({
+				type: 'transcript',
+				role: 'user',
+				text: 'corrected text',
+				partial: true,
+				corrected: true,
+			});
+		});
+
+		it('no-op when correction is empty or whitespace', () => {
+			const sink = createSink();
+			const mgr = new TranscriptManager(sink);
+
+			mgr.handleInput('original text');
+			mgr.correctInput('');
+			mgr.correctInput('   ');
+			mgr.flush();
+
+			expect(sink.userMessages).toEqual(['original text']);
+		});
+
+		it('last correction wins when multiple arrive', () => {
+			const sink = createSink();
+			const mgr = new TranscriptManager(sink);
+
+			mgr.handleInput('stt text');
+			mgr.correctInput('first correction');
+			mgr.correctInput('second correction');
+			mgr.flush();
+
+			expect(sink.userMessages).toEqual(['second correction']);
+		});
+	});
 });

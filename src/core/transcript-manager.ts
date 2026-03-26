@@ -48,6 +48,24 @@ export class TranscriptManager {
 		}
 	}
 
+	/**
+	 * Replace the current input buffer with an authoritative transcript
+	 * (e.g. from Gemini's built-in inputAudioTranscription).
+	 * Sends a corrected partial to the client so the UI updates.
+	 * No-op if the correction is empty.
+	 */
+	correctInput(text: string): void {
+		if (!text.trim()) return;
+		this.inputBuffer = text;
+		this.sink.sendToClient({
+			type: 'transcript',
+			role: 'user',
+			text: text.trim(),
+			partial: true,
+			corrected: true,
+		});
+	}
+
 	/** Accumulate incoming user speech transcription and emit a partial transcript. */
 	handleInput(text: string): void {
 		if (text.trim()) {

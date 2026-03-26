@@ -11,5 +11,6 @@ docs/.vitepress/cache/
 docs/.vitepress/dist/
 docs/api/
 /memory/
-/scripts/.worktrees/
+/scripts/
 /.worktrees/
+.massgen/
