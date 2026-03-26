@@ -137,6 +137,8 @@ export class VoiceSession {
 	private turnId = 0;
 	private sttProvider?: STTProvider;
 	private _commitFiredForTurn = false;
+	/** True when the current turn was interrupted — skips Gemini transcript correction. */
+	private _turnWasInterrupted = false;
 	private config: VoiceSessionConfig;
 	private directiveManager = new DirectiveManager();
 	private transcriptManager!: TranscriptManager;
@@ -253,16 +255,15 @@ export class VoiceSession {
 		const allInitialTools = [...(initialAgent?.tools ?? []), ...behaviorTools];
 
 		// Determine inputAudioTranscription setting:
-		// When sttProvider is set, disable built-in transcription automatically.
-		const inputTranscription = config.sttProvider ? false : config.inputAudioTranscription;
+		// Keep Gemini's built-in transcription enabled even when an external STT
+		// provider is active — the built-in result is used as a post-hoc correction
+		// for the STT transcript (more accurate language detection, better accuracy).
+		const inputTranscription = config.inputAudioTranscription;
 
 		if (config.transport) {
 			// Use pre-constructed transport (OpenAI, mock, etc.)
 			this.transport = config.transport;
 			// Sync tools and instructions so they're available at connect time.
-			// When an external STT provider is active, also disable transport built-in
-			// transcription at the provider level (not just the callback) to avoid
-			// duplicate backend processing and unnecessary cost.
 			this.transport.updateSession({
 				instructions,
 				tools: allInitialTools.length ? allInitialTools : undefined,
@@ -315,7 +316,8 @@ export class VoiceSession {
 			this.handleResumptionUpdate(handle, resumable);
 		this.transport.onGroundingMetadata = (metadata) => this.handleGroundingMetadata(metadata);
 
-		// Wire STT: exactly one transcript path is active per session.
+		// Wire STT: streaming provider for real-time display, Gemini built-in for
+		// post-hoc correction. Both paths can be active simultaneously.
 		if (config.sttProvider) {
 			this.sttProvider = config.sttProvider;
 
@@ -340,8 +342,13 @@ export class VoiceSession {
 				this.transcriptManager.handleInputPartial(text);
 			};
 
-			// Disable transport built-in input transcription
-			this.transport.onInputTranscription = undefined;
+			// Wire Gemini built-in transcription as authoritative correction.
+			// Skipped on interrupted turns — Gemini may miss audio spoken during
+			// model output, producing incomplete transcripts.
+			this.transport.onInputTranscription = (text) => {
+				if (this._turnWasInterrupted) return;
+				this.transcriptManager.correctInput(text);
+			};
 		} else {
 			// No external STT — use transport built-in transcription
 			this.transport.onInputTranscription = (text) => this.transcriptManager.handleInput(text);
@@ -811,6 +818,7 @@ export class VoiceSession {
 			}
 			this.sttProvider.handleTurnComplete();
 			this._commitFiredForTurn = false;
+			this._turnWasInterrupted = false;
 		}
 
 		this.transcriptManager.flush();
@@ -891,6 +899,7 @@ export class VoiceSession {
 
 	private handleInterrupted(): void {
 		this.log('Interrupted by user');
+		this._turnWasInterrupted = true;
 		this.sttProvider?.handleInterrupted();
 		this.notificationQueue.resetAudio();
 		this.notificationQueue.markInterrupted();

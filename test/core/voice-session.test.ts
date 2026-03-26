@@ -2084,7 +2084,7 @@ describe('VoiceSession', () => {
 			expect(items.some((i) => i.content === 'current text')).toBe(true);
 		});
 
-		it('disables transport onInputTranscription when sttProvider is set', async () => {
+		it('Gemini inputTranscription corrects STT transcript when sttProvider is set', async () => {
 			const stt = createMockSTTProvider();
 			session = new VoiceSession({
 				sessionId: 'sess_stt',
@@ -2109,18 +2109,130 @@ describe('VoiceSession', () => {
 				if (!isBinary) received.push(data.toString());
 			});
 
+			// STT provides initial transcript
+			stt.onTranscript?.('Hola mi nombre es Juan', 0);
+			await new Promise((r) => setTimeout(r, 50));
+
 			const { _getMessageHandler } = await import('@google/genai');
 			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
 
-			// Fire inputTranscription from Gemini — should be ignored since sttProvider is set
-			fire({ serverContent: { inputTranscription: { text: 'should be ignored' } } });
+			// Gemini provides authoritative correction
+			fire({ serverContent: { inputTranscription: { text: 'Hello my name is John' } } });
 			await new Promise((r) => setTimeout(r, 50));
 
-			// No user transcript should be sent to client
 			const transcripts = received
 				.map((r) => JSON.parse(r))
 				.filter((m: Record<string, unknown>) => m.type === 'transcript' && m.role === 'user');
-			expect(transcripts).toHaveLength(0);
+
+			// Should have STT partial + Gemini correction
+			expect(transcripts.length).toBeGreaterThanOrEqual(2);
+			const correction = transcripts.find((t: Record<string, unknown>) => t.corrected === true);
+			expect(correction).toBeDefined();
+			expect(correction!.text).toBe('Hello my name is John');
+
+			ws.close();
+			await new Promise<void>((r) => ws.on('close', r));
+		});
+
+		it('skips Gemini transcript correction on interrupted turns', async () => {
+			const stt = createMockSTTProvider();
+			session = new VoiceSession({
+				sessionId: 'sess_stt',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9924,
+				model: mockModel,
+				sttProvider: stt,
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const WebSocket = (await import('ws')).default;
+			const ws = new WebSocket('ws://localhost:9924');
+			await new Promise<void>((r) => ws.on('open', r));
+
+			const received: string[] = [];
+			ws.on('message', (data, isBinary) => {
+				if (!isBinary) received.push(data.toString());
+			});
+
+			// STT provides transcript
+			stt.onTranscript?.('user speech', 0);
+			await new Promise((r) => setTimeout(r, 50));
+
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+			// Simulate interruption
+			fire({ serverContent: { interrupted: true } });
+			await new Promise((r) => setTimeout(r, 50));
+
+			// Gemini sends inputTranscription after interruption — should be skipped
+			fire({ serverContent: { inputTranscription: { text: 'incomplete transcript' } } });
+			await new Promise((r) => setTimeout(r, 50));
+
+			const corrections = received
+				.map((r) => JSON.parse(r))
+				.filter((m: Record<string, unknown>) => m.corrected === true);
+			expect(corrections).toHaveLength(0);
+
+			ws.close();
+			await new Promise<void>((r) => ws.on('close', r));
+		});
+
+		it('resets interrupted flag on next turnComplete so correction resumes', async () => {
+			const stt = createMockSTTProvider();
+			session = new VoiceSession({
+				sessionId: 'sess_stt',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9925,
+				model: mockModel,
+				sttProvider: stt,
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const WebSocket = (await import('ws')).default;
+			const ws = new WebSocket('ws://localhost:9925');
+			await new Promise<void>((r) => ws.on('open', r));
+
+			const received: string[] = [];
+			ws.on('message', (data, isBinary) => {
+				if (!isBinary) received.push(data.toString());
+			});
+
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+			// Turn 1: interrupted — correction skipped
+			stt.onTranscript?.('turn one', 0);
+			fire({ serverContent: { interrupted: true } });
+			await new Promise((r) => setTimeout(r, 50));
+
+			fire({ serverContent: { inputTranscription: { text: 'skipped correction' } } });
+			await new Promise((r) => setTimeout(r, 50));
+
+			// Turn 2: normal turn completes — resets flag
+			fire({ serverContent: { turnComplete: true } });
+			await new Promise((r) => setTimeout(r, 50));
+
+			// New turn: STT + Gemini correction should work
+			stt.onTranscript?.('turn two stt', 1);
+			fire({ serverContent: { inputTranscription: { text: 'turn two corrected' } } });
+			await new Promise((r) => setTimeout(r, 50));
+
+			const corrections = received
+				.map((r) => JSON.parse(r))
+				.filter((m: Record<string, unknown>) => m.corrected === true);
+			expect(corrections).toHaveLength(1);
+			expect(corrections[0].text).toBe('turn two corrected');
 
 			ws.close();
 			await new Promise<void>((r) => ws.on('close', r));
