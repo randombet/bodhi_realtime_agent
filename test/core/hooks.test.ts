@@ -14,7 +14,27 @@ describe('HooksManager', () => {
 		expect(mgr.onAgentTransfer).toBeUndefined();
 		expect(mgr.onSubagentStep).toBeUndefined();
 		expect(mgr.onMemoryExtraction).toBeUndefined();
+		expect(mgr.onTTSSynthesis).toBeUndefined();
 		expect(mgr.onError).toBeUndefined();
+	});
+
+	it('onTTSSynthesis hook fires with timing metrics', () => {
+		const mgr = new HooksManager();
+		const handler = vi.fn();
+		mgr.register({ onTTSSynthesis: handler });
+
+		const event = {
+			sessionId: 's',
+			provider: 'ElevenLabsTTSProvider',
+			textLength: 50,
+			durationMs: 1200,
+			audioMs: 1000,
+			ttfbMs: 200,
+			requestId: 1,
+		};
+		mgr.onTTSSynthesis?.(event);
+
+		expect(handler).toHaveBeenCalledWith(event);
 	});
 
 	it('registered handler is invoked', () => {

@@ -49,6 +49,8 @@ export class AgentRouter {
 	private agents = new Map<string, MainAgent>();
 	private _activeAgent: MainAgent | null = null;
 	private activeSubagents = new Map<string, ActiveSubagent>();
+	/** Response modality to include in transfer SessionUpdate (set by VoiceSession for TTS). */
+	responseModality?: 'audio' | 'text';
 
 	constructor(
 		private sessionManager: SessionManager,
@@ -141,6 +143,7 @@ export class AgentRouter {
 					instructions: resolvedInstructions,
 					tools: allTools,
 					providerOptions,
+					...(this.responseModality ? { responseModality: this.responseModality } : {}),
 				},
 				state,
 			);

@@ -158,6 +158,9 @@ export class VoiceSession {
 	private _ttsNeedsResample = false;
 	private _ttsIdleTimer?: ReturnType<typeof setTimeout>;
 	private _ttsHardTimer?: ReturnType<typeof setTimeout>;
+	private _ttsFirstTextMs = 0;
+	private _ttsFirstAudioMs = 0;
+	private _ttsTextLength = 0;
 	private config: VoiceSessionConfig;
 	private directiveManager = new DirectiveManager();
 	private transcriptManager!: TranscriptManager;
@@ -454,6 +457,9 @@ export class VoiceSession {
 		);
 		this.agentRouter.registerAgents(config.agents);
 		this.agentRouter.setInitialAgent(config.initialAgent);
+		if (this.ttsProvider) {
+			this.agentRouter.responseModality = 'text';
+		}
 
 		if (config.orchestrationMode === 'actor') {
 			this.runtimeToolRegistry = this.buildRuntimeToolRegistry([
@@ -854,8 +860,12 @@ export class VoiceSession {
 			if (!this._ttsTextStartedForTurn) {
 				this._ttsCurrentRequestId++;
 				this._ttsTextStartedForTurn = true;
+				this._ttsFirstTextMs = Date.now();
+				this._ttsFirstAudioMs = 0;
+				this._ttsTextLength = 0;
 			}
 			this._ttsHasTextForRequest = true;
+			this._ttsTextLength += text.length;
 			tts.synthesize(text, this._ttsCurrentRequestId);
 			this.transcriptManager.handleOutput(text);
 		};
@@ -884,16 +894,32 @@ export class VoiceSession {
 			this.clientTransport.sendAudioToClient(buffer);
 			this.notificationQueue.markAudioReceived();
 			this._ttsSpeaking = true;
+			if (this._ttsFirstAudioMs === 0) {
+				this._ttsFirstAudioMs = Date.now();
+			}
 			// Reset idle watchdog on each audio chunk
 			this.ttsResetIdleTimer();
 		};
 
-		// Wire TTS done → turn gating
+		// Wire TTS done → turn gating + hook
 		tts.onDone = (requestId) => {
 			if (requestId !== this._ttsCurrentRequestId) return; // stale
 			this._ttsAudioDone = true;
 			this._ttsSpeaking = false;
 			this.ttsClearTimers();
+			// Fire TTS synthesis hook with timing metrics
+			if (this.hooks.onTTSSynthesis && this._ttsFirstTextMs > 0) {
+				const now = Date.now();
+				this.hooks.onTTSSynthesis({
+					sessionId: this.config.sessionId,
+					provider: tts.constructor.name,
+					textLength: this._ttsTextLength,
+					durationMs: now - this._ttsFirstTextMs,
+					audioMs: 0, // Would require tracking total audio duration
+					ttfbMs: this._ttsFirstAudioMs > 0 ? this._ttsFirstAudioMs - this._ttsFirstTextMs : 0,
+					requestId,
+				});
+			}
 			this.ttsMaybeCompleteTurn();
 		};
 
