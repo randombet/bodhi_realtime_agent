@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ClaudeCodeSessionOptions } from '../../app/lib/claude-code-client.js';
 import { PersistentClaudeSubagent } from '../../app/lib/persistent-claude-subagent.js';
+import type { PersistentClaudeSubagentOptions } from '../../app/lib/persistent-claude-subagent.js';
 
 // Mock the ClaudeCodeSession class
 vi.mock('../../app/lib/claude-code-client.js', () => {
@@ -30,7 +30,7 @@ vi.mock('../../app/lib/claude-code-client.js', () => {
 	};
 });
 
-const sessionOptions: ClaudeCodeSessionOptions = {
+const sessionOptions: PersistentClaudeSubagentOptions = {
 	cwd: '/test/project',
 	model: 'claude-sonnet-4-5-20250929',
 };
@@ -113,5 +113,71 @@ describe('PersistentClaudeSubagent', () => {
 
 		const agent = new PersistentClaudeSubagent('claude-1', sessionOptions);
 		await expect(agent.invoke('Bad task', {})).rejects.toThrow('Something went wrong');
+	});
+
+	it('surfaces needs_input as descriptive text with question', async () => {
+		const { ClaudeCodeSession } = await import('../../app/lib/claude-code-client.js');
+		(ClaudeCodeSession as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => ({
+			start: vi.fn().mockResolvedValue({
+				status: 'needs_input',
+				text: 'Partial work done.',
+				sdkSessionId: 'sdk-needs-input',
+				question: 'Which file should I edit?',
+				questionOptions: [
+					{ label: 'src/index.ts', description: 'Main entry point' },
+					{ label: 'src/utils.ts', description: 'Utility functions' },
+				],
+			}),
+			abort: vi.fn().mockResolvedValue(undefined),
+		}));
+
+		const agent = new PersistentClaudeSubagent('claude-1', sessionOptions);
+		const result = await agent.invoke('Edit a file', {});
+
+		expect(result).toContain('Partial work done.');
+		expect(result).toContain('[Needs input]');
+		expect(result).toContain('Which file should I edit?');
+		expect(result).toContain('src/index.ts');
+		expect(result).toContain('src/utils.ts');
+	});
+
+	it('needs_input without options omits options list', async () => {
+		const { ClaudeCodeSession } = await import('../../app/lib/claude-code-client.js');
+		(ClaudeCodeSession as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => ({
+			start: vi.fn().mockResolvedValue({
+				status: 'needs_input',
+				text: '',
+				sdkSessionId: 'sdk-ni',
+				question: 'What should I do next?',
+			}),
+			abort: vi.fn().mockResolvedValue(undefined),
+		}));
+
+		const agent = new PersistentClaudeSubagent('claude-1', sessionOptions);
+		const result = await agent.invoke('Do something', {});
+
+		expect(result).toContain('[Needs input] What should I do next?');
+		expect(result).not.toContain('Options:');
+	});
+
+	it('creates fresh MCP servers per invoke via mcpServerFactory', async () => {
+		const { ClaudeCodeSession } = await import('../../app/lib/claude-code-client.js');
+		const factory = vi.fn().mockReturnValue({ myServer: {} });
+
+		const agent = new PersistentClaudeSubagent('claude-1', {
+			...sessionOptions,
+			mcpServerFactory: factory,
+		});
+
+		await agent.invoke('Task 1', {});
+		await agent.invoke('Task 2', {});
+
+		// Factory called once per invoke, not once at construction
+		expect(factory).toHaveBeenCalledTimes(2);
+
+		// Each ClaudeCodeSession receives fresh mcpServers
+		const calls = (ClaudeCodeSession as unknown as ReturnType<typeof vi.fn>).mock.calls;
+		expect(calls[0][0].mcpServers).toEqual({ myServer: {} });
+		expect(calls[1][0].mcpServers).toEqual({ myServer: {} });
 	});
 });

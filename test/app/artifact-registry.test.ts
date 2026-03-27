@@ -21,12 +21,12 @@ describe('ArtifactRegistry', () => {
 
 		const artifact = reg.get(id);
 		expect(artifact).toBeDefined();
-		expect(artifact!.base64).toBe(TINY_PNG_B64);
-		expect(artifact!.mimeType).toBe('image/png');
-		expect(artifact!.description).toBe('test image');
-		expect(artifact!.source).toBe('generated');
-		expect(artifact!.fileName).toBe('test.png');
-		expect(artifact!.sizeBytes).toBeGreaterThan(0);
+		expect(artifact?.base64).toBe(TINY_PNG_B64);
+		expect(artifact?.mimeType).toBe('image/png');
+		expect(artifact?.description).toBe('test image');
+		expect(artifact?.source).toBe('generated');
+		expect(artifact?.fileName).toBe('test.png');
+		expect(artifact?.sizeBytes).toBeGreaterThan(0);
 
 		const list = reg.list();
 		expect(list).toHaveLength(1);
@@ -143,16 +143,16 @@ describe('ArtifactRegistry', () => {
 		const id1 = reg.store(TINY_PNG_B64, 'image/png', 'upload', 'uploaded', 'photo.png');
 		const id2 = reg.store(TINY_PNG_B64, 'image/jpeg', 'received', 'received');
 
-		expect(reg.get(id1)!.source).toBe('uploaded');
-		expect(reg.get(id1)!.fileName).toBe('photo.png');
-		expect(reg.get(id2)!.source).toBe('received');
-		expect(reg.get(id2)!.fileName).toBeUndefined();
+		expect(reg.get(id1)?.source).toBe('uploaded');
+		expect(reg.get(id1)?.fileName).toBe('photo.png');
+		expect(reg.get(id2)?.source).toBe('received');
+		expect(reg.get(id2)?.fileName).toBeUndefined();
 	});
 
 	it('defaults source to generated', () => {
 		const reg = new ArtifactRegistry();
 		const id = reg.store(TINY_PNG_B64, 'image/png', 'gen');
-		expect(reg.get(id)!.source).toBe('generated');
+		expect(reg.get(id)?.source).toBe('generated');
 	});
 
 	it('get returns undefined for unknown ID', () => {

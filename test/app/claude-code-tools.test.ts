@@ -9,9 +9,12 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
 }));
 
 // Must import AFTER vi.mock
-const { askClaudeTool, createClaudeCodeSubagentConfig, _ClaudeCodeSessionClass } = await import(
-	'../../app/lib/claude-code-tools.js'
-);
+const {
+	askClaudeTool,
+	createClaudeCodeSubagentConfig,
+	createPersistentClaudeCodeSubagentConfig,
+	_ClaudeCodeSessionClass,
+} = await import('../../app/lib/claude-code-tools.js');
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -699,5 +702,53 @@ describe('createClaudeCodeSubagentConfig', () => {
 			await config.dispose?.();
 			await config.dispose?.();
 		});
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Persistent config factory (actor runtime path)
+// ---------------------------------------------------------------------------
+
+describe('createPersistentClaudeCodeSubagentConfig', () => {
+	it('returns SubagentConfig with persistent lifetime', () => {
+		const config = createPersistentClaudeCodeSubagentConfig({ projectDir: '/test' });
+
+		expect(config.name).toBe('claude-code-persistent');
+		expect(config.lifetime).toBe('persistent_session');
+		expect(config.persistentFactory).toBeTypeOf('function');
+	});
+
+	it('persistentFactory creates PersistentClaudeSubagent instance', async () => {
+		const config = createPersistentClaudeCodeSubagentConfig({
+			projectDir: '/test',
+			anthropicApiKey: 'test-key',
+			model: 'claude-sonnet-4-5-20250929',
+			permissionMode: 'bypassPermissions',
+			maxTurns: 10,
+		});
+
+		const instance = await config.persistentFactory?.('test-key', config);
+		expect(instance).toBeDefined();
+		expect(instance.key).toBe('test-key');
+		expect(instance.invoke).toBeTypeOf('function');
+		expect(instance.dispose).toBeTypeOf('function');
+
+		await instance.dispose();
+	});
+
+	it('passes options through to ClaudeCodeSessionOptions', async () => {
+		const config = createPersistentClaudeCodeSubagentConfig({
+			projectDir: '/my/project',
+			anthropicApiKey: 'sk-test',
+			model: 'claude-opus-4-5',
+			permissionMode: 'bypassPermissions',
+			maxTurns: 30,
+			extraAllowedTools: ['mcp__email__*'],
+		});
+
+		// Factory should succeed without throwing
+		const instance = await config.persistentFactory?.('key-1', config);
+		expect(instance.key).toBe('key-1');
+		await instance.dispose();
 	});
 });
