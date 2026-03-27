@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mockCallCreate = vi.fn();
 const mockCallUpdate = vi.fn();
 vi.mock('twilio', () => ({
-	Twilio: vi.fn().mockImplementation(() => ({
+	default: vi.fn().mockImplementation(() => ({
 		calls: Object.assign(mockCallCreate, {
 			create: mockCallCreate,
 		}),

@@ -12,7 +12,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { Twilio } from 'twilio';
+import twilio from 'twilio';
 import { frameworkToTwilio, twilioToFramework } from './audio-codec.js';
 import { TwilioWebhookServer } from './twilio-webhook-server.js';
 
@@ -57,7 +57,7 @@ type BridgeState = 'idle' | 'dialing' | 'ringing' | 'connected' | 'ended' | 'dis
 // ---------------------------------------------------------------------------
 
 export class TwilioBridge {
-	private client: Twilio;
+	private client: ReturnType<typeof twilio>;
 	private webhookServer: TwilioWebhookServer;
 	private state: BridgeState = 'idle';
 	private callSid: string | undefined;
@@ -68,7 +68,7 @@ export class TwilioBridge {
 		private readonly config: TwilioBridgeConfig,
 		private readonly callbacks: TwilioBridgeCallbacks,
 	) {
-		this.client = new Twilio(config.accountSid, config.authToken);
+		this.client = twilio(config.accountSid, config.authToken);
 		this.wsAuthToken = randomBytes(16).toString('hex');
 
 		this.webhookServer = new TwilioWebhookServer({
