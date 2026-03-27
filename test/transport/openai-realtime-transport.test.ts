@@ -103,6 +103,7 @@ describe('OpenAIRealtimeTransport', () => {
 				sessionResumption: false,
 				contextCompression: false,
 				groundingMetadata: false,
+				textResponseModality: true,
 			});
 		});
 
@@ -735,6 +736,80 @@ describe('OpenAIRealtimeTransport', () => {
 
 			expect(transport.isConnected).toBe(false);
 			expect(mockRt.close).toHaveBeenCalled();
+		});
+	});
+
+	describe('text-mode responses', () => {
+		it('fires onTextOutput on text delta events', () => {
+			const textOutput = vi.fn();
+			transport.onTextOutput = textOutput;
+
+			mockRt.emit('response.output_text.delta', { delta: 'Hello ' });
+			mockRt.emit('response.output_text.delta', { delta: 'world' });
+
+			expect(textOutput).toHaveBeenCalledTimes(2);
+			expect(textOutput).toHaveBeenCalledWith('Hello ');
+			expect(textOutput).toHaveBeenCalledWith('world');
+		});
+
+		it('fires onTextDone on text done event', () => {
+			const textDone = vi.fn();
+			transport.onTextDone = textDone;
+
+			mockRt.emit('response.output_text.done', {});
+
+			expect(textDone).toHaveBeenCalledOnce();
+		});
+
+		it('fires onTextDone before onTurnComplete (ordering contract)', () => {
+			const order: string[] = [];
+			transport.onTextDone = () => order.push('textDone');
+			transport.onTurnComplete = () => order.push('turnComplete');
+
+			// onTextDone fires on response.output_text.done
+			mockRt.emit('response.output_text.done', {});
+			// onTurnComplete fires on response.done
+			mockRt.emit('response.done', {});
+
+			expect(order).toEqual(['textDone', 'turnComplete']);
+		});
+
+		it('fires onSpeechStarted on speech_started event', () => {
+			const speechStarted = vi.fn();
+			transport.onSpeechStarted = speechStarted;
+
+			// speech_started fires even when model is not generating (for TTS barge-in)
+			mockRt.emit('input_audio_buffer.speech_started', {});
+
+			expect(speechStarted).toHaveBeenCalledOnce();
+		});
+
+		it('fires onSpeechStarted even when model is not generating', () => {
+			const speechStarted = vi.fn();
+			const interrupted = vi.fn();
+			transport.onSpeechStarted = speechStarted;
+			transport.onInterrupted = interrupted;
+
+			// When model is NOT generating, speech_started still fires onSpeechStarted
+			// but does NOT fire onInterrupted
+			// biome-ignore lint/suspicious/noExplicitAny: test mock injection
+			(transport as any)._isModelGenerating = false;
+			mockRt.emit('input_audio_buffer.speech_started', {});
+
+			expect(speechStarted).toHaveBeenCalledOnce();
+			expect(interrupted).not.toHaveBeenCalled();
+		});
+
+		it('preserves responseModality across applyTransportConfig', () => {
+			// biome-ignore lint/suspicious/noExplicitAny: test internal state
+			(transport as any).applyTransportConfig({
+				auth: { type: 'api_key', apiKey: 'test' },
+				model: 'gpt-4o-realtime',
+				responseModality: 'text',
+			});
+
+			// biome-ignore lint/suspicious/noExplicitAny: test internal state
+			expect((transport as any)._textMode).toBe(true);
 		});
 	});
 });

@@ -106,6 +106,10 @@ export class GeminiLiveTransport implements LLMTransport {
 	private setupResolver: (() => void) | null = null;
 	/** Tracks whether onModelTurnStart has already fired for the current turn. */
 	private _modelTurnStarted = false;
+	/** Whether the transport is configured for text-mode responses (for TTS). */
+	private _textMode = false;
+	/** Whether onTextDone has been fired for the current turn (prevents double-fire). */
+	private _textDoneFired = false;
 
 	// --- LLMTransport static properties ---
 
@@ -117,6 +121,7 @@ export class GeminiLiveTransport implements LLMTransport {
 		sessionResumption: true,
 		contextCompression: true,
 		groundingMetadata: true,
+		textResponseModality: true,
 	};
 
 	readonly audioFormat: AudioFormatSpec = {
@@ -143,6 +148,9 @@ export class GeminiLiveTransport implements LLMTransport {
 	onGoAway?: (timeLeft: string) => void;
 	onResumptionUpdate?: (handle: string, resumable: boolean) => void;
 	onGroundingMetadata?: (metadata: Record<string, unknown>) => void;
+	onTextOutput?: (text: string) => void;
+	onTextDone?: () => void;
+	onSpeechStarted?: () => void;
 
 	constructor(config: GeminiTransportConfig, callbacks: GeminiTransportCallbacks) {
 		this.ai = new GoogleGenAI({ apiKey: config.apiKey });
@@ -169,8 +177,8 @@ export class GeminiLiveTransport implements LLMTransport {
 		const model = this.config.model ?? 'gemini-live-2.5-flash-preview';
 
 		const connectConfig: Record<string, unknown> = {
-			responseModalities: ['AUDIO'],
-			outputAudioTranscription: {},
+			responseModalities: [this._textMode ? 'TEXT' : 'AUDIO'],
+			...(this._textMode ? {} : { outputAudioTranscription: {} }),
 		};
 
 		if (this.config.inputAudioTranscription !== false) {
@@ -446,6 +454,9 @@ export class GeminiLiveTransport implements LLMTransport {
 				};
 			}
 		}
+		if (config.responseModality !== undefined) {
+			this._textMode = config.responseModality === 'text';
+		}
 	}
 
 	/** Convert ReplayItem[] to Gemini Content format and send as client content. */
@@ -515,7 +526,7 @@ export class GeminiLiveTransport implements LLMTransport {
 		if (msg.serverContent) {
 			const content = msg.serverContent;
 
-			// Audio output — fire onModelTurnStart on first modelTurn.parts per turn
+			// Model output — fire onModelTurnStart on first modelTurn.parts per turn
 			if (content.modelTurn?.parts) {
 				if (!this._modelTurnStarted) {
 					this._modelTurnStarted = true;
@@ -524,8 +535,13 @@ export class GeminiLiveTransport implements LLMTransport {
 				}
 				for (const part of content.modelTurn.parts) {
 					if (part.inlineData?.data) {
+						// Audio output (audio mode)
 						this.callbacks.onAudioOutput?.(part.inlineData.data);
 						if (this.onAudioOutput) this.onAudioOutput(part.inlineData.data);
+					}
+					if (part.text !== undefined && part.text !== null) {
+						// Text output (text mode — for TTS)
+						if (this.onTextOutput) this.onTextOutput(part.text);
 					}
 				}
 			}
@@ -554,6 +570,12 @@ export class GeminiLiveTransport implements LLMTransport {
 			}
 			if (content.turnComplete) {
 				this._modelTurnStarted = false;
+				// In text mode, fire onTextDone before onTurnComplete (ordering contract)
+				if (this._textMode && !this._textDoneFired) {
+					this._textDoneFired = true;
+					if (this.onTextDone) this.onTextDone();
+				}
+				this._textDoneFired = false;
 				this.callbacks.onTurnComplete?.();
 				if (this.onTurnComplete) this.onTurnComplete();
 			}
