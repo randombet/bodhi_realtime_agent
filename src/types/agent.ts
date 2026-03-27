@@ -23,6 +23,13 @@ export interface AgentContext {
 	getRecentTurns(count?: number): ConversationItem[];
 	/** Retrieve all memory facts currently stored for this user. */
 	getMemoryFacts(): MemoryFact[];
+	/** Request an asynchronous transfer to another agent (fires on next tick to avoid re-entrancy). */
+	requestTransfer(toAgent: string): void;
+	/** Stop buffering client audio and drain buffered chunks through the handler.
+	 *  Used by external audio agents (e.g., Twilio) to flush audio accumulated during the dial gap. */
+	stopBufferingAndDrain(handler: (chunk: Buffer) => void): void;
+	/** Send a JSON message to the connected client. */
+	sendJsonToClient(message: Record<string, unknown>): void;
 }
 
 /**
@@ -44,6 +51,8 @@ export interface MainAgent {
 	providerOptions?: Record<string, unknown>;
 	/** IETF BCP 47 language tag for this agent (e.g., 'zh-CN', 'es-ES', 'ja-JP'). When set, a language directive is prepended to the system instruction. */
 	language?: string;
+	/** Audio routing mode. 'llm' (default): audio flows through LLM transport. 'external': agent manages its own audio path (e.g., Twilio phone bridge). When 'external', LLM transport is disconnected during this agent's turn. */
+	audioMode?: 'llm' | 'external';
 	/** Called when this agent becomes the active agent (after a transfer or initial start). */
 	onEnter?(ctx: AgentContext): Promise<void>;
 	/** Called when this agent is being replaced by another agent. */

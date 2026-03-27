@@ -69,6 +69,9 @@ export function createAgentContext(options: {
 	conversationContext: ConversationContext;
 	hooks: HooksManager;
 	memoryFacts?: MemoryFact[];
+	requestTransfer?: (toAgent: string) => void;
+	stopBufferingAndDrain?: (handler: (chunk: Buffer) => void) => void;
+	sendJsonToClient?: (message: Record<string, unknown>) => void;
 }): AgentContext {
 	return {
 		sessionId: options.sessionId,
@@ -82,6 +85,15 @@ export function createAgentContext(options: {
 		},
 		getMemoryFacts(): MemoryFact[] {
 			return options.memoryFacts ?? [];
+		},
+		requestTransfer(toAgent: string): void {
+			options.requestTransfer?.(toAgent);
+		},
+		stopBufferingAndDrain(handler: (chunk: Buffer) => void): void {
+			options.stopBufferingAndDrain?.(handler);
+		},
+		sendJsonToClient(message: Record<string, unknown>): void {
+			options.sendJsonToClient?.(message);
 		},
 	};
 }

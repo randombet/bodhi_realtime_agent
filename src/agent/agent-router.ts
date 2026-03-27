@@ -118,52 +118,65 @@ export class AgentRouter {
 		this.clientTransport.startBuffering();
 
 		try {
-			// 5. Build transfer config and state
-			const suffix = this.getInstructionSuffix?.() ?? '';
-			const resolvedInstructions = resolveInstructions(toAgent) + suffix;
-			const allTools = [...toAgent.tools, ...this.extraTools];
+			if (toAgent.audioMode === 'external') {
+				// External audio agent: disconnect LLM transport, let agent manage audio
+				await this.transport.disconnect();
+				this._activeAgent = toAgent;
 
-			const state = {
-				conversationHistory: this.conversationContext.toReplayContent(),
-			};
+				// onEnter receives context — agent wires its own audio path.
+				// Buffering continues until agent calls ctx.stopBufferingAndDrain().
+				const newCtx = this.createContext(toAgent.name);
+				await toAgent.onEnter?.(newCtx);
 
-			// 6. Single transferSession call — transport handles reconnect/replay internally
-			const providerOptions: Record<string, unknown> = {
-				...(toAgent.providerOptions ?? {}),
-			};
-			// Support legacy googleSearch field
-			if (toAgent.googleSearch !== undefined && providerOptions.googleSearch === undefined) {
-				providerOptions.googleSearch = toAgent.googleSearch;
+				this.sessionManager.transitionTo('ACTIVE');
+				this.eventBus.publish('agent.enter', {
+					sessionId: this.sessionManager.sessionId,
+					agentName: toAgent.name,
+				});
+			} else {
+				// Standard LLM agent: reconnect transport with new config
+				const suffix = this.getInstructionSuffix?.() ?? '';
+				const resolvedInstructions = resolveInstructions(toAgent) + suffix;
+				const allTools = [...toAgent.tools, ...this.extraTools];
+
+				const state = {
+					conversationHistory: this.conversationContext.toReplayContent(),
+				};
+
+				const providerOptions: Record<string, unknown> = {
+					...(toAgent.providerOptions ?? {}),
+				};
+				if (toAgent.googleSearch !== undefined && providerOptions.googleSearch === undefined) {
+					providerOptions.googleSearch = toAgent.googleSearch;
+				}
+
+				await this.transport.transferSession(
+					{
+						instructions: resolvedInstructions,
+						tools: allTools,
+						providerOptions,
+					},
+					state,
+				);
+
+				// Stop buffering and replay audio
+				const buffered = this.clientTransport.stopBuffering();
+				for (const chunk of buffered) {
+					this.transport.sendAudio(chunk.toString('base64'));
+				}
+
+				this.sessionManager.transitionTo('ACTIVE');
+				this._activeAgent = toAgent;
+
+				const newCtx = this.createContext(toAgent.name);
+				await toAgent.onEnter?.(newCtx);
+				this.eventBus.publish('agent.enter', {
+					sessionId: this.sessionManager.sessionId,
+					agentName: toAgent.name,
+				});
 			}
 
-			await this.transport.transferSession(
-				{
-					instructions: resolvedInstructions,
-					tools: allTools,
-					providerOptions,
-				},
-				state,
-			);
-
-			// 7. Stop buffering and replay audio
-			const buffered = this.clientTransport.stopBuffering();
-			for (const chunk of buffered) {
-				this.transport.sendAudio(chunk.toString('base64'));
-			}
-
-			// 8. Transition to ACTIVE
-			this.sessionManager.transitionTo('ACTIVE');
-			this._activeAgent = toAgent;
-
-			// 9. onEnter new agent
-			const newCtx = this.createContext(toAgent.name);
-			await toAgent.onEnter?.(newCtx);
-			this.eventBus.publish('agent.enter', {
-				sessionId: this.sessionManager.sessionId,
-				agentName: toAgent.name,
-			});
-
-			// 10. Publish transfer event
+			// Publish transfer event (both paths)
 			this.eventBus.publish('agent.transfer', {
 				sessionId: this.sessionManager.sessionId,
 				fromAgent: fromAgent.name,
@@ -301,6 +314,23 @@ export class AgentRouter {
 			agentName,
 			conversationContext: this.conversationContext,
 			hooks: this.hooks,
+			requestTransfer: (toAgent: string) => {
+				setImmediate(() => {
+					this.eventBus.publish('agent.transfer_requested', {
+						sessionId: this.sessionManager.sessionId,
+						toAgent,
+					});
+				});
+			},
+			stopBufferingAndDrain: (handler: (chunk: Buffer) => void) => {
+				const buffered = this.clientTransport.stopBuffering();
+				for (const chunk of buffered) {
+					handler(chunk);
+				}
+			},
+			sendJsonToClient: (message: Record<string, unknown>) => {
+				this.clientTransport.sendJsonToClient(message);
+			},
 		});
 	}
 }
