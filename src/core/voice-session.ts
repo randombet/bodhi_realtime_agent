@@ -150,6 +150,7 @@ export class VoiceSession {
 	private reconnectAttempts = 0;
 	private static readonly MAX_RECONNECT_ATTEMPTS = 3;
 	private static readonly RECONNECT_BACKOFF_MS = [1000, 2000, 4000];
+	private externalAudioHandler: ((data: Buffer) => void) | null = null;
 
 	constructor(config: VoiceSessionConfig) {
 		this.config = config;
@@ -436,6 +437,14 @@ export class VoiceSession {
 			{
 				onMessage: (toolCallId, msg) => this.handleSubagentMessage(toolCallId, msg),
 				onSessionEnd: (toolCallId) => this.interactionMode.deactivate(toolCallId),
+			},
+			{
+				setExternalAudioHandler: (handler) => {
+					this.externalAudioHandler = handler;
+				},
+				sendAudioToClient: (data) => {
+					this.clientTransport.sendAudioToClient(data);
+				},
 			},
 		);
 		this.agentRouter.registerAgents(config.agents);
@@ -778,6 +787,12 @@ export class VoiceSession {
 			sendJsonToClient: (message: Record<string, unknown>) => {
 				this.clientTransport.sendJsonToClient(message);
 			},
+			sendAudioToClient: (data: Buffer) => {
+				this.clientTransport.sendAudioToClient(data);
+			},
+			setExternalAudioHandler: (handler: ((data: Buffer) => void) | null) => {
+				this.externalAudioHandler = handler;
+			},
 		};
 	}
 
@@ -803,8 +818,17 @@ export class VoiceSession {
 	private handleAudioFromClient(data: Buffer): void {
 		if (this.sessionManager.isActive) {
 			// When active agent uses external audio, don't forward to LLM transport.
-			// The agent's onEnter hook wired its own audio path (e.g., TwilioBridge).
-			if (this.agentRouter.activeAgent.audioMode === 'external') return;
+			// Route mic frames to the active external audio handler (e.g., TwilioBridge).
+			if (this.agentRouter.activeAgent.audioMode === 'external') {
+				if (this.externalAudioHandler) {
+					try {
+						this.externalAudioHandler(data);
+					} catch (err) {
+						this.reportError('external-audio', err instanceof Error ? err : new Error(String(err)));
+					}
+				}
+				return;
+			}
 			const base64 = data.toString('base64');
 			this.transport.sendAudio(base64);
 			this.sttProvider?.feedAudio(base64);

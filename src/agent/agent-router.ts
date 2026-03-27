@@ -33,6 +33,14 @@ export interface SubagentEventCallbacks {
 	onSessionEnd?: (toolCallId: string) => void;
 }
 
+/** Hooks for bridging external-audio agents with VoiceSession audio routing. */
+export interface ExternalAudioCallbacks {
+	/** Called when an external agent wants to receive raw client mic audio. */
+	setExternalAudioHandler?: (handler: ((data: Buffer) => void) | null) => void;
+	/** Called when an external agent wants to play raw PCM audio to the client. */
+	sendAudioToClient?: (data: Buffer) => void;
+}
+
 /**
  * Manages agent lifecycle: transfers between MainAgents and handoffs to background subagents.
  *
@@ -61,6 +69,7 @@ export class AgentRouter {
 		private getInstructionSuffix?: () => string,
 		private extraTools: ToolDefinition[] = [],
 		private subagentCallbacks?: SubagentEventCallbacks,
+		private externalAudioCallbacks?: ExternalAudioCallbacks,
 	) {}
 
 	registerAgents(agents: MainAgent[]): void {
@@ -330,6 +339,16 @@ export class AgentRouter {
 			},
 			sendJsonToClient: (message: Record<string, unknown>) => {
 				this.clientTransport.sendJsonToClient(message);
+			},
+			sendAudioToClient: (data: Buffer) => {
+				if (this.externalAudioCallbacks?.sendAudioToClient) {
+					this.externalAudioCallbacks.sendAudioToClient(data);
+					return;
+				}
+				this.clientTransport.sendAudioToClient(data);
+			},
+			setExternalAudioHandler: (handler: ((data: Buffer) => void) | null) => {
+				this.externalAudioCallbacks?.setExternalAudioHandler?.(handler);
 			},
 		});
 	}

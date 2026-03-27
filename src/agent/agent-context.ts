@@ -72,6 +72,8 @@ export function createAgentContext(options: {
 	requestTransfer?: (toAgent: string) => void;
 	stopBufferingAndDrain?: (handler: (chunk: Buffer) => void) => void;
 	sendJsonToClient?: (message: Record<string, unknown>) => void;
+	sendAudioToClient?: (data: Buffer) => void;
+	setExternalAudioHandler?: (handler: ((data: Buffer) => void) | null) => void;
 }): AgentContext {
 	return {
 		sessionId: options.sessionId,
@@ -94,6 +96,12 @@ export function createAgentContext(options: {
 		},
 		sendJsonToClient(message: Record<string, unknown>): void {
 			options.sendJsonToClient?.(message);
+		},
+		sendAudioToClient(data: Buffer): void {
+			options.sendAudioToClient?.(data);
+		},
+		setExternalAudioHandler(handler: ((data: Buffer) => void) | null): void {
+			options.setExternalAudioHandler?.(handler);
 		},
 	};
 }

@@ -30,6 +30,10 @@ export interface AgentContext {
 	stopBufferingAndDrain(handler: (chunk: Buffer) => void): void;
 	/** Send a JSON message to the connected client. */
 	sendJsonToClient(message: Record<string, unknown>): void;
+	/** Send raw PCM audio to the connected client as a binary frame. */
+	sendAudioToClient?(data: Buffer): void;
+	/** Register/unregister an external audio handler for client mic frames. */
+	setExternalAudioHandler?(handler: ((data: Buffer) => void) | null): void;
 }
 
 /**
