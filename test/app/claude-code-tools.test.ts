@@ -84,6 +84,7 @@ describe('askClaudeTool', () => {
 	it('accepts optional threadKey and continuityMode', () => {
 		const result = askClaudeTool.parameters.safeParse({
 			task: 'Fix the bug',
+			artifactIds: ['art_123'],
 			threadKey: 'task_auth_bug',
 			continuityMode: 'force_fresh',
 		});

@@ -177,3 +177,112 @@ describe('session_data_action tool (download_history)', () => {
 		expect(store.getSessionItems).toHaveBeenCalledWith('sess_test');
 	});
 });
+
+describe('artifact registry wiring in bodhi session config', () => {
+	it('creates an artifactRegistry on session config', () => {
+		const config = createBodhiSessionConfig({
+			apiKey: 'test-key',
+			memoryStore: {
+				addFacts: vi.fn(),
+				getAll: vi.fn(async () => []),
+				replaceAll: vi.fn(),
+				getDirectives: vi.fn(async () => null),
+				setDirectives: vi.fn(),
+			},
+			clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			sessionId: 'sess_artifacts',
+			userId: 'user_test',
+			getSessionRef: () => null,
+		});
+
+		expect(config.artifactRegistry).toBeDefined();
+		expect(typeof config.artifactRegistry?.store).toBe('function');
+		expect(typeof config.artifactRegistry?.dispose).toBe('function');
+	});
+
+	it('exposes list_artifacts tool that returns session artifacts', async () => {
+		const config = createBodhiSessionConfig({
+			apiKey: 'test-key',
+			memoryStore: {
+				addFacts: vi.fn(),
+				getAll: vi.fn(async () => []),
+				replaceAll: vi.fn(),
+				getDirectives: vi.fn(async () => null),
+				setDirectives: vi.fn(),
+			},
+			clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			sessionId: 'sess_artifacts',
+			userId: 'user_test',
+			getSessionRef: () => null,
+		});
+		const listArtifactsTool = config.agents[0]?.tools.find((t) => t.name === 'list_artifacts');
+		expect(listArtifactsTool).toBeDefined();
+
+		config.artifactRegistry?.store('ZmFrZQ==', 'image/png', 'test image', 'generated');
+		const result = (await listArtifactsTool?.execute({}, createMockCtx())) as {
+			artifacts: Array<{ id: string }>;
+		};
+
+		expect(Array.isArray(result.artifacts)).toBe(true);
+		expect(result.artifacts.length).toBe(1);
+		expect(result.artifacts[0]?.id.startsWith('art_')).toBe(true);
+	});
+
+	it('list_artifacts returns empty array before any artifact is stored', async () => {
+		const config = createBodhiSessionConfig({
+			apiKey: 'test-key',
+			memoryStore: {
+				addFacts: vi.fn(),
+				getAll: vi.fn(async () => []),
+				replaceAll: vi.fn(),
+				getDirectives: vi.fn(async () => null),
+				setDirectives: vi.fn(),
+			},
+			clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			sessionId: 'sess_artifacts_empty',
+			userId: 'user_test',
+			getSessionRef: () => null,
+		});
+		const listArtifactsTool = config.agents[0]?.tools.find((t) => t.name === 'list_artifacts');
+		expect(listArtifactsTool).toBeDefined();
+
+		const result = (await listArtifactsTool?.execute({}, createMockCtx())) as {
+			artifacts: Array<{ id: string }>;
+		};
+		expect(result.artifacts).toEqual([]);
+	});
+
+	it('injects list_artifacts for standard, claude_code, and nanoclaw profiles', () => {
+		const baseOptions = {
+			apiKey: 'test-key',
+			memoryStore: {
+				addFacts: vi.fn(),
+				getAll: vi.fn(async () => []),
+				replaceAll: vi.fn(),
+				getDirectives: vi.fn(async () => null),
+				setDirectives: vi.fn(),
+			},
+			clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			sessionId: 'sess_profiles',
+			userId: 'user_test',
+			getSessionRef: () => null,
+		};
+
+		const standard = createBodhiSessionConfig({
+			...baseOptions,
+			agentProfile: 'standard',
+		});
+		const claude = createBodhiSessionConfig({
+			...baseOptions,
+			agentProfile: 'claude_code',
+		});
+		const nanoclaw = createBodhiSessionConfig({
+			...baseOptions,
+			agentProfile: 'nanoclaw',
+		});
+
+		expect(standard.agents[0]?.tools.some((t) => t.name === 'list_artifacts')).toBe(true);
+		expect(claude.agents[0]?.tools.some((t) => t.name === 'list_artifacts')).toBe(true);
+		expect(nanoclaw.agents[0]?.tools.some((t) => t.name === 'list_artifacts')).toBe(true);
+	});
+});

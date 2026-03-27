@@ -10,9 +10,8 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
 	query: vi.fn(),
 }));
 
-const { canonicalizeGroupId, createPersistentNanoClawSubagentConfig } = await import(
-	'../../app/lib/nanoclaw-tools.js'
-);
+const { canonicalizeGroupId, createPersistentNanoClawSubagentConfig, askNanoClawTool } =
+	await import('../../app/lib/nanoclaw-tools.js');
 
 describe('createPersistentNanoClawSubagentConfig', () => {
 	function makeTempRoot(): string {
@@ -94,5 +93,15 @@ describe('createPersistentNanoClawSubagentConfig', () => {
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
+	});
+});
+
+describe('askNanoClawTool', () => {
+	it('accepts optional artifactIds', () => {
+		const result = askNanoClawTool.parameters.safeParse({
+			task: 'Analyze these artifacts',
+			artifactIds: ['art_123', 'art_456'],
+		});
+		expect(result.success).toBe(true);
 	});
 });

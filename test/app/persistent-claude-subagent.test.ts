@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: MIT
 
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { ArtifactRegistry } from '../../app/lib/artifact-registry.js';
 import { PersistentClaudeSubagent } from '../../app/lib/persistent-claude-subagent.js';
 import type { PersistentClaudeSubagentOptions } from '../../app/lib/persistent-claude-subagent.js';
 
@@ -179,5 +183,43 @@ describe('PersistentClaudeSubagent', () => {
 		const calls = (ClaudeCodeSession as unknown as ReturnType<typeof vi.fn>).mock.calls;
 		expect(calls[0][0].mcpServers).toEqual({ myServer: {} });
 		expect(calls[1][0].mcpServers).toEqual({ myServer: {} });
+	});
+
+	it('materializes requested artifacts into workspace and augments task', async () => {
+		const cwd = mkdtempSync(path.join(tmpdir(), 'bodhi-persistent-claude-'));
+		try {
+			const registry = new ArtifactRegistry();
+			const artId = registry.store('aGVsbG8=', 'image/png', 'demo image', 'generated', 'demo.png');
+
+			const agent = new PersistentClaudeSubagent('claude-1', {
+				...sessionOptions,
+				cwd,
+				artifactRegistry: registry,
+			});
+			await agent.invoke('Please analyze this image', { artifactIds: [artId] });
+
+			const { ClaudeCodeSession } = await import('../../app/lib/claude-code-client.js');
+			const ctor = ClaudeCodeSession as unknown as ReturnType<typeof vi.fn>;
+			const instance = ctor.mock.results[0]?.value as { start: ReturnType<typeof vi.fn> };
+			const startedWith = instance.start.mock.calls[0]?.[0] as string;
+
+			expect(startedWith).toContain('The user attached artifact file(s) for this task.');
+			expect(startedWith).toContain(artId);
+			expect(startedWith).toContain('Original task:');
+			expect(startedWith).toContain('Please analyze this image');
+
+			const materializedPath = path.join(cwd, '.bodhi_artifacts', `${artId}_demo.png`);
+			expect(existsSync(materializedPath)).toBe(true);
+			expect(readFileSync(materializedPath, 'utf8')).toBe('hello');
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it('throws when artifactIds are provided but no registry is configured', async () => {
+		const agent = new PersistentClaudeSubagent('claude-1', sessionOptions);
+		await expect(
+			agent.invoke('Use file', { artifactIds: ['art_missing_registry'] }),
+		).rejects.toThrow('no artifact registry');
 	});
 });
