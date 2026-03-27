@@ -2,6 +2,14 @@
 
 Subagents run in the background using the Vercel AI SDK while the voice model continues speaking to the user. They handle long-running operations that would otherwise block the voice stream.
 
+::: tip Persistent Runtime Flow
+For the actor-runtime persistent path (instance reuse, lifecycle states, and OpenClaw example), see [Persistent Subagent Lifecycle](/advanced/persistent-subagent-lifecycle).
+:::
+
+::: info OpenClaw Demo Routing Note
+In `app/openclaw-demo.ts`, OpenClaw is not configured to generate images or videos. Media generation requests should route to `generate_image` / `generate_video`, even if the user explicitly mentions OpenClaw.
+:::
+
 ## Why Subagents?
 
 The Realtime API is real-time — when you call an inline tool, the voice stream pauses until the tool returns. For operations that take more than a couple of seconds (report generation, multi-step workflows, coding tasks), subagents let the conversation continue naturally:
@@ -430,6 +438,20 @@ generate_image subagent ──────► result queued   ↓
 **Isolation:** Use `createInstance()` when subagent state must not leak between concurrent runs. Without it, all runs of the same tool share the same `SubagentConfig` object (and its closures).
 
 **Notification pacing:** Results are flushed one per turn boundary to avoid overwhelming the user with a burst of audio notifications.
+
+### Artifact Passing Between Tools
+
+When a background tool produces an artifact (e.g., a generated image), subsequent tools can reference it by ID via the `artifactIds` parameter:
+
+```typescript
+// Step 1: generate_image stores artifact, returns { artifactId: "art_xxx" }
+// Step 2: User says "email that image to me"
+// Step 3: Main LLM calls ask_openclaw({ task: "email...", artifactIds: ["art_xxx"] })
+// Step 4: Relay subagent resolves artifact from ArtifactRegistry
+// Step 5: chatSend() attaches base64 image to the external agent message
+```
+
+This uses **structured artifact IDs** rather than embedding base64 inline or parsing text descriptions. The `ArtifactRegistry` is per-session, in-memory, with FIFO eviction (max 20 artifacts or 50 MB, 30-min TTL). See [Tools > Artifact Pipeline](/guide/tools#artifact-pipeline-cross-tool-data-flow) for implementation details.
 
 ## Error Handling
 

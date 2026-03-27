@@ -18,6 +18,16 @@ import type {
 } from '../types/transport.js';
 import { zodToJsonSchema } from './zod-to-schema.js';
 
+function toFunctionResponsePayload(value: unknown): Record<string, unknown> {
+	if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+		return value as Record<string, unknown>;
+	}
+	if (value === undefined) {
+		return { result: null };
+	}
+	return { result: value };
+}
+
 /** Configuration for connecting to the Gemini Live API. */
 export interface GeminiTransportConfig {
 	/** Google API key for authentication. */
@@ -346,7 +356,11 @@ export class GeminiLiveTransport implements LLMTransport {
 		if (!this.session) return;
 		this.session.sendToolResponse({
 			functionResponses: [
-				{ id: result.id, name: result.name, response: result.result as Record<string, unknown> },
+				{
+					id: result.id,
+					name: result.name,
+					response: toFunctionResponsePayload(result.result),
+				},
 			],
 		});
 	}
@@ -456,7 +470,14 @@ export class GeminiLiveTransport implements LLMTransport {
 				case 'tool_result':
 					turns.push({
 						role: 'user',
-						parts: [{ functionResponse: { name: item.name, response: item.result } }],
+						parts: [
+							{
+								functionResponse: {
+									name: item.name,
+									response: toFunctionResponsePayload(item.result),
+								},
+							},
+						],
 					});
 					break;
 				case 'file':

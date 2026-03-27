@@ -3,9 +3,13 @@
 import type { LanguageModelV1 } from 'ai';
 import { resolveInstructions } from '../agent/agent-context.js';
 import { AgentRouter } from '../agent/agent-router.js';
+import { PersistentSubagentManager } from '../agent/persistent-subagent-manager.js';
 import type { SubagentMessage } from '../agent/subagent-session.js';
 import { BehaviorManager } from '../behaviors/behavior-manager.js';
 import { MemoryDistiller } from '../memory/memory-distiller.js';
+import type { ToolRoutingInfo } from '../runtime/actors/tool-router-actor.js';
+import { GeminiTransportAdapter } from '../runtime/adapters/gemini-transport-adapter.js';
+import { RuntimeOrchestrator } from '../runtime/runtime-orchestrator.js';
 import { ToolExecutor } from '../tools/tool-executor.js';
 import { ClientSenderAdapter } from '../transport/client-sender-adapter.js';
 import { GeminiLiveTransport } from '../transport/gemini-live-transport.js';
@@ -84,6 +88,19 @@ export interface VoiceSessionConfig {
 	artifactStore?: ArtifactStore;
 	/** Pre-constructed LLM transport. If provided, apiKey/geminiModel/speechConfig/compressionConfig are ignored. */
 	transport?: LLMTransport;
+	/** Orchestration engine for tool routing/subagent lifecycle (default: legacy). */
+	orchestrationMode?: 'legacy' | 'actor';
+	/** Optional per-session artifact registry for cross-tool binary sharing (images, documents). */
+	artifactRegistry?: {
+		store(
+			base64: string,
+			mimeType: string,
+			description: string,
+			source?: string,
+			fileName?: string,
+		): string;
+		dispose(): void;
+	};
 }
 
 /**
@@ -119,14 +136,19 @@ export class VoiceSession {
 	private clientTransport: IClientChannel;
 	private agentRouter: AgentRouter;
 	private toolExecutor: ToolExecutor;
-	private toolCallRouter!: ToolCallRouter;
+	private toolCallRouter?: ToolCallRouter;
+	private runtimeOrchestrator?: RuntimeOrchestrator;
+	private runtimeToolRegistry?: Map<string, ToolRoutingInfo>;
 	private subagentConfigs: Record<string, SubagentConfig>;
+	private persistentSubagents = new PersistentSubagentManager();
 	private behaviorManager?: BehaviorManager;
 	private memoryDistiller?: MemoryDistiller;
 	private memoryCacheManager?: MemoryCacheManager;
 	private turnId = 0;
 	private sttProvider?: STTProvider;
 	private _commitFiredForTurn = false;
+	/** True when the current turn was interrupted — skips Gemini transcript correction. */
+	private _turnWasInterrupted = false;
 	private config: VoiceSessionConfig;
 	private directiveManager = new DirectiveManager();
 	private transcriptManager!: TranscriptManager;
@@ -257,16 +279,15 @@ export class VoiceSession {
 		const allInitialTools = [...(initialAgent?.tools ?? []), ...behaviorTools];
 
 		// Determine inputAudioTranscription setting:
-		// When sttProvider is set, disable built-in transcription automatically.
-		const inputTranscription = config.sttProvider ? false : config.inputAudioTranscription;
+		// Keep Gemini's built-in transcription enabled even when an external STT
+		// provider is active — the built-in result is used as a post-hoc correction
+		// for the STT transcript (more accurate language detection, better accuracy).
+		const inputTranscription = config.inputAudioTranscription;
 
 		if (config.transport) {
 			// Use pre-constructed transport (OpenAI, mock, etc.)
 			this.transport = config.transport;
 			// Sync tools and instructions so they're available at connect time.
-			// When an external STT provider is active, also disable transport built-in
-			// transcription at the provider level (not just the callback) to avoid
-			// duplicate backend processing and unnecessary cost.
 			this.transport.updateSession({
 				instructions,
 				tools: allInitialTools.length ? allInitialTools : undefined,
@@ -293,8 +314,21 @@ export class VoiceSession {
 
 		// Wire LLMTransport property callbacks — works for both injected and default transports
 		this.transport.onAudioOutput = (data) => this.handleAudioOutput(data);
-		this.transport.onToolCall = (calls) => this.toolCallRouter.handleToolCalls(calls);
-		this.transport.onToolCallCancel = (ids) => this.toolCallRouter.handleToolCallCancellation(ids);
+		this.transport.onToolCall = (calls) => {
+			if (this.runtimeOrchestrator) {
+				const names = calls.map((c) => c.name).join(', ');
+				this.log(`Tool calls from LLM: [${names}]`);
+				this.transcriptManager.flushInput();
+				this.transcriptManager.saveOutputPrefix();
+			}
+			this.toolCallRouter?.handleToolCalls(calls);
+		};
+		this.transport.onToolCallCancel = (ids) => {
+			if (this.runtimeOrchestrator) {
+				this.toolExecutor.cancel(ids);
+			}
+			this.toolCallRouter?.handleToolCallCancellation(ids);
+		};
 		this.transport.onTurnComplete = () => this.handleTurnComplete();
 		this.transport.onInterrupted = () => this.handleInterrupted();
 		this.transport.onOutputTranscription = (text) => this.transcriptManager.handleOutput(text);
@@ -306,7 +340,8 @@ export class VoiceSession {
 			this.handleResumptionUpdate(handle, resumable);
 		this.transport.onGroundingMetadata = (metadata) => this.handleGroundingMetadata(metadata);
 
-		// Wire STT: exactly one transcript path is active per session.
+		// Wire STT: streaming provider for real-time display, Gemini built-in for
+		// post-hoc correction. Both paths can be active simultaneously.
 		if (config.sttProvider) {
 			this.sttProvider = config.sttProvider;
 
@@ -331,8 +366,13 @@ export class VoiceSession {
 				this.transcriptManager.handleInputPartial(text);
 			};
 
-			// Disable transport built-in input transcription
-			this.transport.onInputTranscription = undefined;
+			// Wire Gemini built-in transcription as authoritative correction.
+			// Skipped on interrupted turns — Gemini may miss audio spoken during
+			// model output, producing incomplete transcripts.
+			this.transport.onInputTranscription = (text) => {
+				if (this._turnWasInterrupted) return;
+				this.transcriptManager.correctInput(text);
+			};
 		} else {
 			// No external STT — use transport built-in transcription
 			this.transport.onInputTranscription = (text) => this.transcriptManager.handleInput(text);
@@ -413,25 +453,194 @@ export class VoiceSession {
 		this.agentRouter.registerAgents(config.agents);
 		this.agentRouter.setInitialAgent(config.initialAgent);
 
-		// Set up tool call router
-		this.toolCallRouter = new ToolCallRouter({
-			toolExecutor: this.toolExecutor,
-			agentRouter: this.agentRouter,
-			conversationContext: this.conversationContext,
-			notificationQueue: this.notificationQueue,
-			transcriptManager: this.transcriptManager,
-			subagentConfigs: this.subagentConfigs,
-			sendToolResult: (result) => this.transport.sendToolResult(result),
-			transfer: (toAgent) => this.transfer(toAgent),
-			reportError: (component, error) => this.reportError(component, error),
-			log: (msg) => this.log(msg),
-		});
+		if (config.orchestrationMode === 'actor') {
+			this.runtimeToolRegistry = this.buildRuntimeToolRegistry([
+				...(initialAgent?.tools ?? []),
+				...behaviorTools,
+			]);
+
+			this.runtimeOrchestrator = new RuntimeOrchestrator({
+				adapter: new GeminiTransportAdapter(this.transport),
+				tools: this.runtimeToolRegistry,
+				inlineExecutor: {
+					execute: async (call) => {
+						const toolCall = {
+							toolCallId: call.toolCallId,
+							toolName: call.toolName,
+							args: call.args,
+						};
+						const result = await this.toolExecutor.handleToolCall(toolCall);
+						this.conversationContext.addToolCall(toolCall);
+						this.conversationContext.addToolResult(result);
+						return {
+							result: result.error ? { error: result.error } : result.result,
+							error: result.error,
+						};
+					},
+				},
+				clientSend: (message) => this.clientTransport.sendJsonToClient(message),
+				onTransferRequested: async (toAgent) => {
+					await this.transfer(toAgent);
+				},
+				backgroundExecutor: async (request, signal) => {
+					const toolCall = {
+						toolCallId: request.toolCallId,
+						toolName: request.toolName,
+						args: request.args,
+					};
+					const registeredConfig = this.subagentConfigs[request.toolName];
+					if (!registeredConfig) {
+						throw new Error(`No subagent config for tool "${request.toolName}"`);
+					}
+					const hasPendingMessage = !!this.runtimeToolRegistry?.get(request.toolName)
+						?.pendingMessage;
+					this.log(
+						`Background task started: ${request.toolName} (toolCallId=${request.toolCallId}, lifetime=${request.lifetime})`,
+					);
+
+					this.conversationContext.addToolCall(toolCall);
+					try {
+						let resultText: string;
+						const usePersistentRuntimePath =
+							request.lifetime === 'persistent_session' && !!registeredConfig.persistentFactory;
+
+						if (usePersistentRuntimePath) {
+							const persistentKey = request.configName;
+							// Safe: usePersistentRuntimePath checks !!registeredConfig.persistentFactory above
+							const factory = registeredConfig.persistentFactory as NonNullable<
+								typeof registeredConfig.persistentFactory
+							>;
+							await this.persistentSubagents.acquirePersistent(
+								persistentKey,
+								registeredConfig,
+								factory,
+							);
+							resultText = await this.persistentSubagents.invoke(
+								persistentKey,
+								`Execute tool: ${request.toolName}`,
+								request.args,
+								signal,
+							);
+						} else {
+							const subagentConfig = registeredConfig.createInstance
+								? registeredConfig.createInstance()
+								: registeredConfig;
+							const result = await this.agentRouter.handoff(toolCall, subagentConfig, signal);
+							resultText = result.text;
+						}
+
+						this.conversationContext.addToolResult({
+							toolCallId: toolCall.toolCallId,
+							toolName: toolCall.toolName,
+							result: resultText,
+						});
+						if (hasPendingMessage) {
+							this.notificationQueue.sendOrQueue(
+								[
+									{
+										role: 'user',
+										parts: [
+											{
+												text: `[SYSTEM: Background task "${request.toolName}" completed successfully. Result: ${resultText}. Please inform the user now.]`,
+											},
+										],
+									},
+								],
+								true,
+							);
+						}
+						this.log(
+							`Background task completed: ${request.toolName} (toolCallId=${request.toolCallId})`,
+						);
+						return resultText;
+					} catch (err) {
+						this.conversationContext.addToolResult({
+							toolCallId: toolCall.toolCallId,
+							toolName: toolCall.toolName,
+							result: null,
+							error: err instanceof Error ? err.message : String(err),
+						});
+						if (hasPendingMessage) {
+							const msg = err instanceof Error ? err.message : String(err);
+							this.notificationQueue.sendOrQueue(
+								[
+									{
+										role: 'user',
+										parts: [
+											{
+												text: `[SYSTEM: Background task "${request.toolName}" failed: ${msg}. Please apologize and ask how to proceed.]`,
+											},
+										],
+									},
+								],
+								true,
+							);
+						}
+						this.log(
+							`Background task failed: ${request.toolName} (toolCallId=${request.toolCallId})`,
+						);
+						throw err;
+					}
+				},
+				agents: config.agents.map((agent) => ({
+					name: agent.name,
+					instructions: resolveInstructions(agent),
+					tools: agent.tools,
+					providerOptions: agent.providerOptions,
+					onEnter: async () => agent.onEnter?.(this.createAgentContext(agent.name)),
+					onExit: async () => agent.onExit?.(this.createAgentContext(agent.name)),
+				})),
+				initialAgent: config.initialAgent,
+				hooks: {
+					onAgentTransfer: (info) => {
+						this.eventBus.publish('agent.transfer', {
+							sessionId: this.sessionManager.sessionId,
+							fromAgent: info.fromAgent,
+							toAgent: info.toAgent,
+						});
+					},
+					onError: (info) => this.reportError(info.component, info.error),
+				},
+			});
+		} else {
+			// Set up legacy tool call router
+			this.toolCallRouter = new ToolCallRouter({
+				toolExecutor: this.toolExecutor,
+				agentRouter: this.agentRouter,
+				conversationContext: this.conversationContext,
+				notificationQueue: this.notificationQueue,
+				transcriptManager: this.transcriptManager,
+				subagentConfigs: this.subagentConfigs,
+				sendToolResult: (result) => this.transport.sendToolResult(result),
+				transfer: (toAgent) => this.transfer(toAgent),
+				reportError: (component, error) => this.reportError(component, error),
+				log: (msg) => this.log(msg),
+			});
+		}
+	}
+
+	/**
+	 * Queue a short spoken update for the user.
+	 * Delivered immediately when possible, otherwise after the current turn.
+	 */
+	notifyBackground(
+		text: string,
+		options?: { priority?: 'normal' | 'high'; label?: 'SUBAGENT UPDATE' | 'SUBAGENT QUESTION' },
+	): void {
+		const label = options?.label ?? 'SUBAGENT UPDATE';
+		this.notificationQueue.sendOrQueue(
+			[{ role: 'user', parts: [{ text: `[${label}]: ${text}` }] }],
+			true,
+			{ priority: options?.priority ?? 'normal' },
+		);
 	}
 
 	/** Start the client WebSocket server and connect to the LLM transport. */
 	async start(): Promise<void> {
-		// STT is started only when session becomes ACTIVE (in handleSetupComplete / reconnect),
-		// so it is bound to agent readiness, not connection establishment.
+		await this.sttProvider?.start();
+		if (this.runtimeOrchestrator) {
+			await this.runtimeOrchestrator.start();
+		}
 
 		// Load memory and directives in parallel with Gemini connect so session starts fast
 		this._memoryReadyPromise = this.loadMemoryAndDirectives();
@@ -522,6 +731,11 @@ export class VoiceSession {
 		}
 
 		await this.sttProvider?.stop();
+		if (this.runtimeOrchestrator) {
+			await this.runtimeOrchestrator.stop();
+		}
+		await this.persistentSubagents.disposeAllPersistent();
+		this.config.artifactRegistry?.dispose();
 		await this.transport.disconnect();
 		await this.clientTransport.stop();
 
@@ -543,7 +757,18 @@ export class VoiceSession {
 		this.toolExecutor = this.createToolExecutor(agent.name);
 		const behaviorTools = this.behaviorManager?.tools ?? [];
 		this.toolExecutor.register([...agent.tools, ...behaviorTools]);
-		this.toolCallRouter.toolExecutor = this.toolExecutor;
+		if (this.toolCallRouter) {
+			this.toolCallRouter.toolExecutor = this.toolExecutor;
+		}
+		if (this.runtimeToolRegistry) {
+			this.runtimeToolRegistry.clear();
+			for (const [name, info] of this.buildRuntimeToolRegistry([
+				...agent.tools,
+				...behaviorTools,
+			])) {
+				this.runtimeToolRegistry.set(name, info);
+			}
+		}
 
 		// Clear agent-scoped directives on transfer; session-scoped directives persist
 		this.directiveManager.clearAgent();
@@ -563,6 +788,34 @@ export class VoiceSession {
 			(msg) => this.clientTransport.sendJsonToClient(msg),
 			(key, value, scope) => this.directiveManager.set(key, value, scope),
 		);
+	}
+
+	private createAgentContext(agentName: string) {
+		return {
+			sessionId: this.config.sessionId,
+			agentName,
+			injectSystemMessage: (text: string) =>
+				this.conversationContext.addAssistantMessage(`[system] ${text}`),
+			getRecentTurns: (count = 10) => [...this.conversationContext.items].slice(-count),
+			getMemoryFacts: () => this.memoryCacheManager?.facts ?? [],
+		};
+	}
+
+	private buildRuntimeToolRegistry(
+		tools: { name: string; execution: 'inline' | 'background'; pendingMessage?: string }[],
+	): Map<string, ToolRoutingInfo> {
+		const registry = new Map<string, ToolRoutingInfo>();
+		for (const tool of tools) {
+			registry.set(tool.name, {
+				name: tool.name,
+				execution: tool.execution,
+				// Keep the transport tool result name aligned with the model-facing tool name.
+				configName: tool.name,
+				pendingMessage: tool.pendingMessage,
+				lifetime: this.subagentConfigs[tool.name]?.lifetime,
+			});
+		}
+		return registry;
 	}
 
 	// --- Audio fast-path (no EventBus) ---
@@ -620,6 +873,7 @@ export class VoiceSession {
 			}
 			this.sttProvider.handleTurnComplete();
 			this._commitFiredForTurn = false;
+			this._turnWasInterrupted = false;
 		}
 
 		this.transcriptManager.flush();
@@ -700,6 +954,7 @@ export class VoiceSession {
 
 	private handleInterrupted(): void {
 		this.log('Interrupted by user');
+		this._turnWasInterrupted = true;
 		this.sttProvider?.handleInterrupted();
 		this.notificationQueue.resetAudio();
 		this.notificationQueue.markInterrupted();
@@ -799,6 +1054,26 @@ export class VoiceSession {
 
 		// Record in conversation context
 		this.conversationContext.addUserMessage(`[Uploaded file: ${fileName ?? 'file'}]`);
+
+		// Store in artifact registry for cross-tool access (supported binary image types only).
+		if (this.config.artifactRegistry && mimeType.startsWith('image/')) {
+			try {
+				this.config.artifactRegistry.store(
+					base64,
+					mimeType,
+					fileName ?? `upload_${Date.now()}`,
+					'uploaded',
+					fileName,
+				);
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				this.log(`Failed to store artifact: ${msg}`);
+				this.eventBus.publish('gui.notification', {
+					sessionId: this.config.sessionId,
+					message: `File uploaded to voice session but cannot be forwarded to agents: ${msg}`,
+				});
+			}
+		}
 	}
 
 	private handleTextInput(text: string): void {
