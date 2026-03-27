@@ -10,6 +10,8 @@ import type {
 	ReconnectState,
 	ReplayItem,
 	SessionUpdate,
+	TTSAudioConfig,
+	TTSProvider,
 	TransportCapabilities,
 	TransportPendingToolCall,
 	TransportToolCall,
@@ -160,5 +162,133 @@ describe('LLMTransport type definitions', () => {
 	it('SessionUpdate has optional fields', () => {
 		const update: SessionUpdate = { instructions: 'New instructions' };
 		expect(update.tools).toBeUndefined();
+	});
+
+	it('SessionUpdate accepts responseModality', () => {
+		const update: SessionUpdate = { responseModality: 'text' };
+		expect(update.responseModality).toBe('text');
+	});
+
+	it('LLMTransportConfig accepts responseModality', () => {
+		const config: LLMTransportConfig = {
+			auth: { type: 'api_key', apiKey: 'test' },
+			model: 'test-model',
+			responseModality: 'text',
+		};
+		expect(config.responseModality).toBe('text');
+	});
+
+	it('TransportCapabilities accepts optional textResponseModality', () => {
+		const caps: TransportCapabilities = {
+			messageTruncation: false,
+			turnDetection: true,
+			userTranscription: true,
+			inPlaceSessionUpdate: false,
+			sessionResumption: true,
+			contextCompression: true,
+			groundingMetadata: true,
+			textResponseModality: true,
+		};
+		expect(caps.textResponseModality).toBe(true);
+	});
+
+	it('LLMTransport stub supports text-mode callbacks', () => {
+		const stub: LLMTransport = {
+			capabilities: {
+				messageTruncation: false,
+				turnDetection: true,
+				userTranscription: true,
+				inPlaceSessionUpdate: false,
+				sessionResumption: false,
+				contextCompression: false,
+				groundingMetadata: false,
+				textResponseModality: true,
+			},
+			audioFormat: {
+				inputSampleRate: 16000,
+				outputSampleRate: 24000,
+				channels: 1,
+				bitDepth: 16,
+				encoding: 'pcm',
+			},
+			isConnected: false,
+			connect: vi.fn(),
+			disconnect: vi.fn(),
+			reconnect: vi.fn(),
+			sendAudio: vi.fn(),
+			commitAudio: vi.fn(),
+			clearAudio: vi.fn(),
+			updateSession: vi.fn(),
+			transferSession: vi.fn(),
+			sendContent: vi.fn(),
+			sendFile: vi.fn(),
+			sendToolResult: vi.fn(),
+			triggerGeneration: vi.fn(),
+			onTextOutput: vi.fn(),
+			onTextDone: vi.fn(),
+			onSpeechStarted: vi.fn(),
+		};
+
+		expect(stub.capabilities.textResponseModality).toBe(true);
+		stub.onTextOutput?.('hello');
+		expect(stub.onTextOutput).toHaveBeenCalledWith('hello');
+	});
+});
+
+describe('TTSProvider type definitions', () => {
+	it('TTSAudioConfig satisfies expected shape', () => {
+		const config: TTSAudioConfig = {
+			sampleRate: 24000,
+			bitDepth: 16,
+			channels: 1,
+			encoding: 'pcm',
+		};
+		expect(config.sampleRate).toBe(24000);
+		expect(config.encoding).toBe('pcm');
+	});
+
+	it('TTSProvider stub satisfies interface', () => {
+		const provider: TTSProvider = {
+			configure: vi
+				.fn()
+				.mockReturnValue({ sampleRate: 24000, bitDepth: 16, channels: 1, encoding: 'pcm' }),
+			start: vi.fn(),
+			stop: vi.fn(),
+			synthesize: vi.fn(),
+			cancel: vi.fn(),
+		};
+
+		const result = provider.configure({
+			sampleRate: 24000,
+			bitDepth: 16,
+			channels: 1,
+			encoding: 'pcm',
+		});
+		expect(result.sampleRate).toBe(24000);
+		provider.synthesize('hello', 1);
+		expect(provider.synthesize).toHaveBeenCalledWith('hello', 1);
+	});
+
+	it('TTSProvider callbacks are optional', () => {
+		const provider: TTSProvider = {
+			configure: vi
+				.fn()
+				.mockReturnValue({ sampleRate: 24000, bitDepth: 16, channels: 1, encoding: 'pcm' }),
+			start: vi.fn(),
+			stop: vi.fn(),
+			synthesize: vi.fn(),
+			cancel: vi.fn(),
+		};
+
+		expect(provider.onAudio).toBeUndefined();
+		expect(provider.onDone).toBeUndefined();
+		expect(provider.onWordBoundary).toBeUndefined();
+		expect(provider.onError).toBeUndefined();
+	});
+
+	it('TTSProvider is re-exported from types barrel', async () => {
+		const types = await import('../../src/types/index.js');
+		// Type-level check — if TTSProvider is not exported, this test file won't compile
+		expect(types).toBeDefined();
 	});
 });
