@@ -268,9 +268,7 @@ describe('TranscriptManager', () => {
 
 			mgr.correctInput('corrected text');
 
-			const correctionMsg = sink.messages.find(
-				(m) => m.corrected === true,
-			);
+			const correctionMsg = sink.messages.find((m) => m.corrected === true);
 			expect(correctionMsg).toEqual({
 				type: 'transcript',
 				role: 'user',

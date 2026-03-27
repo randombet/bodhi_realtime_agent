@@ -24,6 +24,7 @@ export interface EventPayloadMap {
 	'agent.enter': { sessionId: string; agentName: string };
 	'agent.exit': { sessionId: string; agentName: string };
 	'agent.transfer': { sessionId: string; fromAgent: string; toAgent: string };
+	'agent.transfer_requested': { sessionId: string; toAgent: string };
 	'agent.handoff': {
 		sessionId: string;
 		agentName: string;

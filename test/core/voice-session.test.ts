@@ -2128,7 +2128,7 @@ describe('VoiceSession', () => {
 			expect(transcripts.length).toBeGreaterThanOrEqual(2);
 			const correction = transcripts.find((t: Record<string, unknown>) => t.corrected === true);
 			expect(correction).toBeDefined();
-			expect(correction!.text).toBe('Hello my name is John');
+			expect(correction?.text).toBe('Hello my name is John');
 
 			ws.close();
 			await new Promise<void>((r) => ws.on('close', r));

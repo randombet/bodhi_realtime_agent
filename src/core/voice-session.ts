@@ -150,6 +150,7 @@ export class VoiceSession {
 	private reconnectAttempts = 0;
 	private static readonly MAX_RECONNECT_ATTEMPTS = 3;
 	private static readonly RECONNECT_BACKOFF_MS = [1000, 2000, 4000];
+	private externalAudioHandler: ((data: Buffer) => void) | null = null;
 
 	constructor(config: VoiceSessionConfig) {
 		this.config = config;
@@ -404,6 +405,17 @@ export class VoiceSession {
 			},
 		);
 
+		// Subscribe to async agent transfer requests (from external audio agents like Twilio)
+		this.eventBus.subscribe('agent.transfer_requested', (payload) => {
+			setImmediate(() => {
+				this.agentRouter.transfer(payload.toAgent).catch((err) => {
+					this.log(
+						`Transfer requested to "${payload.toAgent}" failed: ${err instanceof Error ? err.message : String(err)}`,
+					);
+				});
+			});
+		});
+
 		// Set up tool executor
 		this.toolExecutor = this.createToolExecutor(config.initialAgent);
 
@@ -425,6 +437,14 @@ export class VoiceSession {
 			{
 				onMessage: (toolCallId, msg) => this.handleSubagentMessage(toolCallId, msg),
 				onSessionEnd: (toolCallId) => this.interactionMode.deactivate(toolCallId),
+			},
+			{
+				setExternalAudioHandler: (handler) => {
+					this.externalAudioHandler = handler;
+				},
+				sendAudioToClient: (data) => {
+					this.clientTransport.sendAudioToClient(data);
+				},
 			},
 		);
 		this.agentRouter.registerAgents(config.agents);
@@ -742,7 +762,7 @@ export class VoiceSession {
 		);
 	}
 
-	private createAgentContext(agentName: string) {
+	private createAgentContext(agentName: string): import('../types/agent.js').AgentContext {
 		return {
 			sessionId: this.config.sessionId,
 			agentName,
@@ -750,6 +770,29 @@ export class VoiceSession {
 				this.conversationContext.addAssistantMessage(`[system] ${text}`),
 			getRecentTurns: (count = 10) => [...this.conversationContext.items].slice(-count),
 			getMemoryFacts: () => this.memoryCacheManager?.facts ?? [],
+			requestTransfer: (toAgent: string) => {
+				setImmediate(() => {
+					this.eventBus.publish('agent.transfer_requested', {
+						sessionId: this.config.sessionId,
+						toAgent,
+					});
+				});
+			},
+			stopBufferingAndDrain: (handler: (chunk: Buffer) => void) => {
+				const buffered = this.clientTransport.stopBuffering();
+				for (const chunk of buffered) {
+					handler(chunk);
+				}
+			},
+			sendJsonToClient: (message: Record<string, unknown>) => {
+				this.clientTransport.sendJsonToClient(message);
+			},
+			sendAudioToClient: (data: Buffer) => {
+				this.clientTransport.sendAudioToClient(data);
+			},
+			setExternalAudioHandler: (handler: ((data: Buffer) => void) | null) => {
+				this.externalAudioHandler = handler;
+			},
 		};
 	}
 
@@ -774,6 +817,18 @@ export class VoiceSession {
 
 	private handleAudioFromClient(data: Buffer): void {
 		if (this.sessionManager.isActive) {
+			// When active agent uses external audio, don't forward to LLM transport.
+			// Route mic frames to the active external audio handler (e.g., TwilioBridge).
+			if (this.agentRouter.activeAgent.audioMode === 'external') {
+				if (this.externalAudioHandler) {
+					try {
+						this.externalAudioHandler(data);
+					} catch (err) {
+						this.reportError('external-audio', err instanceof Error ? err : new Error(String(err)));
+					}
+				}
+				return;
+			}
 			const base64 = data.toString('base64');
 			this.transport.sendAudio(base64);
 			this.sttProvider?.feedAudio(base64);
@@ -839,17 +894,7 @@ export class VoiceSession {
 				.map((i) => `[${i.role}]: ${i.content}`)
 				.join('\n');
 
-			agent.onTurnCompleted(
-				{
-					sessionId: this.config.sessionId,
-					agentName: agent.name,
-					injectSystemMessage: (text) =>
-						this.conversationContext.addAssistantMessage(`[system] ${text}`),
-					getRecentTurns: (count = 10) => [...this.conversationContext.items].slice(-count),
-					getMemoryFacts: () => this.memoryCacheManager?.facts ?? [],
-				},
-				transcript,
-			);
+			agent.onTurnCompleted(this.createAgentContext(agent.name), transcript);
 		}
 
 		// Trigger memory extraction (every N turns) and refresh cache
