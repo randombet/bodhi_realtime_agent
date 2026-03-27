@@ -12,6 +12,7 @@ import { GeminiTransportAdapter } from '../runtime/adapters/gemini-transport-ada
 import { RuntimeOrchestrator } from '../runtime/runtime-orchestrator.js';
 import { ToolExecutor } from '../tools/tool-executor.js';
 import { ClientSenderAdapter } from '../transport/client-sender-adapter.js';
+import { ClientTransport } from '../transport/client-transport.js';
 import { GeminiLiveTransport } from '../transport/gemini-live-transport.js';
 import type { MainAgent, SubagentConfig } from '../types/agent.js';
 import type { BehaviorCategory } from '../types/behavior.js';
@@ -56,7 +57,13 @@ export interface VoiceSessionConfig {
 	 * Sender for all output to the client. The server owns the socket and feeds input
 	 * via feedAudioFromClient / feedJsonFromClient and notifyClientConnected / notifyClientDisconnected.
 	 */
-	clientSender: SessionClientSender;
+	clientSender?: SessionClientSender;
+	/** Port for the local client WebSocket server (legacy/local mode). */
+	port?: number;
+	/** Host for the local client WebSocket server (legacy/local mode). */
+	host?: string;
+	/** Listen timeout for local client WebSocket server startup (legacy/local mode). */
+	listenTimeoutMs?: number;
 	/** LLM model name (e.g. "gemini-live-2.5-flash-preview"). */
 	geminiModel?: string;
 	/** Vercel AI SDK model for subagent text generation. */
@@ -386,7 +393,23 @@ export class VoiceSession {
 			}
 		};
 
-		this.clientTransport = new ClientSenderAdapter(config.clientSender);
+		if (config.clientSender) {
+			// Server-owned socket mode (multi-user/session router).
+			this.clientTransport = new ClientSenderAdapter(config.clientSender);
+		} else {
+			// Backward-compatible local mode used by demos/tests.
+			this.clientTransport = new ClientTransport(
+				config.port ?? 9900,
+				{
+					onAudioFromClient: (data) => this.handleAudioFromClient(data),
+					onJsonFromClient: (message) => this.handleJsonFromClient(message),
+					onClientConnected: () => this.handleClientConnected(),
+					onClientDisconnected: () => this.handleClientDisconnected(),
+				},
+				config.host ?? '0.0.0.0',
+				config.listenTimeoutMs ?? 10_000,
+			);
+		}
 
 		// Forward GUI events from EventBus to the client as JSON text frames
 		this.eventBus.subscribe('gui.update', (payload) => {
