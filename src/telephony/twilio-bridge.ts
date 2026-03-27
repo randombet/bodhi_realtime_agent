@@ -122,7 +122,6 @@ export class TwilioBridge {
 		const twimlUrl = `${this.config.webhookBaseUrl}/twilio/voice?auth=${this.wsAuthToken}`;
 		const statusCallbackUrl = `${this.config.webhookBaseUrl}/twilio/status`;
 
-		// biome-ignore lint: Twilio SDK types are complex; explicit options object is clearer
 		const callOptions = {
 			to: toNumber,
 			from: this.config.fromNumber,
