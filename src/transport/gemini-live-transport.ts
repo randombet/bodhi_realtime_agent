@@ -106,6 +106,15 @@ export class GeminiLiveTransport implements LLMTransport {
 	private setupResolver: (() => void) | null = null;
 	/** Tracks whether onModelTurnStart has already fired for the current turn. */
 	private _modelTurnStarted = false;
+	/** Whether the transport should emit text output (used by external TTS pipelines). */
+	private _textMode = false;
+	/**
+	 * True when text-mode is satisfied by output audio transcription instead of
+	 * model text parts (native-audio model compatibility path).
+	 */
+	private _textFromOutputTranscription = false;
+	/** Whether onTextDone has been fired for the current turn (prevents double-fire). */
+	private _textDoneFired = false;
 
 	// --- LLMTransport static properties ---
 
@@ -117,6 +126,7 @@ export class GeminiLiveTransport implements LLMTransport {
 		sessionResumption: true,
 		contextCompression: true,
 		groundingMetadata: true,
+		textResponseModality: true,
 	};
 
 	readonly audioFormat: AudioFormatSpec = {
@@ -143,6 +153,9 @@ export class GeminiLiveTransport implements LLMTransport {
 	onGoAway?: (timeLeft: string) => void;
 	onResumptionUpdate?: (handle: string, resumable: boolean) => void;
 	onGroundingMetadata?: (metadata: Record<string, unknown>) => void;
+	onTextOutput?: (text: string) => void;
+	onTextDone?: () => void;
+	onSpeechStarted?: () => void;
 
 	constructor(config: GeminiTransportConfig, callbacks: GeminiTransportCallbacks) {
 		this.ai = new GoogleGenAI({ apiKey: config.apiKey });
@@ -167,10 +180,24 @@ export class GeminiLiveTransport implements LLMTransport {
 		});
 
 		const model = this.config.model ?? 'gemini-live-2.5-flash-preview';
+		const nativeAudioTextFallback = this._textMode && /native-audio/i.test(model);
+		this._textFromOutputTranscription = nativeAudioTextFallback;
 
 		const connectConfig: Record<string, unknown> = {
-			responseModalities: ['AUDIO'],
-			outputAudioTranscription: {},
+			// In external TTS mode, request both AUDIO and TEXT:
+			// - TEXT is consumed by the app's TTS provider
+			// - AUDIO is ignored by the app, but keeps native-audio models happy
+			//
+			// Native-audio models reject TEXT modality; for those, use AUDIO +
+			// outputAudioTranscription and route transcription text to TTS.
+			responseModalities: nativeAudioTextFallback
+				? ['AUDIO']
+				: this._textMode
+					? ['AUDIO', 'TEXT']
+					: ['AUDIO'],
+			...((this._textMode && nativeAudioTextFallback) || !this._textMode
+				? { outputAudioTranscription: {} }
+				: {}),
 		};
 
 		if (this.config.inputAudioTranscription !== false) {
@@ -198,7 +225,7 @@ export class GeminiLiveTransport implements LLMTransport {
 			connectConfig.sessionResumption = {};
 		}
 
-		if (this.config.speechConfig?.voiceName) {
+		if (this.config.speechConfig?.voiceName && !this._textMode) {
 			connectConfig.speechConfig = {
 				voiceConfig: { prebuiltVoiceConfig: { voiceName: this.config.speechConfig.voiceName } },
 			};
@@ -384,6 +411,9 @@ export class GeminiLiveTransport implements LLMTransport {
 		if (config.tools !== undefined) {
 			this.config.tools = config.tools;
 		}
+		if (config.responseModality !== undefined) {
+			this._textMode = config.responseModality === 'text';
+		}
 		if (config.providerOptions !== undefined) {
 			if (typeof config.providerOptions.googleSearch === 'boolean') {
 				this.config.googleSearch = config.providerOptions.googleSearch;
@@ -445,6 +475,9 @@ export class GeminiLiveTransport implements LLMTransport {
 					targetTokens: number;
 				};
 			}
+		}
+		if (config.responseModality !== undefined) {
+			this._textMode = config.responseModality === 'text';
 		}
 	}
 
@@ -515,7 +548,7 @@ export class GeminiLiveTransport implements LLMTransport {
 		if (msg.serverContent) {
 			const content = msg.serverContent;
 
-			// Audio output — fire onModelTurnStart on first modelTurn.parts per turn
+			// Model output — fire onModelTurnStart on first modelTurn.parts per turn
 			if (content.modelTurn?.parts) {
 				if (!this._modelTurnStarted) {
 					this._modelTurnStarted = true;
@@ -524,8 +557,16 @@ export class GeminiLiveTransport implements LLMTransport {
 				}
 				for (const part of content.modelTurn.parts) {
 					if (part.inlineData?.data) {
-						this.callbacks.onAudioOutput?.(part.inlineData.data);
-						if (this.onAudioOutput) this.onAudioOutput(part.inlineData.data);
+						// In text-mode pipelines (external TTS), Gemini audio is intentionally ignored.
+						if (!this._textMode) {
+							this.callbacks.onAudioOutput?.(part.inlineData.data);
+							if (this.onAudioOutput) this.onAudioOutput(part.inlineData.data);
+						}
+					}
+					if (part.text !== undefined && part.text !== null && !this._textFromOutputTranscription) {
+						// Text output (text mode — for TTS). In native-audio text fallback,
+						// prefer outputTranscription and suppress model text parts.
+						if (this.onTextOutput) this.onTextOutput(part.text);
 					}
 				}
 			}
@@ -538,6 +579,9 @@ export class GeminiLiveTransport implements LLMTransport {
 
 			// Transcriptions
 			if (content.inputTranscription?.text) {
+				// Best-effort speech-start signal for external TTS barge-in.
+				// Gemini Live does not currently expose a dedicated speech_started event.
+				if (this.onSpeechStarted) this.onSpeechStarted();
 				this.callbacks.onInputTranscription?.(content.inputTranscription.text);
 				if (this.onInputTranscription) this.onInputTranscription(content.inputTranscription.text);
 			}
@@ -545,15 +589,27 @@ export class GeminiLiveTransport implements LLMTransport {
 				this.callbacks.onOutputTranscription?.(content.outputTranscription.text);
 				if (this.onOutputTranscription)
 					this.onOutputTranscription(content.outputTranscription.text);
+				if (this._textMode && this._textFromOutputTranscription && this.onTextOutput) {
+					this.onTextOutput(content.outputTranscription.text);
+				}
 			}
 
 			// Turn signals
 			if (content.interrupted) {
+				// Mirror interruption as speech-start signal for consumers that need
+				// barge-in semantics while model audio/text may still be flushing.
+				if (this.onSpeechStarted) this.onSpeechStarted();
 				this.callbacks.onInterrupted?.();
 				if (this.onInterrupted) this.onInterrupted();
 			}
 			if (content.turnComplete) {
 				this._modelTurnStarted = false;
+				// In text mode, fire onTextDone before onTurnComplete (ordering contract)
+				if (this._textMode && !this._textDoneFired) {
+					this._textDoneFired = true;
+					if (this.onTextDone) this.onTextDone();
+				}
+				this._textDoneFired = false;
 				this.callbacks.onTurnComplete?.();
 				if (this.onTurnComplete) this.onTurnComplete();
 			}

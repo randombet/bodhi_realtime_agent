@@ -76,6 +76,17 @@ export interface FrameworkHooks {
 		durationMs: number;
 	}): void;
 
+	/** Fires after each TTS synthesis request completes. */
+	onTTSSynthesis?(event: {
+		sessionId: string;
+		provider: string;
+		textLength: number;
+		durationMs: number;
+		audioMs: number;
+		ttfbMs: number;
+		requestId: number;
+	}): void;
+
 	/** Fires on any framework error. Use for centralized error logging/alerting. */
 	onError?(event: {
 		sessionId?: string;
