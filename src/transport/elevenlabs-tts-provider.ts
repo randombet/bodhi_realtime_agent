@@ -36,8 +36,8 @@ const SUPPORTED_OUTPUT_FORMATS: Record<number, string> = {
 const WS_BASE_URL = 'wss://api.elevenlabs.io/v1/text-to-speech';
 const CONNECT_TIMEOUT_MS = 10_000;
 
-/** Maximum characters allowed in the SentenceBuffer before rejecting input. */
-const MAX_BUFFER_CHARS = 10_000;
+/** Maximum characters pending synthesis before applying backpressure. */
+const MAX_PENDING_CHARS = 10_000;
 
 type ProviderState = 'idle' | 'connecting' | 'connected' | 'stopping' | 'stopped';
 
@@ -80,6 +80,7 @@ export class ElevenLabsTTSProvider implements TTSProvider {
 	// --- Start promise resolution ---
 	private _connectResolve: (() => void) | null = null;
 	private _connectReject: ((err: Error) => void) | null = null;
+	private _connectTimer?: ReturnType<typeof setTimeout>;
 
 	// --- Callbacks (wired by VoiceSession before start()) ---
 	onAudio?: (base64Pcm: string, durationMs: number, requestId: number) => void;
@@ -158,9 +159,9 @@ export class ElevenLabsTTSProvider implements TTSProvider {
 		}
 
 		// Backpressure: reject input when too much text is pending synthesis
-		if (this._pendingChars > MAX_BUFFER_CHARS) {
+		if (this._pendingChars > MAX_PENDING_CHARS) {
 			this._log(
-				`Backpressure: dropping ${text.length} chars (${this._pendingChars} pending, limit ${MAX_BUFFER_CHARS})`,
+				`Backpressure: dropping ${text.length} chars (${this._pendingChars} pending, limit ${MAX_PENDING_CHARS})`,
 			);
 			return;
 		}
@@ -168,7 +169,7 @@ export class ElevenLabsTTSProvider implements TTSProvider {
 		// Buffer text and send at sentence boundaries
 		const sentences = this._sentenceBuffer.add(text);
 		for (const sentence of sentences) {
-			this._sendText(sentence, requestId);
+			this._sendText(sentence);
 			this._pendingChars += sentence.length;
 		}
 
@@ -242,7 +243,8 @@ export class ElevenLabsTTSProvider implements TTSProvider {
 			});
 
 			// Connection timeout
-			setTimeout(() => {
+			this._connectTimer = setTimeout(() => {
+				this._connectTimer = undefined;
 				if (this._connectResolve) {
 					const err = new Error('ElevenLabsTTSProvider: connection timeout');
 					this._connectResolve = null;
@@ -276,7 +278,7 @@ export class ElevenLabsTTSProvider implements TTSProvider {
 		this._send(bos);
 	}
 
-	private _sendText(text: string, _requestId: number): void {
+	private _sendText(text: string): void {
 		if (this._ws?.readyState !== WebSocket.OPEN) return;
 		this._send({
 			text,
@@ -288,7 +290,7 @@ export class ElevenLabsTTSProvider implements TTSProvider {
 		if (requestId < 0) return;
 		const remaining = this._sentenceBuffer.flush();
 		if (remaining) {
-			this._sendText(remaining, requestId);
+			this._sendText(remaining);
 			this._pendingChars += remaining.length;
 		}
 		// Send generation flush to trigger any remaining synthesis
@@ -310,34 +312,21 @@ export class ElevenLabsTTSProvider implements TTSProvider {
 		if (typeof msg.audio === 'string' && msg.audio.length > 0) {
 			const requestId = this._currentRequestId;
 			if (requestId >= 0 && this._pendingRequestIds.has(requestId)) {
-				const base64Audio = msg.audio as string;
 				// Calculate duration from PCM data: base64 → bytes → samples → duration
-				const byteLength = Math.ceil((base64Audio.length * 3) / 4);
+				const byteLength = Math.ceil((msg.audio.length * 3) / 4);
 				// 16-bit mono = 2 bytes per sample
 				const samples = byteLength / 2;
 				const durationMs = (samples / this._sampleRate) * 1000;
-				this.onAudio?.(base64Audio, durationMs, requestId);
+				this.onAudio?.(msg.audio, durationMs, requestId);
 			}
 		}
 
-		// Word alignment / boundary data
-		if (msg.alignment != null && typeof msg.alignment === 'object') {
-			const alignment = msg.alignment as {
-				chars?: string[];
-				charStartTimesMs?: number[];
-				charDurationsMs?: number[];
-			};
-			this._processAlignment(alignment);
-		}
-
-		// Normalized alignment (alternative format)
-		if (msg.normalizedAlignment != null && typeof msg.normalizedAlignment === 'object') {
-			const alignment = msg.normalizedAlignment as {
-				chars?: string[];
-				charStartTimesMs?: number[];
-				charDurationsMs?: number[];
-			};
-			this._processAlignment(alignment);
+		// Word alignment / boundary data — prefer normalizedAlignment, fall back to alignment
+		const alignmentData = (msg.normalizedAlignment ?? msg.alignment) as
+			| { chars?: string[]; charStartTimesMs?: number[]; charDurationsMs?: number[] }
+			| undefined;
+		if (alignmentData != null && typeof alignmentData === 'object') {
+			this._processAlignment(alignmentData);
 		}
 
 		// Final message indicator — isFinal is true on the last chunk
@@ -367,7 +356,7 @@ export class ElevenLabsTTSProvider implements TTSProvider {
 		charDurationsMs?: number[];
 	}): void {
 		const requestId = this._currentRequestId;
-		if (requestId < 0) return;
+		if (requestId < 0 || !this._pendingRequestIds.has(requestId)) return;
 
 		const chars = alignment.chars;
 		const startTimes = alignment.charStartTimesMs;
@@ -435,6 +424,10 @@ export class ElevenLabsTTSProvider implements TTSProvider {
 		this._sentenceBuffer.clear();
 		this._pendingChars = 0;
 		this._pendingRequestIds.clear();
+		if (this._connectTimer) {
+			clearTimeout(this._connectTimer);
+			this._connectTimer = undefined;
+		}
 
 		if (this._ws) {
 			if (this._ws.readyState === WebSocket.OPEN || this._ws.readyState === WebSocket.CONNECTING) {

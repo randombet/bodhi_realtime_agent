@@ -81,6 +81,7 @@ export class CartesiaTTSProvider implements TTSProvider {
 	// --- Start promise resolution ---
 	private _connectResolve: (() => void) | null = null;
 	private _connectReject: ((err: Error) => void) | null = null;
+	private _connectTimer?: ReturnType<typeof setTimeout>;
 
 	// --- Callbacks (wired by VoiceSession) ---
 	onAudio?: (base64Pcm: string, durationMs: number, requestId: number) => void;
@@ -148,6 +149,10 @@ export class CartesiaTTSProvider implements TTSProvider {
 		this._currentContextId = null;
 		this._contextFinalized = false;
 
+		if (this._connectTimer) {
+			clearTimeout(this._connectTimer);
+			this._connectTimer = undefined;
+		}
 		if (this._connectResolve) {
 			this._connectResolve = null;
 			this._connectReject = null;
@@ -179,7 +184,8 @@ export class CartesiaTTSProvider implements TTSProvider {
 		}
 
 		// At this point _currentContextId is guaranteed non-null (set above or previously)
-		const contextId = this._currentContextId as string;
+		if (!this._currentContextId) return;
+		const contextId = this._currentContextId;
 
 		// Buffer text and send complete sentences
 		const sentences = this._sentenceBuffer.add(text);
@@ -208,14 +214,14 @@ export class CartesiaTTSProvider implements TTSProvider {
 		this._sentenceBuffer.clear();
 
 		if (this._currentContextId && this._currentRequestId !== null) {
-			// Mark this request as cancelled
-			this._cancelledRequests.add(this._currentRequestId);
-
 			// Send cancel message to Cartesia
 			this._send({
 				context_id: this._currentContextId,
 				cancel: true,
 			});
+
+			// Clean up context mapping eagerly — don't rely on 'done' arriving
+			this._contextToRequest.delete(this._currentContextId);
 
 			this._currentContextId = null;
 			this._currentRequestId = null;
@@ -268,7 +274,8 @@ export class CartesiaTTSProvider implements TTSProvider {
 			});
 
 			// Connection timeout
-			setTimeout(() => {
+			this._connectTimer = setTimeout(() => {
+				this._connectTimer = undefined;
 				if (this._connectResolve) {
 					const err = new Error('CartesiaTTSProvider: connection timeout');
 					this._connectResolve = null;
@@ -293,7 +300,9 @@ export class CartesiaTTSProvider implements TTSProvider {
 		const contextId = typeof msg.context_id === 'string' ? msg.context_id : null;
 		const requestId = contextId ? this._contextToRequest.get(contextId) : undefined;
 
-		// Suppress callbacks for cancelled requests
+		// Suppress callbacks for cancelled requests (legacy guard).
+		// In normal cancel() flow we eagerly delete context mapping, so requestId is
+		// usually undefined here and callbacks are naturally skipped.
 		if (requestId !== undefined && this._cancelledRequests.has(requestId)) {
 			// Still handle 'done' to clean up context mapping
 			if (msg.type === 'done' && contextId) {
@@ -391,13 +400,23 @@ export class CartesiaTTSProvider implements TTSProvider {
 	private _sendTextChunk(text: string, contextId: string, isContinuation: boolean): void {
 		if (!this._ws || this._ws.readyState !== WebSocket.OPEN) return;
 
-		const msg: Record<string, unknown> = {
+		const voice: Record<string, unknown> = {
+			mode: 'id',
+			id: this._voiceId,
+		};
+
+		// Add optional voice controls
+		if (this._speed !== 'normal' || this._emotion.length > 0) {
+			const controls: Record<string, unknown> = {};
+			if (this._speed !== 'normal') controls.speed = this._speed;
+			if (this._emotion.length > 0) controls.emotion = this._emotion;
+			voice.__experimental_controls = controls;
+		}
+
+		this._send({
 			model_id: this._modelId,
 			transcript: text,
-			voice: {
-				mode: 'id',
-				id: this._voiceId,
-			},
+			voice,
 			output_format: {
 				container: 'raw',
 				encoding: 'pcm_s16le',
@@ -407,23 +426,7 @@ export class CartesiaTTSProvider implements TTSProvider {
 			language: this._language,
 			continue: isContinuation,
 			add_timestamps: true,
-		};
-
-		// Add optional voice controls
-		if (this._speed !== 'normal') {
-			(msg.voice as Record<string, unknown>).__experimental_controls = {
-				speed: this._speed,
-			};
-		}
-
-		if (this._emotion.length > 0) {
-			(msg.voice as Record<string, unknown>).__experimental_controls = {
-				...(((msg.voice as Record<string, unknown>).__experimental_controls as object) ?? {}),
-				emotion: this._emotion,
-			};
-		}
-
-		this._send(msg);
+		});
 	}
 
 	private _finalizeCurrentContext(): void {

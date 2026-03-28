@@ -265,6 +265,9 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		if (config.tools !== undefined) {
 			this.tools = config.tools;
 		}
+		if (config.responseModality !== undefined) {
+			this._textMode = config.responseModality === 'text';
+		}
 
 		if (!this.rt || !this._isConnected) return;
 
@@ -275,6 +278,11 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		if (config.tools !== undefined) {
 			// biome-ignore lint/suspicious/noExplicitAny: SDK tools type is complex; our tool format is compatible at runtime
 			update.tools = config.tools.map(toolToOpenAIFunction) as any;
+		}
+		if (config.responseModality !== undefined) {
+			// biome-ignore lint/suspicious/noExplicitAny: modalities field may not be in SDK type yet
+			(update as any).modalities =
+				config.responseModality === 'text' ? ['text'] : ['text', 'audio'];
 		}
 
 		this.rtSend({ type: 'session.update', session: update as RealtimeSessionCreateRequest });
@@ -293,6 +301,12 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			this.tools = config.tools;
 			// biome-ignore lint/suspicious/noExplicitAny: SDK tools type is complex; our tool format is compatible at runtime
 			update.tools = config.tools.map(toolToOpenAIFunction) as any;
+		}
+		if (config.responseModality !== undefined) {
+			this._textMode = config.responseModality === 'text';
+			// biome-ignore lint/suspicious/noExplicitAny: modalities field may not be in SDK type yet
+			(update as any).modalities =
+				config.responseModality === 'text' ? ['text'] : ['text', 'audio'];
 		}
 
 		if (!this.rt || !this._isConnected) return;

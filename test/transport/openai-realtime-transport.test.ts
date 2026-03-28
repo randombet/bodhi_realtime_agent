@@ -459,6 +459,15 @@ describe('OpenAIRealtimeTransport', () => {
 			>[];
 			expect(tools[0]).toMatchObject({ type: 'function', name: 'calculator' });
 		});
+
+		it('sends session.update with modalities when responseModality is provided', () => {
+			transport.updateSession({ responseModality: 'text' });
+
+			expect(mockRt.sent).toContainEqual({
+				type: 'session.update',
+				session: { modalities: ['text'] },
+			});
+		});
 	});
 
 	describe('transferSession', () => {
@@ -478,6 +487,15 @@ describe('OpenAIRealtimeTransport', () => {
 
 			// Verify no disconnect was called
 			expect(mockRt.close).not.toHaveBeenCalled();
+		});
+
+		it('includes modalities in transfer session.update when responseModality is provided', async () => {
+			await transport.transferSession({ responseModality: 'text' });
+
+			expect(mockRt.sent).toContainEqual({
+				type: 'session.update',
+				session: { modalities: ['text'] },
+			});
 		});
 	});
 

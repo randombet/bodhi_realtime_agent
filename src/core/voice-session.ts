@@ -149,13 +149,11 @@ export class VoiceSession {
 	// --- TTS state (actor-mode only) ---
 	private ttsProvider?: TTSProvider;
 	private _ttsCurrentRequestId = 0;
-	private _ttsTextStartedForTurn = false;
-	private _ttsHasTextForRequest = false;
+	private _ttsTurnHasText = false;
 	private _ttsLlmTextDone = false;
 	private _ttsAudioDone = false;
 	private _ttsSpeaking = false;
 	private _ttsFormat?: TTSAudioConfig;
-	private _ttsNeedsResample = false;
 	private _ttsIdleTimer?: ReturnType<typeof setTimeout>;
 	private _ttsHardTimer?: ReturnType<typeof setTimeout>;
 	private _ttsFirstTextMs = 0;
@@ -687,13 +685,12 @@ export class VoiceSession {
 		this.sessionManager.transitionTo('CONNECTING');
 		if (this.config.transport) {
 			// Pre-constructed transport — already configured, just connect
-			// If TTS is active, set text modality via updateSession (for in-place-update transports)
-			if (this.ttsProvider && this.transport.capabilities.inPlaceSessionUpdate) {
-				await this.transport.connect();
+			// If TTS is active, set text modality before connect (Gemini applies on connect)
+			// or after connect (OpenAI applies via session.update in-place)
+			if (this.ttsProvider) {
 				this.transport.updateSession({ responseModality: 'text' });
-			} else {
-				await this.transport.connect();
 			}
+			await this.transport.connect();
 		} else {
 			// Default Gemini transport — pass config for backward compatibility
 			await this.transport.connect({
@@ -853,26 +850,30 @@ export class VoiceSession {
 			encoding: 'pcm',
 		};
 		this._ttsFormat = tts.configure(preferredFormat);
-		this._ttsNeedsResample = this._ttsFormat.sampleRate !== preferredFormat.sampleRate;
 
 		// Wire LLM text output → TTS provider + transcript
 		this.transport.onTextOutput = (text) => {
-			if (!this._ttsTextStartedForTurn) {
+			this.transcriptManager.handleOutput(text);
+			// Skip empty/whitespace-only chunks for TTS to avoid invalid transcript
+			// errors from providers that require meaningful initial text.
+			if (!text || text.trim().length === 0) {
+				return;
+			}
+
+			if (!this._ttsTurnHasText) {
 				this._ttsCurrentRequestId++;
-				this._ttsTextStartedForTurn = true;
+				this._ttsTurnHasText = true;
 				this._ttsFirstTextMs = Date.now();
 				this._ttsFirstAudioMs = 0;
 				this._ttsTextLength = 0;
 			}
-			this._ttsHasTextForRequest = true;
 			this._ttsTextLength += text.length;
 			tts.synthesize(text, this._ttsCurrentRequestId);
-			this.transcriptManager.handleOutput(text);
 		};
 
 		// When LLM text stream ends — flush TTS buffer (does NOT mean end-of-request)
 		this.transport.onTextDone = () => {
-			if (this._ttsHasTextForRequest) {
+			if (this._ttsTurnHasText) {
 				tts.synthesize('', this._ttsCurrentRequestId, { flush: true });
 			}
 		};
@@ -881,14 +882,15 @@ export class VoiceSession {
 		tts.onAudio = (base64Pcm, _durationMs, requestId) => {
 			if (requestId !== this._ttsCurrentRequestId) return; // stale
 			let buffer: Buffer = Buffer.from(base64Pcm, 'base64');
-			if (this._ttsNeedsResample && this._ttsFormat) {
-				buffer = Buffer.from(
-					resamplePcm(
-						buffer,
-						this._ttsFormat.sampleRate,
-						this.transport.audioFormat.outputSampleRate,
-						this._ttsFormat.bitDepth,
-					),
+			if (
+				this._ttsFormat &&
+				this._ttsFormat.sampleRate !== this.transport.audioFormat.outputSampleRate
+			) {
+				buffer = resamplePcm(
+					buffer,
+					this._ttsFormat.sampleRate,
+					this.transport.audioFormat.outputSampleRate,
+					this._ttsFormat.bitDepth,
 				);
 			}
 			this.clientTransport.sendAudioToClient(buffer);
@@ -966,8 +968,7 @@ export class VoiceSession {
 		if (this._ttsLlmTextDone && this._ttsAudioDone) {
 			this._ttsLlmTextDone = false;
 			this._ttsAudioDone = false;
-			this._ttsHasTextForRequest = false;
-			this._ttsTextStartedForTurn = false;
+			this._ttsTurnHasText = false;
 			this.ttsClearTimers();
 			this.handleTurnCompleteInternal();
 		}
@@ -980,6 +981,7 @@ export class VoiceSession {
 			this.log('TTS idle watchdog fired — forcing turn completion');
 			this._ttsAudioDone = true;
 			this._ttsSpeaking = false;
+			this._ttsCurrentRequestId++; // Invalidate late-arriving chunks
 			this.ttsMaybeCompleteTurn();
 		}, 2000);
 	}
@@ -1022,7 +1024,7 @@ export class VoiceSession {
 		// TTS turn gating: when TTS is active, defer turn completion until TTS finishes
 		if (this.ttsProvider) {
 			this._ttsLlmTextDone = true;
-			if (!this._ttsHasTextForRequest) {
+			if (!this._ttsTurnHasText) {
 				// Tool-call-only turn — no text synthesized, TTS won't fire onDone
 				this._ttsAudioDone = true;
 			} else {
@@ -1032,6 +1034,7 @@ export class VoiceSession {
 						this.log('TTS hard cap timer fired — forcing turn completion');
 						this._ttsAudioDone = true;
 						this._ttsSpeaking = false;
+						this._ttsCurrentRequestId++; // Invalidate late-arriving chunks
 						this.ttsMaybeCompleteTurn();
 					}, 60000);
 				}
@@ -1143,8 +1146,7 @@ export class VoiceSession {
 			this._ttsSpeaking = false;
 			this._ttsLlmTextDone = false;
 			this._ttsAudioDone = false;
-			this._ttsHasTextForRequest = false;
-			this._ttsTextStartedForTurn = false;
+			this._ttsTurnHasText = false;
 			this._ttsCurrentRequestId++;
 			this.ttsClearTimers();
 		}
