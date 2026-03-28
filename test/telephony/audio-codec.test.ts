@@ -160,6 +160,56 @@ describe('twilioToFramework / frameworkToTwilio', () => {
 		expect(typeof result).toBe('string');
 	});
 
+	it('frameworkToTwilio with 24kHz input produces correct mulaw length', () => {
+		// 10ms at 24kHz = 240 samples = 480 bytes PCM → resample to 8kHz → 80 samples → 80 mulaw bytes
+		const samples24k = 240;
+		const pcm24k = Buffer.alloc(samples24k * 2);
+		for (let i = 0; i < samples24k; i++) {
+			pcm24k.writeInt16LE(Math.round(Math.sin(i * 0.1) * 5000), i * 2);
+		}
+
+		const mulawBase64 = frameworkToTwilio(pcm24k, 24000);
+		const mulawBuf = Buffer.from(mulawBase64, 'base64');
+		expect(mulawBuf.length).toBe(80); // 10ms at 8kHz = 80 mulaw bytes
+
+		// Basic fidelity guard: decode back to framework format and compare signal shape.
+		const recovered16k = twilioToFramework(mulawBase64);
+		const recovered24k = resample(recovered16k, 16000, 24000);
+		expect(recovered24k.length).toBe(pcm24k.length);
+
+		const checkpoints = [15, 45, 75, 105, 135, 165, 195, 225];
+		for (const i of checkpoints) {
+			const original = pcm24k.readInt16LE(i * 2);
+			const recovered = recovered24k.readInt16LE(i * 2);
+			expect(Math.sign(recovered)).toBe(Math.sign(original));
+			expect(Math.abs(recovered - original)).toBeLessThan(3500);
+		}
+	});
+
+	it('frameworkToTwilio with 8kHz input (identity resample) produces correct mulaw length', () => {
+		// 80 samples at 8kHz → no resample → 80 mulaw bytes
+		const samples8k = 80;
+		const pcm8k = Buffer.alloc(samples8k * 2);
+		for (let i = 0; i < samples8k; i++) {
+			pcm8k.writeInt16LE(Math.round(Math.sin(i * 0.2) * 3000), i * 2);
+		}
+
+		const mulawBase64 = frameworkToTwilio(pcm8k, 8000);
+		const mulawBuf = Buffer.from(mulawBase64, 'base64');
+		expect(mulawBuf.length).toBe(80);
+	});
+
+	it('frameworkToTwilio with explicit inputRate=16000 matches implicit default', () => {
+		const pcm16k = Buffer.alloc(32);
+		for (let i = 0; i < 16; i++) {
+			pcm16k.writeInt16LE(Math.round(Math.sin(i * 0.5) * 10000), i * 2);
+		}
+
+		const explicit = frameworkToTwilio(pcm16k, 16000);
+		const implicit = frameworkToTwilio(pcm16k);
+		expect(explicit).toBe(implicit); // byte-for-byte identical
+	});
+
 	it('round-trips through both conversions with reasonable fidelity', () => {
 		// Generate a simple sine wave at 16kHz
 		const samples = 160; // 10ms at 16kHz

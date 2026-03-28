@@ -118,13 +118,16 @@ export function twilioToFramework(mulawBase64: string): Buffer {
 }
 
 /**
- * Convert framework PCM L16 16kHz audio to Twilio mulaw 8kHz.
- * Input: Buffer of PCM L16 16kHz (or base64 string).
+ * Convert framework PCM audio to Twilio mulaw 8kHz.
+ * Input: Buffer of PCM L16 (or base64 string) at the given sample rate.
  * Output: base64-encoded mulaw 8kHz buffer.
+ *
+ * @param pcmInput PCM L16 buffer or base64-encoded PCM string
+ * @param inputRate Sample rate of the input in Hz (default: 16000)
  */
-export function frameworkToTwilio(pcmInput: Buffer | string): string {
-	const pcm16k = typeof pcmInput === 'string' ? Buffer.from(pcmInput, 'base64') : pcmInput;
-	const pcm8k = resample(pcm16k, 16000, 8000);
+export function frameworkToTwilio(pcmInput: Buffer | string, inputRate = 16000): string {
+	const pcm = typeof pcmInput === 'string' ? Buffer.from(pcmInput, 'base64') : pcmInput;
+	const pcm8k = resample(pcm, inputRate, 8000);
 	const mulaw = encodePcmToMulaw(pcm8k);
 	return mulaw.toString('base64');
 }
