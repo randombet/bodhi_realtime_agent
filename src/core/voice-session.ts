@@ -5,6 +5,7 @@ import { resolveInstructions } from '../agent/agent-context.js';
 import { AgentRouter } from '../agent/agent-router.js';
 import { PersistentSubagentManager } from '../agent/persistent-subagent-manager.js';
 import type { SubagentMessage } from '../agent/subagent-session.js';
+import { resamplePcm } from '../audio/resample.js';
 import { BehaviorManager } from '../behaviors/behavior-manager.js';
 import { MemoryDistiller } from '../memory/memory-distiller.js';
 import type { ToolRoutingInfo } from '../runtime/actors/tool-router-actor.js';
@@ -22,6 +23,7 @@ import type { MemoryStore } from '../types/memory.js';
 import type { IClientChannel } from '../types/session-client.js';
 import type { SessionClientSender } from '../types/session-client.js';
 import type { LLMTransport, LLMTransportError, STTProvider } from '../types/transport.js';
+import type { TTSAudioConfig, TTSProvider } from '../types/tts.js';
 import type { ArtifactRef, ArtifactStore, SaveArtifactParams } from '../types/workspace.js';
 import { BackgroundNotificationQueue } from './background-notification-queue.js';
 import { ConversationContext } from './conversation-context.js';
@@ -93,6 +95,11 @@ export interface VoiceSessionConfig {
 	conversationHistoryStore?: ConversationHistoryStore;
 	/** When provided, agents/tools can persist artifacts (images, docs, etc.) via session.workspace.saveArtifact(). */
 	artifactStore?: ArtifactStore;
+	/** External TTS provider for speech synthesis (actor-mode only).
+	 *  When set, LLM is configured for text-mode responses.
+	 *  When omitted, LLM-native audio generation is used (default).
+	 *  Requires orchestrationMode: 'actor'. Ignored in legacy mode. */
+	ttsProvider?: TTSProvider;
 	/** Pre-constructed LLM transport. If provided, apiKey/geminiModel/speechConfig/compressionConfig are ignored. */
 	transport?: LLMTransport;
 	/** Orchestration engine for tool routing/subagent lifecycle (default: legacy). */
@@ -156,6 +163,19 @@ export class VoiceSession {
 	private _commitFiredForTurn = false;
 	/** True when the current turn was interrupted — skips Gemini transcript correction. */
 	private _turnWasInterrupted = false;
+	// --- TTS state (actor-mode only) ---
+	private ttsProvider?: TTSProvider;
+	private _ttsCurrentRequestId = 0;
+	private _ttsTurnHasText = false;
+	private _ttsLlmTextDone = false;
+	private _ttsAudioDone = false;
+	private _ttsSpeaking = false;
+	private _ttsFormat?: TTSAudioConfig;
+	private _ttsIdleTimer?: ReturnType<typeof setTimeout>;
+	private _ttsHardTimer?: ReturnType<typeof setTimeout>;
+	private _ttsFirstTextMs = 0;
+	private _ttsFirstAudioMs = 0;
+	private _ttsTextLength = 0;
 	private config: VoiceSessionConfig;
 	private directiveManager = new DirectiveManager();
 	private transcriptManager!: TranscriptManager;
@@ -169,6 +189,7 @@ export class VoiceSession {
 	private static readonly RECONNECT_BACKOFF_MS = [1000, 2000, 4000];
 	/** Resolves when memory/directives are loaded; used so greeting is sent after load without blocking connect. */
 	private _memoryReadyPromise: Promise<void> = Promise.resolve();
+	private externalAudioHandler: ((data: Buffer) => void) | null = null;
 
 	constructor(config: VoiceSessionConfig) {
 		this.config = config;
@@ -393,6 +414,12 @@ export class VoiceSession {
 			}
 		};
 
+		// Wire TTS provider (actor-mode only)
+		if (config.ttsProvider && config.orchestrationMode === 'actor') {
+			this.ttsProvider = config.ttsProvider;
+			this.wireTtsProvider();
+		}
+
 		if (config.clientSender) {
 			// Server-owned socket mode (multi-user/session router).
 			this.clientTransport = new ClientSenderAdapter(config.clientSender);
@@ -450,6 +477,17 @@ export class VoiceSession {
 			},
 		);
 
+		// Subscribe to async agent transfer requests (from external audio agents like Twilio)
+		this.eventBus.subscribe('agent.transfer_requested', (payload) => {
+			setImmediate(() => {
+				this.agentRouter.transfer(payload.toAgent).catch((err) => {
+					this.log(
+						`Transfer requested to "${payload.toAgent}" failed: ${err instanceof Error ? err.message : String(err)}`,
+					);
+				});
+			});
+		});
+
 		// Set up tool executor
 		this.toolExecutor = this.createToolExecutor(config.initialAgent);
 
@@ -472,9 +510,20 @@ export class VoiceSession {
 				onMessage: (toolCallId, msg) => this.handleSubagentMessage(toolCallId, msg),
 				onSessionEnd: (toolCallId) => this.interactionMode.deactivate(toolCallId),
 			},
+			{
+				setExternalAudioHandler: (handler) => {
+					this.externalAudioHandler = handler;
+				},
+				sendAudioToClient: (data) => {
+					this.clientTransport.sendAudioToClient(data);
+				},
+			},
 		);
 		this.agentRouter.registerAgents(config.agents);
 		this.agentRouter.setInitialAgent(config.initialAgent);
+		if (this.ttsProvider) {
+			this.agentRouter.responseModality = 'text';
+		}
 
 		if (config.orchestrationMode === 'actor') {
 			this.runtimeToolRegistry = this.buildRuntimeToolRegistry([
@@ -660,7 +709,19 @@ export class VoiceSession {
 
 	/** Start the client WebSocket server and connect to the LLM transport. */
 	async start(): Promise<void> {
+		// Validate TTS config
+		if (this.ttsProvider) {
+			if (this.config.orchestrationMode !== 'actor') {
+				throw new Error('TTSProvider requires orchestrationMode: "actor"');
+			}
+			if (!this.transport.capabilities.textResponseModality) {
+				throw new Error(
+					'TTSProvider requires text-mode responses, but the transport does not support textResponseModality',
+				);
+			}
+		}
 		await this.sttProvider?.start();
+		await this.ttsProvider?.start();
 		if (this.runtimeOrchestrator) {
 			await this.runtimeOrchestrator.start();
 		}
@@ -672,11 +733,15 @@ export class VoiceSession {
 		this.log('Connecting to LLM transport...');
 		this.sessionManager.transitionTo('CONNECTING');
 		if (this.config.transport) {
+			if (this.ttsProvider) {
+				this.transport.updateSession({ responseModality: 'text' });
+			}
 			await this.transport.connect();
 		} else {
 			await this.transport.connect({
 				auth: { type: 'api_key', apiKey: this.config.apiKey },
 				model: this.config.geminiModel ?? 'gemini-live-2.5-flash-preview',
+				...(this.ttsProvider ? { responseModality: 'text' as const } : {}),
 			});
 		}
 		this.log('LLM transport connected and setup complete');
@@ -754,6 +819,8 @@ export class VoiceSession {
 		}
 
 		await this.sttProvider?.stop();
+		this.ttsClearTimers();
+		await this.ttsProvider?.stop();
 		if (this.runtimeOrchestrator) {
 			await this.runtimeOrchestrator.stop();
 		}
@@ -813,7 +880,7 @@ export class VoiceSession {
 		);
 	}
 
-	private createAgentContext(agentName: string) {
+	private createAgentContext(agentName: string): import('../types/agent.js').AgentContext {
 		return {
 			sessionId: this.config.sessionId,
 			agentName,
@@ -821,6 +888,29 @@ export class VoiceSession {
 				this.conversationContext.addAssistantMessage(`[system] ${text}`),
 			getRecentTurns: (count = 10) => [...this.conversationContext.items].slice(-count),
 			getMemoryFacts: () => this.memoryCacheManager?.facts ?? [],
+			requestTransfer: (toAgent: string) => {
+				setImmediate(() => {
+					this.eventBus.publish('agent.transfer_requested', {
+						sessionId: this.config.sessionId,
+						toAgent,
+					});
+				});
+			},
+			stopBufferingAndDrain: (handler: (chunk: Buffer) => void) => {
+				const buffered = this.clientTransport.stopBuffering();
+				for (const chunk of buffered) {
+					handler(chunk);
+				}
+			},
+			sendJsonToClient: (message: Record<string, unknown>) => {
+				this.clientTransport.sendJsonToClient(message);
+			},
+			sendAudioToClient: (data: Buffer) => {
+				this.clientTransport.sendAudioToClient(data);
+			},
+			setExternalAudioHandler: (handler: ((data: Buffer) => void) | null) => {
+				this.externalAudioHandler = handler;
+			},
 		};
 	}
 
@@ -845,6 +935,18 @@ export class VoiceSession {
 
 	private handleAudioFromClient(data: Buffer): void {
 		if (this.sessionManager.isActive) {
+			// When active agent uses external audio, don't forward to LLM transport.
+			// Route mic frames to the active external audio handler (e.g., TwilioBridge).
+			if (this.agentRouter.activeAgent.audioMode === 'external') {
+				if (this.externalAudioHandler) {
+					try {
+						this.externalAudioHandler(data);
+					} catch (err) {
+						this.reportError('external-audio', err instanceof Error ? err : new Error(String(err)));
+					}
+				}
+				return;
+			}
 			const base64 = data.toString('base64');
 			this.transport.sendAudio(base64);
 			this.sttProvider?.feedAudio(base64);
@@ -855,6 +957,169 @@ export class VoiceSession {
 		this.notificationQueue.markAudioReceived();
 		const buffer = Buffer.from(data, 'base64');
 		this.clientTransport.sendAudioToClient(buffer);
+	}
+
+	// --- TTS wiring (actor-mode only) ---
+
+	/** Wire TTSProvider callbacks and override transport callbacks for text mode. */
+	private wireTtsProvider(): void {
+		const tts = this.ttsProvider;
+		if (!tts) return;
+
+		// Configure TTS with preferred output format
+		const preferredFormat: TTSAudioConfig = {
+			sampleRate: this.transport.audioFormat.outputSampleRate,
+			bitDepth: 16,
+			channels: 1,
+			encoding: 'pcm',
+		};
+		this._ttsFormat = tts.configure(preferredFormat);
+
+		// Wire LLM text output → TTS provider + transcript
+		this.transport.onTextOutput = (text) => {
+			this.transcriptManager.handleOutput(text);
+			// Skip empty/whitespace-only chunks for TTS to avoid invalid transcript
+			// errors from providers that require meaningful initial text.
+			if (!text || text.trim().length === 0) {
+				return;
+			}
+
+			if (!this._ttsTurnHasText) {
+				this._ttsCurrentRequestId++;
+				this._ttsTurnHasText = true;
+				this._ttsFirstTextMs = Date.now();
+				this._ttsFirstAudioMs = 0;
+				this._ttsTextLength = 0;
+			}
+			this._ttsTextLength += text.length;
+			tts.synthesize(text, this._ttsCurrentRequestId);
+		};
+
+		// When LLM text stream ends — flush TTS buffer (does NOT mean end-of-request)
+		this.transport.onTextDone = () => {
+			if (this._ttsTurnHasText) {
+				tts.synthesize('', this._ttsCurrentRequestId, { flush: true });
+			}
+		};
+
+		// Wire TTS audio output → client (fast-path, with stale filtering + resampling)
+		tts.onAudio = (base64Pcm, _durationMs, requestId) => {
+			if (requestId !== this._ttsCurrentRequestId) return; // stale
+			let buffer: Buffer = Buffer.from(base64Pcm, 'base64');
+			if (
+				this._ttsFormat &&
+				this._ttsFormat.sampleRate !== this.transport.audioFormat.outputSampleRate
+			) {
+				buffer = resamplePcm(
+					buffer,
+					this._ttsFormat.sampleRate,
+					this.transport.audioFormat.outputSampleRate,
+					this._ttsFormat.bitDepth,
+				);
+			}
+			this.clientTransport.sendAudioToClient(buffer);
+			this.notificationQueue.markAudioReceived();
+			this._ttsSpeaking = true;
+			if (this._ttsFirstAudioMs === 0) {
+				this._ttsFirstAudioMs = Date.now();
+			}
+			// Reset idle watchdog on each audio chunk
+			this.ttsResetIdleTimer();
+		};
+
+		// Wire TTS done → turn gating + hook
+		tts.onDone = (requestId) => {
+			if (requestId !== this._ttsCurrentRequestId) return; // stale
+			this._ttsAudioDone = true;
+			this._ttsSpeaking = false;
+			this.ttsClearTimers();
+			// Fire TTS synthesis hook with timing metrics
+			if (this.hooks.onTTSSynthesis && this._ttsFirstTextMs > 0) {
+				const now = Date.now();
+				this.hooks.onTTSSynthesis({
+					sessionId: this.config.sessionId,
+					provider: tts.constructor.name,
+					textLength: this._ttsTextLength,
+					durationMs: now - this._ttsFirstTextMs,
+					audioMs: 0, // Would require tracking total audio duration
+					ttfbMs: this._ttsFirstAudioMs > 0 ? this._ttsFirstAudioMs - this._ttsFirstTextMs : 0,
+					requestId,
+				});
+			}
+			this.ttsMaybeCompleteTurn();
+		};
+
+		// Wire TTS errors
+		tts.onError = (error, fatal) => {
+			this.log(`TTS error (fatal=${fatal}): ${error.message}`);
+			if (this.hooks.onError) {
+				this.hooks.onError({
+					component: 'tts',
+					error,
+					severity: fatal ? 'fatal' : 'warn',
+				});
+			}
+			if (fatal) {
+				this.close('tts_fatal_error');
+			}
+		};
+
+		// Wire word boundaries to client
+		tts.onWordBoundary = (word, offsetMs, requestId) => {
+			if (requestId !== this._ttsCurrentRequestId) return;
+			this.clientTransport.sendJsonToClient({
+				type: 'word_boundary',
+				word,
+				offsetMs,
+				requestId,
+			});
+		};
+
+		// Wire speech-started for TTS barge-in (LLM idle but TTS still playing)
+		this.transport.onSpeechStarted = () => {
+			if (this._ttsSpeaking && this._ttsLlmTextDone) {
+				this.handleInterrupted();
+			}
+		};
+
+		// Disable native audio output and output transcription in TTS mode
+		this.transport.onAudioOutput = undefined;
+		this.transport.onOutputTranscription = undefined;
+	}
+
+	/** Turn gating: check if both LLM and TTS are done. */
+	private ttsMaybeCompleteTurn(): void {
+		if (this._ttsLlmTextDone && this._ttsAudioDone) {
+			this._ttsLlmTextDone = false;
+			this._ttsAudioDone = false;
+			this._ttsTurnHasText = false;
+			this.ttsClearTimers();
+			this.handleTurnCompleteInternal();
+		}
+	}
+
+	/** Reset the idle watchdog timer (called on each TTS audio chunk). */
+	private ttsResetIdleTimer(): void {
+		if (this._ttsIdleTimer) clearTimeout(this._ttsIdleTimer);
+		this._ttsIdleTimer = setTimeout(() => {
+			this.log('TTS idle watchdog fired — forcing turn completion');
+			this._ttsAudioDone = true;
+			this._ttsSpeaking = false;
+			this._ttsCurrentRequestId++; // Invalidate late-arriving chunks
+			this.ttsMaybeCompleteTurn();
+		}, 2000);
+	}
+
+	/** Clear all TTS timers. */
+	private ttsClearTimers(): void {
+		if (this._ttsIdleTimer) {
+			clearTimeout(this._ttsIdleTimer);
+			this._ttsIdleTimer = undefined;
+		}
+		if (this._ttsHardTimer) {
+			clearTimeout(this._ttsHardTimer);
+			this._ttsHardTimer = undefined;
+		}
 	}
 
 	// --- Gemini event handlers ---
@@ -887,6 +1152,33 @@ export class VoiceSession {
 		// A completed turn means the connection is healthy — reset reconnect counter
 		this.reconnectAttempts = 0;
 
+		// TTS turn gating: when TTS is active, defer turn completion until TTS finishes
+		if (this.ttsProvider) {
+			this._ttsLlmTextDone = true;
+			if (!this._ttsTurnHasText) {
+				// Tool-call-only turn — no text synthesized, TTS won't fire onDone
+				this._ttsAudioDone = true;
+			} else {
+				// Start hard cap timer (60s) to prevent stuck turns
+				if (!this._ttsHardTimer) {
+					this._ttsHardTimer = setTimeout(() => {
+						this.log('TTS hard cap timer fired — forcing turn completion');
+						this._ttsAudioDone = true;
+						this._ttsSpeaking = false;
+						this._ttsCurrentRequestId++; // Invalidate late-arriving chunks
+						this.ttsMaybeCompleteTurn();
+					}, 60000);
+				}
+			}
+			this.ttsMaybeCompleteTurn();
+			return; // Defer — actual turn-end runs via ttsMaybeCompleteTurn
+		}
+
+		this.handleTurnCompleteInternal();
+	}
+
+	/** Core turn-end logic — called directly (no TTS) or via ttsMaybeCompleteTurn (TTS gate). */
+	private handleTurnCompleteInternal(): void {
 		// ORDERING: STT commit + cleanup BEFORE turnId increment.
 		// This ensures commit(turnId) uses the turn being completed, and
 		// stale-drop (turnId < this.turnId) correctly rejects prior-turn results.
@@ -917,17 +1209,7 @@ export class VoiceSession {
 				.map((i) => `[${i.role}]: ${i.content}`)
 				.join('\n');
 
-			agent.onTurnCompleted(
-				{
-					sessionId: this.config.sessionId,
-					agentName: agent.name,
-					injectSystemMessage: (text) =>
-						this.conversationContext.addAssistantMessage(`[system] ${text}`),
-					getRecentTurns: (count = 10) => [...this.conversationContext.items].slice(-count),
-					getMemoryFacts: () => this.memoryCacheManager?.facts ?? [],
-				},
-				transcript,
-			);
+			agent.onTurnCompleted(this.createAgentContext(agent.name), transcript);
 		}
 
 		// Trigger memory extraction (every N turns) and refresh cache
@@ -979,6 +1261,16 @@ export class VoiceSession {
 		this.log('Interrupted by user');
 		this._turnWasInterrupted = true;
 		this.sttProvider?.handleInterrupted();
+		// Cancel TTS and invalidate in-flight audio
+		if (this.ttsProvider) {
+			this.ttsProvider.cancel();
+			this._ttsSpeaking = false;
+			this._ttsLlmTextDone = false;
+			this._ttsAudioDone = false;
+			this._ttsTurnHasText = false;
+			this._ttsCurrentRequestId++;
+			this.ttsClearTimers();
+		}
 		this.notificationQueue.resetAudio();
 		this.notificationQueue.markInterrupted();
 		this.transcriptManager.flush();

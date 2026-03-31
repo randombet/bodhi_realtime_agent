@@ -250,6 +250,29 @@ describe('GeminiLiveTransport', () => {
 			expect(onAudioOutput).toHaveBeenCalledWith('audio_b64');
 		});
 
+		it('suppresses audio output callbacks in text mode', async () => {
+			const onAudioOutput = vi.fn();
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, { onAudioOutput });
+			await transport.connect({
+				auth: { type: 'api_key', apiKey: 'test-key' },
+				model: 'gemini-2.5-flash-native-audio-preview-12-2025',
+				responseModality: 'text',
+			});
+
+			const propertyAudioOutput = vi.fn();
+			transport.onAudioOutput = propertyAudioOutput;
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({
+				serverContent: {
+					modelTurn: { parts: [{ inlineData: { data: 'audio_b64' } }] },
+				},
+			});
+
+			expect(onAudioOutput).not.toHaveBeenCalled();
+			expect(propertyAudioOutput).not.toHaveBeenCalled();
+		});
+
 		it('dispatches toolCall', async () => {
 			const onToolCall = vi.fn();
 			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, { onToolCall });
@@ -354,6 +377,36 @@ describe('GeminiLiveTransport', () => {
 			expect(onInputTranscription).toHaveBeenCalledWith('hello');
 			expect(onOutputTranscription).toHaveBeenCalledWith('hi there');
 		});
+
+		it('fires onSpeechStarted when input transcription arrives', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			const speechStarted = vi.fn();
+			transport.onSpeechStarted = speechStarted;
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({
+				serverContent: { inputTranscription: { text: 'hello' } },
+			});
+
+			expect(speechStarted).toHaveBeenCalledOnce();
+		});
+
+		it('fires onSpeechStarted when turn is interrupted', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			const speechStarted = vi.fn();
+			transport.onSpeechStarted = speechStarted;
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({
+				serverContent: { interrupted: true },
+			});
+
+			expect(speechStarted).toHaveBeenCalledOnce();
+		});
 	});
 
 	describe('disconnect', () => {
@@ -383,6 +436,7 @@ describe('GeminiLiveTransport', () => {
 				sessionResumption: true,
 				contextCompression: true,
 				groundingMetadata: true,
+				textResponseModality: true,
 			});
 		});
 
@@ -395,6 +449,170 @@ describe('GeminiLiveTransport', () => {
 				bitDepth: 16,
 				encoding: 'pcm',
 			});
+		});
+	});
+
+	describe('text-mode responses', () => {
+		it('configures dual AUDIO+TEXT modalities when responseModality is text', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect({
+				auth: { type: 'api_key', apiKey: 'test-key' },
+				model: 'gemini-2.5-flash',
+				responseModality: 'text',
+			});
+
+			expect(capturedConnectConfig.config).toEqual(
+				expect.objectContaining({ responseModalities: ['AUDIO', 'TEXT'] }),
+			);
+		});
+
+		it('uses AUDIO + outputAudioTranscription in text mode for native-audio models', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect({
+				auth: { type: 'api_key', apiKey: 'test-key' },
+				model: 'gemini-2.5-flash-native-audio-preview-12-2025',
+				responseModality: 'text',
+			});
+
+			expect(capturedConnectConfig.config).toEqual(
+				expect.objectContaining({
+					responseModalities: ['AUDIO'],
+					outputAudioTranscription: {},
+				}),
+			);
+		});
+
+		it('fires onTextOutput for text parts in modelTurn', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect({
+				auth: { type: 'api_key', apiKey: 'test-key' },
+				model: 'gemini-2.5-flash',
+				responseModality: 'text',
+			});
+
+			const textOutput = vi.fn();
+			transport.onTextOutput = textOutput;
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({
+				serverContent: {
+					modelTurn: { parts: [{ text: 'Hello world' }] },
+				},
+			});
+
+			expect(textOutput).toHaveBeenCalledWith('Hello world');
+		});
+
+		it('routes outputTranscription text to onTextOutput in native-audio text mode', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect({
+				auth: { type: 'api_key', apiKey: 'test-key' },
+				model: 'gemini-2.5-flash-native-audio-preview-12-2025',
+				responseModality: 'text',
+			});
+
+			const textOutput = vi.fn();
+			transport.onTextOutput = textOutput;
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({
+				serverContent: { outputTranscription: { text: 'Transcribed output' } },
+			});
+
+			expect(textOutput).toHaveBeenCalledWith('Transcribed output');
+		});
+
+		it('suppresses model text parts when native-audio outputTranscription fallback is active', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect({
+				auth: { type: 'api_key', apiKey: 'test-key' },
+				model: 'gemini-2.5-flash-native-audio-preview-12-2025',
+				responseModality: 'text',
+			});
+
+			const textOutput = vi.fn();
+			transport.onTextOutput = textOutput;
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({
+				serverContent: {
+					modelTurn: { parts: [{ text: '**Interpreting User Intent**' }] },
+					outputTranscription: { text: "I'm doing great, thanks!" },
+				},
+			});
+
+			expect(textOutput).toHaveBeenCalledTimes(1);
+			expect(textOutput).toHaveBeenCalledWith("I'm doing great, thanks!");
+		});
+
+		it('fires onTextDone before onTurnComplete in text mode', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect({
+				auth: { type: 'api_key', apiKey: 'test-key' },
+				model: 'gemini-2.5-flash',
+				responseModality: 'text',
+			});
+
+			const order: string[] = [];
+			transport.onTextDone = () => order.push('textDone');
+			transport.onTurnComplete = () => order.push('turnComplete');
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({
+				serverContent: { turnComplete: true },
+			});
+
+			expect(order).toEqual(['textDone', 'turnComplete']);
+		});
+
+		it('does not fire onTextDone in audio mode', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			const textDone = vi.fn();
+			transport.onTextDone = textDone;
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({
+				serverContent: { turnComplete: true },
+			});
+
+			expect(textDone).not.toHaveBeenCalled();
+		});
+
+		it('preserves responseModality on reconnect', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect({
+				auth: { type: 'api_key', apiKey: 'test-key' },
+				model: 'gemini-2.5-flash',
+				responseModality: 'text',
+			});
+
+			await transport.disconnect();
+			await transport.reconnect();
+
+			// Second connect should still have TEXT modality
+			expect(capturedConnectConfig.config).toEqual(
+				expect.objectContaining({ responseModalities: ['AUDIO', 'TEXT'] }),
+			);
+		});
+
+		it('applies responseModality from updateSession on next reconnect', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect({
+				auth: { type: 'api_key', apiKey: 'test-key' },
+				model: 'gemini-2.5-flash',
+			});
+			expect(capturedConnectConfig.config).toEqual(
+				expect.objectContaining({ responseModalities: ['AUDIO'] }),
+			);
+
+			transport.updateSession({ responseModality: 'text' });
+			await transport.reconnect();
+
+			expect(capturedConnectConfig.config).toEqual(
+				expect.objectContaining({ responseModalities: ['AUDIO', 'TEXT'] }),
+			);
 		});
 	});
 
@@ -540,6 +758,22 @@ describe('GeminiLiveTransport', () => {
 				],
 				turnComplete: false,
 			});
+		});
+
+		it('applies responseModality from transferSession before reconnect', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect({
+				auth: { type: 'api_key', apiKey: 'test-key' },
+				model: 'gemini-2.5-flash',
+			});
+			expect(capturedConnectConfig.config).toEqual(
+				expect.objectContaining({ responseModalities: ['AUDIO'] }),
+			);
+
+			await transport.transferSession({ responseModality: 'text' }, { conversationHistory: [] });
+			expect(capturedConnectConfig.config).toEqual(
+				expect.objectContaining({ responseModalities: ['AUDIO', 'TEXT'] }),
+			);
 		});
 	});
 

@@ -38,6 +38,9 @@ export class HooksManager {
 	get onMemoryExtraction() {
 		return this.hooks.onMemoryExtraction;
 	}
+	get onTTSSynthesis() {
+		return this.hooks.onTTSSynthesis;
+	}
 	get onError() {
 		return this.hooks.onError;
 	}

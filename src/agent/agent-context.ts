@@ -69,6 +69,11 @@ export function createAgentContext(options: {
 	conversationContext: ConversationContext;
 	hooks: HooksManager;
 	memoryFacts?: MemoryFact[];
+	requestTransfer?: (toAgent: string) => void;
+	stopBufferingAndDrain?: (handler: (chunk: Buffer) => void) => void;
+	sendJsonToClient?: (message: Record<string, unknown>) => void;
+	sendAudioToClient?: (data: Buffer) => void;
+	setExternalAudioHandler?: (handler: ((data: Buffer) => void) | null) => void;
 }): AgentContext {
 	return {
 		sessionId: options.sessionId,
@@ -82,6 +87,21 @@ export function createAgentContext(options: {
 		},
 		getMemoryFacts(): MemoryFact[] {
 			return options.memoryFacts ?? [];
+		},
+		requestTransfer(toAgent: string): void {
+			options.requestTransfer?.(toAgent);
+		},
+		stopBufferingAndDrain(handler: (chunk: Buffer) => void): void {
+			options.stopBufferingAndDrain?.(handler);
+		},
+		sendJsonToClient(message: Record<string, unknown>): void {
+			options.sendJsonToClient?.(message);
+		},
+		sendAudioToClient(data: Buffer): void {
+			options.sendAudioToClient?.(data);
+		},
+		setExternalAudioHandler(handler: ((data: Buffer) => void) | null): void {
+			options.setExternalAudioHandler?.(handler);
 		},
 	};
 }

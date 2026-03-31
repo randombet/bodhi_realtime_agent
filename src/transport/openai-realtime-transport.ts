@@ -70,6 +70,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		sessionResumption: false,
 		contextCompression: false,
 		groundingMetadata: false,
+		textResponseModality: true,
 	};
 
 	readonly audioFormat: AudioFormatSpec = {
@@ -95,6 +96,9 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	onGoAway?: (timeLeft: string) => void;
 	onResumptionUpdate?: (handle: string, resumable: boolean) => void;
 	onGroundingMetadata?: (metadata: Record<string, unknown>) => void;
+	onTextOutput?: (text: string) => void;
+	onTextDone?: () => void;
+	onSpeechStarted?: () => void;
 
 	// --- Private state ---
 	private client: OpenAI;
@@ -117,6 +121,9 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	// when_idle scheduling: buffer tool results while model is generating
 	private _isModelGenerating = false;
 	private _pendingWhenIdle: TransportToolResult[] = [];
+
+	// Text mode: whether the transport is configured for text-mode responses (for TTS)
+	private _textMode = false;
 
 	// Audio suppression: stop forwarding audio deltas after interruption
 	private _suppressAudio = false;
@@ -258,6 +265,9 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		if (config.tools !== undefined) {
 			this.tools = config.tools;
 		}
+		if (config.responseModality !== undefined) {
+			this._textMode = config.responseModality === 'text';
+		}
 
 		if (!this.rt || !this._isConnected) return;
 
@@ -268,6 +278,11 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		if (config.tools !== undefined) {
 			// biome-ignore lint/suspicious/noExplicitAny: SDK tools type is complex; our tool format is compatible at runtime
 			update.tools = config.tools.map(toolToOpenAIFunction) as any;
+		}
+		if (config.responseModality !== undefined) {
+			// biome-ignore lint/suspicious/noExplicitAny: modalities field may not be in SDK type yet
+			(update as any).modalities =
+				config.responseModality === 'text' ? ['text'] : ['text', 'audio'];
 		}
 
 		this.rtSend({ type: 'session.update', session: update as RealtimeSessionCreateRequest });
@@ -286,6 +301,12 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			this.tools = config.tools;
 			// biome-ignore lint/suspicious/noExplicitAny: SDK tools type is complex; our tool format is compatible at runtime
 			update.tools = config.tools.map(toolToOpenAIFunction) as any;
+		}
+		if (config.responseModality !== undefined) {
+			this._textMode = config.responseModality === 'text';
+			// biome-ignore lint/suspicious/noExplicitAny: modalities field may not be in SDK type yet
+			(update as any).modalities =
+				config.responseModality === 'text' ? ['text'] : ['text', 'audio'];
 		}
 
 		if (!this.rt || !this._isConnected) return;
@@ -435,11 +456,16 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		if (config.transcription !== undefined) {
 			this.config.transcriptionModel = config.transcription.input === false ? null : undefined;
 		}
+		if (config.responseModality !== undefined) {
+			this._textMode = config.responseModality === 'text';
+		}
 	}
 
 	private buildSessionConfig(): RealtimeSessionCreateRequest {
 		const session: RealtimeSessionCreateRequest = {
 			type: 'realtime',
+			// biome-ignore lint/suspicious/noExplicitAny: modalities field may not be in SDK type yet
+			...(this._textMode ? { modalities: ['text'] } : ({ modalities: ['text', 'audio'] } as any)),
 			audio: {
 				input: {
 					format: { type: 'audio/pcm', rate: 24000 },
@@ -462,10 +488,14 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 							{ noise_reduction: this.config.noiseReduction as any }
 						: {}),
 				},
-				output: {
-					format: { type: 'audio/pcm', rate: 24000 },
-					voice: this.voice,
-				},
+				...(!this._textMode
+					? {
+							output: {
+								format: { type: 'audio/pcm', rate: 24000 },
+								voice: this.voice,
+							},
+						}
+					: {}),
 			},
 		};
 
@@ -493,6 +523,16 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			const bytes = Buffer.from(event.delta, 'base64').length;
 			const samples = bytes / 2; // 16-bit = 2 bytes per sample
 			this.audioOutputMs += (samples / 24000) * 1000;
+		});
+
+		// --- Text output (text mode — for TTS) ---
+		// biome-ignore lint/suspicious/noExplicitAny: event name may not be in SDK types yet
+		(rt as any).on('response.output_text.delta', (event: any) => {
+			if (this.onTextOutput && event.delta) this.onTextOutput(event.delta);
+		});
+		// biome-ignore lint/suspicious/noExplicitAny: event name may not be in SDK types yet
+		(rt as any).on('response.output_text.done', () => {
+			if (this.onTextDone) this.onTextDone();
 		});
 
 		// --- Response lifecycle: track when a response is active ---
@@ -571,6 +611,9 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		// Sending response.cancel here would race with the server's own cancellation
 		// and produce "no active response found" errors.
 		rt.on('input_audio_buffer.speech_started', () => {
+			// Always fire onSpeechStarted — TTS barge-in needs this even when LLM is idle
+			if (this.onSpeechStarted) this.onSpeechStarted();
+
 			if (!this._isModelGenerating) return;
 			this._suppressAudio = true;
 

@@ -78,6 +78,8 @@ export type {
 	TransportToolResult,
 } from './transport.js';
 
+export type { TTSAudioConfig, TTSProvider } from './tts.js';
+
 export type { UIResponse } from './ui.js';
 
 export type { ArtifactRef, ArtifactStore, SaveArtifactParams } from './workspace.js';
