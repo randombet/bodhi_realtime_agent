@@ -1424,7 +1424,7 @@ export class VoiceSession {
 
 		this.behaviorManager?.sendCatalog();
 		if (this.sessionManager.isActive) {
-			this.sendGreeting();
+			this._memoryReadyPromise.then(() => this.sendGreeting());
 		}
 	}
 
@@ -1470,7 +1470,6 @@ export class VoiceSession {
 		const detail = code != null ? ` code=${code}${reason ? ` reason="${reason}"` : ''}` : '';
 		this.log(`Transport closed (state=${this.sessionManager.state}${detail})`);
 		if (this.sessionManager.state === 'ACTIVE') {
-			// Unexpected close — try to reconnect with backoff and retry limit
 			const handle = this.sessionManager.resumptionHandle;
 			if (handle && this.reconnectAttempts < VoiceSession.MAX_RECONNECT_ATTEMPTS) {
 				const attempt = this.reconnectAttempts++;
@@ -1479,13 +1478,19 @@ export class VoiceSession {
 					`Reconnect attempt ${attempt + 1}/${VoiceSession.MAX_RECONNECT_ATTEMPTS} in ${delay}ms`,
 				);
 				this.sessionManager.transitionTo('RECONNECTING');
+				this.clientTransport.startBuffering();
 				setTimeout(() => {
 					this.transport
 						.reconnect({ conversationHistory: this.conversationContext.toReplayContent() })
 						.then(() => {
+							const buffered = this.clientTransport.stopBuffering();
+							for (const chunk of buffered) {
+								this.transport.sendAudio(chunk.toString('base64'));
+							}
 							this.sessionManager.transitionTo('ACTIVE');
 						})
 						.catch((err) => {
+							this.clientTransport.stopBuffering();
 							this.reportError('reconnect', err);
 							this.sessionManager.transitionTo('CLOSED');
 						});

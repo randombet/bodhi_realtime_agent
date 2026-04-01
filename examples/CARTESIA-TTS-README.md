@@ -23,19 +23,25 @@ User (mic) → WebSocket → Gemini Live API (text output) → Cartesia Sonic (T
 
 ## Quick Start
 
+### Standalone example (`examples/cartesia-tts-demo.ts`)
+
 ```bash
 # 1. Set environment variables
 export GEMINI_API_KEY=your_gemini_key
 export CARTESIA_API_KEY=your_cartesia_key
 
 # 2. Start the voice backend
-pnpm tsx app/cartesia-tts-demo.ts
+pnpm tsx examples/cartesia-tts-demo.ts
 
 # 3. In another terminal, start the web client
-pnpm tsx app/web-client.ts
+pnpm web-client:dev
 
 # 4. Open http://localhost:8080 in Chrome and click Connect
 ```
+
+### Production Bodhi app (`pnpm start`)
+
+The same Cartesia pipeline is wired into `createBodhiSessionConfig()` when `CARTESIA_API_KEY` is set in `.env`. Use `pnpm start` and `pnpm web-client:dev`; optional voice/speed/emotion overrides are available in the Talk page under **Output voice (Cartesia)** (query params: `cartesiaVoiceId`, `cartesiaSpeed`, `cartesiaEmotion`). Not used when `LLM_PROVIDER=openai` (OpenAI Realtime supplies its own audio).
 
 ## Environment Variables
 

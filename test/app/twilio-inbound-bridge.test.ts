@@ -92,7 +92,8 @@ describe('TwilioInboundBridge phone path', () => {
 			const from = '+15551234567';
 			const twiml = await postVoice(port, callSid, from);
 			expect(twiml).toContain('<Response>');
-			expect(twiml).toContain('<Stream url="wss://bodhiagent.live/twilio/media">');
+			expect(twiml).toContain('url="wss://bodhiagent.live/twilio/media"');
+			expect(twiml).toContain('statusCallback="https://bodhiagent.live/twilio/status"');
 			const nonce = parseAuthNonce(twiml);
 			expect(nonce.length).toBeGreaterThan(16);
 
