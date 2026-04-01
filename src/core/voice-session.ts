@@ -603,7 +603,7 @@ export class VoiceSession {
 							);
 						}
 						this.log(
-							`Background task failed: ${request.toolName} (toolCallId=${request.toolCallId})`,
+							`Background task failed: ${request.toolName} (toolCallId=${request.toolCallId}): ${err instanceof Error ? err.message : String(err)}`,
 						);
 						throw err;
 					}
