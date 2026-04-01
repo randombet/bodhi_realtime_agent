@@ -54,6 +54,12 @@ export interface ServerConfig {
 		level: 'debug' | 'info' | 'warn' | 'error';
 		format: 'json' | 'text';
 	};
+	/** Twilio inbound phone call bridge (optional — disabled when absent). */
+	twilio?: {
+		inboundEnabled: boolean;
+		/** Public HTTPS URL (nginx/ngrok) used in TwiML so Twilio connects back to us. */
+		webhookUrl: string;
+	};
 }
 
 /**
@@ -123,6 +129,13 @@ export function loadConfig(): ServerConfig {
 			level: (process.env.LOG_LEVEL || 'info') as 'debug' | 'info' | 'warn' | 'error',
 			format: (process.env.LOG_FORMAT || 'text') as 'json' | 'text',
 		},
+		twilio:
+			process.env.TWILIO_INBOUND_ENABLED === 'true' && process.env.TWILIO_WEBHOOK_URL
+				? {
+						inboundEnabled: true,
+						webhookUrl: process.env.TWILIO_WEBHOOK_URL,
+					}
+				: undefined,
 	};
 
 	// Validate auth config

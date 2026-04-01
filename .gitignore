@@ -15,7 +15,6 @@ docs/api/
 /memory/
 /history/
 /workspaces/
-/scripts/
 # Optional local pnpm config (e.g. store-dir); do not commit
 .npmrc
 /.worktrees/

@@ -99,7 +99,7 @@ export class MultiClientTransport {
 			(req: IncomingMessage, socket: import('node:net').Socket, head: Buffer) => {
 				const pathname = req.url?.split('?')[0] ?? '';
 				if (!paths.includes(pathname)) {
-					socket.destroy();
+					// Not our websocket path; allow other upgrade handlers (e.g. Twilio bridge) to process it.
 					return;
 				}
 				this.wss?.handleUpgrade(req, socket, head, (ws) => {
