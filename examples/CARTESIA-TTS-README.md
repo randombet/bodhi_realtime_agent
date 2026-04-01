@@ -41,14 +41,15 @@ pnpm web-client:dev
 
 ### Production Bodhi app (`pnpm start`)
 
-The same Cartesia pipeline is wired into `createBodhiSessionConfig()` when `CARTESIA_API_KEY` is set in `.env`. Use `pnpm start` and `pnpm web-client:dev`; optional voice/speed/emotion overrides are available in the Talk page under **Output voice (Cartesia)** (query params: `cartesiaVoiceId`, `cartesiaSpeed`, `cartesiaEmotion`). Not used when `LLM_PROVIDER=openai` (OpenAI Realtime supplies its own audio).
+The same Cartesia pipeline is wired into `createBodhiSessionConfig()` when `CARTESIA_TTS_ENABLED=true` and `CARTESIA_API_KEY` are set in `.env`. Without `CARTESIA_TTS_ENABLED=true`, the production server uses native Gemini audio even if the key is present. Use `pnpm start` and `pnpm web-client:dev`; optional voice/speed/emotion overrides are available in the Talk page under **Output voice (Cartesia)** (query params: `cartesiaVoiceId`, `cartesiaSpeed`, `cartesiaEmotion`). Not used when `LLM_PROVIDER=openai` (OpenAI Realtime supplies its own audio).
 
 ## Environment Variables
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `GEMINI_API_KEY` | Yes | — | Google AI Studio API key |
-| `CARTESIA_API_KEY` | Yes | — | Cartesia API key |
+| `CARTESIA_TTS_ENABLED` | For Bodhi app | *(unset)* | Set `true` on the production server to use Cartesia; otherwise native Gemini audio |
+| `CARTESIA_API_KEY` | Yes (demo / when enabled) | — | Cartesia API key |
 | `CARTESIA_VOICE_ID` | No | `a0e99841-...` (Barbershop Man) | Cartesia voice ID |
 | `CARTESIA_SPEED` | No | `normal` | `slowest` / `slow` / `normal` / `fast` / `fastest` |
 | `CARTESIA_EMOTION` | No | *(none)* | Comma-separated emotions, e.g. `cheerful,friendly` |
