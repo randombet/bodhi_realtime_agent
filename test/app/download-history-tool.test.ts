@@ -285,4 +285,98 @@ describe('artifact registry wiring in bodhi session config', () => {
 		expect(claude.agents[0]?.tools.some((t) => t.name === 'list_artifacts')).toBe(true);
 		expect(nanoclaw.agents[0]?.tools.some((t) => t.name === 'list_artifacts')).toBe(true);
 	});
+
+	it('injects read_image for standard, claude_code, and nanoclaw profiles', () => {
+		const baseOptions = {
+			apiKey: 'test-key',
+			memoryStore: {
+				addFacts: vi.fn(),
+				getAll: vi.fn(async () => []),
+				replaceAll: vi.fn(),
+				getDirectives: vi.fn(async () => null),
+				setDirectives: vi.fn(),
+			},
+			clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			sessionId: 'sess_read_image_profiles',
+			userId: 'user_test',
+			getSessionRef: () => null,
+		};
+
+		const standard = createBodhiSessionConfig({
+			...baseOptions,
+			agentProfile: 'standard',
+		});
+		const claude = createBodhiSessionConfig({
+			...baseOptions,
+			agentProfile: 'claude_code',
+		});
+		const nanoclaw = createBodhiSessionConfig({
+			...baseOptions,
+			agentProfile: 'nanoclaw',
+		});
+
+		expect(standard.agents[0]?.tools.some((t) => t.name === 'read_image')).toBe(true);
+		expect(claude.agents[0]?.tools.some((t) => t.name === 'read_image')).toBe(true);
+		expect(nanoclaw.agents[0]?.tools.some((t) => t.name === 'read_image')).toBe(true);
+	});
+
+	it('configures read_image as background tool with a pending message', () => {
+		const config = createBodhiSessionConfig({
+			apiKey: 'test-key',
+			memoryStore: {
+				addFacts: vi.fn(),
+				getAll: vi.fn(async () => []),
+				replaceAll: vi.fn(),
+				getDirectives: vi.fn(async () => null),
+				setDirectives: vi.fn(),
+			},
+			clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			sessionId: 'sess_read_image_tool',
+			userId: 'user_test',
+			getSessionRef: () => null,
+		});
+		const readImageTool = config.agents[0]?.tools.find((t) => t.name === 'read_image');
+		expect(readImageTool).toBeDefined();
+		expect(readImageTool?.execution).toBe('background');
+		expect(readImageTool?.pendingMessage).toContain("I'm analyzing your image now.");
+	});
+
+	it('registers read_image subagent and returns missing-artifact error', async () => {
+		const config = createBodhiSessionConfig({
+			apiKey: 'test-key',
+			memoryStore: {
+				addFacts: vi.fn(),
+				getAll: vi.fn(async () => []),
+				replaceAll: vi.fn(),
+				getDirectives: vi.fn(async () => null),
+				setDirectives: vi.fn(),
+			},
+			clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			sessionId: 'sess_read_image_subagent',
+			userId: 'user_test',
+			getSessionRef: () => null,
+		});
+
+		const readImageSubagent = config.subagentConfigs.read_image;
+		expect(readImageSubagent).toBeDefined();
+		expect(readImageSubagent?.name).toBe('image_reader');
+
+		type AnalyzeImageTool = {
+			execute: (args: { artifactId: string; question: string }) => Promise<unknown>;
+		};
+		const analyzeImageTool = (
+			readImageSubagent?.tools as Record<string, AnalyzeImageTool> | undefined
+		)?.analyze_image;
+		expect(analyzeImageTool).toBeDefined();
+
+		const result = await analyzeImageTool?.execute({
+			artifactId: 'art_missing',
+			question: 'What is in this image?',
+		});
+
+		expect(result).toEqual({
+			status: 'error',
+			error: 'Image artifact art_missing not found. It may have expired.',
+		});
+	});
 });
