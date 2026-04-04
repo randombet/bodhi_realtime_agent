@@ -317,4 +317,146 @@ describe('TwilioInboundBridge phone path', () => {
 			await new Promise<void>((r) => server.close(() => r()));
 		}
 	});
+
+	it('streams hold audio while session is being created and clears on handoff', async () => {
+		const feedAudioFromClient = vi.fn();
+		const cleanup = vi.fn();
+
+		let resolveSession: (() => void) | null = null;
+		const createSession = vi.fn(
+			() =>
+				new Promise<{
+					session: VoiceSession;
+					sessionId: string;
+					cleanup: () => void;
+				}>((resolve) => {
+					resolveSession = () =>
+						resolve({
+							session: { feedAudioFromClient } as unknown as VoiceSession,
+							sessionId: 'sess_hold_music',
+							cleanup,
+						});
+				}),
+		);
+
+		const bridge = new TwilioInboundBridge({
+			webhookUrl: 'https://bodhiagent.live',
+			sessionFactory: { createSession },
+			logger: {
+				info: vi.fn(),
+				warn: vi.fn(),
+				error: vi.fn(),
+				debug: vi.fn(),
+			},
+		});
+
+		const server = createServer((req, res) => {
+			const path = new URL(req.url ?? '/', 'http://127.0.0.1').pathname.replace(/\/+$/, '');
+			if (path.startsWith('/twilio/')) bridge.handleRequest(req, res);
+			else {
+				res.writeHead(404);
+				res.end();
+			}
+		});
+		bridge.attach(server);
+
+		const port = await new Promise<number>((resolve, reject) => {
+			server.listen(0, '127.0.0.1', () => {
+				const a = server.address();
+				if (a && typeof a === 'object') resolve(a.port);
+				else reject(new Error('no port'));
+			});
+		});
+
+		try {
+			const callSid = 'CA_hold_001';
+			const twiml = await postVoice(port, callSid, '+15558889999');
+			const nonce = parseAuthNonce(twiml);
+
+			await new Promise<void>((resolve, reject) => {
+				const ws = new WebSocket(`ws://127.0.0.1:${port}/twilio/media`);
+				const timeout = setTimeout(() => reject(new Error('hold audio timeout')), 12000);
+
+				let holdMediaCount = 0;
+				let sawClear = false;
+				let resolved = false;
+				let outboundTriggered = false;
+
+				const maybeResolve = () => {
+					if (!resolved && holdMediaCount > 0 && sawClear) {
+						resolved = true;
+						clearTimeout(timeout);
+						ws.send(
+							JSON.stringify({
+								event: 'stop',
+								stop: { callSid },
+								streamSid: 'MZ_hold_stream',
+							}),
+						);
+						setTimeout(() => {
+							ws.close(1000);
+							resolve();
+						}, 25);
+					}
+				};
+
+				ws.on('error', reject);
+
+				ws.on('open', () => {
+					ws.send(JSON.stringify({ event: 'connected', protocol: 'Call', version: '1.0.0' }));
+					ws.send(
+						JSON.stringify({
+							event: 'start',
+							start: {
+								streamSid: 'MZ_hold_stream',
+								callSid,
+								customParameters: { auth: nonce },
+							},
+							streamSid: 'MZ_hold_stream',
+						}),
+					);
+				});
+
+				ws.on('message', (raw) => {
+					try {
+						const msg = JSON.parse(raw.toString()) as Record<string, unknown>;
+						const event = msg.event;
+						if (event === 'media') {
+							holdMediaCount += 1;
+							if (holdMediaCount >= 2 && resolveSession) {
+								const done = resolveSession;
+								resolveSession = null;
+								done();
+							}
+							if (!outboundTriggered && holdMediaCount >= 2 && !resolveSession) {
+								outboundTriggered = true;
+								setTimeout(() => {
+									const sender = bridge.createClientSenderForCallSid(callSid);
+									if (!sender) {
+										reject(new Error('client sender missing after session create'));
+										return;
+									}
+									// Trigger first outbound assistant audio to verify hold-music handoff.
+									sender.sendAudio(Buffer.alloc(1920));
+								}, 25);
+							}
+						} else if (event === 'clear') {
+							sawClear = true;
+							maybeResolve();
+						}
+						maybeResolve();
+					} catch {
+						// ignore malformed
+					}
+				});
+			});
+
+			expect(createSession).toHaveBeenCalledWith('phone_15558889999', callSid);
+			expect(cleanup).toHaveBeenCalled();
+			expect(feedAudioFromClient).toHaveBeenCalledTimes(0);
+		} finally {
+			bridge.dispose();
+			await new Promise<void>((r) => server.close(() => r()));
+		}
+	}, 20_000);
 });
