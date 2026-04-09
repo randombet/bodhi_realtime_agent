@@ -15,12 +15,21 @@ function createMockServer(
 ): Promise<{ port: number; close: () => Promise<void> }> {
 	return new Promise((resolve) => {
 		const server = createServer(handler);
+		// Track connections for force-close on shutdown
+		const sockets = new Set<import('node:net').Socket>();
+		server.on('connection', (socket) => {
+			sockets.add(socket);
+			socket.on('close', () => sockets.delete(socket));
+		});
 		server.listen(0, '127.0.0.1', () => {
 			const addr = server.address();
 			const port = typeof addr === 'object' && addr ? addr.port : 0;
 			resolve({
 				port,
-				close: () => new Promise<void>((r) => server.close(() => r())),
+				close: () => {
+					for (const s of sockets) s.destroy();
+					return new Promise<void>((r) => server.close(() => r()));
+				},
 			});
 		});
 	});
@@ -49,11 +58,6 @@ describe('OpenClawHttpClient', () => {
 		req.on('end', () => {
 			lastRequestBody = JSON.parse(body);
 			lastRequestHeaders = req.headers;
-
-			if (customHandler) {
-				customHandler(req, res);
-				return;
-			}
 
 			// Default: return a simple streaming response
 			res.writeHead(200, {
@@ -107,7 +111,14 @@ describe('OpenClawHttpClient', () => {
 	};
 
 	beforeAll(async () => {
-		const mock = await createMockServer((req, res) => defaultHandler(req, res));
+		const mock = await createMockServer((req, res) => {
+			// If customHandler is set, route directly to it (bypasses body parsing)
+			if (customHandler) {
+				customHandler(req, res);
+				return;
+			}
+			defaultHandler(req, res);
+		});
 		mockPort = mock.port;
 		closeMock = mock.close;
 	});
@@ -291,6 +302,161 @@ describe('OpenClawHttpClient', () => {
 		expect(result).toBeInstanceOf(Error);
 		expect((result as Error).message).toContain('closed');
 
+		customHandler = null;
+	});
+
+	it('parses CRLF-delimited SSE frames', async () => {
+		customHandler = (_req, res) => {
+			res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+			// Send CRLF-delimited SSE
+			res.write(
+				'event: response.created\r\n' +
+					'data: {"type":"response.created","response":{"id":"resp_crlf"}}\r\n\r\n' +
+					'event: response.output_text.delta\r\n' +
+					'data: {"type":"response.output_text.delta","delta":"CRLF works"}\r\n\r\n' +
+					'event: response.completed\r\n' +
+					'data: {"type":"response.completed","response":{"id":"resp_crlf","output":[{"type":"message","content":[{"type":"output_text","text":"CRLF works"}]}]}}\r\n\r\n' +
+					'data: [DONE]\r\n\r\n',
+			);
+			res.end();
+		};
+
+		const client = createClient();
+		const { runId } = await client.chatSend('sess:crlf', 'test');
+		const ev1 = await client.nextChatEvent(runId);
+		expect(ev1.state).toBe('delta');
+		expect(ev1.text).toBe('CRLF works');
+		const ev2 = await client.nextChatEvent(runId);
+		expect(ev2.state).toBe('final');
+		expect(ev2.text).toBe('CRLF works');
+		await client.close();
+		customHandler = null;
+	});
+
+	it('handles bare data: line (empty data field per SSE spec)', async () => {
+		customHandler = (_req, res) => {
+			res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+			// Standard single-line data with extra event fields the parser should skip
+			res.write(
+				'event: response.output_text.delta\nid: 123\ndata: {"type":"response.output_text.delta","delta":"OK"}\n\n',
+			);
+			res.write(
+				sseEvent('response.completed', {
+					type: 'response.completed',
+					response: {
+						id: 'resp_bare',
+						output: [
+							{
+								type: 'message',
+								content: [{ type: 'output_text', text: 'OK' }],
+							},
+						],
+					},
+				}),
+			);
+			res.write('data: [DONE]\n\n');
+			res.end();
+		};
+
+		const client = createClient();
+		const { runId } = await client.chatSend('sess:bare', 'test');
+		const ev1 = await client.nextChatEvent(runId);
+		expect(ev1.state).toBe('delta');
+		expect(ev1.text).toBe('OK');
+		const ev2 = await client.nextChatEvent(runId);
+		expect(ev2.state).toBe('final');
+		expect(ev2.text).toBe('OK');
+		await client.close();
+		customHandler = null;
+	});
+
+	it('abort attempts server-cancel when response.id is captured early', async () => {
+		let cancelRequested = false;
+		let cancelPath = '';
+
+		customHandler = (req, res) => {
+			const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+
+			// Handle cancel endpoint
+			if (req.method === 'POST' && url.pathname.includes('/cancel')) {
+				cancelRequested = true;
+				cancelPath = url.pathname;
+				res.writeHead(200);
+				res.end();
+				return;
+			}
+
+			// Handle /v1/responses — send response.created then hang
+			res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+			res.write(
+				sseEvent('response.created', {
+					type: 'response.created',
+					response: { id: 'resp_cancel_me' },
+				}),
+			);
+			res.write(
+				sseEvent('response.output_text.delta', {
+					type: 'response.output_text.delta',
+					delta: 'Working...',
+				}),
+			);
+			// Don't end — simulate long-running task
+		};
+
+		const client = createClient();
+		const { runId } = await client.chatSend('sess:cancel', 'Long task');
+
+		// Read delta — response.created was processed before this (same SSE stream)
+		const ev = await client.nextChatEvent(runId);
+		expect(ev.state).toBe('delta');
+
+		// Small delay to ensure _responseIds is populated from response.created
+		await new Promise((r) => setTimeout(r, 50));
+
+		// Abort — should attempt server cancel
+		await client.chatAbort(runId);
+		const abortEv = await client.nextChatEvent(runId);
+		expect(abortEv.state).toBe('aborted');
+
+		// Give the fire-and-forget cancel request time to arrive
+		await new Promise((r) => setTimeout(r, 500));
+		expect(cancelRequested).toBe(true);
+		expect(cancelPath).toBe('/v1/responses/resp_cancel_me/cancel');
+
+		await client.close();
+		customHandler = null;
+	});
+
+	it('abort works client-side only when no response.id captured', async () => {
+		customHandler = (req, res) => {
+			// Ignore cancel requests
+			if (req.url?.includes('/cancel')) {
+				res.writeHead(404);
+				res.end();
+				return;
+			}
+			// Send SSE without response.created (no early ID)
+			res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+			res.write(
+				sseEvent('response.output_text.delta', {
+					type: 'response.output_text.delta',
+					delta: 'No ID',
+				}),
+			);
+			// Don't end — simulate long-running task
+		};
+
+		const client = createClient();
+		const { runId } = await client.chatSend('sess:no-id', 'test');
+		const ev = await client.nextChatEvent(runId);
+		expect(ev.state).toBe('delta');
+
+		// Abort without server cancel (no response.id captured)
+		await client.chatAbort(runId);
+		const abortEv = await client.nextChatEvent(runId);
+		expect(abortEv.state).toBe('aborted');
+
+		await client.close();
 		customHandler = null;
 	});
 });
