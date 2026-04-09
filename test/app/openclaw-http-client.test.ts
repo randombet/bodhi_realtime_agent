@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 import { type IncomingMessage, type ServerResponse, createServer } from 'node:http';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { OpenClawHttpClient } from '../../app/lib/openclaw-http-client.js';
 
 // ---------------------------------------------------------------------------
@@ -48,6 +48,8 @@ describe('OpenClawHttpClient', () => {
 	let closeMock: () => Promise<void>;
 	let lastRequestBody: Record<string, unknown> | null = null;
 	let lastRequestHeaders: Record<string, string | string[] | undefined> = {};
+	let requestBodies: Record<string, unknown>[] = [];
+	let issuedResponseIds: string[] = [];
 	let customHandler: SSEHandler | null = null;
 
 	const defaultHandler: SSEHandler = (req, res) => {
@@ -56,10 +58,23 @@ describe('OpenClawHttpClient', () => {
 			body += chunk;
 		});
 		req.on('end', () => {
-			lastRequestBody = JSON.parse(body);
+			const parsedBody = JSON.parse(body) as Record<string, unknown>;
+			lastRequestBody = parsedBody;
 			lastRequestHeaders = req.headers;
+			requestBodies.push(parsedBody);
+
+			const isStreaming = parsedBody.stream !== false;
+			if (!isStreaming) {
+				const responseId = `resp_preflight_${requestBodies.length}`;
+				issuedResponseIds.push(responseId);
+				res.writeHead(200, { 'Content-Type': 'application/json' });
+				res.end(JSON.stringify({ id: responseId, status: 'completed' }));
+				return;
+			}
 
 			// Default: return a simple streaming response
+			const responseId = 'resp_test_001';
+			issuedResponseIds.push(responseId);
 			res.writeHead(200, {
 				'Content-Type': 'text/event-stream',
 				'Cache-Control': 'no-cache',
@@ -90,7 +105,7 @@ describe('OpenClawHttpClient', () => {
 				sseEvent('response.completed', {
 					type: 'response.completed',
 					response: {
-						id: 'resp_test_001',
+						id: responseId,
 						object: 'response',
 						status: 'completed',
 						output: [
@@ -109,6 +124,14 @@ describe('OpenClawHttpClient', () => {
 			res.end();
 		});
 	};
+
+	beforeEach(() => {
+		lastRequestBody = null;
+		lastRequestHeaders = {};
+		requestBodies = [];
+		issuedResponseIds = [];
+		customHandler = null;
+	});
 
 	beforeAll(async () => {
 		const mock = await createMockServer((req, res) => {
@@ -264,6 +287,37 @@ describe('OpenClawHttpClient', () => {
 		customHandler = null;
 	});
 
+	it('surfaces structured HTTP 400 error details', async () => {
+		customHandler = (_req, res) => {
+			res.writeHead(400, {
+				'Content-Type': 'application/json',
+				'x-request-id': 'req_test_123',
+			});
+			res.end(
+				JSON.stringify({
+					error: {
+						message: 'input: Invalid input',
+						type: 'invalid_request_error',
+						param: 'input',
+					},
+				}),
+			);
+		};
+
+		const client = createClient();
+		const { runId } = await client.chatSend('sess:bad-request', 'test');
+		const ev = await client.nextChatEvent(runId);
+		expect(ev.state).toBe('error');
+		expect(ev.error).toContain('HTTP 400');
+		expect(ev.error).toContain('input: Invalid input');
+		expect(ev.error).toContain('type=invalid_request_error');
+		expect(ev.error).toContain('param=input');
+		expect(ev.error).toContain('request_id=req_test_123');
+
+		await client.close();
+		customHandler = null;
+	});
+
 	it('sends Authorization header and Idempotency-Key', async () => {
 		customHandler = null;
 		const client = createClient();
@@ -273,6 +327,70 @@ describe('OpenClawHttpClient', () => {
 		while ((await client.nextChatEvent(runId)).state !== 'final') {}
 		expect(lastRequestHeaders.authorization).toBe('Bearer test-token');
 		expect(lastRequestHeaders['idempotency-key']).toBe('idem-123');
+		await client.close();
+	});
+
+	it('serializes attachments using message envelope with input_image source base64', async () => {
+		customHandler = null;
+		const client = createClient();
+		const { runId } = await client.chatSend('sess:attach', 'Describe this image', {
+			attachments: [
+				{
+					type: 'image',
+					mimeType: 'image/png',
+					fileName: 'artifact.png',
+					content: 'QUJD',
+				},
+			],
+		});
+		while ((await client.nextChatEvent(runId)).state !== 'final') {}
+
+		// Request 1: text as a single-content message (non-stream)
+		const preflightRequest = requestBodies[0];
+		expect(preflightRequest.stream).toBe(false);
+		const preflightInput = preflightRequest.input as Record<string, unknown>[];
+		expect(Array.isArray(preflightInput)).toBe(true);
+		expect(preflightInput).toHaveLength(1);
+		const preflightMessage = preflightInput[0];
+		expect(preflightMessage.type).toBe('message');
+		expect(preflightMessage.role).toBe('user');
+		const preflightContent = preflightMessage.content as Record<string, unknown>[];
+		expect(preflightContent).toHaveLength(1);
+		expect(preflightContent[0]).toMatchObject({
+			type: 'input_text',
+			text: 'Describe this image',
+		});
+
+		// Request 2: image message includes text context + image content, chained to preflight response
+		const finalRequest = requestBodies[1];
+		expect(finalRequest.stream).toBe(true);
+		expect(finalRequest.previous_response_id).toBe(issuedResponseIds[0]);
+		const input = finalRequest.input as Record<string, unknown>[];
+		expect(Array.isArray(input)).toBe(true);
+		expect(input).toHaveLength(1);
+
+		const message = input[0];
+		expect(message.type).toBe('message');
+		expect(message.role).toBe('user');
+
+		const content = message.content as Record<string, unknown>[];
+		expect(Array.isArray(content)).toBe(true);
+		expect(content).toHaveLength(2);
+		expect(content[0]).toMatchObject({
+			type: 'input_text',
+			text: 'Describe this image',
+		});
+		expect(content[1]).toMatchObject({ type: 'input_image' });
+		const source = content[1].source as Record<string, unknown>;
+		expect(source).toMatchObject({
+			type: 'base64',
+			media_type: 'image/png',
+			data: 'QUJD',
+			filename: 'artifact.png',
+		});
+
+		expect(requestBodies).toHaveLength(2);
+
 		await client.close();
 	});
 
