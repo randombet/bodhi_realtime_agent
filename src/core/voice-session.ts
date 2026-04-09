@@ -594,7 +594,7 @@ export class VoiceSession {
 										role: 'user',
 										parts: [
 											{
-												text: `[SYSTEM: Background task "${request.toolName}" failed: ${msg}. Please apologize and ask how to proceed.]`,
+												text: `[SYSTEM: Background task "${request.toolName}" failed. Exact error details: ${msg}. Tell the user the exact error details first, then ask how to proceed.]`,
 											},
 										],
 									},
