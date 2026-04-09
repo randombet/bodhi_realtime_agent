@@ -6,12 +6,13 @@ import type { SubagentConfig } from '../../src/types/agent.js';
 import type { ToolDefinition } from '../../src/types/tool.js';
 import type { ArtifactRegistry } from './artifact-registry.js';
 import {
-	ArtifactResolutionError,
 	type AdapterLimits,
+	ArtifactResolutionError,
 	resolveArtifacts,
 	resolveRequestedArtifactIds,
 } from './artifact-resolution.js';
-import { type ContentBlock, mergeText, type OpenClawClient } from './openclaw-client.js';
+import { type ContentBlock, mergeText } from './openclaw-client.js';
+import type { OpenClawTransport } from './openclaw-transport.js';
 import { PersistentOpenClawSubagent } from './persistent-openclaw-subagent.js';
 
 // ---------------------------------------------------------------------------
@@ -47,11 +48,61 @@ export const askOpenClawTool: ToolDefinition = {
 			.describe('IDs of artifacts (images, files) to attach to the task'),
 	}),
 	execution: 'background',
-	pendingMessage:
-		"I'm sending that to my agent now. I'll let you know what it finds.",
+	pendingMessage: "I'm sending that to my agent now. I'll let you know what it finds.",
 	execute: async () => {
 		// Placeholder — execution is routed by the orchestration runtime.
 		return { text: 'Routed to subagent', stepCount: 0 };
+	},
+};
+
+/**
+ * Work-focused OpenClaw tool — handles email, calendar, Xiaohongshu/XHS,
+ * and other productivity/work tasks in its own persistent session.
+ */
+export const askWorkAgentTool: ToolDefinition = {
+	name: 'ask_work_agent',
+	description:
+		'Delegate a WORK task to the work agent. ' +
+		'Use this for: email (send/draft/reply/forward), calendar, scheduling, ' +
+		'Xiaohongshu/XHS (小红书) posts, social media, document writing, ' +
+		'spreadsheets, and any productivity or business task. ' +
+		'This agent remembers past work conversations within the session.',
+	parameters: z.object({
+		task: z.string().describe('The work task to delegate'),
+		artifactIds: z
+			.array(z.string())
+			.optional()
+			.describe('IDs of artifacts (images, files) to attach to the task'),
+	}),
+	execution: 'background',
+	pendingMessage: "I'm sending that to my work agent. I'll update you shortly.",
+	execute: async () => {
+		return { text: 'Routed to work agent', stepCount: 0 };
+	},
+};
+
+/**
+ * General-purpose OpenClaw tool — handles coding, research, web browsing,
+ * and other complex tasks in its own persistent session.
+ */
+export const askGeneralAgentTool: ToolDefinition = {
+	name: 'ask_general_agent',
+	description:
+		'Delegate a COMPLEX task to the general agent. ' +
+		'Use this for: coding, debugging, research, web browsing, data analysis, ' +
+		'file operations, multi-step investigations, and any technical or exploratory task. ' +
+		'This agent remembers past conversations within the session.',
+	parameters: z.object({
+		task: z.string().describe('The task to delegate'),
+		artifactIds: z
+			.array(z.string())
+			.optional()
+			.describe('IDs of artifacts (images, files) to attach to the task'),
+	}),
+	execution: 'background',
+	pendingMessage: "I'm sending that to my agent. I'll let you know what it finds.",
+	execute: async () => {
+		return { text: 'Routed to general agent', stepCount: 0 };
 	},
 };
 
@@ -62,7 +113,7 @@ export const askOpenClawTool: ToolDefinition = {
  * through PersistentSubagentManager + PersistentOpenClawSubagent.
  */
 export function createPersistentOpenClawSubagentConfig(
-	client: OpenClawClient,
+	client: OpenClawTransport,
 	sessionId: string,
 	options?: OpenClawSubagentOptions,
 ): SubagentConfig {
@@ -96,7 +147,7 @@ export function createPersistentOpenClawSubagentConfig(
  * user via voice, then calls `openclaw_chat` again with the answer.
  */
 export function createOpenClawSubagentConfig(
-	client: OpenClawClient,
+	client: OpenClawTransport,
 	sessionId: string,
 	options?: OpenClawSubagentOptions,
 ): SubagentConfig {
@@ -116,15 +167,15 @@ export function createOpenClawSubagentConfig(
 			'   - Also treat question-like responses as clarification requests, even when status is "completed".',
 			'   - The "text" field contains OpenClaw\'s response including the question.',
 			'   - Use ask_user to relay the question to the user via voice.',
-			'   - When phrasing the question for ask_user, be concise — extract the key question from OpenClaw\'s response.',
-			'   - Call openclaw_chat with the user\'s answer to continue.',
+			"   - When phrasing the question for ask_user, be concise — extract the key question from OpenClaw's response.",
+			"   - Call openclaw_chat with the user's answer to continue.",
 			'3. If the result has status "completed", OpenClaw has finished the task.',
 			'   - Return a brief voice-friendly summary of what was done.',
 			'   - Do NOT read out code verbatim — summarize the outcome.',
 			'4. If the result has an error, tell the user what went wrong briefly.',
 			'',
 			'IMPORTANT:',
-			'- Always relay OpenClaw\'s questions to the user — never answer on their behalf.',
+			"- Always relay OpenClaw's questions to the user — never answer on their behalf.",
 			'- Keep your voice summaries short (2-3 sentences max).',
 			'- The user is listening via audio — no markdown, no code blocks in your final answer.',
 		].join('\n'),
@@ -141,7 +192,7 @@ export function createOpenClawSubagentConfig(
  * full streaming response. Returns the accumulated text and final disposition.
  */
 function createOpenClawChatTool(
-	client: OpenClawClient,
+	client: OpenClawTransport,
 	sessionKey: string,
 	options?: OpenClawSubagentOptions,
 ) {
@@ -178,7 +229,16 @@ function createOpenClawChatTool(
 		execute: async ({ message, artifactIds }) => {
 			try {
 				// Resolve artifacts to attachments (if any)
-				let sendOptions: { attachments?: { type: 'image'; mimeType: string; fileName?: string; content: string }[] } | undefined;
+				let sendOptions:
+					| {
+							attachments?: {
+								type: 'image';
+								mimeType: string;
+								fileName?: string;
+								content: string;
+							}[];
+					  }
+					| undefined;
 				let attachmentWarning: string | undefined;
 
 				const requestedArtifactIds = resolveRequestedArtifactIds(
@@ -238,9 +298,7 @@ function createOpenClawChatTool(
 							text = mergeText(text, event.text);
 							collectContentBlocks(event.contentBlocks, receivedBlocks, seenBlockHashes);
 							const status = event.finalDisposition ?? 'completed';
-							console.log(
-								`[OpenClaw] Run ${runId} completed (${status}): ${text.slice(0, 200)}`,
-							);
+							console.log(`[OpenClaw] Run ${runId} completed (${status}): ${text.slice(0, 200)}`);
 
 							if (status === 'completed' && text.trim().length === 0) {
 								if (attempt < maxAttempts) {
@@ -256,10 +314,7 @@ function createOpenClawChatTool(
 							}
 
 							// Surface received content blocks to user
-							const receivedArtifactIds = surfaceContentBlocks(
-								receivedBlocks,
-								options,
-							);
+							const receivedArtifactIds = surfaceContentBlocks(receivedBlocks, options);
 
 							if (status === 'completed' && looksLikeClarifyingQuestion(text)) {
 								const result: Record<string, unknown> = { status: 'needs_input', text };
@@ -276,10 +331,7 @@ function createOpenClawChatTool(
 							console.log(`[OpenClaw] Run ${runId} ${event.state}: ${event.error}`);
 							const errorText = event.error ?? `OpenClaw run ${event.state}`;
 							// Surface attachment-specific gateway errors with context
-							if (
-								sendOptions?.attachments &&
-								/attachment|mime|unsupported/i.test(errorText)
-							) {
+							if (sendOptions?.attachments && /attachment|mime|unsupported/i.test(errorText)) {
 								return {
 									status: 'error',
 									error: `Attachment rejected by agent gateway: ${errorText}`,
@@ -319,7 +371,7 @@ function collectContentBlocks(
 		if (!block.base64) continue;
 
 		// Size validation
-		const estimatedBytes = Math.ceil(block.base64.length * 3 / 4);
+		const estimatedBytes = Math.ceil((block.base64.length * 3) / 4);
 		if (estimatedBytes > MAX_INBOUND_BLOCK_BYTES) {
 			console.warn(
 				`[OpenClaw] Received content block ~${(estimatedBytes / 1_000_000).toFixed(1)} MB, exceeds 10 MB limit, skipping`,
@@ -347,10 +399,7 @@ function collectContentBlocks(
 }
 
 /** Surface received content blocks: store in registry + publish gui.update. Returns stored artifactIds. */
-function surfaceContentBlocks(
-	blocks: ContentBlock[],
-	options?: OpenClawSubagentOptions,
-): string[] {
+function surfaceContentBlocks(blocks: ContentBlock[], options?: OpenClawSubagentOptions): string[] {
 	const artifactIds: string[] = [];
 
 	for (const block of blocks) {

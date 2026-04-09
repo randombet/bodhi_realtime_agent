@@ -4,6 +4,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { ArtifactRegistry } from '../../app/lib/artifact-registry.js';
 import type { ChatEvent, OpenClawClient } from '../../app/lib/openclaw-client.js';
 import {
+	askGeneralAgentTool,
+	askWorkAgentTool,
 	createOpenClawSubagentConfig,
 	createPersistentOpenClawSubagentConfig,
 } from '../../app/lib/openclaw-tools.js';
@@ -35,6 +37,22 @@ type ToolMap = Record<
 >;
 
 describe('openclaw tools', () => {
+	it('defines ask_work_agent with background execution and expected parameters', () => {
+		expect(askWorkAgentTool.name).toBe('ask_work_agent');
+		expect(askWorkAgentTool.execution).toBe('background');
+		expect(askWorkAgentTool.pendingMessage).toBeDefined();
+		expect(askWorkAgentTool.parameters.safeParse({ task: 'Send an email' }).success).toBe(true);
+	});
+
+	it('defines ask_general_agent with background execution and expected parameters', () => {
+		expect(askGeneralAgentTool.name).toBe('ask_general_agent');
+		expect(askGeneralAgentTool.execution).toBe('background');
+		expect(askGeneralAgentTool.pendingMessage).toBeDefined();
+		expect(
+			askGeneralAgentTool.parameters.safeParse({ task: 'Debug this TypeScript error' }).success,
+		).toBe(true);
+	});
+
 	it('openclaw_chat preserves delta text when final text is empty', async () => {
 		const client = createMockClient([
 			{
@@ -308,7 +326,7 @@ describe('openclaw tools', () => {
 		expect(config.lifetime).toBe('persistent_session');
 		expect(typeof config.persistentFactory).toBe('function');
 
-		const instance = await config.persistentFactory?.('ask_openclaw', config);
+		const instance = await config.persistentFactory?.('ask_general_agent', config);
 		const text = await instance?.invoke('Fallback task', { task: 'Send the summary email' });
 
 		expect(client.sessionKey).toHaveBeenCalledWith('session-42');

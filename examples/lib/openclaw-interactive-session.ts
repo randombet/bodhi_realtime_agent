@@ -4,7 +4,8 @@ import { FrameworkError } from '../../src/core/errors.js';
 import { CancelledError } from '../../src/agent/subagent-session.js';
 import type { SubagentSession } from '../../src/agent/subagent-session.js';
 import type { SubagentResult } from '../../src/types/conversation.js';
-import { mergeText, type ChatEvent, type OpenClawClient } from './openclaw-client.js';
+import { mergeText, type ChatEvent } from './openclaw-client.js';
+import type { OpenClawTransport } from './openclaw-transport.js';
 
 /** Tagged user input for Promise.race() discriminated union. */
 type TaggedUserInput = { source: 'user_input'; text: string };
@@ -20,7 +21,7 @@ type RaceResult = ChatEvent | TaggedUserInput;
  * state transitions are owned exclusively by `runSubagent()` (the caller).
  */
 export async function runOpenClawInteractiveSession(
-	client: OpenClawClient,
+	client: OpenClawTransport,
 	session: SubagentSession,
 	sessionKey: string,
 	task: string,

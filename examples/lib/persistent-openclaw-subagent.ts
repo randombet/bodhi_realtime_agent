@@ -10,7 +10,7 @@ import {
 } from './artifact-resolution.js';
 import type { ChatSendOptions, ContentBlock } from './openclaw-client.js';
 import { mergeText } from './openclaw-client.js';
-import type { OpenClawClient } from './openclaw-client.js';
+import type { OpenClawTransport } from './openclaw-transport.js';
 
 /**
  * A persistent OpenClaw subagent instance.
@@ -31,7 +31,7 @@ export class PersistentOpenClawSubagent implements PersistentSubagentInstance {
 
 	constructor(
 		key: string,
-		private readonly client: OpenClawClient,
+		private readonly client: OpenClawTransport,
 		private readonly sessionKey: string,
 		private readonly artifactRegistry?: ArtifactRegistry,
 		private readonly adapterLimits?: AdapterLimits,
@@ -97,15 +97,23 @@ export class PersistentOpenClawSubagent implements PersistentSubagentInstance {
 
 		const maxAttempts = 2;
 		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+			let runId: string;
 			const attachmentCount = retrySafeSendOptions.attachments?.length ?? 0;
 			console.log(
 				`[OpenClaw] Dispatching chatSend (persistent): sessionKey=${this.sessionKey} attachments=${attachmentCount}`,
 			);
-			const { runId } = await this.client.chatSend(
-				this.sessionKey,
-				message,
-				retrySafeSendOptions,
-			);
+			try {
+				const result = await this.client.chatSend(
+					this.sessionKey,
+					message,
+					retrySafeSendOptions,
+				);
+				runId = result.runId;
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				console.error(`[OpenClaw] chatSend failed (persistent): ${msg}`);
+				throw new Error(`OpenClaw chatSend failed: ${msg}`);
+			}
 			this.activeRunId = runId;
 			console.log(`[OpenClaw] Run started: ${runId}`);
 

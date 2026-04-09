@@ -2,16 +2,17 @@
  * Bodhi + OpenClaw — Voice-Driven AI Agent Demo
  *
  * A voice assistant that combines Gemini's native capabilities (search, image/video
- * generation) with OpenClaw's general-purpose agent for coding, research, writing,
- * emails, and more.
+ * generation) with two OpenClaw-backed agents:
+ * - Work agent: email, calendar, scheduling, social/productivity tasks
+ * - General agent: coding, research, technical and multi-step tasks
  *
  * Features:
  * - Voice interface: Speak requests naturally
- * - OpenClaw agent: Delegates complex tasks (coding, research, email, etc.)
+ * - Dual agent routing: Delegates tasks to work/general agents
  * - Google Search: Real-time web search via Gemini's built-in grounding
  * - Image generation: Creates images via Gemini
  * - Video generation: Creates short videos via Veo
- * - Interactive delegation: OpenClaw can ask follow-up questions via voice
+ * - Interactive delegation: OpenClaw agents can ask follow-up questions via voice
  * - Artifact sharing: Generated images can be forwarded to OpenClaw (e.g. "email that image")
  *
  * Usage:
@@ -38,15 +39,19 @@ import { GoogleGenAI } from '@google/genai';
 import { tool } from 'ai';
 import { z } from 'zod';
 import { VoiceSession } from '../../src/core/voice-session.js';
-import { ElevenLabsTTSProvider } from '../../src/transport/elevenlabs-tts-provider.js';
 import { GeminiBatchSTTProvider } from '../../src/transport/gemini-batch-stt-provider.js';
-import type { TTSProvider } from '../../src/types/tts.js';
 import type { MainAgent, SubagentConfig } from '../../src/types/agent.js';
 import type { ToolDefinition } from '../../src/types/tool.js';
 import { ArtifactRegistry } from '../../app/lib/artifact-registry.js';
-import { OpenClawClient } from '../../app/lib/openclaw-client.js';
-import { loadOrCreateDeviceIdentity } from '../../app/lib/openclaw-device-identity.js';
-import { askOpenClawTool, createPersistentOpenClawSubagentConfig } from '../../app/lib/openclaw-tools.js';
+import { OpenClawHttpClient } from '../../app/lib/openclaw-http-client.js';
+import type { OpenClawTransport } from '../../app/lib/openclaw-transport.js';
+import { OpenClawClient } from '../lib/openclaw-client.js';
+import { loadOrCreateDeviceIdentity } from '../lib/openclaw-device-identity.js';
+import {
+	askGeneralAgentTool,
+	askWorkAgentTool,
+	createPersistentOpenClawSubagentConfig,
+} from '../lib/openclaw-tools.js';
 
 // =============================================================================
 // Helpers
@@ -70,8 +75,6 @@ const PORT = Number(process.env.PORT) || 9900;
 const HOST = process.env.HOST || '0.0.0.0';
 const OPENCLAW_URL = process.env.OPENCLAW_URL || 'ws://127.0.0.1:18789';
 const OPENCLAW_TOKEN = process.env.OPENCLAW_TOKEN || '';
-const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || '';
-
 const SESSION_ID = `session_${Date.now()}`;
 const google = createGoogleGenerativeAI({ apiKey: API_KEY });
 
@@ -288,7 +291,7 @@ async function main() {
 		name: 'list_artifacts',
 		description:
 			'List all available artifacts (uploaded files, generated images) in this session. ' +
-			'Call this before delegating to ask_openclaw when the user references a file or image ' +
+			'Call this before delegating to ask_work_agent or ask_general_agent when the user references a file or image ' +
 			'that needs to be attached.',
 		parameters: z.object({}),
 		execution: 'inline',
@@ -304,47 +307,49 @@ async function main() {
 		name: 'main',
 		greeting: [
 			'[System: A user just connected. Greet them warmly. Introduce yourself as Bodhi,',
-			'a voice assistant with a powerful AI agent that can help with almost anything —',
+			'a voice assistant with powerful AI agents that can help with almost anything —',
 			'coding, research, writing, browsing the web, sending emails, generating images and videos.',
 			'Keep the greeting brief — 2-3 sentences max.]',
 		].join(' '),
 		instructions: [
-			'You are Bodhi, a voice assistant powered by a capable AI agent (OpenClaw).',
-			'OpenClaw is a general-purpose agent that can handle a wide range of tasks:',
-			'coding, file management, web browsing, research, writing, sending emails,',
-			'and much more. Do NOT assume it is limited to coding.',
-			'OpenClaw is NOT configured for image or video generation.',
+			'You are Bodhi, a voice assistant powered by two specialized AI agents.',
+			'You have a WORK agent for productivity tasks and a GENERAL agent for technical tasks.',
+			'Neither agent is configured for image or video generation.',
 			'',
-			'TOOL ROUTING:',
-			'- Google Search: Use for quick factual lookups — weather, news, sports scores,',
-			'  "who is X", "what is Y". Gemini handles this natively (no tool call needed).',
-			'- generate_image: ALWAYS use this when the user asks for any picture, image,',
-			'  card, illustration, or visual generation request.',
-			'- generate_video: ALWAYS use this when the user asks for a video, animation,',
-			'  movie clip, or motion generation request.',
-			'- get_current_time: For the current date/time.',
-			'- list_artifacts: Call this when the user references a file, image, or upload',
-			'  that needs to be forwarded to OpenClaw. It returns available artifact IDs.',
-			'- ask_openclaw: If the user explicitly mentions "OpenClaw", "open claw",',
-			'  "send to OpenClaw", or asks to use "your agent", route immediately to',
-			'  ask_openclaw, EXCEPT image/video generation requests which must use',
-			'  generate_image or generate_video.',
-			'- ask_openclaw: ALWAYS use this for email intents — send, draft, rewrite, reply,',
-			'  forward, or "email this to ...". Do NOT handle email requests directly yourself.',
-			'- ask_openclaw: for any file/image email or send request, ALWAYS call list_artifacts',
-			'  immediately before ask_openclaw and include artifactIds in the tool call.',
-			'- ask_openclaw: If a request combines lookup + action (for example,',
-			'  "summarize today\'s tech news and email it"), route to OpenClaw.',
-			'- ask_openclaw: For all other complex tasks fall into this category — generic tasks',
-			'  include coding, writing emails, research reports, file operations, multi-step tasks',
-			'  and anything you cannot handle with your built-in tools.',
-			'  If unsure, route to OpenClaw.',
+			'AGENT ROUTING — pick the right agent for each task:',
+			'',
+			'ask_work_agent (WORK tasks):',
+			'- Email: send, draft, reply, forward, rewrite. Do NOT handle email yourself.',
+			'- Calendar and scheduling requests.',
+			'- Xiaohongshu/XHS (小红书): post, draft, publish, browse, search.',
+			'- Social media: any post, draft, or publishing task.',
+			'- Document writing: reports, memos, letters, spreadsheets.',
+			'- Any productivity or business task.',
+			'',
+			'ask_general_agent (TECHNICAL/COMPLEX tasks):',
+			'- Coding: write, debug, review, refactor, explain code.',
+			'- Research: investigate topics, summarize findings, compare options.',
+			'- Web browsing: look up documentation, scrape data, visit URLs.',
+			'- Data analysis: parse files, process data, generate charts.',
+			'- File operations: read, create, modify files on disk.',
+			'- Multi-step investigations and any technical task.',
+			'',
+			'If a task combines WORK + TECHNICAL (e.g., "summarize today\'s tech news and email it"),',
+			'route to ask_work_agent — it can do the research and send the email in one shot.',
+			'If unsure, route to ask_general_agent.',
+			'',
+			'OTHER TOOLS:',
+			'- Google Search: Quick factual lookups — weather, news, "who is X". Gemini handles natively.',
+			'- generate_image: ANY picture, image, card, illustration, or visual generation.',
+			'- generate_video: ANY video, animation, or movie clip.',
+			'- get_current_time: Current date/time.',
+			'- list_artifacts: Call BEFORE ask_work_agent or ask_general_agent when the user',
+			'  references an uploaded file or image. Pass artifactIds in the tool call.',
 			'- end_session: When the user says goodbye.',
 			'',
 			'ARTIFACT ROUTING:',
-			'- When the user says "send that image" or "email that picture", call list_artifacts',
-			'  first to get artifact IDs, then pass them to ask_openclaw with artifactIds.',
-			'- Never embed artifact IDs in the task text — always use the artifactIds parameter.',
+			'- "send that image" / "email that picture" → list_artifacts first, then ask_work_agent',
+			'  with artifactIds. Never embed artifact IDs in the task text.',
 			'',
 			'VOICE RULES:',
 			'- Keep responses short and clear (2-3 sentences).',
@@ -352,14 +357,14 @@ async function main() {
 			'- When relaying results, focus on the outcome, not raw details.',
 			'',
 			'IMPORTANT:',
-			'- OpenClaw may ask follow-up questions — these will be relayed to the user via voice.',
-			'- Do NOT route image/video generation tasks to ask_openclaw.',
-			'- For image/video generation, warn the user it may take a moment.',
-			'- Never claim an email was sent unless ask_openclaw has completed and said it was sent.',
-			'- Do not expose internal routing or backend process details to the user.',
+			'- Agents may ask follow-up questions — relay them to the user via voice.',
+			'- Do NOT route image/video generation to either agent.',
+			'- Never claim an email was sent unless the work agent confirmed it.',
+			'- Do not expose internal routing or agent names to the user.',
 		].join('\n'),
 		tools: [
-			askOpenClawTool,
+			askWorkAgentTool,
+			askGeneralAgentTool,
 			getCurrentTime,
 			generateImage,
 			generateVideo,
@@ -373,49 +378,70 @@ async function main() {
 	};
 
 	// -------------------------------------------------------------------------
-	// Gateway connection
+	// Gateway connection (HTTP over Tailscale or local WebSocket)
 	// -------------------------------------------------------------------------
-	const device = await loadOrCreateDeviceIdentity();
-	console.log(`${ts()} Device identity: ${device.deviceId.slice(0, 16)}...`);
+	let openclawClient: OpenClawTransport;
+	const OPENCLAW_HTTP_URL = process.env.OPENCLAW_HTTP_URL;
 
-	console.log(`${ts()} Connecting to OpenClaw gateway at ${OPENCLAW_URL}...`);
-	const openclawClient = new OpenClawClient({
-		url: OPENCLAW_URL,
-		token: OPENCLAW_TOKEN,
-		device,
-	});
-	await openclawClient.connect();
-	console.log(`${ts()} OpenClaw gateway connected.`);
+	if (OPENCLAW_HTTP_URL) {
+		// Remote mode — HTTP over Tailscale
+		const httpToken = process.env.OPENCLAW_HTTP_TOKEN ?? process.env.OPENCLAW_GATEWAY_TOKEN ?? '';
+		console.log(`${ts()} Using HTTP mode: ${OPENCLAW_HTTP_URL}`);
+		openclawClient = new OpenClawHttpClient({
+			url: OPENCLAW_HTTP_URL,
+			token: httpToken,
+			model: process.env.OPENCLAW_MODEL || 'openclaw/default',
+		});
+		await openclawClient.connect(); // no-op for HTTP
+		console.log(`${ts()} OpenClaw HTTP client ready.`);
+	} else {
+		// Local mode — WebSocket
+		const device = await loadOrCreateDeviceIdentity();
+		console.log(`${ts()} Device identity: ${device.deviceId.slice(0, 16)}...`);
 
-	// Switch model for this session via /model slash command
-	const openclawModel = process.env.OPENCLAW_MODEL || 'anthropic/claude-opus-4-6';
-	const openclawSessionKey = openclawClient.sessionKey(SESSION_ID);
-	await openclawClient.setModel(openclawSessionKey, openclawModel);
+		console.log(`${ts()} Connecting to OpenClaw gateway at ${OPENCLAW_URL}...`);
+		openclawClient = new OpenClawClient({
+			url: OPENCLAW_URL,
+			token: OPENCLAW_TOKEN,
+			device,
+		});
+		await openclawClient.connect();
+		console.log(`${ts()} OpenClaw gateway connected.`);
+	}
+
+	// Switch model for both sessions. Keep HTTP and WebSocket defaults aligned
+	// with gateway expectations for each transport mode.
+	const openclawModel =
+		process.env.OPENCLAW_MODEL ||
+		(OPENCLAW_HTTP_URL ? 'openclaw/default' : 'openai/gpt-5.4');
+	const workSessionId = `${SESSION_ID}_work`;
+	const generalSessionId = `${SESSION_ID}_general`;
+	await openclawClient.setModel(openclawClient.sessionKey(workSessionId), openclawModel);
+	await openclawClient.setModel(openclawClient.sessionKey(generalSessionId), openclawModel);
 
 	// Note: eventBus is accessed lazily via sessionRef (set after VoiceSession creation).
 	// The persistentFactory is only called on the first tool call, so sessionRef is guaranteed set.
-	const openclawSubagent = createPersistentOpenClawSubagentConfig(openclawClient, SESSION_ID, {
+	const subagentOptions = {
 		artifactRegistry,
 		get eventBus() {
 			return sessionRef?.eventBus;
 		},
 		sessionId: SESSION_ID,
-	});
+	};
 
-	// -------------------------------------------------------------------------
-	// TTS Provider (optional — enabled when ELEVENLABS_API_KEY is set)
-	// -------------------------------------------------------------------------
-	let ttsProvider: TTSProvider | undefined;
-	if (ELEVENLABS_API_KEY) {
-		ttsProvider = new ElevenLabsTTSProvider({
-			apiKey: ELEVENLABS_API_KEY,
-			voiceId: process.env.ELEVENLABS_VOICE_ID || 'pNInz6obpgDQGcFmaJgB', // Adam
-			modelId: 'eleven_flash_v2_5',
-		});
-		console.log(
-			`${ts()} [TTS] ElevenLabs TTS enabled (voice: ${process.env.ELEVENLABS_VOICE_ID || 'Adam'})`,
-		);
-	}
+	// Work agent — email, calendar, XHS, productivity tasks (own persistent session)
+	const workSubagent = createPersistentOpenClawSubagentConfig(
+		openclawClient,
+		workSessionId,
+		subagentOptions,
+	);
+
+	// General agent — coding, research, web browsing, complex tasks (own persistent session)
+	const generalSubagent = createPersistentOpenClawSubagentConfig(
+		openclawClient,
+		generalSessionId,
+		subagentOptions,
+	);
 
 	// -------------------------------------------------------------------------
 	// Voice Session
@@ -431,15 +457,12 @@ async function main() {
 		model: google('gemini-2.5-flash'),
 		orchestrationMode: 'actor',
 		artifactRegistry,
-		ttsProvider,
 		subagentConfigs: {
-			ask_openclaw: openclawSubagent,
+			ask_work_agent: workSubagent,
+			ask_general_agent: generalSubagent,
 			generate_image: imageSubagent,
 			generate_video: videoSubagent,
 		},
-		// Use native-audio live model for both modes:
-		// - no TTS: app plays Gemini audio directly
-		// - with TTS: transport uses native-audio-compatible text path for external TTS
 		geminiModel: 'gemini-2.5-flash-native-audio-preview-12-2025',
 		sttProvider: new GeminiBatchSTTProvider({ apiKey: API_KEY, model: 'gemini-3-flash-preview' }),
 		speechConfig: { voiceName: 'Puck' },
@@ -506,7 +529,7 @@ async function main() {
 	console.log('============================================================');
 	console.log();
 	console.log(`  Voice agent:     ws://localhost:${PORT}`);
-	console.log(`  OpenClaw:        ${OPENCLAW_URL}`);
+	console.log(`  OpenClaw:        ${OPENCLAW_HTTP_URL ?? OPENCLAW_URL}`);
 	console.log(`  Session ID:      ${SESSION_ID}`);
 	console.log();
 	console.log('Start the web client in another terminal:');
@@ -515,8 +538,8 @@ async function main() {
 	console.log('Then open http://localhost:8080 and try saying:');
 	console.log("  - 'What is the weather in San Francisco?'  (Google Search)");
 	console.log("  - 'Draw me a picture of a sunset'          (Image generation)");
-	console.log("  - 'Write a Python prime checker'           (OpenClaw agent)");
-	console.log("  - 'Summarize today's tech news by email'   (OpenClaw agent)");
+	console.log("  - 'Write a Python prime checker'           (General agent)");
+	console.log("  - 'Summarize today's tech news by email'   (Work agent)");
 	console.log("  - 'Goodbye'");
 	console.log();
 	console.log('Press Ctrl+C to stop.');

@@ -226,7 +226,7 @@ export class ToolCallRouter {
 								role: 'user',
 								parts: [
 									{
-										text: `[SYSTEM: Background task "${call.toolName}" failed: ${err instanceof Error ? err.message : String(err)}. Please apologize to the user and let them know.]`,
+										text: `[SYSTEM: Background task "${call.toolName}" failed. Exact error details: ${err instanceof Error ? err.message : String(err)}. Tell the user the exact error details first, then ask how to proceed.]`,
 									},
 								],
 							},
