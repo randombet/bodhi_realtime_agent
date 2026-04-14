@@ -280,9 +280,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			update.tools = config.tools.map(toolToOpenAIFunction) as any;
 		}
 		if (config.responseModality !== undefined) {
-			// biome-ignore lint/suspicious/noExplicitAny: modalities field may not be in SDK type yet
-			(update as any).modalities =
-				config.responseModality === 'text' ? ['text'] : ['text', 'audio'];
+			update.output_modalities = config.responseModality === 'text' ? ['text'] : ['audio'];
 		}
 
 		this.rtSend({ type: 'session.update', session: update as RealtimeSessionCreateRequest });
@@ -304,9 +302,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		}
 		if (config.responseModality !== undefined) {
 			this._textMode = config.responseModality === 'text';
-			// biome-ignore lint/suspicious/noExplicitAny: modalities field may not be in SDK type yet
-			(update as any).modalities =
-				config.responseModality === 'text' ? ['text'] : ['text', 'audio'];
+			update.output_modalities = config.responseModality === 'text' ? ['text'] : ['audio'];
 		}
 
 		if (!this.rt || !this._isConnected) return;
@@ -464,8 +460,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	private buildSessionConfig(): RealtimeSessionCreateRequest {
 		const session: RealtimeSessionCreateRequest = {
 			type: 'realtime',
-			// biome-ignore lint/suspicious/noExplicitAny: modalities field may not be in SDK type yet
-			...(this._textMode ? { modalities: ['text'] } : ({ modalities: ['text', 'audio'] } as any)),
+			output_modalities: this._textMode ? ['text'] : ['audio'],
 			audio: {
 				input: {
 					format: { type: 'audio/pcm', rate: 24000 },
