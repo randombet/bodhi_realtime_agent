@@ -38,7 +38,7 @@ Base path: **`https://<your-origin>/api/`**
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `POST` | `/api/mobile/sessions` | Create a **short-lived session intent**. Optional JSON body: `agentProfile`, `deviceId`, `resumeSessionId`. Response includes `sessionIntentId`, `token`, `expiresAt`, `wsPath` (typically `/ws/mobile`). |
+| `POST` | `/api/mobile/sessions` | Create a **short-lived session intent**. Optional JSON body: `agentProfile` (must be a registered id from the app server’s `app/agents/agent-profiles-catalog.ts`; unknown values are treated as `standard`), `deviceId`, `resumeSessionId`. Response includes `sessionIntentId`, `token`, `expiresAt`, `wsPath` (typically `/ws/mobile`). |
 | `POST` | `/api/mobile/device-events` | Send **summarized** context while a voice session is **active** (e.g. location, motion, health aggregates). Body: `sessionId`, `eventType`, `payload` (object), optional `deviceId`, `timestamp`. Expect **`202`** when accepted. |
 | `POST` | `/api/mobile/sessions/:sessionId/close` | Close that session for the authenticated user. |
 | `GET` | `/api/users/me/sessions` | List sessions (when history/auth are configured on the deployment). |

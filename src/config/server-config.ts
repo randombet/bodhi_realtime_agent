@@ -59,7 +59,43 @@ export interface ServerConfig {
 		inboundEnabled: boolean;
 		/** Public HTTPS URL (nginx/ngrok) used in TwiML so Twilio connects back to us. */
 		webhookUrl: string;
+		/** Fallback agent profile for inbound calls (default: standard). */
+		defaultAgentProfile: string;
+		/** Optional E.164 number -> agent profile map (digits only key). */
+		numberAgentProfiles: Record<string, string>;
 	};
+}
+
+function normalizePhoneMapKey(phone: string): string {
+	return phone.replace(/[^0-9]/g, '');
+}
+
+function parseTwilioNumberAgentProfiles(raw: string): Record<string, string> {
+	if (!raw.trim()) return {};
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch (error) {
+		throw new Error(
+			`TWILIO_NUMBER_AGENT_PROFILES must be valid JSON object: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+	if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+		throw new Error('TWILIO_NUMBER_AGENT_PROFILES must be a JSON object of number->profile');
+	}
+
+	const out: Record<string, string> = {};
+	for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+		const phoneKey = normalizePhoneMapKey(key);
+		if (!phoneKey) {
+			throw new Error(`TWILIO_NUMBER_AGENT_PROFILES has invalid phone key: "${key}"`);
+		}
+		if (typeof value !== 'string' || value.trim().length === 0) {
+			throw new Error(`TWILIO_NUMBER_AGENT_PROFILES value for "${key}" must be a non-empty string`);
+		}
+		out[phoneKey] = value.trim().slice(0, 64);
+	}
+	return out;
 }
 
 /**
@@ -134,6 +170,12 @@ export function loadConfig(): ServerConfig {
 				? {
 						inboundEnabled: true,
 						webhookUrl: process.env.TWILIO_WEBHOOK_URL,
+						defaultAgentProfile: (
+							process.env.TWILIO_DEFAULT_AGENT_PROFILE?.trim().slice(0, 64) || 'standard'
+						),
+						numberAgentProfiles: parseTwilioNumberAgentProfiles(
+							process.env.TWILIO_NUMBER_AGENT_PROFILES || '',
+						),
 					}
 				: undefined,
 	};
