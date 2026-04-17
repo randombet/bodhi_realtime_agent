@@ -25,6 +25,7 @@
   "scripts": {
     "start": "tsx app/server/index.ts",
     "start:twilio-local": "node scripts/start-with-ngrok.mjs",
+    "recruiting:fixtures-json": "node scripts/build-recruiting-screening-json.mjs",
     "build": "tsup",
     "web-client:build": "vite build --config app/web-client/vite.config.ts",
     "web-client:dev": "vite --config app/web-client/vite.config.ts",
