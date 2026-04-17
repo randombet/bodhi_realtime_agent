@@ -4,7 +4,7 @@
  * State Ownership Invariant Tests
  *
  * Enforces the single-source-of-truth rule defined in
- * dev_docs/state-ownership-map.md. Each state domain has exactly one
+ * dev_docs/framework/state-ownership-map.md. Each state domain has exactly one
  * authoritative owner. Actor components orchestrate over these owners —
  * they never maintain parallel copies of the same state.
  */

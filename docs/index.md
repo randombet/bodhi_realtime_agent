@@ -13,6 +13,9 @@ hero:
       text: API Reference
       link: /api/
     - theme: alt
+      text: Hosted voice API
+      link: /service/hosted-voice-api
+    - theme: alt
       text: GitHub
       link: https://github.com/randombet/bodhi_realtime_agent
 

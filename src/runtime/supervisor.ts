@@ -5,7 +5,7 @@
  *
  * Each actor has a supervision policy that determines what happens when
  * it fails during message processing. Policies follow the per-actor matrix
- * from dev_docs/actor-supervision-policy.md.
+ * from dev_docs/framework/actor-supervision-policy.md.
  */
 
 import type { ActorId } from './envelope.js';

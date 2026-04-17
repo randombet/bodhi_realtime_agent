@@ -4,7 +4,7 @@
  * Audio Fast-Path Invariant Tests
  *
  * These tests enforce the strict data/control plane separation defined in
- * dev_docs/audio-fast-path-contract.md. They act as architectural guardrails
+ * dev_docs/framework/audio-fast-path-contract.md. They act as architectural guardrails
  * that fail if someone routes audio through the control plane.
  */
 
