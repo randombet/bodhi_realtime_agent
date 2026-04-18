@@ -14,7 +14,7 @@ const {
 	createClaudeCodeSubagentConfig,
 	createPersistentClaudeCodeSubagentConfig,
 	_ClaudeCodeSessionClass,
-} = await import('../../app/lib/claude-code-tools.js');
+} = await import('../../app/lib/integrations/claude-code/claude-code-tools.js');
 
 // ---------------------------------------------------------------------------
 // Helpers

@@ -2,7 +2,7 @@
 
 import { type IncomingMessage, type ServerResponse, createServer } from 'node:http';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { OpenClawHttpClient } from '../../app/lib/openclaw-http-client.js';
+import { OpenClawHttpClient } from '../../app/lib/integrations/openclaw/openclaw-http-client.js';
 
 // ---------------------------------------------------------------------------
 // Helpers — tiny SSE mock server

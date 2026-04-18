@@ -2,7 +2,7 @@
 
 import { randomUUID } from 'node:crypto';
 import type { PersistentSubagentInstance } from '../../src/agent/persistent-subagent-types.js';
-import type { ArtifactRegistry } from './artifact-registry.js';
+import type { ArtifactRegistry } from '../../app/lib/media/artifact-registry.js';
 import {
 	type AdapterLimits,
 	resolveArtifacts,
@@ -10,7 +10,7 @@ import {
 } from './artifact-resolution.js';
 import type { ChatSendOptions, ContentBlock } from './openclaw-client.js';
 import { mergeText } from './openclaw-client.js';
-import type { OpenClawTransport } from './openclaw-transport.js';
+import type { OpenClawTransport } from '../../app/lib/integrations/openclaw/openclaw-transport.js';
 
 /**
  * A persistent OpenClaw subagent instance.

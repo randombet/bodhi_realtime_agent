@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 
 import { describe, expect, it, vi } from 'vitest';
-import { ArtifactRegistry } from '../../app/lib/artifact-registry.js';
-import type { ChatEvent, OpenClawClient } from '../../app/lib/openclaw-client.js';
+import { ArtifactRegistry } from '../../app/lib/media/artifact-registry.js';
+import type { ChatEvent, OpenClawClient } from '../../app/lib/integrations/openclaw/openclaw-client.js';
 import {
 	askGeneralAgentTool,
 	askWorkAgentTool,

@@ -4,12 +4,12 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ArtifactRegistry } from '../../app/lib/artifact-registry.js';
-import { PersistentClaudeSubagent } from '../../app/lib/persistent-claude-subagent.js';
-import type { PersistentClaudeSubagentOptions } from '../../app/lib/persistent-claude-subagent.js';
+import { PersistentClaudeSubagent } from '../../app/lib/integrations/claude-code/persistent-claude-subagent.js';
+import type { PersistentClaudeSubagentOptions } from '../../app/lib/integrations/claude-code/persistent-claude-subagent.js';
+import { ArtifactRegistry } from '../../app/lib/media/artifact-registry.js';
 
 // Mock the ClaudeCodeSession class
-vi.mock('../../app/lib/claude-code-client.js', () => {
+vi.mock('../../app/lib/integrations/claude-code/claude-code-client.js', () => {
 	let callCount = 0;
 	return {
 		ClaudeCodeSession: vi.fn().mockImplementation(() => {
@@ -50,7 +50,9 @@ describe('PersistentClaudeSubagent', () => {
 
 		expect(result).toContain('result from session');
 		// ClaudeCodeSession was constructed
-		const { ClaudeCodeSession } = await import('../../app/lib/claude-code-client.js');
+		const { ClaudeCodeSession } = await import(
+			'../../app/lib/integrations/claude-code/claude-code-client.js'
+		);
 		expect(ClaudeCodeSession).toHaveBeenCalled();
 	});
 
@@ -67,7 +69,9 @@ describe('PersistentClaudeSubagent', () => {
 
 	it('creates a new ClaudeCodeSession per invoke (avoids started flag)', async () => {
 		const agent = new PersistentClaudeSubagent('claude-1', sessionOptions);
-		const { ClaudeCodeSession } = await import('../../app/lib/claude-code-client.js');
+		const { ClaudeCodeSession } = await import(
+			'../../app/lib/integrations/claude-code/claude-code-client.js'
+		);
 
 		await agent.invoke('Task 1', {});
 		await agent.invoke('Task 2', {});
@@ -105,7 +109,9 @@ describe('PersistentClaudeSubagent', () => {
 	});
 
 	it('propagates errors from ClaudeCodeSession', async () => {
-		const { ClaudeCodeSession } = await import('../../app/lib/claude-code-client.js');
+		const { ClaudeCodeSession } = await import(
+			'../../app/lib/integrations/claude-code/claude-code-client.js'
+		);
 		(ClaudeCodeSession as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => ({
 			start: vi.fn().mockResolvedValue({
 				status: 'error',
@@ -120,7 +126,9 @@ describe('PersistentClaudeSubagent', () => {
 	});
 
 	it('surfaces needs_input as descriptive text with question', async () => {
-		const { ClaudeCodeSession } = await import('../../app/lib/claude-code-client.js');
+		const { ClaudeCodeSession } = await import(
+			'../../app/lib/integrations/claude-code/claude-code-client.js'
+		);
 		(ClaudeCodeSession as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => ({
 			start: vi.fn().mockResolvedValue({
 				status: 'needs_input',
@@ -146,7 +154,9 @@ describe('PersistentClaudeSubagent', () => {
 	});
 
 	it('needs_input without options omits options list', async () => {
-		const { ClaudeCodeSession } = await import('../../app/lib/claude-code-client.js');
+		const { ClaudeCodeSession } = await import(
+			'../../app/lib/integrations/claude-code/claude-code-client.js'
+		);
 		(ClaudeCodeSession as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => ({
 			start: vi.fn().mockResolvedValue({
 				status: 'needs_input',
@@ -165,7 +175,9 @@ describe('PersistentClaudeSubagent', () => {
 	});
 
 	it('creates fresh MCP servers per invoke via mcpServerFactory', async () => {
-		const { ClaudeCodeSession } = await import('../../app/lib/claude-code-client.js');
+		const { ClaudeCodeSession } = await import(
+			'../../app/lib/integrations/claude-code/claude-code-client.js'
+		);
 		const factory = vi.fn().mockReturnValue({ myServer: {} });
 
 		const agent = new PersistentClaudeSubagent('claude-1', {
@@ -198,7 +210,9 @@ describe('PersistentClaudeSubagent', () => {
 			});
 			await agent.invoke('Please analyze this image', { artifactIds: [artId] });
 
-			const { ClaudeCodeSession } = await import('../../app/lib/claude-code-client.js');
+			const { ClaudeCodeSession } = await import(
+				'../../app/lib/integrations/claude-code/claude-code-client.js'
+			);
 			const ctor = ClaudeCodeSession as unknown as ReturnType<typeof vi.fn>;
 			const instance = ctor.mock.results[0]?.value as { start: ReturnType<typeof vi.fn> };
 			const startedWith = instance.start.mock.calls[0]?.[0] as string;

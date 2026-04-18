@@ -8,7 +8,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
 }));
 
 const { createClaudeCodeSubagentConfig, _ClaudeCodeSessionClass } = await import(
-	'../../app/lib/claude-code-tools.js'
+	'../../app/lib/integrations/claude-code/claude-code-tools.js'
 );
 
 function createMockInitMessage(sessionId: string) {

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 import { describe, expect, it } from 'vitest';
-import { ArtifactRegistry } from '../../app/lib/artifact-registry.js';
+import { ArtifactRegistry } from '../../app/lib/media/artifact-registry.js';
 
 // Small valid PNG base64 (1x1 pixel) — ~70 bytes decoded
 const TINY_PNG_B64 =

@@ -11,7 +11,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
 }));
 
 const { canonicalizeGroupId, createPersistentNanoClawSubagentConfig, askNanoClawTool } =
-	await import('../../app/lib/nanoclaw-tools.js');
+	await import('../../app/lib/integrations/nanoclaw/nanoclaw-tools.js');
 
 describe('createPersistentNanoClawSubagentConfig', () => {
 	function makeTempRoot(): string {

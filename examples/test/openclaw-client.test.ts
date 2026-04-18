@@ -8,7 +8,7 @@ import {
 	extractContentBlocks,
 	mergeText,
 	normalizeEvent,
-} from '../../app/lib/openclaw-client.js';
+} from '../../app/lib/integrations/openclaw/openclaw-client.js';
 
 describe('normalizeEvent', () => {
 	const baseRaw: GatewayChatEventRaw = {

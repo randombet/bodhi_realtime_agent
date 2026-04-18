@@ -11,7 +11,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
 
 // Must import AFTER vi.mock
 const { ClaudeCodeSession, resolveClaudeCodeExecutablePath } = await import(
-	'../../app/lib/claude-code-client.js'
+	'../../app/lib/integrations/claude-code/claude-code-client.js'
 );
 
 // ---------------------------------------------------------------------------

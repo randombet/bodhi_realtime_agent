@@ -42,9 +42,9 @@ import { VoiceSession } from '../../src/core/voice-session.js';
 import { GeminiBatchSTTProvider } from '../../src/transport/gemini-batch-stt-provider.js';
 import type { MainAgent, SubagentConfig } from '../../src/types/agent.js';
 import type { ToolDefinition } from '../../src/types/tool.js';
-import { ArtifactRegistry } from '../../app/lib/artifact-registry.js';
-import { OpenClawHttpClient } from '../../app/lib/openclaw-http-client.js';
-import type { OpenClawTransport } from '../../app/lib/openclaw-transport.js';
+import { ArtifactRegistry } from '../../app/lib/media/artifact-registry.js';
+import { OpenClawHttpClient } from '../../app/lib/integrations/openclaw/openclaw-http-client.js';
+import type { OpenClawTransport } from '../../app/lib/integrations/openclaw/openclaw-transport.js';
 import { OpenClawClient } from '../lib/openclaw-client.js';
 import { loadOrCreateDeviceIdentity } from '../lib/openclaw-device-identity.js';
 import {
