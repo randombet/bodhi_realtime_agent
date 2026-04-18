@@ -170,9 +170,8 @@ export function loadConfig(): ServerConfig {
 				? {
 						inboundEnabled: true,
 						webhookUrl: process.env.TWILIO_WEBHOOK_URL,
-						defaultAgentProfile: (
-							process.env.TWILIO_DEFAULT_AGENT_PROFILE?.trim().slice(0, 64) || 'standard'
-						),
+						defaultAgentProfile:
+							process.env.TWILIO_DEFAULT_AGENT_PROFILE?.trim().slice(0, 64) || 'standard',
 						numberAgentProfiles: parseTwilioNumberAgentProfiles(
 							process.env.TWILIO_NUMBER_AGENT_PROFILES || '',
 						),

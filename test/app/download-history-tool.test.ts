@@ -286,6 +286,30 @@ describe('artifact registry wiring in bodhi session config', () => {
 		expect(nanoclaw.agents[0]?.tools.some((t) => t.name === 'list_artifacts')).toBe(true);
 	});
 
+	it('injects recruiting source-of-truth context and get_screening_context tool', () => {
+		const config = createBodhiSessionConfig({
+			apiKey: 'test-key',
+			memoryStore: {
+				addFacts: vi.fn(),
+				getAll: vi.fn(async () => []),
+				replaceAll: vi.fn(),
+				getDirectives: vi.fn(async () => null),
+				setDirectives: vi.fn(),
+			},
+			clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			sessionId: 'sess_recruiting_profile',
+			userId: 'user_test',
+			getSessionRef: () => null,
+			agentProfile: 'recruiting_screen',
+		});
+
+		const mainAgent = config.agents[0];
+		expect(mainAgent?.instructions).toContain('Calendly');
+		expect(mainAgent?.instructions).toContain('Full Stack Engineer, Commerce');
+		expect(mainAgent?.instructions).toContain('YIXUAN ZHAI');
+		expect(mainAgent?.tools.some((t) => t.name === 'get_screening_context')).toBe(true);
+	});
+
 	it('injects read_image for standard, claude_code, and nanoclaw profiles', () => {
 		const baseOptions = {
 			apiKey: 'test-key',

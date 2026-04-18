@@ -50,11 +50,13 @@ describe('TwilioInboundBridge phone path', () => {
 	it('POST /twilio/voice returns TwiML with Stream and auth nonce', async () => {
 		const feedAudioFromClient = vi.fn();
 		const cleanup = vi.fn();
-		const createSession = vi.fn(async (_userId: string, _callSid: string) => ({
-			session: { feedAudioFromClient } as unknown as VoiceSession,
-			sessionId: 'sess_phone_test',
-			cleanup,
-		}));
+		const createSession = vi.fn(
+			async (_userId: string, _callSid: string, _caller: string, _called: string) => ({
+				session: { feedAudioFromClient } as unknown as VoiceSession,
+				sessionId: 'sess_phone_test',
+				cleanup,
+			}),
+		);
 
 		const bridge = new TwilioInboundBridge({
 			webhookUrl: 'https://bodhiagent.live',
@@ -135,7 +137,7 @@ describe('TwilioInboundBridge phone path', () => {
 				const interval = setInterval(async () => {
 					if (createSession.mock.calls.length === 0) return;
 					clearInterval(interval);
-					expect(createSession).toHaveBeenCalledWith('phone_15551234567', callSid);
+					expect(createSession).toHaveBeenCalledWith('phone_15551234567', callSid, from, 'unknown');
 					// Let createSessionForCall() finish assigning call.session before media.
 					await new Promise((r) => setTimeout(r, 100));
 
@@ -248,11 +250,13 @@ describe('TwilioInboundBridge phone path', () => {
 	});
 
 	it('works when MultiClientTransport is attached on same server (no socket destroy)', async () => {
-		const createSession = vi.fn(async (_userId: string, _callSid: string) => ({
-			session: { feedAudioFromClient: vi.fn() } as unknown as VoiceSession,
-			sessionId: 'sess_coexist',
-			cleanup: vi.fn(),
-		}));
+		const createSession = vi.fn(
+			async (_userId: string, _callSid: string, _caller: string, _called: string) => ({
+				session: { feedAudioFromClient: vi.fn() } as unknown as VoiceSession,
+				sessionId: 'sess_coexist',
+				cleanup: vi.fn(),
+			}),
+		);
 		const bridge = new TwilioInboundBridge({
 			webhookUrl: 'https://bodhiagent.live',
 			sessionFactory: { createSession },
@@ -310,7 +314,12 @@ describe('TwilioInboundBridge phone path', () => {
 					}
 				}, 20);
 			});
-			expect(createSession).toHaveBeenCalledWith('phone_15557778888', callSid);
+			expect(createSession).toHaveBeenCalledWith(
+				'phone_15557778888',
+				callSid,
+				'+15557778888',
+				'unknown',
+			);
 		} finally {
 			bridge.dispose();
 			await mct.stop();
@@ -451,7 +460,12 @@ describe('TwilioInboundBridge phone path', () => {
 				});
 			});
 
-			expect(createSession).toHaveBeenCalledWith('phone_15558889999', callSid);
+			expect(createSession).toHaveBeenCalledWith(
+				'phone_15558889999',
+				callSid,
+				'+15558889999',
+				'unknown',
+			);
 			expect(cleanup).toHaveBeenCalled();
 			expect(feedAudioFromClient).toHaveBeenCalledTimes(0);
 		} finally {
