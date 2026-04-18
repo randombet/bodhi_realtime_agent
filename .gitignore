@@ -11,6 +11,7 @@ coverage/
 .DS_Store
 docs/.vitepress/cache/
 docs/.vitepress/dist/
+docs/.vitepress/.temp/
 docs/api/
 /memory/
 /history/
