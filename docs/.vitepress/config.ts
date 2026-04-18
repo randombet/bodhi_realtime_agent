@@ -30,6 +30,7 @@ export default withMermaid(
 						text: 'Core Concepts',
 						items: [
 							{ text: 'Architecture Overview', link: '/guide/architecture' },
+							{ text: 'Actor Runtime Pattern', link: '/guide/actor-pattern' },
 							{ text: 'VoiceSession', link: '/guide/voice-session' },
 							{ text: 'Agents', link: '/guide/agents' },
 							{ text: 'Tools', link: '/guide/tools' },
