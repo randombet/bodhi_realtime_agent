@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: MIT
 
 import { describe, expect, it } from 'vitest';
-import { compileAgentDefinition } from '../../app/agents/runtime/compile-agent-definition.js';
 import { getBuiltinAgentCompileModel } from '../../app/agents/definitions/builtin-agent-definitions.js';
+import { compileAgentDefinition } from '../../app/agents/runtime/compile-agent-definition.js';
 import { ArtifactRegistry } from '../../app/lib/media/artifact-registry.js';
 
 describe('compileAgentDefinition', () => {
 	it('compiles standard built-in profile with media workers', () => {
 		const model = getBuiltinAgentCompileModel('standard');
 		expect(model).not.toBeNull();
+		if (!model) throw new Error('expected standard builtin model');
 		const artifactRegistry = new ArtifactRegistry();
-		const out = compileAgentDefinition(model!, {
+		const out = compileAgentDefinition(model, {
 			apiKey: 'k',
 			getSessionRef: () => null,
 			artifactRegistry,
@@ -27,9 +28,13 @@ describe('compileAgentDefinition', () => {
 	it('rejects worker binding without matching background tool', () => {
 		const model = getBuiltinAgentCompileModel('standard');
 		expect(model).not.toBeNull();
+		if (!model) throw new Error('expected standard builtin model');
 		const bad = {
-			...model!,
-			workers: { ...model!.workers, orphan_worker: { type: 'bodhi_builtin_subagent', variant: 'read_image' } },
+			...model,
+			workers: {
+				...model.workers,
+				orphan_worker: { type: 'bodhi_builtin_subagent', variant: 'read_image' },
+			},
 		};
 		const artifactRegistry = new ArtifactRegistry();
 		expect(() =>
