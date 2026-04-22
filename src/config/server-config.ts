@@ -129,7 +129,8 @@ export function loadConfig(): ServerConfig {
 		host,
 		llmProvider,
 		apiKey,
-		openaiApiKey: llmProvider === 'openai' ? openaiApiKey : undefined,
+		/** Keep when set so per-profile OpenAI sessions work while global default stays Gemini. */
+		openaiApiKey: openaiApiKey.trim() ? openaiApiKey : undefined,
 		maxSessionsPerUser: Number(process.env.MAX_SESSIONS_PER_USER) || 5,
 		maxTotalSessions: Number(process.env.MAX_TOTAL_SESSIONS) || 1000,
 		sessionTimeoutMs: Number(process.env.SESSION_TIMEOUT_MS) || 30 * 60 * 1000, // 30 minutes
