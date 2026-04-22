@@ -12,12 +12,16 @@ describe('app-routes', () => {
 		expect(pathnameForTab('talk')).toBe('/talk');
 		expect(pathnameForTab('agent_studio')).toBe('/agent-studio');
 		expect(pathnameForTab('hardware_guide')).toBe('/hardware-guide');
+		expect(pathnameForTab('terms')).toBe('/terms');
+		expect(pathnameForTab('privacy')).toBe('/privacy');
 	});
 
 	it('resolves pathnames to tabs', () => {
 		expect(tabFromPathname('/')).toBe('talk');
 		expect(tabFromPathname('/talk')).toBe('talk');
 		expect(tabFromPathname('/agent-studio')).toBe('agent_studio');
+		expect(tabFromPathname('/terms')).toBe('terms');
+		expect(tabFromPathname('/privacy')).toBe('privacy');
 		expect(tabFromPathname('/unknown-route')).toBeNull();
 	});
 
@@ -29,6 +33,8 @@ describe('app-routes', () => {
 			'opensource',
 			'hardware_guide',
 			'hardware_faq',
+			'terms',
+			'privacy',
 		];
 		for (const t of tabs) {
 			expect(tabFromPathname(pathnameForTab(t))).toBe(t);
