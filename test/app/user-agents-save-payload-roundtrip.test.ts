@@ -62,6 +62,52 @@ describe('user-agents-api save payload round-trip', () => {
 		expect(rebuilt.mainAgents[0]?.toolIds).toEqual(expect.arrayContaining(['my_studio_tool']));
 	});
 
+	it('round-trips reasoning fields on studio_background_tool', () => {
+		const v2: AgentDefinitionV2 = {
+			schemaVersion: 2,
+			id: ctx.id,
+			userId: ctx.userId,
+			name: 'Reasoning agent',
+			description: '',
+			realtimeProvider: 'gemini',
+			geminiVoiceName: 'Puck',
+			openaiVoice: 'coral',
+			geminiSttModel: 'gemini-3-flash-preview',
+			mainAgents: [
+				{
+					name: 'main',
+					greeting: 'Hi',
+					instructions: 'Main.',
+					googleSearch: true,
+					toolIds: ['end_session', 'rs_tool'],
+				},
+			],
+			workers: {
+				rs_tool: {
+					type: 'studio_background_tool',
+					description: 'With reasoning',
+					parametersSchema: { type: 'object', additionalProperties: true },
+					instructions: 'Call studio_run.',
+					code: 'return { ok: true };',
+					reasoningProvider: 'openai_compatible',
+					reasoningModel: 'deepseek-chat',
+					reasoningBaseUrl: 'https://api.deepseek.com/v1',
+					reasoningApiKeyName: 'OPENAI_API_KEY',
+					reasoningHeaders: { 'X-Test': '1' },
+				},
+			},
+			createdAt: ctx.createdAt,
+			updatedAt: ctx.updatedAt,
+		};
+		const payload = userAgentWireToSavePayload(v2);
+		expect(payload.studioBackgroundTools?.[0]?.reasoningProvider).toBe('openai_compatible');
+		expect(payload.studioBackgroundTools?.[0]?.reasoningBaseUrl).toBe(
+			'https://api.deepseek.com/v1',
+		);
+		const rebuilt = buildAgentDefinitionV2FromSavePayload(payload, ctx);
+		expect(rebuilt.workers.rs_tool).toEqual(v2.workers.rs_tool);
+	});
+
 	it('legacy UserAgentRecord without studio tools maps to v2 and back', () => {
 		const raw = {
 			id: ctx.id,

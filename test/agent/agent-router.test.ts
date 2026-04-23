@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 import type { LanguageModelV1 } from 'ai';
+import { generateText } from 'ai';
 import { describe, expect, it, vi } from 'vitest';
 import { AgentRouter } from '../../src/agent/agent-router.js';
 import { ConversationContext } from '../../src/core/conversation-context.js';
@@ -216,6 +217,22 @@ describe('AgentRouter', () => {
 			expect(result.text).toBe('subagent result');
 			expect(result.stepCount).toBe(1);
 			expect(router.activeSubagentCount).toBe(0);
+		});
+
+		it('passes config.reasoningModel to generateText when set', async () => {
+			const { router } = setup();
+			router.registerAgents([createTestAgent('general')]);
+			router.setInitialAgent('general');
+
+			const overrideModel = { modelId: 'reasoning-override' } as unknown as LanguageModelV1;
+			await router.handoff(
+				{ toolCallId: 'tc_1', toolName: 'search', args: {} },
+				{ name: 'search-agent', instructions: 'Search', tools: {}, reasoningModel: overrideModel },
+			);
+
+			expect(vi.mocked(generateText)).toHaveBeenCalledWith(
+				expect.objectContaining({ model: overrideModel }),
+			);
 		});
 
 		it('publishes agent.handoff event', async () => {

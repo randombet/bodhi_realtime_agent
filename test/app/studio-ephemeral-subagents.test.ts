@@ -1,10 +1,25 @@
 // SPDX-License-Identifier: MIT
 
+import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { describe, expect, it } from 'vitest';
 import { userAgentRecordToAgentDefinitionV2 } from '../../app/agents/agent-definition-parse.js';
 import { compileAgentDefinition } from '../../app/agents/runtime/compile-agent-definition.js';
+import type { WorkerRuntimeContext } from '../../app/agents/runtime/worker-runtime-registry.js';
 import { parseUserAgentRecord } from '../../app/agents/user-agent-record.js';
 import { ArtifactRegistry } from '../../app/lib/media/artifact-registry.js';
+
+function testCompileWorkerCtx(partial?: Partial<WorkerRuntimeContext>): WorkerRuntimeContext {
+	const googleApiKey = partial?.googleApiKey ?? 'test-key';
+	return {
+		googleApiKey,
+		defaultReasoningModel: createGoogleGenerativeAI({ apiKey: googleApiKey })('gemini-2.5-flash'),
+		getSessionRef: () => null,
+		artifactRegistry: new ArtifactRegistry(),
+		userId: 'u',
+		sessionId: 's',
+		...partial,
+	};
+}
 
 describe('Studio background tools', () => {
 	it('parses legacy UserAgentRecord with studioEphemeralSubagents (migrates to studioBackgroundTools)', () => {
@@ -33,6 +48,32 @@ describe('Studio background tools', () => {
 		expect(rec?.studioBackgroundTools).toHaveLength(1);
 		expect(rec?.studioBackgroundTools?.[0]?.toolName).toBe('my_task');
 		expect(rec?.studioBackgroundTools?.[0]?.code).toContain('Agent Studio migration');
+	});
+
+	it('rejects studio background tool with openai_compatible missing base URL', () => {
+		const raw = {
+			id: 'ua_cccccccccccccccc',
+			userId: 'u',
+			name: 'N',
+			greeting: 'g',
+			systemPrompt: 'sys',
+			enabledToolIds: ['end_session', 'bad_tool'],
+			studioBackgroundTools: [
+				{
+					toolName: 'bad_tool',
+					description: 'd',
+					parametersSchema: { type: 'object', additionalProperties: true },
+					instructions: 'i',
+					code: 'return {};',
+					reasoningProvider: 'openai_compatible',
+					reasoningModel: 'm',
+				},
+			],
+			googleSearch: true,
+			createdAt: 1,
+			updatedAt: 2,
+		};
+		expect(parseUserAgentRecord(raw)).toBeNull();
 	});
 
 	it('parses UserAgentRecord with first-class studioBackgroundTools', () => {
@@ -101,16 +142,13 @@ describe('Studio background tools', () => {
 		const out = compileAgentDefinition(
 			{ mainAgents: v2.mainAgents, workers: v2.workers },
 			{
-				apiKey: 'test-key',
-				getSessionRef: () => null,
-				artifactRegistry,
-				userId: 'u',
-				sessionId: 's',
+				...testCompileWorkerCtx({ artifactRegistry }),
 				isUserAgent: true,
 			},
 		);
 		expect(out.subagentConfigs.research_bot).toBeDefined();
 		expect(out.subagentConfigs.research_bot?.name).toBe('studio_bg:research_bot');
+		expect(out.subagentConfigs.research_bot?.reasoningModel).toBeDefined();
 	});
 
 	it('executes studio_run with user code', async () => {
@@ -148,11 +186,7 @@ describe('Studio background tools', () => {
 		const out = compileAgentDefinition(
 			{ mainAgents: v2.mainAgents, workers: v2.workers },
 			{
-				apiKey: 'test-key',
-				getSessionRef: () => null,
-				artifactRegistry,
-				userId: 'u',
-				sessionId: 's',
+				...testCompileWorkerCtx({ artifactRegistry }),
 				isUserAgent: true,
 			},
 		);

@@ -45,6 +45,7 @@
   "license": "UNLICENSED",
   "dependencies": {
     "@ai-sdk/google": "^1.2.0",
+    "@ai-sdk/openai": "^1.3.24",
     "@anthropic-ai/claude-agent-sdk": "^0.2.71",
     "@emotion/react": "^11.14.0",
     "@emotion/styled": "^11.14.1",

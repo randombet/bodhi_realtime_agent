@@ -10,6 +10,18 @@ import type { SubagentContextSnapshot, SubagentResult } from '../types/conversat
 import { InputTimeoutError } from './subagent-session.js';
 import type { InteractiveSubagentConfig, SubagentSession } from './subagent-session.js';
 
+function isSubagentDebugLogging(): boolean {
+	return process.env.LOG_LEVEL === 'debug';
+}
+
+/** Best-effort model id for logs (`@ai-sdk/*` models usually set `modelId`). */
+function reasoningModelLabelForLog(model: LanguageModelV1): string {
+	const m = model as { modelId?: string };
+	return typeof m.modelId === 'string' && m.modelId.length > 0
+		? m.modelId
+		: '(LanguageModelV1: no modelId)';
+}
+
 /** Options for running a background subagent via the Vercel AI SDK. */
 export interface RunSubagentOptions {
 	/** Subagent configuration (instructions, tools, maxSteps). */
@@ -142,6 +154,8 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 	const { config, context, hooks, model, abortSignal, session } = options;
 	const maxSteps = config.maxSteps ?? 5;
 	const timeoutMs = config.timeout ?? DEFAULT_SUBAGENT_TIMEOUT_MS;
+	const runWallStartedAt = Date.now();
+	const dbg = isSubagentDebugLogging();
 
 	// Compose timeout signal with caller-provided abort signal
 	const controller = new AbortController();
@@ -167,9 +181,22 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 
 	try {
 		const systemPrompt = buildSystemPrompt(context);
-		console.log(`[Subagent:${config.name}] system prompt:\n${systemPrompt}`);
-		console.log(`[Subagent:${config.name}] available tools: [${Object.keys(tools).join(', ')}]`);
+		if (dbg) {
+			const cap = 12_000;
+			const body =
+				systemPrompt.length > cap
+					? `${systemPrompt.slice(0, cap)}\n…[truncated ${systemPrompt.length - cap} chars]`
+					: systemPrompt;
+			console.log(
+				`[Subagent:${config.name}] system prompt (${systemPrompt.length} chars):\n${body}`,
+			);
+			console.log(`[Subagent:${config.name}] available tools: [${Object.keys(tools).join(', ')}]`);
+			console.log(
+				`[Subagent:run:generateText:start] name=${config.name} modelId=${reasoningModelLabelForLog(model)} maxSteps=${maxSteps} timeoutMs=${timeoutMs}`,
+			);
+		}
 
+		const generateTextStartedAt = Date.now();
 		const result = await generateText({
 			model,
 			system: systemPrompt,
@@ -183,25 +210,28 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 			onStepFinish: (step) => {
 				stepCount++;
 				// Debug logging: tool calls with args and results
-				if (step.toolCalls?.length) {
-					for (const tc of step.toolCalls) {
-						console.log(
-							`[Subagent:${config.name}] step#${stepCount} tool=${tc.toolName} args=${JSON.stringify(tc.args)}`,
-						);
+				if (dbg) {
+					if (step.toolCalls?.length) {
+						for (const tc of step.toolCalls) {
+							console.log(
+								`[Subagent:${config.name}] step#${stepCount} tool=${tc.toolName} args=${JSON.stringify(tc.args)}`,
+							);
+						}
 					}
-				}
-				if (step.toolResults?.length) {
-					for (const tr of step.toolResults as Array<{ toolName: string; result: unknown }>) {
-						const resultStr = JSON.stringify(tr.result);
-						const truncated = resultStr.length > 500 ? `${resultStr.slice(0, 500)}...` : resultStr;
-						console.log(
-							`[Subagent:${config.name}] step#${stepCount} result(${tr.toolName})=${truncated}`,
-						);
+					if (step.toolResults?.length) {
+						for (const tr of step.toolResults as Array<{ toolName: string; result: unknown }>) {
+							const resultStr = JSON.stringify(tr.result);
+							const truncated =
+								resultStr.length > 500 ? `${resultStr.slice(0, 500)}...` : resultStr;
+							console.log(
+								`[Subagent:${config.name}] step#${stepCount} result(${tr.toolName})=${truncated}`,
+							);
+						}
 					}
-				}
-				if (step.text) {
-					const truncated = step.text.length > 300 ? `${step.text.slice(0, 300)}...` : step.text;
-					console.log(`[Subagent:${config.name}] step#${stepCount} text=${truncated}`);
+					if (step.text) {
+						const truncated = step.text.length > 300 ? `${step.text.slice(0, 300)}...` : step.text;
+						console.log(`[Subagent:${config.name}] step#${stepCount} text=${truncated}`);
+					}
 				}
 				if (hooks.onSubagentStep) {
 					hooks.onSubagentStep({
@@ -213,6 +243,13 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 				}
 			},
 		});
+		if (dbg) {
+			const usage = result.usage ?? {};
+			const finishReason = (result as { finishReason?: string }).finishReason;
+			console.log(
+				`[Subagent:run:generateText:ok] name=${config.name} generateTextMs=${Date.now() - generateTextStartedAt} wallMs=${Date.now() - runWallStartedAt} steps=${stepCount} finishReason=${finishReason ?? 'n/a'} usage=${JSON.stringify(usage)}`,
+			);
+		}
 
 		const subagentResult: SubagentResult = {
 			text: result.text,
@@ -226,6 +263,11 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 
 		return subagentResult;
 	} catch (err) {
+		if (dbg) {
+			console.warn(
+				`[Subagent:run:generateText:error] name=${config.name} wallMs=${Date.now() - runWallStartedAt} message=${err instanceof Error ? err.message : String(err)}`,
+			);
+		}
 		// Terminal transition: cancel on error
 		if (session) {
 			session.cancel();

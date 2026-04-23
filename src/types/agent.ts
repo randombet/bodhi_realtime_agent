@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 
+import type { LanguageModelV1 } from 'ai';
 import type {
 	PersistentSubagentFactory,
 	SubagentLifetimeMode,
@@ -83,8 +84,11 @@ export interface SubagentConfig {
 	maxSteps?: number;
 	/** Timeout in milliseconds for the entire subagent run. */
 	timeout?: number;
-	/** Override the model used for this subagent (defaults to session model). */
-	model?: string;
+	/**
+	 * Optional Vercel AI SDK text model for this subagent’s `generateText` relay.
+	 * When omitted, the session default (`VoiceSessionConfig.model`) is used.
+	 */
+	reasoningModel?: LanguageModelV1;
 	/** When true, a SubagentSession with user interaction capabilities is created. */
 	interactive?: boolean;
 	/**

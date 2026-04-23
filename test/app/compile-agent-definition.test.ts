@@ -1,9 +1,24 @@
 // SPDX-License-Identifier: MIT
 
+import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { describe, expect, it } from 'vitest';
 import { getBuiltinAgentCompileModel } from '../../app/agents/definitions/builtin-agent-definitions.js';
 import { compileAgentDefinition } from '../../app/agents/runtime/compile-agent-definition.js';
+import type { WorkerRuntimeContext } from '../../app/agents/runtime/worker-runtime-registry.js';
 import { ArtifactRegistry } from '../../app/lib/media/artifact-registry.js';
+
+function testWorkerCtx(partial?: Partial<WorkerRuntimeContext>): WorkerRuntimeContext {
+	const googleApiKey = partial?.googleApiKey ?? 'k';
+	return {
+		googleApiKey,
+		defaultReasoningModel: createGoogleGenerativeAI({ apiKey: googleApiKey })('gemini-2.5-flash'),
+		getSessionRef: () => null,
+		artifactRegistry: new ArtifactRegistry(),
+		userId: 'u',
+		sessionId: 's',
+		...partial,
+	};
+}
 
 describe('compileAgentDefinition', () => {
 	it('compiles standard built-in profile with media workers', () => {
@@ -12,11 +27,7 @@ describe('compileAgentDefinition', () => {
 		if (!model) throw new Error('expected standard builtin model');
 		const artifactRegistry = new ArtifactRegistry();
 		const out = compileAgentDefinition(model, {
-			apiKey: 'k',
-			getSessionRef: () => null,
-			artifactRegistry,
-			userId: 'u',
-			sessionId: 's',
+			...testWorkerCtx({ artifactRegistry }),
 			isUserAgent: false,
 		});
 		expect(out.mainAgents.map((a) => a.name)).toEqual(['main', 'math_expert']);
@@ -39,11 +50,7 @@ describe('compileAgentDefinition', () => {
 		const artifactRegistry = new ArtifactRegistry();
 		expect(() =>
 			compileAgentDefinition(bad, {
-				apiKey: 'k',
-				getSessionRef: () => null,
-				artifactRegistry,
-				userId: 'u',
-				sessionId: 's',
+				...testWorkerCtx({ artifactRegistry }),
 			}),
 		).toThrow(/orphan_worker/);
 	});

@@ -16,6 +16,18 @@ import { runSubagent } from './subagent-runner.js';
 import type { SubagentMessage, SubagentSession } from './subagent-session.js';
 import { SubagentSessionImpl } from './subagent-session.js';
 
+function isHandoffDebugLogging(): boolean {
+	return process.env.LOG_LEVEL === 'debug';
+}
+
+/** Best-effort model id for logs (`@ai-sdk/*` models usually set `modelId`). */
+function reasoningModelLabelForLog(model: LanguageModelV1): string {
+	const m = model as { modelId?: string };
+	return typeof m.modelId === 'string' && m.modelId.length > 0
+		? m.modelId
+		: '(LanguageModelV1: no modelId)';
+}
+
 /** Tracks a running background subagent so it can be cancelled. */
 interface ActiveSubagent {
 	controller: AbortController;
@@ -278,6 +290,14 @@ export class AgentRouter {
 			toolCallId: toolCall.toolCallId,
 		});
 
+		const resolvedReasoningModel = subagentConfig.reasoningModel ?? this.model;
+		const handoffWallStartedAt = Date.now();
+		if (isHandoffDebugLogging()) {
+			console.log(
+				`[AgentRouter:handoff:start] sessionId=${this.sessionManager.sessionId} toolName=${toolCall.toolName} toolCallId=${toolCall.toolCallId} subagent=${subagentConfig.name} activeAgent=${this.activeAgent.name} reasoningOverride=${Boolean(subagentConfig.reasoningModel)} resolvedModelId=${reasoningModelLabelForLog(resolvedReasoningModel)}`,
+			);
+		}
+
 		try {
 			const context = this.conversationContext.getSubagentContext(
 				{
@@ -294,12 +314,24 @@ export class AgentRouter {
 				config: subagentConfig,
 				context,
 				hooks: this.hooks,
-				model: this.model,
+				model: resolvedReasoningModel,
 				abortSignal: controller.signal,
 				session,
 			});
 
+			if (isHandoffDebugLogging()) {
+				console.log(
+					`[AgentRouter:handoff:ok] sessionId=${this.sessionManager.sessionId} toolName=${toolCall.toolName} toolCallId=${toolCall.toolCallId} subagent=${subagentConfig.name} wallMs=${Date.now() - handoffWallStartedAt} stepCount=${result.stepCount} textChars=${result.text?.length ?? 0}`,
+				);
+			}
 			return result;
+		} catch (err) {
+			if (isHandoffDebugLogging()) {
+				console.warn(
+					`[AgentRouter:handoff:error] sessionId=${this.sessionManager.sessionId} toolName=${toolCall.toolName} toolCallId=${toolCall.toolCallId} subagent=${subagentConfig.name} wallMs=${Date.now() - handoffWallStartedAt} message=${err instanceof Error ? err.message : String(err)}`,
+				);
+			}
+			throw err;
 		} finally {
 			externalSignal?.removeEventListener('abort', onExternalAbort);
 			this.activeSubagents.delete(toolCall.toolCallId);
