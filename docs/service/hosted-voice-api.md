@@ -30,6 +30,20 @@ Your integration must match how **your** Bodhi deployment is configured:
 
 Mobile voice bootstrap always uses the **same identity rules** as the rest of `/api/*`.
 
+### 2.1 User-defined agents (`ua_*`) — Bodhi integration API keys (optional)
+
+When your operator enables **Agent Studio** with **Supabase** and **hosted integration keys**, a signed-in builder can mint a **Bodhi integration API key** in Agent Studio. Keys look like `bsk_<uuid>_<random>`; the **full string** is the secret (shown once at creation).
+
+Use that key as the Bearer token on **`POST /api/mobile/sessions`** and when opening **`/ws/mobile`** (same `Authorization` header on the WebSocket upgrade, if your stack supports it).
+
+**Rules (additive — existing deployments keep working as before):**
+
+- **First-party catalog** profiles (`standard`, and other ids from your deployment’s profile catalog) keep using whatever Bearer / auth model you already use.
+- **`agentProfile` set to a saved Agent Studio id** (`ua_` + 16 hex characters) **must** use a valid **Bodhi integration key** for the **same Supabase user** that owns that saved agent. Other Bearer tokens for `ua_*` receive **403** (`integration_api_key_required`) on session create (and the WebSocket bind is rejected for defense in depth).
+- A **malformed or unknown** `bsk_...` token is rejected with **401** (`invalid_integration_key`) and is **not** interpreted as another auth method (prevents accidental fallback to weaker identity).
+
+Managing keys (create / list metadata / revoke) is done in **Agent Studio** while signed in with the normal web session, under **Hosted API access keys**. Integrators do not need those URLs unless they are also the account owner.
+
 ---
 
 ## 3. REST endpoints
@@ -38,7 +52,7 @@ Base path: **`https://<your-origin>/api/`**
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `POST` | `/api/mobile/sessions` | Create a **short-lived session intent**. Optional JSON body: `agentProfile` (must be a registered id from the app server’s `app/agents/agent-profiles-catalog.ts`; unknown values are treated as `standard`), `deviceId`, `resumeSessionId`. Response includes `sessionIntentId`, `token`, `expiresAt`, `wsPath` (typically `/ws/mobile`). |
+| `POST` | `/api/mobile/sessions` | Create a **short-lived session intent**. Optional JSON body: `agentProfile` (a registered catalog id from `app/agents/agent-profiles-catalog.ts` — unknown values are treated as `standard` — **or**, when enabled on your deployment, a saved Agent Studio id `ua_` + 16 hex with a **Bodhi integration key**, see §2.1), `deviceId`, `resumeSessionId`. Response includes `sessionIntentId`, `token`, `expiresAt`, `wsPath` (typically `/ws/mobile`). |
 | `POST` | `/api/mobile/device-events` | Send **summarized** context while a voice session is **active** (e.g. location, motion, health aggregates). Body: `sessionId`, `eventType`, `payload` (object), optional `deviceId`, `timestamp`. Expect **`202`** when accepted. |
 | `POST` | `/api/mobile/sessions/:sessionId/close` | Close that session for the authenticated user. |
 | `GET` | `/api/users/me/sessions` | List sessions (when history/auth are configured on the deployment). |
@@ -121,6 +135,15 @@ curl -sS -X POST 'https://<your-origin>/api/mobile/sessions' \
   -d '{"agentProfile":"standard"}'
 ```
 
+**Same endpoint with a saved Agent Studio agent** (when §2.1 applies; use the full `bsk_...` secret from Agent Studio):
+
+```bash
+curl -sS -X POST 'https://<your-origin>/api/mobile/sessions' \
+  -H 'Authorization: Bearer bsk_<uuid>_<secret>' \
+  -H 'Content-Type: application/json' \
+  -d '{"agentProfile":"ua_0123456789abcdef"}'
+```
+
 Example success shape (fields may vary by version):
 
 ```json
@@ -144,6 +167,7 @@ curl -sS -H 'Authorization: Bearer <token>' \
 ## 7. Security expectations
 
 - **API keys** for cloud LLMs stay **on the server** — never ship them in the mobile binary.
+- **Bodhi integration keys (`bsk_`)** are **server-to-server or per-device secrets** for *your* product to call Bodhi on behalf of a builder’s account. Prefer storing them in your backend or secure device vault, not in screenshots or shared chat.
 - **Intent tokens** are short-lived; do not log them in analytics in plain text.
 - Use **TLS 1.2+** for all HTTP and WebSocket traffic (`https://` / `wss://`).
 
