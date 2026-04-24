@@ -525,6 +525,16 @@ export class VoiceSession {
 			this.agentRouter.responseModality = 'text';
 		}
 
+		this.transport.onRealtimeLLMUsage = (usage) => {
+			if (this.hooks.onRealtimeLLMUsage) {
+				this.hooks.onRealtimeLLMUsage({
+					sessionId: this.config.sessionId,
+					agentName: this.agentRouter.activeAgent.name,
+					usage,
+				});
+			}
+		};
+
 		if (config.orchestrationMode === 'actor') {
 			this.runtimeToolRegistry = this.buildRuntimeToolRegistry([
 				...(initialAgent?.tools ?? []),

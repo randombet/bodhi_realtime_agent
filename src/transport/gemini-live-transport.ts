@@ -9,6 +9,7 @@ import type {
 	LLMTransport,
 	LLMTransportConfig,
 	LLMTransportError,
+	RealtimeLLMUsageEvent,
 	ReconnectState,
 	ReplayItem,
 	SessionUpdate,
@@ -16,6 +17,7 @@ import type {
 	TransportToolCall,
 	TransportToolResult,
 } from '../types/transport.js';
+import { normalizeGeminiUsageMetadata } from './realtime-usage-normalize.js';
 import { zodToJsonSchema } from './zod-to-schema.js';
 
 function toFunctionResponsePayload(value: unknown): Record<string, unknown> {
@@ -115,6 +117,8 @@ export class GeminiLiveTransport implements LLMTransport {
 	private _textFromOutputTranscription = false;
 	/** Whether onTextDone has been fired for the current turn (prevents double-fire). */
 	private _textDoneFired = false;
+	/** Latest Gemini `usageMetadata` for the active model turn (cleared on `turnComplete`). */
+	private _cachedGeminiUsage: unknown | null = null;
 
 	// --- LLMTransport static properties ---
 
@@ -156,6 +160,7 @@ export class GeminiLiveTransport implements LLMTransport {
 	onTextOutput?: (text: string) => void;
 	onTextDone?: () => void;
 	onSpeechStarted?: () => void;
+	onRealtimeLLMUsage?: (usage: RealtimeLLMUsageEvent) => void;
 
 	constructor(config: GeminiTransportConfig, callbacks: GeminiTransportCallbacks) {
 		this.ai = new GoogleGenAI({ apiKey: config.apiKey });
@@ -302,6 +307,7 @@ export class GeminiLiveTransport implements LLMTransport {
 
 	async disconnect(): Promise<void> {
 		this._modelTurnStarted = false;
+		this._cachedGeminiUsage = null;
 		if (this.session) {
 			try {
 				await this.session.close();
@@ -545,6 +551,13 @@ export class GeminiLiveTransport implements LLMTransport {
 			return;
 		}
 
+		// Usage may appear on its own server message or alongside other fields.
+		if (msg.usageMetadata) {
+			this._cachedGeminiUsage = msg.usageMetadata;
+			const update = normalizeGeminiUsageMetadata(msg.usageMetadata, 'update');
+			if (update && this.onRealtimeLLMUsage) this.onRealtimeLLMUsage(update);
+		}
+
 		if (msg.serverContent) {
 			const content = msg.serverContent;
 
@@ -610,6 +623,11 @@ export class GeminiLiveTransport implements LLMTransport {
 					if (this.onTextDone) this.onTextDone();
 				}
 				this._textDoneFired = false;
+				if (this._cachedGeminiUsage) {
+					const fin = normalizeGeminiUsageMetadata(this._cachedGeminiUsage, 'final');
+					if (fin && this.onRealtimeLLMUsage) this.onRealtimeLLMUsage(fin);
+					this._cachedGeminiUsage = null;
+				}
 				this.callbacks.onTurnComplete?.();
 				if (this.onTurnComplete) this.onTurnComplete();
 			}

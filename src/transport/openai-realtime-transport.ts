@@ -13,6 +13,7 @@ import type {
 	LLMTransport,
 	LLMTransportConfig,
 	LLMTransportError,
+	RealtimeLLMUsageEvent,
 	ReconnectState,
 	ReplayItem,
 	SessionUpdate,
@@ -20,6 +21,10 @@ import type {
 	TransportToolCall,
 	TransportToolResult,
 } from '../types/transport.js';
+import {
+	normalizeOpenAIResponseUsage,
+	normalizeOpenAITranscriptionUsage,
+} from './realtime-usage-normalize.js';
 import { zodToJsonSchema } from './zod-to-schema.js';
 
 /** Configuration for constructing an OpenAIRealtimeTransport. */
@@ -99,6 +104,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	onTextOutput?: (text: string) => void;
 	onTextDone?: () => void;
 	onSpeechStarted?: () => void;
+	onRealtimeLLMUsage?: (usage: RealtimeLLMUsageEvent) => void;
 
 	// --- Private state ---
 	private client: OpenAI;
@@ -591,7 +597,11 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		});
 
 		// --- Turn complete: clear generating state, flush when_idle queue ---
-		rt.on('response.done', () => {
+		rt.on('response.done', (event: unknown) => {
+			const e = event as { response?: { id?: string; usage?: unknown } };
+			const normalized = normalizeOpenAIResponseUsage(e?.response?.usage, e?.response?.id);
+			if (normalized && this.onRealtimeLLMUsage) this.onRealtimeLLMUsage(normalized);
+
 			this._isModelGenerating = false;
 			this.lastAssistantItemId = null;
 			this.audioOutputMs = 0;
@@ -625,8 +635,11 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		});
 
 		// --- Input transcription ---
-		rt.on('conversation.item.input_audio_transcription.completed', (event) => {
-			if (this.onInputTranscription) this.onInputTranscription(event.transcript);
+		rt.on('conversation.item.input_audio_transcription.completed', (event: unknown) => {
+			const e = event as { transcript?: string; usage?: unknown };
+			if (this.onInputTranscription) this.onInputTranscription(e.transcript ?? '');
+			const tu = normalizeOpenAITranscriptionUsage(e.usage);
+			if (tu && this.onRealtimeLLMUsage) this.onRealtimeLLMUsage(tu);
 		});
 
 		// --- Output transcription (streaming deltas) ---

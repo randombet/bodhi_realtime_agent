@@ -13,6 +13,7 @@ describe('HooksManager', () => {
 		expect(mgr.onToolResult).toBeUndefined();
 		expect(mgr.onAgentTransfer).toBeUndefined();
 		expect(mgr.onSubagentStep).toBeUndefined();
+		expect(mgr.onRealtimeLLMUsage).toBeUndefined();
 		expect(mgr.onMemoryExtraction).toBeUndefined();
 		expect(mgr.onTTSSynthesis).toBeUndefined();
 		expect(mgr.onError).toBeUndefined();

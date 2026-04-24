@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 import type { ToolExecution } from './tool.js';
+import type { RealtimeLLMUsageEvent } from './transport.js';
 
 /**
  * Optional lifecycle hooks for observability, logging, and metrics.
@@ -67,6 +68,13 @@ export interface FrameworkHooks {
 		stepNumber: number;
 		toolCalls: string[];
 		tokensUsed: number;
+	}): void;
+
+	/** Fires when a realtime LLM transport reports provider usage (tokens or duration). */
+	onRealtimeLLMUsage?(event: {
+		sessionId: string;
+		agentName: string;
+		usage: RealtimeLLMUsageEvent;
 	}): void;
 
 	/** Fires after the memory distiller extracts facts from conversation. */

@@ -200,6 +200,52 @@ export interface LLMTransportError {
 	recoverable: boolean;
 }
 
+/** Which realtime provider produced this usage event. */
+export type RealtimeUsageProvider = 'gemini_live' | 'openai_realtime';
+
+/** What billable slice this event describes. */
+export type RealtimeUsageKind = 'response' | 'input_transcription';
+
+/** Whether this is a mid-turn snapshot or a turn-final snapshot. */
+export type RealtimeUsagePhase = 'update' | 'final';
+
+/** Billable unit for this event (tokens vs duration-based transcription). */
+export type RealtimeUsageUnit = 'tokens' | 'duration_seconds';
+
+/** Optional per-modality token breakdown when the provider exposes it. */
+export interface RealtimeUsageModalityBreakdown {
+	inputTextTokens?: number;
+	inputAudioTokens?: number;
+	inputImageTokens?: number;
+	cachedTokens?: number;
+	cachedTextTokens?: number;
+	cachedAudioTokens?: number;
+	cachedImageTokens?: number;
+	outputTextTokens?: number;
+	outputAudioTokens?: number;
+}
+
+/**
+ * Normalized usage from Gemini Live or OpenAI Realtime transports.
+ * Carries provider-reported billable units only (no USD estimation).
+ */
+export interface RealtimeLLMUsageEvent {
+	provider: RealtimeUsageProvider;
+	kind: RealtimeUsageKind;
+	phase: RealtimeUsagePhase;
+	unit: RealtimeUsageUnit;
+	inputTokens?: number;
+	outputTokens?: number;
+	totalTokens?: number;
+	/** Present when `unit === 'duration_seconds'` (e.g. some transcription billing). */
+	durationSeconds?: number;
+	modalityBreakdown?: RealtimeUsageModalityBreakdown;
+	/** OpenAI response id when `kind === 'response'`. */
+	providerResponseId?: string;
+	/** Opaque provider payload for exact downstream reconciliation. */
+	providerRaw?: unknown;
+}
+
 /**
  * Provider-agnostic interface for realtime LLM transports.
  *
@@ -280,4 +326,7 @@ export interface LLMTransport {
 	onGoAway?: (timeLeft: string) => void;
 	onResumptionUpdate?: (handle: string, resumable: boolean) => void;
 	onGroundingMetadata?: (metadata: Record<string, unknown>) => void;
+
+	/** Optional: fires when the provider reports token or duration usage for billing/observability. */
+	onRealtimeLLMUsage?: (usage: RealtimeLLMUsageEvent) => void;
 }
