@@ -8,6 +8,16 @@ This document is for **teams building mobile or native apps** that call a **depl
 
 **Related:** Bodhi operators maintain reverse-proxy routing and TLS; see [internal routing notes](../../dev_docs/app/server/http-websocket-routing.md) in this repo (not required reading for app-only integrators).
 
+### First time here? How the two connections fit
+
+- **Two surfaces:** **HTTPS** (`/api/...`) for **bootstrap** and **WSS** (`/ws/mobile`) for **realtime voice and control**. The `POST` that creates a session **intent** does **not** open the WebSocket for you and does **not** carry audio. Your client performs **both** the HTTPS call **and** the WebSocket connect.
+
+- **Typical order:** (1) `POST /api/mobile/sessions` with auth → you get `sessionIntentId`, `token`, and usually `wsPath` (`/ws/mobile`). (2) Your app **opens** `wss://<your-origin>/ws/mobile?sessionIntentId=...&token=...` (same `Authorization: Bearer` on the upgrade if your client sends it for `bsk_` or other tokens). (3) On the socket, wait for **`session.config`** (audio format) then **`session.ready`** (gives a real `sessionId`, `userId`, `agentProfile`). (4) **Stream** user mic as **binary** WebSocket messages; **receive** assistant audio as **binary** and UI/transcripts as **JSON** text frames.
+
+- **“Starting” the call:** The live session is established after **`session.ready`**. You do not need a special JSON “start call” event for voice. After the socket is ready, send **microphone PCM** as **binary** frames (and optionally **`text_input`** and other supported JSON message types in **text** frames). If you only use voice, you may send **only** binary PCM on the wire.
+
+- **Ending:** Stop streaming, **close** the WebSocket, and optionally `POST /api/mobile/sessions/:sessionId/close` with `sessionId` from `session.ready`.
+
 ---
 
 ## 1. Capabilities
