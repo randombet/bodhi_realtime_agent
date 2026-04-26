@@ -190,4 +190,57 @@ describe('user-agents-api save payload round-trip', () => {
 			code: customInnerTools[0]?.code,
 		});
 	});
+
+	it('round-trips remote_persistent_worker via save payload', () => {
+		const v2: AgentDefinitionV2 = {
+			schemaVersion: 2,
+			id: ctx.id,
+			userId: ctx.userId,
+			name: 'Remote agent',
+			description: '',
+			realtimeProvider: 'gemini',
+			geminiVoiceName: 'Puck',
+			openaiVoice: 'coral',
+			geminiSttModel: 'gemini-3-flash-preview',
+			mainAgents: [
+				{
+					name: 'main',
+					greeting: 'Hi',
+					instructions: 'Delegate coding to ask_remote.',
+					googleSearch: true,
+					toolIds: ['end_session', 'ask_remote'],
+				},
+			],
+			workers: {
+				ask_remote: {
+					type: 'remote_persistent_worker',
+					url: 'https://worker.example.com',
+					token: 'secret-token',
+					description: 'Delegate coding tasks to remote worker.',
+					pendingMessage: 'Working remotely…',
+				},
+			},
+			createdAt: ctx.createdAt,
+			updatedAt: ctx.updatedAt,
+		};
+
+		const payload = userAgentWireToSavePayload(v2);
+		expect(payload.remotePersistentWorkerToolName).toBe('ask_remote');
+		expect(payload.remotePersistentWorkerUrl).toBe('https://worker.example.com');
+		expect(payload.remotePersistentWorkerToken).toBe('secret-token');
+		expect(payload.remotePersistentWorkerDescription).toBe(
+			'Delegate coding tasks to remote worker.',
+		);
+		expect(payload.remotePersistentWorkerPendingMessage).toBe('Working remotely…');
+
+		const rebuilt = buildAgentDefinitionV2FromSavePayload(payload, ctx);
+		expect(rebuilt.workers.ask_remote).toEqual({
+			type: 'remote_persistent_worker',
+			url: 'https://worker.example.com',
+			token: 'secret-token',
+			description: 'Delegate coding tasks to remote worker.',
+			pendingMessage: 'Working remotely…',
+		});
+		expect(rebuilt.mainAgents[0]?.toolIds).toContain('ask_remote');
+	});
 });

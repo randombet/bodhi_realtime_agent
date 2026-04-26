@@ -172,6 +172,13 @@ curl -sS -H 'Authorization: Bearer <token>' \
   'https://<your-origin>/api/users/me/sessions'
 ```
 
+### Related: remote coding worker from Agent Studio
+
+If you use Agent Studio with `remote_persistent_worker` (main voice agent in Bodhi, coding worker on your own server), follow:
+
+- [Remote persistent worker setup](./remote-persistent-worker-setup.md)
+- [Example bridge server](../../examples/remote-persistent-worker/server.mjs)
+
 ---
 
 ## 7. Security expectations
