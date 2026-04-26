@@ -4,7 +4,7 @@
 
 This document is for **teams building mobile or native apps** that call a **deployed** Bodhi realtime voice backend over the public internet. You do **not** need this repository or the TypeScript framework package in your app: use **HTTPS** for REST and **WSS** for the voice socket.
 
-**Who this is for:** product engineers integrating against your production (or staging) **origin** — for example `https://voice.example.com`. Paths below are **relative to that origin**.
+**Who this is for:** product engineers calling **hosted Bodhi** over the public internet. The production API host is **`https://bodhiagent.live`**; all paths below are **relative to that origin**. If you use a **self‑hosted** deployment with another public HTTPS origin, substitute your host (same path layout: `/api/...`, `/ws/mobile`).
 
 **Related:** Bodhi operators maintain reverse-proxy routing and TLS; see [internal routing notes](../../dev_docs/app/server/http-websocket-routing.md) in this repo (not required reading for app-only integrators).
 
@@ -12,7 +12,7 @@ This document is for **teams building mobile or native apps** that call a **depl
 
 - **Two surfaces:** **HTTPS** (`/api/...`) for **bootstrap** and **WSS** (`/ws/mobile`) for **realtime voice and control**. The `POST` that creates a session **intent** does **not** open the WebSocket for you and does **not** carry audio. Your client performs **both** the HTTPS call **and** the WebSocket connect.
 
-- **Typical order:** (1) `POST /api/mobile/sessions` with auth → you get `sessionIntentId`, `token`, and usually `wsPath` (`/ws/mobile`). (2) Your app **opens** `wss://<your-origin>/ws/mobile?sessionIntentId=...&token=...` (same `Authorization: Bearer` on the upgrade if your client sends it for `bsk_` or other tokens). (3) On the socket, wait for **`session.config`** (audio format) then **`session.ready`** (gives a real `sessionId`, `userId`, `agentProfile`). (4) **Stream** user mic as **binary** WebSocket messages; **receive** assistant audio as **binary** and UI/transcripts as **JSON** text frames.
+- **Typical order:** (1) `POST /api/mobile/sessions` with auth → you get `sessionIntentId`, `token`, and usually `wsPath` (`/ws/mobile`). (2) Your app **opens** `wss://bodhiagent.live/ws/mobile?sessionIntentId=...&token=...` (same `Authorization: Bearer` on the upgrade if your client sends it for `bsk_` or other tokens). (3) On the socket, wait for **`session.config`** (audio format) then **`session.ready`** (gives a real `sessionId`, `userId`, `agentProfile`). (4) **Stream** user mic as **binary** WebSocket messages; **receive** assistant audio as **binary** and UI/transcripts as **JSON** text frames.
 
 - **“Starting” the call:** The live session is established after **`session.ready`**. You do not need a special JSON “start call” event for voice. After the socket is ready, send **microphone PCM** as **binary** frames (and optionally **`text_input`** and other supported JSON message types in **text** frames). If you only use voice, you may send **only** binary PCM on the wire.
 
@@ -58,7 +58,7 @@ Managing keys (create / list metadata / revoke) is done in **Agent Studio** whil
 
 ## 3. REST endpoints
 
-Base path: **`https://<your-origin>/api/`**
+Base path (hosted): **`https://bodhiagent.live/api/`** — use your own origin if self-hosting.
 
 | Method | Path | Purpose |
 |--------|------|---------|
@@ -82,7 +82,7 @@ Base path: **`https://<your-origin>/api/`**
 After a successful **`POST /api/mobile/sessions`**, open:
 
 ```text
-wss://<your-origin>/ws/mobile?sessionIntentId=<id>&token=<token>
+wss://bodhiagent.live/ws/mobile?sessionIntentId=<id>&token=<token>
 ```
 
 Use the **`sessionIntentId`** and **`token`** from the response. Treat the token as an **opaque secret** until the first successful connection.
@@ -136,10 +136,10 @@ Treat **`session.error`**, HTTP **4xx/5xx**, and abnormal WebSocket close codes 
 
 ## 6. Example: create intent (HTTPS)
 
-Replace `<your-origin>` and credentials with values from your environment.
+Replace host only if you are not on hosted Bodhi; always use real credentials from your environment.
 
 ```bash
-curl -sS -X POST 'https://<your-origin>/api/mobile/sessions' \
+curl -sS -X POST 'https://bodhiagent.live/api/mobile/sessions' \
   -H 'Authorization: Bearer <token>' \
   -H 'Content-Type: application/json' \
   -d '{"agentProfile":"standard"}'
@@ -148,7 +148,7 @@ curl -sS -X POST 'https://<your-origin>/api/mobile/sessions' \
 **Same endpoint with a saved Agent Studio agent** (when §2.1 applies; use the full `bsk_...` secret from Agent Studio):
 
 ```bash
-curl -sS -X POST 'https://<your-origin>/api/mobile/sessions' \
+curl -sS -X POST 'https://bodhiagent.live/api/mobile/sessions' \
   -H 'Authorization: Bearer bsk_<uuid>_<secret>' \
   -H 'Content-Type: application/json' \
   -d '{"agentProfile":"ua_0123456789abcdef"}'
@@ -169,7 +169,7 @@ Example success shape (fields may vary by version):
 
 ```bash
 curl -sS -H 'Authorization: Bearer <token>' \
-  'https://<your-origin>/api/users/me/sessions'
+  'https://bodhiagent.live/api/users/me/sessions'
 ```
 
 ### Related: remote coding worker from Agent Studio
@@ -195,7 +195,7 @@ If you use Agent Studio with `remote_persistent_worker` (main voice agent in Bod
 | Item | Value |
 |------|-------|
 | Mobile REST | `POST /api/mobile/sessions`, `POST /api/mobile/device-events`, `POST /api/mobile/sessions/:id/close` |
-| Mobile voice | `wss://<your-origin>/ws/mobile?sessionIntentId=&token=` |
+| Mobile voice | `wss://bodhiagent.live/ws/mobile?sessionIntentId=&token=` |
 | Mic → server | PCM s16le mono **16 kHz** (unless `session.config` says otherwise) |
 | Speaker ← server | PCM s16le mono **24 kHz** (default Gemini path) |
 | Text frames | Single JSON object per message |
