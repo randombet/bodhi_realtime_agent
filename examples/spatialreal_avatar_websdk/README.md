@@ -1,10 +1,10 @@
 # SpatialReal Avatar Web SDK Demo
 
-This example is self-contained under `examples/` and mirrors the `openclaw` shape:
+This example mirrors the `openclaw` shape:
 
 - `demo.ts`: starts Bodhi realtime voice session (WebSocket) + token backend + avatar driving bridge
-- `web-client.ts`: browser client that connects to Bodhi voice WS and renders SpatialReal host-mode avatar
-- `bridge/avatar_bridge.py`: python bridge that sends Bodhi audio output to SpatialReal driving ingress and returns keyframes
+- `web-client.ts`: browser client that connects to Bodhi voice WebSocket and renders SpatialReal host-mode avatar
+- `bridge/avatar_bridge.py`: python bridge (same role as `app/lib/spatialreal/bridge/`); the **venv lives only under `app/`** — one-time: `app/lib/spatialreal/bridge/setup-venv.sh`
 
 ## Architecture
 
@@ -30,20 +30,18 @@ Put these in `.env` (or export them before running):
 - `SPATIALREAL_ENV` (`intl` or `cn`) for the browser SDK
 - optional: `HOST`, `PORT`, `SPATIALREAL_TOKEN_PORT`, `CLIENT_HOST`, `CLIENT_PORT`
 - optional: `SPATIALREAL_TOKEN_SERVER_URL` if your client should hit a non-default backend URL
-- optional: `SPATIALREAL_PYTHON` to point at a specific Python (defaults to `examples/spatialreal_avatar_websdk/bridge/.venv/bin/python3` if you used the venv below)
+- optional: `SPATIALREAL_PYTHON` (defaults to `app/lib/spatialreal/bridge/.venv/.../python3` after you run the app bridge setup)
 
-## Python dependency (use a venv; avoids PEP 668 “externally managed environment”)
+## Python (single venv under `app/`; avoids PEP 668)
 
-On macOS Homebrew Python, **do not** `pip install` into the system interpreter. One-time (Unix/macOS):
+One-time, from the repo root:
 
 ```bash
-cd examples/spatialreal_avatar_websdk/bridge
+cd app/lib/spatialreal/bridge
 ./setup-venv.sh
 ```
 
-On Windows, create the same venv manually: `python -m venv .venv` then `.\.venv\Scripts\python -m pip install -r requirements.txt`.
-
-`demo.ts` will spawn the bridge with that venv by default. Override with `SPATIALREAL_PYTHON` if the venv lives elsewhere.
+`demo.ts` spawns the bridge with that venv by default. Override with `SPATIALREAL_PYTHON` if needed.
 
 ## Run
 
