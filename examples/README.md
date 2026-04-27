@@ -13,6 +13,7 @@ Standalone single-user demos for testing individual framework features. Each exa
 | Twilio Human Transfer | Transfer live call to a real human and back | `twilio-demo.ts` | `pnpm tsx examples/twilio-demo.ts` |
 | Twilio Inbound Bridge | Call a Twilio number to talk to any agent | `twilio-inbound-bridge.ts` | `pnpm tsx examples/twilio-inbound-bridge.ts` |
 | OpenClaw | Multi-tool agent with search, images, video | `openclaw/openclaw-demo.ts` | `pnpm tsx examples/openclaw/openclaw-demo.ts` |
+| SpatialReal Avatar Host Sync | Voice agent + avatar keyframe sync (host mode bridge) | `spatialreal_avatar_websdk/demo.ts` | `pnpm tsx examples/spatialreal_avatar_websdk/demo.ts` |
 
 ## OpenAI Realtime
 
@@ -66,4 +67,14 @@ export GEMINI_API_KEY="your-gemini-key"
 pnpm tsx examples/openclaw/openclaw-demo.ts
 # In another terminal:
 pnpm tsx examples/openclaw/web-client.ts
+```
+
+## SpatialReal Avatar Web SDK
+
+See [spatialreal_avatar_websdk/README.md](spatialreal_avatar_websdk/README.md) for required env setup.
+
+```bash
+pnpm tsx examples/spatialreal_avatar_websdk/demo.ts
+# In another terminal:
+pnpm tsx examples/spatialreal_avatar_websdk/web-client.ts
 ```
