@@ -4,6 +4,8 @@ export { AudioBuffer } from './audio-buffer.js';
 export { CartesiaTTSProvider } from './cartesia-tts-provider.js';
 export type { CartesiaTTSConfig } from './cartesia-tts-provider.js';
 export { ClientSenderAdapter } from './client-sender-adapter.js';
+export { DeepgramSTTProvider } from './deepgram-stt-provider.js';
+export type { DeepgramSTTConfig } from './deepgram-stt-provider.js';
 export { ElevenLabsSTTProvider } from './elevenlabs-stt-provider.js';
 export type { ElevenLabsSTTConfig } from './elevenlabs-stt-provider.js';
 export { ElevenLabsTTSProvider } from './elevenlabs-tts-provider.js';

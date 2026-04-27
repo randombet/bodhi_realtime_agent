@@ -7,6 +7,7 @@ Standalone demos for testing framework features. Each example runs independently
 | Demo | Feature | Entry Point | Run |
 |------|---------|-------------|-----|
 | Gemini Realtime | Senior-friendly Gemini Live voice assistant with tools/transfers | `gemini-realtime-tools.ts` | `pnpm tsx examples/gemini-realtime-tools.ts` |
+| Gemini + Deepgram STT | Gemini Live voice assistant with Deepgram Nova-3 live user transcription | `gemini-deepgram-streaming-stt.ts` | `pnpm tsx examples/gemini-deepgram-streaming-stt.ts` |
 | Generic Web Client | Browser client for realtime voice demos | `web-client.ts` | `pnpm tsx examples/web-client.ts` |
 | OpenAI Realtime | OpenAI native-audio voice assistant with tools/subagents | `openai-realtime-tools.ts` | `pnpm tsx examples/openai-realtime-tools.ts` |
 | Cartesia TTS | Custom voice synthesis via Cartesia Sonic | `cartesia-tts-demo.ts` | `pnpm tsx examples/cartesia-tts-demo.ts` |
@@ -28,6 +29,17 @@ Then open `http://localhost:8080`, connect, and try:
 - "I need help with harder math"
 - "Speak slower please"
 - "Draw me a picture of a sunset"
+
+## Gemini Live + Deepgram Nova-3 STT
+
+See [DEEPGRAM-STT-README.md](DEEPGRAM-STT-README.md) for setup details.
+
+```bash
+export GEMINI_API_KEY="your-gemini-key"
+export DEEPGRAM_API_KEY="your-deepgram-key"
+pnpm tsx examples/gemini-deepgram-streaming-stt.ts
+pnpm tsx examples/web-client.ts
+```
 
 ## OpenAI Realtime
 

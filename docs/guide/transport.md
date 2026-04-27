@@ -65,6 +65,27 @@ const session = new VoiceSession({
 
 When an external STT provider is set, `VoiceSession` feeds every client audio chunk into the provider and commits the provider at model-turn boundaries. Gemini built-in transcription can still be used as a post-hoc correction path when available.
 
+Deepgram Nova-3 live streaming can be used when you want lower-latency partial user transcripts:
+
+```typescript
+import {
+  DeepgramSTTProvider,
+  VoiceSession,
+} from 'bodhi-realtime-agent';
+
+const session = new VoiceSession({
+  // ...
+  sttProvider: new DeepgramSTTProvider({
+    apiKey: process.env.DEEPGRAM_API_KEY!,
+    model: 'nova-3',
+    language: 'en-US',
+  }),
+  inputAudioTranscription: false, // Optional: make Deepgram the only input transcript source.
+});
+```
+
+Deepgram receives the active transport's PCM input format through `configure()`. With Gemini Live that is 16 kHz mono PCM16; with OpenAI Realtime that is 24 kHz mono PCM16.
+
 ## TTS Providers
 
 `VoiceSessionConfig.ttsProvider` switches the realtime LLM to text-mode responses and routes text deltas into a streaming `TTSProvider`.
