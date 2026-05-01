@@ -23,6 +23,7 @@ docs/api/
 # Local-only recruiting fixtures (real JDs / resumes); committed samples live in fixtures/recruiting-screening/*.md
 /fixtures/recruiting-screening/local/
 /user-agents/
+/embed-widgets/
 
 # SpatialReal Python host bridges: local venvs and bytecode (per-bridge .gitignore too)
 app/lib/spatialreal/bridge/.venv/

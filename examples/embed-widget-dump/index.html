@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>Widget Embed Tester</title>
+		<style>
+			* { box-sizing: border-box; margin: 0; }
+			body { font-family: system-ui, -apple-system, sans-serif; background: #f5f5f5; padding: 24px; color: #1a1a1a; }
+			h1 { font-size: 1.4rem; margin-bottom: 4px; }
+			.subtitle { color: #666; font-size: 0.85rem; margin-bottom: 20px; }
+			.grid { display: grid; grid-template-columns: 380px 1fr; gap: 20px; }
+			@media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
+
+			/* Panel */
+			.panel { background: #fff; border: 1px solid #ddd; border-radius: 10px; padding: 16px; }
+			.panel h2 { font-size: 0.95rem; margin-bottom: 12px; border-bottom: 1px solid #eee; padding-bottom: 8px; }
+
+			/* Form */
+			label { display: block; font-size: 0.8rem; font-weight: 600; margin-bottom: 4px; color: #444; }
+			input[type="text"] {
+				width: 100%; padding: 8px 10px; border: 1px solid #ccc; border-radius: 6px;
+				font-size: 0.85rem; font-family: ui-monospace, monospace; margin-bottom: 12px;
+			}
+			input:focus { outline: none; border-color: #4f8df5; box-shadow: 0 0 0 2px #4f8df540; }
+			.hint { font-size: 0.72rem; color: #888; margin-top: -8px; margin-bottom: 12px; }
+			button {
+				padding: 8px 20px; border: none; border-radius: 6px; font-size: 0.85rem; font-weight: 600;
+				cursor: pointer; transition: background 0.15s;
+			}
+			#btn-test { background: #4f8df5; color: #fff; }
+			#btn-test:hover { background: #3d7de5; }
+			#btn-reset { background: #eee; color: #555; margin-left: 8px; }
+			#btn-reset:hover { background: #ddd; }
+			.btn-row { display: flex; gap: 8px; margin-bottom: 16px; }
+
+			/* Snippet */
+			.snippet-box {
+				background: #1e1e1e; color: #d4d4d4; padding: 12px; border-radius: 6px;
+				font-family: ui-monospace, monospace; font-size: 0.75rem; line-height: 1.5;
+				white-space: pre-wrap; word-break: break-all; margin-bottom: 12px; position: relative;
+			}
+			.snippet-box .copy-btn {
+				position: absolute; top: 6px; right: 6px; background: #333; color: #aaa;
+				border: none; border-radius: 4px; padding: 3px 8px; cursor: pointer; font-size: 0.7rem;
+			}
+			.snippet-box .copy-btn:hover { color: #fff; }
+
+			/* Log */
+			#log {
+				background: #fafafa; border: 1px solid #eee; border-radius: 6px; padding: 10px;
+				font-family: ui-monospace, monospace; font-size: 0.75rem; line-height: 1.6;
+				max-height: 280px; overflow-y: auto;
+			}
+			#log:empty::before { content: "Waiting…"; color: #bbb; }
+			.log-ok { color: #2a7d3f; }
+			.log-err { color: #c0392b; }
+			.log-info { color: #555; }
+			.log-warn { color: #b8860b; }
+
+			/* Embed area */
+			#embed-area { min-height: 500px; position: relative; }
+			#embed-area.empty { display: flex; align-items: center; justify-content: center; color: #aaa; font-size: 0.85rem; }
+			#embed-area iframe { border: 0; width: 100%; height: 100%; min-height: 500px; border-radius: 8px; }
+
+			/* Status strip */
+			.status-strip {
+				display: flex; gap: 12px; font-size: 0.75rem; padding: 8px 0; color: #666; flex-wrap: wrap;
+			}
+			.status-strip strong { color: #333; }
+		</style>
+	</head>
+	<body>
+		<h1>Widget Embed Tester</h1>
+		<p class="subtitle">
+			Standalone page on a <strong>separate origin</strong> — verifies cross-origin widget embedding works end-to-end.
+		</p>
+
+		<div class="status-strip">
+			<span>API target: <strong id="api-target"></strong></span>
+		</div>
+
+		<div class="grid">
+			<!-- Left column: controls -->
+			<div>
+				<div class="panel" style="margin-bottom: 16px;">
+					<h2>1. Configure</h2>
+					<label for="inp-widget">Widget ID</label>
+					<input type="text" id="inp-widget" placeholder="wg_abc123…" />
+					<p class="hint">From Agent Studio → Advanced → Widget ID</p>
+
+					<label for="inp-api">API Base (Bodhi server)</label>
+					<input type="text" id="inp-api" />
+					<p class="hint">The Bodhi backend (default port 9900)</p>
+
+					<label for="inp-script">Widget Script URL</label>
+					<input type="text" id="inp-script" />
+					<p class="hint">Where bodhi-widget.js is served (default Vite port 8080)</p>
+
+					<div class="btn-row">
+						<button id="btn-test">Test Embed</button>
+						<button id="btn-reset">Reset</button>
+					</div>
+				</div>
+
+				<div class="panel" style="margin-bottom: 16px;">
+					<h2>2. Snippet (what gets injected)</h2>
+					<div class="snippet-box" id="snippet">
+						<button class="copy-btn" id="btn-copy">copy</button>
+					</div>
+				</div>
+
+				<div class="panel">
+					<h2>3. Activity Log</h2>
+					<div id="log"></div>
+				</div>
+			</div>
+
+			<!-- Right column: live embed -->
+			<div class="panel">
+				<h2>Live Embed Preview</h2>
+				<div id="embed-area" class="empty">Press "Test Embed" to start</div>
+			</div>
+		</div>
+
+		<script>
+			/* ── helpers ── */
+			var logEl = document.getElementById('log');
+			function log(msg, cls) {
+				var d = document.createElement('div');
+				d.className = cls || 'log-info';
+				var ts = new Date().toLocaleTimeString();
+				d.textContent = '[' + ts + '] ' + msg;
+				logEl.appendChild(d);
+				logEl.scrollTop = logEl.scrollHeight;
+			}
+
+			/* ── defaults from URL or sensible local values ── */
+			var params = new URLSearchParams(window.location.search);
+			var inpWidget = document.getElementById('inp-widget');
+			var inpApi    = document.getElementById('inp-api');
+			var inpScript = document.getElementById('inp-script');
+
+			inpWidget.value = params.get('widget') || '';
+			inpApi.value    = params.get('api')    || 'http://127.0.0.1:9900';
+			inpScript.value = params.get('script') || 'http://127.0.0.1:8080/bodhi-widget.js';
+
+			document.getElementById('api-target').textContent  = inpApi.value;
+
+			/* ── snippet preview ── */
+			function updateSnippet() {
+				var w = inpWidget.value.trim() || 'wg_YOUR_WIDGET_ID';
+				var a = inpApi.value.trim();
+				var s = inpScript.value.trim();
+				var text =
+					'<script\n' +
+					'  src="' + s + '"\n' +
+					'  data-bodhi-widget-id="' + w + '"\n' +
+					'  data-bodhi-api-base="' + a + '"\n' +
+					'  async\n' +
+					'></' + 'script>';
+				document.getElementById('snippet').firstChild.nodeType === 3
+					? (document.getElementById('snippet').firstChild.textContent = text)
+					: document.getElementById('snippet').insertBefore(document.createTextNode(text), document.getElementById('snippet').firstChild);
+			}
+			inpWidget.addEventListener('input', updateSnippet);
+			inpApi.addEventListener('input', function () {
+				updateSnippet();
+				document.getElementById('api-target').textContent = inpApi.value.trim();
+			});
+			inpScript.addEventListener('input', updateSnippet);
+			updateSnippet();
+
+			document.getElementById('btn-copy').addEventListener('click', function () {
+				var el = document.getElementById('snippet');
+				var text = el.textContent.replace(/copy$/, '').trim();
+				navigator.clipboard.writeText(text).then(function () {
+					document.getElementById('btn-copy').textContent = 'copied!';
+					setTimeout(function () { document.getElementById('btn-copy').textContent = 'copy'; }, 1500);
+				});
+			});
+
+			/* ── reset ── */
+			document.getElementById('btn-reset').addEventListener('click', function () {
+				var area = document.getElementById('embed-area');
+				area.innerHTML = '';
+				area.className = 'empty';
+				area.textContent = 'Press "Test Embed" to start';
+				logEl.innerHTML = '';
+			});
+
+			/* ── intercept fetch so we can log the widget's own network calls ── */
+			var _origFetch = window.fetch;
+			window.fetch = function (url, opts) {
+				var method = (opts && opts.method) || 'GET';
+				var body = (opts && opts.body) || '';
+				log(method + ' ' + url + (body ? '  body: ' + body : ''), 'log-info');
+				return _origFetch.apply(this, arguments).then(function (resp) {
+					var clone = resp.clone();
+					clone.text().then(function (text) {
+						if (resp.ok) {
+							log('← ' + resp.status + ' OK  ' + text.slice(0, 300), 'log-ok');
+						} else {
+							log('← ' + resp.status + ' ' + resp.statusText + '  ' + text.slice(0, 300), 'log-err');
+							if (resp.status === 404) {
+								log('→ Widget not found or not published. Check the ID and publish it in Agent Studio.', 'log-warn');
+							}
+						}
+					});
+					return resp;
+				}).catch(function (err) {
+					log('Network error: ' + err.message, 'log-err');
+					log('→ Is the Bodhi server running? (pnpm dev on port 9900)', 'log-warn');
+					throw err;
+				});
+			};
+
+			/* ── test embed: inject the widget script exactly like a real site would ── */
+			document.getElementById('btn-test').addEventListener('click', function () {
+				var widgetId  = inpWidget.value.trim();
+				var apiBase   = inpApi.value.trim().replace(/\/+$/, '');
+				var scriptSrc = inpScript.value.trim();
+
+				logEl.innerHTML = '';
+
+				if (!widgetId || !widgetId.startsWith('wg_')) {
+					log('Widget ID must start with "wg_". Get it from Agent Studio → Advanced.', 'log-err');
+					return;
+				}
+
+				var area = document.getElementById('embed-area');
+				area.innerHTML = '';
+				area.className = '';
+
+				log('Injecting widget script from ' + scriptSrc, 'log-info');
+
+				var s = document.createElement('script');
+				s.src = scriptSrc;
+				s.async = true;
+				s.setAttribute('data-bodhi-widget-id', widgetId);
+				s.setAttribute('data-bodhi-api-base', apiBase);
+				s.setAttribute('data-bodhi-container', 'embed-area');
+				s.onload = function () { log('bodhi-widget.js loaded', 'log-ok'); };
+				s.onerror = function () {
+					log('FAILED to load bodhi-widget.js from ' + scriptSrc, 'log-err');
+					log('→ Is your Vite dev server running? (pnpm dev:client on port 8080)', 'log-warn');
+				};
+				area.appendChild(s);
+
+				/* Watch for the iframe the widget creates */
+				var observer = new MutationObserver(function (mutations) {
+					for (var i = 0; i < mutations.length; i++) {
+						for (var j = 0; j < mutations[i].addedNodes.length; j++) {
+							var node = mutations[i].addedNodes[j];
+							if (node.tagName === 'IFRAME') {
+								log('iframe created', 'log-ok');
+								node.addEventListener('load', function () {
+									log('iframe loaded: ' + (node.src || '(srcdoc)'), node.src ? 'log-ok' : 'log-warn');
+								});
+								observer.disconnect();
+							}
+						}
+					}
+				});
+				observer.observe(area, { childList: true, subtree: true });
+			});
+		</script>
+	</body>
+</html>

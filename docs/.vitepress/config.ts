@@ -14,7 +14,7 @@ export default withMermaid(
 			nav: [
 				{ text: 'Guide', link: '/guide/' },
 				{ text: 'Advanced', link: '/advanced/subagents' },
-				{ text: 'Hosted API', link: '/service/hosted-voice-api' },
+				{ text: 'Hosted API', link: '/service/integration-surfaces' },
 				{ text: 'API Reference', link: '/api/' },
 			],
 
@@ -65,8 +65,16 @@ export default withMermaid(
 						text: 'Bodhi hosted service',
 						items: [
 							{
-								text: 'Voice + REST (external clients)',
+								text: 'Integration surfaces overview',
+								link: '/service/integration-surfaces',
+							},
+							{
+								text: 'Programmable voice API (REST + WS)',
 								link: '/service/hosted-voice-api',
+							},
+							{
+								text: 'Publishable widget (`wg_*`)',
+								link: '/service/widget-embed',
 							},
 						],
 					},
