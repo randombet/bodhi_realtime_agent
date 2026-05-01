@@ -14,6 +14,7 @@ Standalone single-user demos for testing individual framework features. Each exa
 | Twilio Inbound Bridge | Call a Twilio number to talk to any agent | `twilio-inbound-bridge.ts` | `pnpm tsx examples/twilio-inbound-bridge.ts` |
 | OpenClaw | Multi-tool agent with search, images, video | `openclaw/openclaw-demo.ts` | `pnpm tsx examples/openclaw/openclaw-demo.ts` |
 | SpatialReal Avatar Host Sync | Voice agent + avatar keyframe sync (host mode bridge) | `spatialreal_avatar_websdk/demo.ts` | `pnpm tsx examples/spatialreal_avatar_websdk/demo.ts` |
+| Widget embed dump | Static page on port 8765 to test `wg_*` + `bodhi-widget.js` from another origin | `embed-widget-dump/server.mjs` | `node examples/embed-widget-dump/server.mjs` |
 
 ## OpenAI Realtime
 
@@ -77,4 +78,12 @@ See [spatialreal_avatar_websdk/README.md](spatialreal_avatar_websdk/README.md) f
 pnpm tsx examples/spatialreal_avatar_websdk/demo.ts
 # In another terminal:
 pnpm tsx examples/spatialreal_avatar_websdk/web-client.ts
+```
+
+## Publishable widget embed (cross-origin)
+
+See [embed-widget-dump/README.md](embed-widget-dump/README.md). Run the Bodhi API + web client, add the dump page origin to your widget allowlist, then:
+
+```bash
+node examples/embed-widget-dump/server.mjs
 ```

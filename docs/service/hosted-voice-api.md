@@ -8,9 +8,11 @@ This document is for **teams building mobile or native apps** that call a **depl
 
 **Related:** Bodhi operators maintain reverse-proxy routing and TLS; see [internal routing notes](../../dev_docs/app/server/http-websocket-routing.md) in this repo (not required reading for app-only integrators).
 
+**Integration surfaces:** This page documents **Surface A — programmable API** (REST + WebSocket, full control). For **Surface B — publishable browser widget** (`wg_*`, allowlisted origins, hosted `/embed/avatar`), see [Integration surfaces](./integration-surfaces.md) and [Widget embed](./widget-embed.md).
+
 ### First time here? How the two connections fit
 
-- **Two surfaces:** **HTTPS** (`/api/...`) for **bootstrap** and **WSS** (`/ws/mobile`) for **realtime voice and control**. The `POST` that creates a session **intent** does **not** open the WebSocket for you and does **not** carry audio. Your client performs **both** the HTTPS call **and** the WebSocket connect.
+- **Two layers:** **HTTPS** (`/api/...`) for **bootstrap** and **WSS** (`/ws/mobile`) for **realtime voice and control**. The `POST` that creates a session **intent** does **not** open the WebSocket for you and does **not** carry audio. Your client performs **both** the HTTPS call **and** the WebSocket connect.
 
 - **Typical order:** (1) `POST /api/mobile/sessions` with auth → you get `sessionIntentId`, `token`, and usually `wsPath` (`/ws/mobile`). (2) Your app **opens** `wss://bodhiagent.live/ws/mobile?sessionIntentId=...&token=...` (same `Authorization: Bearer` on the upgrade if your client sends it for `bsk_` or other tokens). (3) On the socket, wait for **`session.config`** (audio format) then **`session.ready`** (gives a real `sessionId`, `userId`, `agentProfile`). (4) **Stream** user mic as **binary** WebSocket messages; **receive** assistant audio as **binary** and UI/transcripts as **JSON** text frames.
 
@@ -174,7 +176,7 @@ curl -sS -H 'Authorization: Bearer <token>' \
 
 ### Related: browser avatar embed (Spatial Real)
 
-For a **first-party web embed** (iframe or hosted page on the same Bodhi origin) that shows the Spatial Real face plus voice on **`/ws`** (not `/ws/mobile`), see **`app/docs/avatar-integration.md` §2.5**: `POST /api/embed/avatar-sessions`, `POST /api/embed/spatial-session-token`, and the **`/embed/avatar`** route. That path uses short-lived **embed intents** on the WebSocket instead of shipping a long-lived `bsk_` secret to an untrusted browser.
+For a **first-party web embed** (iframe or hosted page on the same Bodhi origin) that shows the Spatial Real face plus voice on **`/ws`** (not `/ws/mobile`), see **`app/docs/avatar-integration.md` §2.5–2.6**: `POST /api/embed/avatar-sessions`, `POST /api/embed/spatial-session-token`, and the **`/embed/avatar`** route. That path uses short-lived **embed intents** on the WebSocket instead of shipping a long-lived `bsk_` secret to an untrusted browser. **§2.6** contrasts this with the normal **`/api/users/me/agents`** CRUD API (persistence vs bootstrap-only).
 
 ### Related: remote coding worker from Agent Studio
 
