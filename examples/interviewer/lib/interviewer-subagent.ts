@@ -21,18 +21,18 @@ const interviewPlanSchema = z.object({
 		candidateName: z.string().min(1),
 		companyName: z.string().min(1),
 		roleTitle: z.string().min(1),
-		resumeHighlights: z.array(z.string().min(1)).min(1).max(6),
-		companyHighlights: z.array(z.string().min(1)).min(1).max(6),
-		mustHaveTechnologies: z.array(z.string().min(1)).min(1).max(8),
-		alignmentNotes: z.array(z.string().min(1)).min(1).max(6),
+		resumeHighlights: z.array(z.string().min(1)).min(1),
+		companyHighlights: z.array(z.string().min(1)).min(1),
+		mustHaveTechnologies: z.array(z.string().min(1)).min(1),
+		alignmentNotes: z.array(z.string().min(1)).min(1),
 	}),
 	questions: z
 		.array(
 			z.object({
 				id: questionIdSchema,
-				text: z.string().min(1).max(220),
-				rationale: z.string().min(1).max(300),
-				sourceRefs: z.array(z.string().min(1)).min(1).max(3),
+				text: z.string().min(1),
+				rationale: z.string().min(1),
+				sourceRefs: z.array(z.string().min(1)).min(1),
 			}),
 		)
 		.length(3),
@@ -97,6 +97,7 @@ Hard requirements:
 - Question 3 must ask about a challenging technical problem they solved.
 - Use exact document values: candidate name "Maya Chen", company name "Northstar Robotics", role title "Senior Software Engineer, Realtime Systems" when those are present in the documents.
 - Never use placeholders such as "the company", "[Company]", or "the role" in saved digest or questions.
+- Keep digest arrays compact: at most 6 resume highlights, 6 company highlights, 8 technologies, 6 alignment notes, and 3 source refs per question.
 - Keep each question concise and natural for voice, ideally under 28 words.
 - Do not create follow-up questions in V1.
 - After save_interview_plan succeeds, return only a short confirmation telling the main agent to call next_interview_question.

@@ -3,6 +3,11 @@
 import type { InterviewDocuments } from './interview-documents.js';
 
 export const QUESTION_IDS = ['walk_resume', 'company_interest', 'technical_challenge'] as const;
+const MAX_RESUME_HIGHLIGHTS = 6;
+const MAX_COMPANY_HIGHLIGHTS = 6;
+const MAX_MUST_HAVE_TECHNOLOGIES = 8;
+const MAX_ALIGNMENT_NOTES = 6;
+const MAX_SOURCE_REFS = 3;
 
 export type InterviewQuestionId = (typeof QUESTION_IDS)[number];
 
@@ -88,9 +93,17 @@ export function normalizeInterviewPlanWithDocuments(
 			candidateName,
 			companyName,
 			roleTitle,
+			resumeHighlights: compactList(plan.digest.resumeHighlights, MAX_RESUME_HIGHLIGHTS),
+			companyHighlights: compactList(plan.digest.companyHighlights, MAX_COMPANY_HIGHLIGHTS),
+			mustHaveTechnologies: compactList(
+				plan.digest.mustHaveTechnologies,
+				MAX_MUST_HAVE_TECHNOLOGIES,
+			),
+			alignmentNotes: compactList(plan.digest.alignmentNotes, MAX_ALIGNMENT_NOTES),
 		},
 		questions: plan.questions.map((q) => ({
 			...q,
+			sourceRefs: compactList(q.sourceRefs, MAX_SOURCE_REFS),
 			text: normalizeQuestionText(q.text, {
 				candidateName,
 				companyName,
@@ -296,6 +309,13 @@ function buildFallbackInterviewPlan(documents: InterviewDocuments): InterviewPla
 function firstMarkdownHeading(markdown: string): string | undefined {
 	const match = markdown.match(/^#\s+(.+)$/m);
 	return match?.[1]?.trim();
+}
+
+function compactList(items: string[], maxItems: number): string[] {
+	return items
+		.map((item) => item.trim())
+		.filter(Boolean)
+		.slice(0, maxItems);
 }
 
 function normalizeQuestionText(
