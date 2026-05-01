@@ -1440,6 +1440,12 @@ describe('VoiceSession', () => {
 
 			await new Promise((r) => setTimeout(r, 100));
 
+			expect(transportRef.reconnect).toHaveBeenCalledWith(
+				expect.objectContaining({
+					resumptionHandle: 'handle_1',
+					conversationHistory: expect.any(Array),
+				}),
+			);
 			expect(session.sessionManager.state).toBe('CLOSED');
 			expect(onError).toHaveBeenCalledWith(
 				expect.objectContaining({
@@ -1480,6 +1486,12 @@ describe('VoiceSession', () => {
 			// Wait for backoff delay (1000ms for first attempt) + reconnect execution
 			await new Promise((r) => setTimeout(r, 1500));
 
+			expect(transportRef.reconnect).toHaveBeenCalledWith(
+				expect.objectContaining({
+					resumptionHandle: 'handle_2',
+					conversationHistory: expect.any(Array),
+				}),
+			);
 			expect(session.sessionManager.state).toBe('CLOSED');
 			expect(onError).toHaveBeenCalledWith(
 				expect.objectContaining({

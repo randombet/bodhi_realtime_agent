@@ -287,17 +287,23 @@ export class GeminiLiveTransport implements LLMTransport {
 		try {
 			await this.disconnect();
 
-			// Accept either a handle string (legacy) or ReconnectState (LLMTransport)
-			if (typeof stateOrHandle === 'string') {
-				this.config.resumptionHandle = stateOrHandle;
+			const resumptionHandle =
+				typeof stateOrHandle === 'string'
+					? stateOrHandle
+					: (stateOrHandle?.resumptionHandle ?? this.config.resumptionHandle);
+			if (resumptionHandle) {
+				this.config.resumptionHandle = resumptionHandle;
 			}
-			// When ReconnectState, the internal resumption handle is already stored
-			// from onResumptionUpdate. conversationHistory replay happens after reconnect.
 
 			await this.connect();
 
-			// If ReconnectState with conversation history, replay it
-			if (typeof stateOrHandle === 'object' && stateOrHandle?.conversationHistory?.length) {
+			// A resumed Gemini Live session already has server-side context. Replaying
+			// history after resume duplicates state and can send Live-invalid tool parts.
+			if (
+				!resumptionHandle &&
+				typeof stateOrHandle === 'object' &&
+				stateOrHandle?.conversationHistory?.length
+			) {
 				this.replayHistory(stateOrHandle.conversationHistory);
 			}
 		} finally {
@@ -436,12 +442,17 @@ export class GeminiLiveTransport implements LLMTransport {
 	/** Transfer session: update config → reconnect → replay conversation history. */
 	async transferSession(config: SessionUpdate, state?: ReconnectState): Promise<void> {
 		this.updateSession(config);
-		// Use internal resumption handle (stored from onResumptionUpdate)
+		const resumptionHandle = state?.resumptionHandle ?? this.config.resumptionHandle;
+		if (resumptionHandle) {
+			this.config.resumptionHandle = resumptionHandle;
+		}
+		const resumingSession = !!resumptionHandle;
 		await this.disconnect();
 		await this.connect();
 
-		// Replay conversation history if provided
-		if (state?.conversationHistory?.length) {
+		// If Gemini resumes the previous Live session, server-side context is already
+		// present. Only replay for a fresh session that has no resumption handle.
+		if (!resumingSession && state?.conversationHistory?.length) {
 			this.replayHistory(state.conversationHistory);
 		}
 	}
@@ -502,8 +513,12 @@ export class GeminiLiveTransport implements LLMTransport {
 					break;
 				case 'tool_call':
 					turns.push({
-						role: 'model',
-						parts: [{ functionCall: { name: item.name, args: item.args } }],
+						role: 'user',
+						parts: [
+							{
+								text: `[Previous tool call: ${item.name}(${JSON.stringify(item.args)})]`,
+							},
+						],
 					});
 					break;
 				case 'tool_result':
@@ -511,10 +526,7 @@ export class GeminiLiveTransport implements LLMTransport {
 						role: 'user',
 						parts: [
 							{
-								functionResponse: {
-									name: item.name,
-									response: toFunctionResponsePayload(item.result),
-								},
+								text: `[Previous tool result for ${item.name}: ${JSON.stringify(item.result)}]`,
 							},
 						],
 					});
@@ -659,6 +671,7 @@ export class GeminiLiveTransport implements LLMTransport {
 		}
 
 		if (msg.sessionResumptionUpdate?.newHandle) {
+			this.config.resumptionHandle = msg.sessionResumptionUpdate.newHandle;
 			this.callbacks.onResumptionUpdate?.(
 				msg.sessionResumptionUpdate.newHandle,
 				msg.sessionResumptionUpdate.resumable ?? false,

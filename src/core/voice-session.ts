@@ -1342,7 +1342,10 @@ export class VoiceSession {
 			this.clientTransport.startBuffering();
 
 			this.transport
-				.reconnect({ conversationHistory: this.conversationContext.toReplayContent() })
+				.reconnect({
+					resumptionHandle: handle,
+					conversationHistory: this.conversationContext.toReplayContent(),
+				})
 				.then(() => {
 					const buffered = this.clientTransport.stopBuffering();
 					for (const chunk of buffered) {
@@ -1508,7 +1511,10 @@ export class VoiceSession {
 				this.clientTransport.startBuffering();
 				setTimeout(() => {
 					this.transport
-						.reconnect({ conversationHistory: this.conversationContext.toReplayContent() })
+						.reconnect({
+							resumptionHandle: handle,
+							conversationHistory: this.conversationContext.toReplayContent(),
+						})
 						.then(() => {
 							const buffered = this.clientTransport.stopBuffering();
 							for (const chunk of buffered) {

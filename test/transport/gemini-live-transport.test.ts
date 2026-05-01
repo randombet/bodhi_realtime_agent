@@ -614,6 +614,40 @@ describe('GeminiLiveTransport', () => {
 				expect.objectContaining({ responseModalities: ['AUDIO', 'TEXT'] }),
 			);
 		});
+
+		it('resumes with the latest server handle and does not replay history', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({
+				sessionResumptionUpdate: { newHandle: 'handle_resume', resumable: true },
+			});
+
+			mockSession.sendClientContent.mockClear();
+			await transport.reconnect({
+				conversationHistory: [{ type: 'text', role: 'user', text: 'hello before reconnect' }],
+			});
+
+			const config = capturedConnectConfig.config as Record<string, unknown>;
+			expect(config.sessionResumption).toEqual({ handle: 'handle_resume' });
+			expect(mockSession.sendClientContent).not.toHaveBeenCalled();
+		});
+
+		it('uses an explicit reconnect resumption handle and does not replay history', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			mockSession.sendClientContent.mockClear();
+			await transport.reconnect({
+				resumptionHandle: 'handle_explicit',
+				conversationHistory: [{ type: 'text', role: 'user', text: 'hello before reconnect' }],
+			});
+
+			const config = capturedConnectConfig.config as Record<string, unknown>;
+			expect(config.sessionResumption).toEqual({ handle: 'handle_explicit' });
+			expect(mockSession.sendClientContent).not.toHaveBeenCalled();
+		});
 	});
 
 	describe('sendContent', () => {
@@ -730,7 +764,7 @@ describe('GeminiLiveTransport', () => {
 			});
 		});
 
-		it('replay wraps primitive tool results into functionResponse objects', async () => {
+		it('replay serializes tool history as Gemini Live-safe text context', async () => {
 			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
 			await transport.connect();
 			mockSession.sendClientContent.mockClear();
@@ -748,16 +782,45 @@ describe('GeminiLiveTransport', () => {
 			expect(mockSession.sendClientContent).toHaveBeenCalledWith({
 				turns: [
 					{
-						role: 'model',
-						parts: [{ functionCall: { name: 'ask_openclaw', args: { task: 'x' } } }],
+						role: 'user',
+						parts: [{ text: '[Previous tool call: ask_openclaw({"task":"x"})]' }],
 					},
 					{
 						role: 'user',
-						parts: [{ functionResponse: { name: 'ask_openclaw', response: { result: 'sent' } } }],
+						parts: [{ text: '[Previous tool result for ask_openclaw: "sent"]' }],
 					},
 				],
 				turnComplete: false,
 			});
+
+			const replayPayload = mockSession.sendClientContent.mock.calls[0][0];
+			expect(JSON.stringify(replayPayload)).not.toContain('functionCall');
+			expect(JSON.stringify(replayPayload)).not.toContain('functionResponse');
+		});
+
+		it('skips transfer history replay when resuming an existing Gemini session', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({
+				sessionResumptionUpdate: { newHandle: 'handle_transfer_resume', resumable: true },
+			});
+
+			mockSession.sendClientContent.mockClear();
+			await transport.transferSession(
+				{ instructions: 'New agent', tools: [] },
+				{
+					conversationHistory: [
+						{ type: 'text', role: 'user', text: 'hello' },
+						{ type: 'tool_call', id: 'tc_1', name: 'search', args: { query: 'x' } },
+					],
+				},
+			);
+
+			const config = capturedConnectConfig.config as Record<string, unknown>;
+			expect(config.sessionResumption).toEqual({ handle: 'handle_transfer_resume' });
+			expect(mockSession.sendClientContent).not.toHaveBeenCalled();
 		});
 
 		it('applies responseModality from transferSession before reconnect', async () => {
