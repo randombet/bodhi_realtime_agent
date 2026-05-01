@@ -2,9 +2,12 @@
 
 import type { ConversationContext } from '../core/conversation-context.js';
 import type { HooksManager } from '../core/hooks.js';
+import { processKnowledgeBase } from '../knowledge/knowledge-base-processor.js';
 import type { AgentContext, MainAgent } from '../types/agent.js';
 import type { ConversationItem } from '../types/conversation.js';
+import type { ProcessedKnowledgeBase } from '../types/knowledge-base.js';
 import type { MemoryFact } from '../types/memory.js';
+import type { ToolDefinition } from '../types/tool.js';
 
 /** Language name map for common BCP 47 tags used in system instruction directives. */
 const LANGUAGE_NAMES: Record<string, string> = {
@@ -57,6 +60,37 @@ export function resolveInstructions(agent: MainAgent): string {
 	const langName = LANGUAGE_NAMES[agent.language] ?? agent.language;
 	const directive = `You MUST respond in ${langName}. Speak only in ${langName} unless the user explicitly asks you to switch languages.`;
 	return `${directive}\n\n${base}`;
+}
+
+/**
+ * Process a MainAgent's knowledge base (if any) and return augmented instructions + tools.
+ *
+ * Combines `resolveInstructions` with KB prompt injection, and appends the
+ * auto-generated search tool when the KB has tool-routed documents.
+ * Callers should use the returned `instructions` and `tools` instead of calling
+ * `resolveInstructions` + `agent.tools` separately.
+ */
+export function resolveAgentWithKnowledgeBase(agent: MainAgent): {
+	instructions: string;
+	tools: ToolDefinition[];
+	processedKB: ProcessedKnowledgeBase | null;
+} {
+	let instructions = resolveInstructions(agent);
+	const tools = [...agent.tools];
+	let processedKB: ProcessedKnowledgeBase | null = null;
+
+	if (agent.knowledgeBase?.documents?.length) {
+		processedKB = processKnowledgeBase(agent.knowledgeBase);
+
+		if (processedKB.promptInjection) {
+			instructions += processedKB.promptInjection;
+		}
+		if (processedKB.searchTool) {
+			tools.push(processedKB.searchTool);
+		}
+	}
+
+	return { instructions, tools, processedKB };
 }
 
 /**

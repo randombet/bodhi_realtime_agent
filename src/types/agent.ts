@@ -6,6 +6,7 @@ import type {
 	SubagentLifetimeMode,
 } from '../agent/persistent-subagent-types.js';
 import type { ConversationItem } from './conversation.js';
+import type { KnowledgeBaseConfig } from './knowledge-base.js';
 import type { MemoryFact } from './memory.js';
 import type { ToolDefinition } from './tool.js';
 
@@ -67,6 +68,11 @@ export interface MainAgent {
 	/** Optional greeting prompt sent to Gemini when this agent activates and a client is connected.
 	 *  Gemini will generate a spoken response based on this prompt. */
 	greeting?: string;
+	/**
+	 * Knowledge base configuration for grounding this agent with domain-specific documents.
+	 * Documents are delivered via prompt injection, tool-based retrieval, or both (auto mode).
+	 */
+	knowledgeBase?: KnowledgeBaseConfig;
 }
 
 /**

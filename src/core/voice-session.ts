@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 import type { LanguageModelV1 } from 'ai';
-import { resolveInstructions } from '../agent/agent-context.js';
+import { resolveAgentWithKnowledgeBase } from '../agent/agent-context.js';
 import { AgentRouter } from '../agent/agent-router.js';
 import { PersistentSubagentManager } from '../agent/persistent-subagent-manager.js';
 import type { SubagentMessage } from '../agent/subagent-session.js';
@@ -19,9 +19,11 @@ import type { MainAgent, SubagentConfig } from '../types/agent.js';
 import type { BehaviorCategory } from '../types/behavior.js';
 import type { ConversationHistoryStore } from '../types/history.js';
 import type { FrameworkHooks } from '../types/hooks.js';
+import type { ProcessedKnowledgeBase } from '../types/knowledge-base.js';
 import type { MemoryStore } from '../types/memory.js';
 import type { IClientChannel } from '../types/session-client.js';
 import type { SessionClientSender } from '../types/session-client.js';
+import type { ToolDefinition } from '../types/tool.js';
 import type { LLMTransport, LLMTransportError, STTProvider } from '../types/transport.js';
 import type { TTSAudioConfig, TTSProvider } from '../types/tts.js';
 import type { ArtifactRef, ArtifactStore, SaveArtifactParams } from '../types/workspace.js';
@@ -158,6 +160,8 @@ export class VoiceSession {
 	private behaviorManager?: BehaviorManager;
 	private memoryDistiller?: MemoryDistiller;
 	private memoryCacheManager?: MemoryCacheManager;
+	/** Latest `processKnowledgeBase` result for the active main agent (prompt slice + optional search tool metadata). */
+	private processedKnowledgeBase: ProcessedKnowledgeBase | null = null;
 	private turnId = 0;
 	private sttProvider?: STTProvider;
 	private _commitFiredForTurn = false;
@@ -249,6 +253,12 @@ export class VoiceSession {
 
 		this.subagentConfigs = config.subagentConfigs ?? {};
 
+		const initialForLive = config.agents.find((a) => a.name === config.initialAgent);
+		const liveResolved = initialForLive
+			? resolveAgentWithKnowledgeBase(initialForLive)
+			: { instructions: '', tools: [] as ToolDefinition[], processedKB: null };
+		this.processedKnowledgeBase = liveResolved.processedKB;
+
 		// Set up BehaviorManager early — tools must be declared to the LLM at connect time.
 		// Callbacks capture `this` via closures and are only invoked at runtime (not during construction).
 		if (config.behaviors?.length) {
@@ -283,6 +293,7 @@ export class VoiceSession {
 					userId: config.userId,
 					sessionId: config.sessionId,
 					turnFrequency: freq,
+					getKnowledgeBaseSummary: () => this.processedKnowledgeBase?.promptInjection ?? '',
 				},
 			);
 			this.log(`Memory distillation enabled (every ${freq} turns)`);
@@ -300,11 +311,10 @@ export class VoiceSession {
 			);
 		}
 
-		// Set up LLM transport
-		const initialAgent = config.agents.find((a) => a.name === config.initialAgent);
-		const instructions = initialAgent ? resolveInstructions(initialAgent) : '';
+		// Set up LLM transport — instructions/tools from KB-aware resolution (see `liveResolved` above)
+		const { instructions, tools: agentTools } = liveResolved;
 		const behaviorTools = this.behaviorManager?.tools ?? [];
-		const allInitialTools = [...(initialAgent?.tools ?? []), ...behaviorTools];
+		const allInitialTools = [...agentTools, ...behaviorTools];
 
 		// Determine inputAudioTranscription setting:
 		// Keep Gemini's built-in transcription enabled even when an external STT
@@ -331,7 +341,7 @@ export class VoiceSession {
 					model: config.geminiModel,
 					systemInstruction: instructions,
 					tools: allInitialTools.length ? allInitialTools : undefined,
-					googleSearch: initialAgent?.googleSearch,
+					googleSearch: initialForLive?.googleSearch,
 					speechConfig: config.speechConfig,
 					compressionConfig: config.compressionConfig,
 					inputAudioTranscription: inputTranscription,
@@ -480,7 +490,7 @@ export class VoiceSession {
 		// Subscribe to async agent transfer requests (from external audio agents like Twilio)
 		this.eventBus.subscribe('agent.transfer_requested', (payload) => {
 			setImmediate(() => {
-				this.agentRouter.transfer(payload.toAgent).catch((err) => {
+				this.transfer(payload.toAgent).catch((err) => {
 					this.log(
 						`Transfer requested to "${payload.toAgent}" failed: ${err instanceof Error ? err.message : String(err)}`,
 					);
@@ -518,6 +528,11 @@ export class VoiceSession {
 					this.clientTransport.sendAudioToClient(data);
 				},
 			},
+			() => this.memoryCacheManager?.facts ?? [],
+			() => {
+				const t = this.processedKnowledgeBase?.promptInjection?.trim();
+				return t && t.length > 0 ? t : undefined;
+			},
 		);
 		this.agentRouter.registerAgents(config.agents);
 		this.agentRouter.setInitialAgent(config.initialAgent);
@@ -536,10 +551,7 @@ export class VoiceSession {
 		};
 
 		if (config.orchestrationMode === 'actor') {
-			this.runtimeToolRegistry = this.buildRuntimeToolRegistry([
-				...(initialAgent?.tools ?? []),
-				...behaviorTools,
-			]);
+			this.runtimeToolRegistry = this.buildRuntimeToolRegistry([...agentTools, ...behaviorTools]);
 
 			this.runtimeOrchestrator = new RuntimeOrchestrator({
 				adapter: new GeminiTransportAdapter(this.transport),
@@ -664,14 +676,17 @@ export class VoiceSession {
 						throw err;
 					}
 				},
-				agents: config.agents.map((agent) => ({
-					name: agent.name,
-					instructions: resolveInstructions(agent),
-					tools: agent.tools,
-					providerOptions: agent.providerOptions,
-					onEnter: async () => agent.onEnter?.(this.createAgentContext(agent.name)),
-					onExit: async () => agent.onExit?.(this.createAgentContext(agent.name)),
-				})),
+				agents: config.agents.map((agent) => {
+					const resolved = resolveAgentWithKnowledgeBase(agent);
+					return {
+						name: agent.name,
+						instructions: resolved.instructions,
+						tools: resolved.tools,
+						providerOptions: agent.providerOptions,
+						onEnter: async () => agent.onEnter?.(this.createAgentContext(agent.name)),
+						onExit: async () => agent.onExit?.(this.createAgentContext(agent.name)),
+					};
+				}),
 				initialAgent: config.initialAgent,
 				hooks: {
 					onAgentTransfer: (info) => {
@@ -852,18 +867,20 @@ export class VoiceSession {
 		await this.agentRouter.transfer(toAgent);
 		this.log(`Transfer to "${toAgent}" complete`);
 
-		// Update tool executor with new agent's tools
+		// Update tool executor with new agent's tools (include KB-generated tools)
 		const agent = this.agentRouter.activeAgent;
+		const resolved = resolveAgentWithKnowledgeBase(agent);
+		this.processedKnowledgeBase = resolved.processedKB;
 		this.toolExecutor = this.createToolExecutor(agent.name);
 		const behaviorTools = this.behaviorManager?.tools ?? [];
-		this.toolExecutor.register([...agent.tools, ...behaviorTools]);
+		this.toolExecutor.register([...resolved.tools, ...behaviorTools]);
 		if (this.toolCallRouter) {
 			this.toolCallRouter.toolExecutor = this.toolExecutor;
 		}
 		if (this.runtimeToolRegistry) {
 			this.runtimeToolRegistry.clear();
 			for (const [name, info] of this.buildRuntimeToolRegistry([
-				...agent.tools,
+				...resolved.tools,
 				...behaviorTools,
 			])) {
 				this.runtimeToolRegistry.set(name, info);

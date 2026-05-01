@@ -38,6 +38,7 @@ export default withMermaid(
 							{ text: 'Tools', link: '/guide/tools' },
 							{ text: 'Behaviors', link: '/guide/behaviors' },
 							{ text: 'Memory', link: '/guide/memory' },
+							{ text: 'Knowledge base', link: '/guide/knowledge-base' },
 							{ text: 'Events & Hooks', link: '/guide/events' },
 							{ text: 'Transport', link: '/guide/transport' },
 						],

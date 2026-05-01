@@ -270,7 +270,54 @@ describe('AgentRouter', () => {
 			expect(spy).toHaveBeenCalledWith(
 				expect.any(Object),
 				'You are a search specialist.',
-				expect.any(Array),
+				[],
+				10,
+				undefined,
+			);
+		});
+
+		it('passes memory facts and KB context from callbacks into getSubagentContext', async () => {
+			const eventBus = new EventBus();
+			const hooks = new HooksManager();
+			const convCtx = new ConversationContext();
+			const sessionMgr = new SessionManager(
+				{ sessionId: 'sess_1', userId: 'user_1', initialAgent: 'general' },
+				eventBus,
+				hooks,
+			);
+			const transport = createMockLLMTransport();
+			const client = createMockClientTransport();
+			const memFacts = [{ content: 'Likes coffee', category: 'preference' as const, timestamp: 1 }];
+			const router = new AgentRouter(
+				sessionMgr,
+				eventBus,
+				hooks,
+				convCtx,
+				transport as unknown as LLMTransport,
+				client as unknown as ClientTransport,
+				mockModel,
+				undefined,
+				[],
+				undefined,
+				undefined,
+				() => memFacts,
+				() => 'KB: Job description for WidgetCo',
+			);
+			const spy = vi.spyOn(convCtx, 'getSubagentContext');
+			router.registerAgents([createTestAgent('general')]);
+			router.setInitialAgent('general');
+
+			await router.handoff(
+				{ toolCallId: 'tc_1', toolName: 'search', args: {} },
+				{ name: 'search-agent', instructions: 'You are a search specialist.', tools: {} },
+			);
+
+			expect(spy).toHaveBeenCalledWith(
+				expect.any(Object),
+				'You are a search specialist.',
+				memFacts,
+				10,
+				'KB: Job description for WidgetCo',
 			);
 		});
 

@@ -8,10 +8,11 @@ import type { HooksManager } from '../core/hooks.js';
 import type { SessionManager } from '../core/session-manager.js';
 import type { MainAgent, SubagentConfig } from '../types/agent.js';
 import type { SubagentResult, ToolCall } from '../types/conversation.js';
+import type { MemoryFact } from '../types/memory.js';
 import type { IClientChannel } from '../types/session-client.js';
 import type { ToolDefinition } from '../types/tool.js';
 import type { LLMTransport } from '../types/transport.js';
-import { createAgentContext, resolveInstructions } from './agent-context.js';
+import { createAgentContext, resolveAgentWithKnowledgeBase } from './agent-context.js';
 import { runSubagent } from './subagent-runner.js';
 import type { SubagentMessage, SubagentSession } from './subagent-session.js';
 import { SubagentSessionImpl } from './subagent-session.js';
@@ -84,6 +85,10 @@ export class AgentRouter {
 		private extraTools: ToolDefinition[] = [],
 		private subagentCallbacks?: SubagentEventCallbacks,
 		private externalAudioCallbacks?: ExternalAudioCallbacks,
+		/** Cached user memory facts for subagent system prompts (VoiceSession wires from MemoryCacheManager). */
+		private getMemoryFacts?: () => MemoryFact[],
+		/** Prompt-injected KB text for the active main agent (VoiceSession wires from processed KB). */
+		private getKnowledgeBaseContext?: () => string | undefined,
 	) {}
 
 	registerAgents(agents: MainAgent[]): void {
@@ -157,10 +162,11 @@ export class AgentRouter {
 					agentName: toAgent.name,
 				});
 			} else {
-				// Standard LLM agent: reconnect transport with new config
+				// Standard LLM agent: reconnect transport with new config (KB-aware)
 				const suffix = this.getInstructionSuffix?.() ?? '';
-				const resolvedInstructions = resolveInstructions(toAgent) + suffix;
-				const allTools = [...toAgent.tools, ...this.extraTools];
+				const resolved = resolveAgentWithKnowledgeBase(toAgent);
+				const resolvedInstructions = resolved.instructions + suffix;
+				const allTools = [...resolved.tools, ...this.extraTools];
 
 				const state = {
 					conversationHistory: this.conversationContext.toReplayContent(),
@@ -299,6 +305,8 @@ export class AgentRouter {
 		}
 
 		try {
+			const memoryFacts = this.getMemoryFacts?.() ?? [];
+			const kbContext = this.getKnowledgeBaseContext?.()?.trim();
 			const context = this.conversationContext.getSubagentContext(
 				{
 					description: `Execute tool: ${toolCall.toolName}`,
@@ -307,7 +315,9 @@ export class AgentRouter {
 					args: toolCall.args,
 				},
 				subagentConfig.instructions,
-				[],
+				memoryFacts,
+				10,
+				kbContext,
 			);
 
 			const result = await runSubagent({

@@ -5,6 +5,7 @@
 
 export * from './agent/index.js';
 export * from './core/index.js';
+export * from './knowledge/index.js';
 export * from './memory/index.js';
 export * from './runtime/index.js';
 export * from './tools/index.js';

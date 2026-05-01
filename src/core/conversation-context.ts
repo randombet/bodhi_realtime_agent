@@ -114,6 +114,7 @@ export class ConversationContext {
 		agentInstructions: string,
 		memoryFacts: MemoryFact[],
 		recentTurnCount = 10,
+		knowledgeBaseContext?: string,
 	): SubagentContextSnapshot {
 		const recentTurns = this._items.slice(-recentTurnCount);
 		return {
@@ -122,6 +123,7 @@ export class ConversationContext {
 			recentTurns,
 			relevantMemoryFacts: memoryFacts,
 			agentInstructions,
+			...(knowledgeBaseContext ? { knowledgeBaseContext } : {}),
 		};
 	}
 

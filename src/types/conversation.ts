@@ -76,6 +76,11 @@ export interface SubagentContextSnapshot {
 	relevantMemoryFacts: MemoryFact[];
 	/** The subagent's own system instructions. */
 	agentInstructions: string;
+	/**
+	 * Prompt-injected knowledge base text for the active main agent (same slice as
+	 * appended to realtime system instructions). Lets background subagents align with domain docs.
+	 */
+	knowledgeBaseContext?: string;
 }
 
 /** Structured UI payload for dual-channel delivery (voice + UI). */

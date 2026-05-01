@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: MIT
 
-export { createAgentContext } from './agent-context.js';
+export {
+	createAgentContext,
+	resolveAgentWithKnowledgeBase,
+	resolveInstructions,
+} from './agent-context.js';
 export { AgentRouter } from './agent-router.js';
 export type { SubagentEventCallbacks } from './agent-router.js';
 export { PersistentSubagentManager } from './persistent-subagent-manager.js';

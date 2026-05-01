@@ -32,6 +32,9 @@ EXTRACTION RULES:
 5. This is VOICE transcription — spelling of names and places may be approximate. Normalize obvious transcription errors when context makes the correct word clear (e.g. "Sankara" → "Santa Clara").
 6. Resolve relative dates to absolute dates using the current date/time above.
 
+KNOWLEDGE BASE CONTEXT (authoritative session documents — do NOT extract facts that merely restate or paraphrase this material; only capture what the user personally states beyond it):
+{knowledgeBaseSummary}
+
 MERGE RULES:
 7. Your output REPLACES the entire memory file. Include ALL facts that should be retained — both existing and newly extracted.
 8. When new information contradicts an existing fact, keep only the newer version.

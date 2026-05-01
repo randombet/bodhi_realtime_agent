@@ -2,6 +2,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { createBodhiSessionConfig } from '../../app/agents/bodhi-session.js';
+import { resolveAgentWithKnowledgeBase } from '../../src/agent/agent-context.js';
 import type { ConversationHistoryStore } from '../../src/types/history.js';
 import type { ToolContext, ToolDefinition } from '../../src/types/tool.js';
 
@@ -9,10 +10,10 @@ import type { ToolContext, ToolDefinition } from '../../src/types/tool.js';
  * Build a minimal session config and extract the session_data_action tool
  * from the main agent's tools array.
  */
-function getSessionDataActionTool(
+async function getSessionDataActionTool(
 	conversationHistoryStore?: ConversationHistoryStore,
-): ToolDefinition {
-	const config = createBodhiSessionConfig({
+): Promise<ToolDefinition> {
+	const config = await createBodhiSessionConfig({
 		apiKey: 'test-key',
 		memoryStore: {
 			addFacts: vi.fn(),
@@ -72,7 +73,7 @@ function createMockStore(overrides?: Partial<ConversationHistoryStore>): Convers
 describe('session_data_action tool (download_history)', () => {
 	it('sends conversation history to client and returns success', async () => {
 		const store = createMockStore();
-		const tool = getSessionDataActionTool(store);
+		const tool = await getSessionDataActionTool(store);
 		const ctx = createMockCtx();
 		const before = Date.now();
 
@@ -95,7 +96,7 @@ describe('session_data_action tool (download_history)', () => {
 	});
 
 	it('returns error when conversationHistoryStore is undefined', async () => {
-		const tool = getSessionDataActionTool(undefined);
+		const tool = await getSessionDataActionTool(undefined);
 		const ctx = createMockCtx();
 
 		const result = await tool.execute({ action: 'download_history' }, ctx);
@@ -109,7 +110,7 @@ describe('session_data_action tool (download_history)', () => {
 
 	it('returns error when sendJsonToClient is unavailable', async () => {
 		const store = createMockStore();
-		const tool = getSessionDataActionTool(store);
+		const tool = await getSessionDataActionTool(store);
 		const ctx = createMockCtx({ sendJsonToClient: undefined });
 
 		const result = await tool.execute({ action: 'download_history' }, ctx);
@@ -125,7 +126,7 @@ describe('session_data_action tool (download_history)', () => {
 			getSession: vi.fn(async () => null),
 			getSessionItems: vi.fn(async () => []),
 		});
-		const tool = getSessionDataActionTool(store);
+		const tool = await getSessionDataActionTool(store);
 		const ctx = createMockCtx();
 
 		const result = await tool.execute({ action: 'download_history' }, ctx);
@@ -153,7 +154,7 @@ describe('session_data_action tool (download_history)', () => {
 		const store = createMockStore({
 			getSessionItems: vi.fn(async () => largeItems),
 		});
-		const tool = getSessionDataActionTool(store);
+		const tool = await getSessionDataActionTool(store);
 		const ctx = createMockCtx();
 
 		const result = (await tool.execute({ action: 'download_history' }, ctx)) as {
@@ -168,7 +169,7 @@ describe('session_data_action tool (download_history)', () => {
 
 	it('calls getSession and getSessionItems with ctx.sessionId', async () => {
 		const store = createMockStore();
-		const tool = getSessionDataActionTool(store);
+		const tool = await getSessionDataActionTool(store);
 		const ctx = createMockCtx();
 
 		await tool.execute({ action: 'download_history' }, ctx);
@@ -179,8 +180,8 @@ describe('session_data_action tool (download_history)', () => {
 });
 
 describe('artifact registry wiring in bodhi session config', () => {
-	it('creates an artifactRegistry on session config', () => {
-		const config = createBodhiSessionConfig({
+	it('creates an artifactRegistry on session config', async () => {
+		const config = await createBodhiSessionConfig({
 			apiKey: 'test-key',
 			memoryStore: {
 				addFacts: vi.fn(),
@@ -201,7 +202,7 @@ describe('artifact registry wiring in bodhi session config', () => {
 	});
 
 	it('exposes list_artifacts tool that returns session artifacts', async () => {
-		const config = createBodhiSessionConfig({
+		const config = await createBodhiSessionConfig({
 			apiKey: 'test-key',
 			memoryStore: {
 				addFacts: vi.fn(),
@@ -229,7 +230,7 @@ describe('artifact registry wiring in bodhi session config', () => {
 	});
 
 	it('list_artifacts returns empty array before any artifact is stored', async () => {
-		const config = createBodhiSessionConfig({
+		const config = await createBodhiSessionConfig({
 			apiKey: 'test-key',
 			memoryStore: {
 				addFacts: vi.fn(),
@@ -252,7 +253,7 @@ describe('artifact registry wiring in bodhi session config', () => {
 		expect(result.artifacts).toEqual([]);
 	});
 
-	it('injects list_artifacts for standard, claude_code, and nanoclaw profiles', () => {
+	it('injects list_artifacts for standard, claude_code, and nanoclaw profiles', async () => {
 		const baseOptions = {
 			apiKey: 'test-key',
 			memoryStore: {
@@ -268,15 +269,15 @@ describe('artifact registry wiring in bodhi session config', () => {
 			getSessionRef: () => null,
 		};
 
-		const standard = createBodhiSessionConfig({
+		const standard = await createBodhiSessionConfig({
 			...baseOptions,
 			agentProfile: 'standard',
 		});
-		const claude = createBodhiSessionConfig({
+		const claude = await createBodhiSessionConfig({
 			...baseOptions,
 			agentProfile: 'claude_code',
 		});
-		const nanoclaw = createBodhiSessionConfig({
+		const nanoclaw = await createBodhiSessionConfig({
 			...baseOptions,
 			agentProfile: 'nanoclaw',
 		});
@@ -286,8 +287,8 @@ describe('artifact registry wiring in bodhi session config', () => {
 		expect(nanoclaw.agents[0]?.tools.some((t) => t.name === 'list_artifacts')).toBe(true);
 	});
 
-	it('injects recruiting source-of-truth context and get_screening_context tool', () => {
-		const config = createBodhiSessionConfig({
+	it('recruiting profile uses knowledgeBase config and resolves documents at session time', async () => {
+		const config = await createBodhiSessionConfig({
 			apiKey: 'test-key',
 			memoryStore: {
 				addFacts: vi.fn(),
@@ -304,13 +305,25 @@ describe('artifact registry wiring in bodhi session config', () => {
 		});
 
 		const mainAgent = config.agents[0];
-		expect(mainAgent?.instructions).toContain('Calendly');
-		expect(mainAgent?.instructions).toContain('Full Stack Engineer, Commerce');
-		expect(mainAgent?.instructions).toContain('YIXUAN ZHAI');
-		expect(mainAgent?.tools.some((t) => t.name === 'get_screening_context')).toBe(true);
+		// The new recruiting profile uses knowledgeBase instead of legacy augmentation
+		expect(mainAgent?.knowledgeBase).toBeDefined();
+		expect(mainAgent?.knowledgeBase?.documents).toHaveLength(3);
+		expect(mainAgent?.knowledgeBase?.documents.map((d) => d.name)).toEqual([
+			'Company Profile',
+			'Job Description',
+			'Candidate Resume',
+		]);
+
+		// Documents are injected at session connect time via resolveAgentWithKnowledgeBase,
+		// so the base instructions don't contain file content. Verify via the resolver:
+		// biome-ignore lint/style/noNonNullAssertion: test assertion already checks mainAgent exists
+		const resolved = resolveAgentWithKnowledgeBase(mainAgent!);
+		expect(resolved.instructions).toContain('Calendly');
+		expect(resolved.instructions).toContain('Full Stack Engineer, Commerce');
+		expect(resolved.instructions).toContain('YIXUAN ZHAI');
 	});
 
-	it('injects read_image for standard, claude_code, and nanoclaw profiles', () => {
+	it('injects read_image for standard, claude_code, and nanoclaw profiles', async () => {
 		const baseOptions = {
 			apiKey: 'test-key',
 			memoryStore: {
@@ -326,15 +339,15 @@ describe('artifact registry wiring in bodhi session config', () => {
 			getSessionRef: () => null,
 		};
 
-		const standard = createBodhiSessionConfig({
+		const standard = await createBodhiSessionConfig({
 			...baseOptions,
 			agentProfile: 'standard',
 		});
-		const claude = createBodhiSessionConfig({
+		const claude = await createBodhiSessionConfig({
 			...baseOptions,
 			agentProfile: 'claude_code',
 		});
-		const nanoclaw = createBodhiSessionConfig({
+		const nanoclaw = await createBodhiSessionConfig({
 			...baseOptions,
 			agentProfile: 'nanoclaw',
 		});
@@ -344,8 +357,8 @@ describe('artifact registry wiring in bodhi session config', () => {
 		expect(nanoclaw.agents[0]?.tools.some((t) => t.name === 'read_image')).toBe(true);
 	});
 
-	it('configures read_image as background tool with a pending message', () => {
-		const config = createBodhiSessionConfig({
+	it('configures read_image as background tool with a pending message', async () => {
+		const config = await createBodhiSessionConfig({
 			apiKey: 'test-key',
 			memoryStore: {
 				addFacts: vi.fn(),
@@ -366,7 +379,7 @@ describe('artifact registry wiring in bodhi session config', () => {
 	});
 
 	it('registers read_image subagent and returns missing-artifact error', async () => {
-		const config = createBodhiSessionConfig({
+		const config = await createBodhiSessionConfig({
 			apiKey: 'test-key',
 			memoryStore: {
 				addFacts: vi.fn(),

@@ -99,6 +99,14 @@ describe('buildSystemPrompt', () => {
 		);
 		expect(prompt).toContain('Prefers window seat');
 	});
+
+	it('includes knowledge base section when knowledgeBaseContext is set', () => {
+		const prompt = _buildSystemPromptForTest(
+			createTestContext({ knowledgeBaseContext: 'Role: Engineer at Acme' }),
+		);
+		expect(prompt).toContain('# Knowledge Base');
+		expect(prompt).toContain('Role: Engineer at Acme');
+	});
 });
 
 describe('runSubagent', () => {

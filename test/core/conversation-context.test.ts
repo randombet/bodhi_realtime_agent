@@ -153,6 +153,20 @@ describe('ConversationContext', () => {
 			expect(snapshot.recentTurns[0].content).toBe('turn2');
 			expect(snapshot.relevantMemoryFacts).toEqual(facts);
 			expect(snapshot.agentInstructions).toBe('You are a booking agent.');
+			expect(snapshot.knowledgeBaseContext).toBeUndefined();
+		});
+
+		it('includes knowledgeBaseContext on snapshot when provided', () => {
+			const ctx = new ConversationContext();
+			ctx.addUserMessage('turn1');
+			const task = {
+				description: 'Summarize',
+				toolCallId: 'tc_1',
+				toolName: 'summarize',
+				args: {},
+			};
+			const snapshot = ctx.getSubagentContext(task, 'Agent instr', [], 10, 'Injected KB text');
+			expect(snapshot.knowledgeBaseContext).toBe('Injected KB text');
 		});
 	});
 

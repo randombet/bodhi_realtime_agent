@@ -40,6 +40,16 @@ export type {
 
 export type { FrameworkHooks } from './hooks.js';
 
+export type {
+	KnowledgeBaseChunk,
+	KnowledgeBaseConfig,
+	KnowledgeBaseDocument,
+	KnowledgeBaseDocumentMode,
+	KnowledgeBaseDocumentSource,
+	KnowledgeBaseProcessContext,
+	ProcessedKnowledgeBase,
+} from './knowledge-base.js';
+
 export type { MemoryCategory, MemoryFact, MemoryStore } from './memory.js';
 
 export type { QueuedNotification } from './notification.js';
