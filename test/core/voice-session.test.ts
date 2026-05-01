@@ -1409,6 +1409,44 @@ describe('VoiceSession', () => {
 	});
 
 	describe('reconnect error handling', () => {
+		it('logs when goAway reconnect completes', async () => {
+			const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+			try {
+				session = new VoiceSession({
+					sessionId: 'sess_1',
+					userId: 'user_1',
+					apiKey: 'test-key',
+					agents: [createEchoAgent()],
+					initialAgent: 'echo',
+					port: 9906,
+					model: mockModel,
+				});
+
+				await session.start();
+				await new Promise((r) => setTimeout(r, 50));
+
+				session.sessionManager.updateResumptionHandle('handle_success');
+
+				const transportRef = (
+					session as unknown as { transport: { reconnect: () => Promise<void> } }
+				).transport;
+				vi.spyOn(transportRef, 'reconnect').mockResolvedValueOnce(undefined);
+
+				const { _getMessageHandler } = await import('@google/genai');
+				const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+				fire({ goAway: { timeLeft: '30s' } });
+
+				await new Promise((r) => setTimeout(r, 100));
+
+				expect(session.sessionManager.state).toBe('ACTIVE');
+				expect(logSpy).toHaveBeenCalledWith(
+					expect.stringContaining('[VoiceSession] Reconnect complete; session ACTIVE'),
+				);
+			} finally {
+				logSpy.mockRestore();
+			}
+		});
+
 		it('transitions to CLOSED when goAway reconnect fails', async () => {
 			const onError = vi.fn();
 			session = new VoiceSession({
