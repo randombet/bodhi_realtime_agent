@@ -17,45 +17,56 @@ export function createInterviewerAgent(
 	state: InterviewState,
 	documents: InterviewDocuments,
 ): MainAgent {
-	const nextInterviewQuestion: ToolDefinition = {
-		name: 'next_interview_question',
+	const progressInterview: ToolDefinition = {
+		name: 'record_answer_and_get_next_question',
 		description:
-			'Return the next planned interview question in sequence. Call this after preparation and after each recorded answer.',
-		parameters: z.object({}),
+			'Advance the interview in one step. At the start, call without answerText to get the first question. After each candidate answer, pass answerText; the tool records it and returns the next question or closing.',
+		parameters: z.object({
+			answerText: z
+				.string()
+				.min(1)
+				.optional()
+				.describe('The candidate answer, summarized or transcribed. Omit only for the first call.'),
+		}),
 		execution: 'inline',
-		execute: async (_args, ctx: ToolContext) => {
-			ensurePreparedWithFallback(state, documents, 'next_interview_question used fallback plan');
-			const result = getNextInterviewQuestion(state);
+		execute: async (args, ctx: ToolContext) => {
+			ensurePreparedWithFallback(
+				state,
+				documents,
+				'record_answer_and_get_next_question used fallback plan',
+			);
+
+			const { answerText } = args as { answerText?: string };
+			const answerRecord = state.activeQuestion
+				? recordInterviewAnswer(state, answerText ?? '')
+				: undefined;
+
+			if (answerRecord?.status === 'error') {
+				return {
+					status: 'error',
+					answerRecord,
+					message:
+						answerRecord.message === 'Answer text is empty.'
+							? 'answerText is required after a question has been asked.'
+							: answerRecord.message,
+				};
+			}
+
+			if (answerRecord) {
+				queueAnswerRecordedNotification(ctx, answerRecord, state.answers.length);
+			}
+
+			const next = getNextInterviewQuestion(state);
+			const result = {
+				...next,
+				answerRecord,
+				answersRecorded: state.answers.length,
+			};
 			ctx.sendJsonToClient?.({
 				type: 'interview.question',
 				payload: result,
 			});
 			return result;
-		},
-	};
-
-	const recordAnswer: ToolDefinition = {
-		name: 'record_interview_answer',
-		description:
-			'Record the candidate answer to the active interview question in the background. Immediately call next_interview_question after this tool is accepted; do not wait or speak first.',
-		parameters: z.object({
-			answerText: z.string().min(1).describe('The candidate answer, summarized or transcribed.'),
-		}),
-		execution: 'background',
-		execute: async (args, ctx: ToolContext) => {
-			const { answerText } = args as { answerText: string };
-			const result = recordInterviewAnswer(state, answerText);
-			ctx.sendJsonToClient?.({
-				type: 'interview.answer_recorded',
-				payload: {
-					...result,
-					answersRecorded: state.answers.length,
-				},
-			});
-			return {
-				...result,
-				answersRecorded: state.answers.length,
-			};
 		},
 	};
 
@@ -95,17 +106,17 @@ Core behavior:
 - Use the candidate, company, and role context from the prepared interview plan.
 
 Required tool flow:
-1. At the start, call next_interview_question.
-2. Ask only the question text returned by next_interview_question.
-3. After the candidate answers, call record_interview_answer with their answer text.
-4. Immediately call next_interview_question again. Do not speak between record_interview_answer and next_interview_question.
-5. Repeat until next_interview_question returns status "completed".
-6. When next_interview_question returns status "completed", speak the returned closingMessage exactly.
+1. At the start, call record_answer_and_get_next_question without answerText.
+2. Ask only the question text returned by record_answer_and_get_next_question.
+3. After the candidate answers, call record_answer_and_get_next_question with their answerText.
+4. If record_answer_and_get_next_question returns status "question", ask only the returned question text.
+5. Repeat until record_answer_and_get_next_question returns status "completed".
+6. When record_answer_and_get_next_question returns status "completed", speak the returned closingMessage exactly.
 7. After speaking the closingMessage, call end_session.
 
 If a tool reports an error, recover politely and continue with the fallback interview plan when available.
 Do not ask dynamic follow-ups in this V1 example.`,
-		tools: [nextInterviewQuestion, recordAnswer, getStatus, endSession],
+		tools: [progressInterview, getStatus, endSession],
 		onEnter: async () => {
 			console.log('[Interviewer] Agent entered');
 		},
@@ -113,4 +124,20 @@ Do not ask dynamic follow-ups in this V1 example.`,
 			console.log('[Interviewer] Agent exited');
 		},
 	};
+}
+
+function queueAnswerRecordedNotification(
+	ctx: ToolContext,
+	result: ReturnType<typeof recordInterviewAnswer>,
+	answersRecorded: number,
+): void {
+	queueMicrotask(() => {
+		ctx.sendJsonToClient?.({
+			type: 'interview.answer_recorded',
+			payload: {
+				...result,
+				answersRecorded,
+			},
+		});
+	});
 }

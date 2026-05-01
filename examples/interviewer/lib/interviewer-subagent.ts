@@ -100,7 +100,7 @@ Hard requirements:
 - Keep digest arrays compact: at most 6 resume highlights, 6 company highlights, 8 technologies, 6 alignment notes, and 3 source refs per question.
 - Keep each question concise and natural for voice, ideally under 28 words.
 - Do not create follow-up questions in V1.
-- After save_interview_plan succeeds, return only a short confirmation telling the main agent to call next_interview_question.
+- After save_interview_plan succeeds, return only a short confirmation telling the main agent to call record_answer_and_get_next_question.
 
 # Job Description
 ${documents.jobDescription}

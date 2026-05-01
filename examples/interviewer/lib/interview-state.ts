@@ -177,7 +177,7 @@ export function buildOpeningGreetingPrompt(state: InterviewState): string {
 		`Say this is the interview for the ${roleTitle} role at ${companyName}.`,
 		`Mention that the conversation will cover their resume, interest in ${companyName}, and a technical challenge.`,
 		'Keep the greeting to two short sentences.',
-		'Then call next_interview_question to get the first prepared question.',
+		'Then call record_answer_and_get_next_question without answerText to get the first prepared question.',
 	].join(' ');
 }
 

@@ -42,8 +42,8 @@ Open the local web client and connect to `ws://localhost:9900`.
 
 1. The voice agent greets the candidate.
 2. The `software_interviewer` subagent has already processed the documents and saved a plan during startup.
-3. The voice agent asks each planned question with `next_interview_question`.
-4. After each answer, the voice agent calls `record_interview_answer`.
+3. The voice agent gets the first planned question with `record_answer_and_get_next_question`.
+4. After each answer, the voice agent calls `record_answer_and_get_next_question` with the answer text and receives the next question or closing.
 5. After the third answer, the voice agent reads the prepared closing message and ends the session.
 
 ## Common Startup Notes
