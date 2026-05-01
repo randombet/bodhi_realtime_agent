@@ -164,6 +164,8 @@ export interface TransportToolResult {
 
 /** State provided to the transport for reconnection/recovery. */
 export interface ReconnectState {
+	/** Provider session handle to resume a live session when supported. */
+	resumptionHandle?: string;
 	/** Full conversation replay for recovery — rich typed items, not text-only. */
 	conversationHistory?: ReplayItem[];
 	/** In-flight tool calls to recover after reconnect. */

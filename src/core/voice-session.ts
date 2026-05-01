@@ -1342,13 +1342,17 @@ export class VoiceSession {
 			this.clientTransport.startBuffering();
 
 			this.transport
-				.reconnect({ conversationHistory: this.conversationContext.toReplayContent() })
+				.reconnect({
+					resumptionHandle: handle,
+					conversationHistory: this.conversationContext.toReplayContent(),
+				})
 				.then(() => {
 					const buffered = this.clientTransport.stopBuffering();
 					for (const chunk of buffered) {
 						this.transport.sendAudio(chunk.toString('base64'));
 					}
 					this.sessionManager.transitionTo('ACTIVE');
+					this.log('Reconnect complete; session ACTIVE');
 				})
 				.catch((err) => {
 					this.clientTransport.stopBuffering();
@@ -1508,13 +1512,17 @@ export class VoiceSession {
 				this.clientTransport.startBuffering();
 				setTimeout(() => {
 					this.transport
-						.reconnect({ conversationHistory: this.conversationContext.toReplayContent() })
+						.reconnect({
+							resumptionHandle: handle,
+							conversationHistory: this.conversationContext.toReplayContent(),
+						})
 						.then(() => {
 							const buffered = this.clientTransport.stopBuffering();
 							for (const chunk of buffered) {
 								this.transport.sendAudio(chunk.toString('base64'));
 							}
 							this.sessionManager.transitionTo('ACTIVE');
+							this.log('Reconnect complete; session ACTIVE');
 						})
 						.catch((err) => {
 							this.clientTransport.stopBuffering();
