@@ -161,8 +161,7 @@ export class ToolCallRouter {
 		// Find subagent config
 		const registeredConfig = this.deps.subagentConfigs[call.toolName];
 		if (!registeredConfig) {
-			// Fallback: run as inline tool
-			this.handleInlineToolCall(call);
+			this.handleLocalBackgroundToolCall(call, hasPendingMessage);
 			return;
 		}
 
@@ -241,6 +240,71 @@ export class ToolCallRouter {
 						scheduling: 'when_idle',
 					});
 				}
+			});
+	}
+
+	private handleLocalBackgroundToolCall(
+		call: { toolCallId: string; toolName: string; args: Record<string, unknown> },
+		hasPendingMessage: boolean,
+	): void {
+		this.deps.conversationContext.addToolCall(call);
+
+		if (!hasPendingMessage) {
+			this.deps.sendToolResult({
+				id: call.toolCallId,
+				name: call.toolName,
+				result: {
+					status: 'accepted',
+					message: 'Background tool accepted. Continue with the next required step.',
+					important:
+						'Do not wait for another tool result. Continue with the next tool call or user-facing response required by your instructions.',
+				},
+				scheduling: 'immediate',
+			});
+		}
+
+		this.deps.toolExecutor
+			.handleToolCall(call)
+			.then((result) => {
+				this.deps.conversationContext.addToolResult(result);
+
+				if (hasPendingMessage) {
+					this.deps.notificationQueue.sendOrQueue(
+						[
+							{
+								role: 'user',
+								parts: [
+									{
+										text: `[SYSTEM: Background task "${call.toolName}" completed successfully. Result: ${JSON.stringify(result.result)}. Please inform the user if relevant.]`,
+									},
+								],
+							},
+						],
+						true,
+					);
+				}
+			})
+			.catch((err) => {
+				this.deps.reportError('tool-executor', err);
+				this.deps.conversationContext.addToolResult({
+					toolCallId: call.toolCallId,
+					toolName: call.toolName,
+					result: null,
+					error: err instanceof Error ? err.message : String(err),
+				});
+				this.deps.notificationQueue.sendOrQueue(
+					[
+						{
+							role: 'user',
+							parts: [
+								{
+									text: `[SYSTEM: Background task "${call.toolName}" failed. Exact error details: ${err instanceof Error ? err.message : String(err)}. Tell the user the exact error details first, then ask how to proceed.]`,
+								},
+							],
+						},
+					],
+					true,
+				);
 			});
 	}
 }

@@ -1017,7 +1017,7 @@ describe('VoiceSession', () => {
 			expect(response.response.error).toContain('Tool execution failed');
 		});
 
-		it('sends error response to Gemini when background tool has no subagent config (falls back to inline)', async () => {
+		it('runs background tool without subagent config asynchronously after immediate acknowledgement', async () => {
 			session = new VoiceSession({
 				sessionId: 'sess_1',
 				userId: 'user_1',
@@ -1026,7 +1026,7 @@ describe('VoiceSession', () => {
 				initialAgent: 'bg-tool-agent',
 				port: 9890,
 				model: mockModel,
-				// No subagentConfigs — will fall back to inline execution
+				// No subagentConfigs — runs as local background execution
 			});
 
 			await session.start();
@@ -1038,7 +1038,7 @@ describe('VoiceSession', () => {
 				_getMockSession as unknown as () => Record<string, ReturnType<typeof vi.fn>>
 			)();
 
-			// Fire a background tool call (no subagent config → inline fallback)
+			// Fire a background tool call (no subagent config → local background execution)
 			fire({
 				toolCall: {
 					functionCalls: [{ id: 'tc_bg', name: 'slow_task', args: { task: 'do stuff' } }],
@@ -1047,14 +1047,12 @@ describe('VoiceSession', () => {
 
 			await new Promise((r) => setTimeout(r, 200));
 
-			// Should get a pending message response first, then the inline result
+			// Should get an immediate pending response so the LLM is not blocked.
 			expect(mockSess.sendToolResponse).toHaveBeenCalled();
-			// The last call should contain the actual result (from fallback inline execution)
 			const calls = mockSess.sendToolResponse.mock.calls;
 			const lastResponse = calls.at(-1)[0].functionResponses[0];
 			expect(lastResponse.id).toBe('tc_bg');
-			// Should not have hung — a response was sent
-			expect(lastResponse.response).toBeDefined();
+			expect(lastResponse.response).toMatchObject({ status: 'still_in_progress' });
 		});
 
 		it('fires onToolResult hook with error status when tool throws', async () => {
