@@ -172,6 +172,10 @@ curl -sS -H 'Authorization: Bearer <token>' \
   'https://bodhiagent.live/api/users/me/sessions'
 ```
 
+### Related: browser avatar embed (Spatial Real)
+
+For a **first-party web embed** (iframe or hosted page on the same Bodhi origin) that shows the Spatial Real face plus voice on **`/ws`** (not `/ws/mobile`), see **`app/docs/avatar-integration.md` §2.5**: `POST /api/embed/avatar-sessions`, `POST /api/embed/spatial-session-token`, and the **`/embed/avatar`** route. That path uses short-lived **embed intents** on the WebSocket instead of shipping a long-lived `bsk_` secret to an untrusted browser.
+
 ### Related: remote coding worker from Agent Studio
 
 If you use Agent Studio with `remote_persistent_worker` (main voice agent in Bodhi, coding worker on your own server), follow:

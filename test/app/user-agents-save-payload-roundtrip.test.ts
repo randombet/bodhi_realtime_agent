@@ -243,4 +243,145 @@ describe('user-agents-api save payload round-trip', () => {
 		});
 		expect(rebuilt.mainAgents[0]?.toolIds).toContain('ask_remote');
 	});
+
+	it('round-trips avatarConfig on AgentDefinitionV2', () => {
+		const v2: AgentDefinitionV2 = {
+			schemaVersion: 2,
+			id: ctx.id,
+			userId: ctx.userId,
+			name: 'Avatar agent',
+			description: '',
+			realtimeProvider: 'gemini',
+			geminiVoiceName: 'Puck',
+			openaiVoice: 'coral',
+			geminiSttModel: 'gemini-3-flash-preview',
+			mainAgents: [
+				{
+					name: 'main',
+					greeting: 'Hi',
+					instructions: 'Main.',
+					googleSearch: true,
+					toolIds: ['end_session'],
+				},
+			],
+			workers: {},
+			avatarConfig: {
+				enabled: true,
+				providerId: 'spatialreal',
+				presetId: 'face-model-uuid-1',
+			},
+			createdAt: ctx.createdAt,
+			updatedAt: ctx.updatedAt,
+		};
+
+		const payload = userAgentWireToSavePayload(v2);
+		expect(payload.avatarConfig?.enabled).toBe(true);
+		expect(payload.avatarConfig?.presetId).toBe('face-model-uuid-1');
+
+		const rebuilt = buildAgentDefinitionV2FromSavePayload(payload, ctx);
+		expect(rebuilt.avatarConfig).toEqual(v2.avatarConfig);
+	});
+
+	it('strips avatarConfig when save payload has avatar disabled', () => {
+		const v2: AgentDefinitionV2 = {
+			schemaVersion: 2,
+			id: ctx.id,
+			userId: ctx.userId,
+			name: 'No avatar',
+			description: '',
+			realtimeProvider: 'gemini',
+			geminiVoiceName: 'Puck',
+			openaiVoice: 'coral',
+			geminiSttModel: 'gemini-3-flash-preview',
+			mainAgents: [
+				{
+					name: 'main',
+					greeting: 'Hi',
+					instructions: 'Main.',
+					googleSearch: true,
+					toolIds: ['end_session'],
+				},
+			],
+			workers: {},
+			avatarConfig: {
+				enabled: true,
+				providerId: 'spatialreal',
+				presetId: 'face-model-uuid-1',
+			},
+			createdAt: ctx.createdAt,
+			updatedAt: ctx.updatedAt,
+		};
+
+		const payload = userAgentWireToSavePayload(v2);
+		const disabled = {
+			...payload,
+			avatarConfig: { enabled: false, providerId: 'spatialreal', presetId: '' },
+		};
+		const rebuilt = buildAgentDefinitionV2FromSavePayload(disabled, ctx);
+		expect(rebuilt.avatarConfig).toBeUndefined();
+	});
+
+	it('parseAgentDefinitionV2 accepts avatarConfig with a non-spatial provider id', () => {
+		const raw = {
+			schemaVersion: 2,
+			id: ctx.id,
+			userId: ctx.userId,
+			name: 'Future avatar provider',
+			description: '',
+			realtimeProvider: 'gemini',
+			geminiVoiceName: 'Puck',
+			openaiVoice: 'coral',
+			geminiSttModel: 'gemini-3-flash-preview',
+			mainAgents: [
+				{
+					name: 'main',
+					greeting: 'Hi',
+					instructions: 'Main.',
+					googleSearch: true,
+					toolIds: ['end_session'],
+				},
+			],
+			workers: {},
+			avatarConfig: {
+				enabled: true,
+				providerId: 'future_avatar_cloud',
+				presetId: 'face-model-uuid-1',
+			},
+			createdAt: ctx.createdAt,
+			updatedAt: ctx.updatedAt,
+		};
+		expect(parseAgentDefinitionV2(raw)?.avatarConfig?.providerId).toBe('future_avatar_cloud');
+	});
+
+	it('parseAgentDefinitionV2 rejects enabled avatar with empty presetId', () => {
+		const raw = {
+			schemaVersion: 2,
+			id: ctx.id,
+			userId: ctx.userId,
+			name: 'Bad preset',
+			description: '',
+			realtimeProvider: 'gemini',
+			geminiVoiceName: 'Puck',
+			openaiVoice: 'coral',
+			geminiSttModel: 'gemini-3-flash-preview',
+			mainAgents: [
+				{
+					name: 'main',
+					greeting: 'Hi',
+					instructions: 'Main.',
+					googleSearch: true,
+					toolIds: ['end_session'],
+				},
+			],
+			workers: {},
+			avatarConfig: {
+				enabled: true,
+				providerId: 'spatialreal',
+				presetId: '',
+			},
+			createdAt: ctx.createdAt,
+			updatedAt: ctx.updatedAt,
+		};
+		expect(parseAgentDefinitionV2(raw)).toBeNull();
+	});
 });
