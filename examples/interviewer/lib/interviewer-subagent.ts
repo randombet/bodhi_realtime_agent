@@ -95,7 +95,8 @@ Hard requirements:
 - Question 1 must ask the candidate to tell me about themselves or walk through their resume.
 - Question 2 must ask why they want to work for the company named in the company intro.
 - Question 3 must ask about a challenging technical problem they solved.
-- Use exact document values: candidate name "Maya Chen", company name "Northstar Robotics", role title "Senior Software Engineer, Realtime Systems" when those are present in the documents.
+- Extract the candidate name from the candidate resume, the company name from the company intro, and the role title from the job description.
+- Use those extracted document values exactly in the saved digest and questions.
 - Never use placeholders such as "the company", "[Company]", or "the role" in saved digest or questions.
 - Keep digest arrays compact: at most 6 resume highlights, 6 company highlights, 8 technologies, 6 alignment notes, and 3 source refs per question.
 - Keep each question concise and natural for voice, ideally under 28 words.
