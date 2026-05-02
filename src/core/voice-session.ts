@@ -14,7 +14,10 @@ import { RuntimeOrchestrator } from '../runtime/runtime-orchestrator.js';
 import { ToolExecutor } from '../tools/tool-executor.js';
 import { ClientSenderAdapter } from '../transport/client-sender-adapter.js';
 import { ClientTransport } from '../transport/client-transport.js';
-import { GeminiLiveTransport } from '../transport/gemini-live-transport.js';
+import {
+	GeminiLiveTransport,
+	type GeminiRealtimeInputConfig,
+} from '../transport/gemini-live-transport.js';
 import type { MainAgent, SubagentConfig } from '../types/agent.js';
 import type { BehaviorCategory } from '../types/behavior.js';
 import type { ConversationHistoryStore } from '../types/history.js';
@@ -80,6 +83,10 @@ export interface VoiceSessionConfig {
 	 *  Has no effect when sttProvider is set (built-in is disabled automatically).
 	 *  Use false to disable all input transcription for privacy or cost control. */
 	inputAudioTranscription?: boolean;
+	/** Gemini Live realtime input/VAD tuning. Applied when using the built-in Gemini transport. */
+	realtimeInputConfig?: GeminiRealtimeInputConfig;
+	/** Drop client microphone frames until the active agent's greeting turn completes. */
+	gateAudioUntilGreetingComplete?: boolean;
 	/** External STT provider for user input transcription.
 	 *  When set, transport built-in transcription is automatically disabled.
 	 *  When omitted, the transport's built-in transcription is used. */
@@ -201,12 +208,17 @@ export class VoiceSession {
 	private lastClientSpeechDurationMs = 0;
 	private lastGeminiRecognitionLoggedForSpeechEndMs = 0;
 	private lastInputTranscriptionLogText = '';
-	private static readonly AUDIO_VAD_SILENCE_MS = 900;
+	private greetingAudioGateActive = false;
+	private greetingAudioGateDropLogged = false;
+	private ownsClientTransport: boolean;
+	private static readonly AUDIO_VAD_SILENCE_MS = 500;
+	private static readonly AUDIO_VAD_MIN_SPEECH_MS = 120;
 	private static readonly AUDIO_VAD_PEAK_THRESHOLD = 1200;
 	private static readonly AUDIO_VAD_AVG_ABS_THRESHOLD = 220;
 
 	constructor(config: VoiceSessionConfig) {
 		this.config = config;
+		this.ownsClientTransport = !config.clientSender;
 		this.eventBus = new EventBus();
 		this.hooks = new HooksManager();
 		this.conversationContext = new ConversationContext();
@@ -355,6 +367,7 @@ export class VoiceSession {
 					speechConfig: config.speechConfig,
 					compressionConfig: config.compressionConfig,
 					inputAudioTranscription: inputTranscription,
+					realtimeInputConfig: config.realtimeInputConfig,
 				},
 				{},
 			);
@@ -786,6 +799,11 @@ export class VoiceSession {
 			await this.transport.connect({
 				auth: { type: 'api_key', apiKey: this.config.apiKey },
 				model: this.config.geminiModel ?? 'gemini-live-2.5-flash-preview',
+				...(this.config.realtimeInputConfig
+					? {
+							realtimeInputConfig: this.config.realtimeInputConfig as Record<string, unknown>,
+						}
+					: {}),
 				...(this.ttsProvider ? { responseModality: 'text' as const } : {}),
 			});
 		}
@@ -982,6 +1000,13 @@ export class VoiceSession {
 
 	private handleAudioFromClient(data: Buffer): void {
 		if (this.sessionManager.isActive) {
+			if (this.greetingAudioGateActive) {
+				if (!this.greetingAudioGateDropLogged) {
+					this.greetingAudioGateDropLogged = true;
+					this.log('Client audio gated while greeting turn is pending');
+				}
+				return;
+			}
 			this.updateClientAudioVad(data);
 			// When active agent uses external audio, don't forward to LLM transport.
 			// Route mic frames to the active external audio handler (e.g., TwilioBridge).
@@ -1043,17 +1068,26 @@ export class VoiceSession {
 		}
 	}
 
-	private completeClientAudioVad(now: number, reason: string): void {
-		if (!this.audioVadSpeechActive || this.audioVadLastVoiceMs <= 0) return;
+	private completeClientAudioVad(now: number, reason: string): 'completed' | 'ignored' | 'none' {
+		if (!this.audioVadSpeechActive || this.audioVadLastVoiceMs <= 0) return 'none';
+		const speechEndMs = this.audioVadLastVoiceMs;
+		const speechDurationMs = Math.max(0, speechEndMs - this.audioVadSpeechStartMs);
+		const silenceObservedMs = now - speechEndMs;
 		this.audioVadSpeechActive = false;
-		this.lastClientSpeechCompletedMs = this.audioVadLastVoiceMs;
-		this.lastClientSpeechDurationMs = Math.max(
-			0,
-			this.audioVadLastVoiceMs - this.audioVadSpeechStartMs,
-		);
+		this.audioVadSpeechStartMs = 0;
+		this.audioVadLastVoiceMs = 0;
+		if (speechDurationMs < VoiceSession.AUDIO_VAD_MIN_SPEECH_MS) {
+			this.log(
+				`[Latency] User voice input ignored (client audio VAD; reason=${reason}; speechDuration=${speechDurationMs}ms; silenceObserved=${silenceObservedMs}ms; minSpeechDuration=${VoiceSession.AUDIO_VAD_MIN_SPEECH_MS}ms)`,
+			);
+			return 'ignored';
+		}
+		this.lastClientSpeechCompletedMs = speechEndMs;
+		this.lastClientSpeechDurationMs = speechDurationMs;
 		this.log(
-			`[Latency] User voice input completed (client audio VAD; reason=${reason}; speechDuration=${this.lastClientSpeechDurationMs}ms; silenceObserved=${now - this.audioVadLastVoiceMs}ms)`,
+			`[Latency] User voice input completed (client audio VAD; reason=${reason}; speechDuration=${this.lastClientSpeechDurationMs}ms; silenceObserved=${silenceObservedMs}ms)`,
 		);
+		return 'completed';
 	}
 
 	private logInputTranscriptionLatency(text: string, source: string): void {
@@ -1305,6 +1339,12 @@ export class VoiceSession {
 
 	/** Core turn-end logic — called directly (no TTS) or via ttsMaybeCompleteTurn (TTS gate). */
 	private handleTurnCompleteInternal(): void {
+		if (this.greetingAudioGateActive) {
+			this.greetingAudioGateActive = false;
+			this.greetingAudioGateDropLogged = false;
+			this.log('Client audio gate released after greeting turn complete');
+		}
+
 		// ORDERING: STT commit + cleanup BEFORE turnId increment.
 		// This ensures commit(turnId) uses the turn being completed, and
 		// stale-drop (turnId < this.turnId) correctly rejects prior-turn results.
@@ -1351,6 +1391,16 @@ export class VoiceSession {
 		this.notificationQueue.onTurnComplete();
 	}
 
+	private activateGreetingAudioGate(): void {
+		if (!this.config.gateAudioUntilGreetingComplete || !this.agentRouter.activeAgent.greeting) {
+			return;
+		}
+		if (this.greetingAudioGateActive) return;
+		this.greetingAudioGateActive = true;
+		this.greetingAudioGateDropLogged = false;
+		this.log('Client audio gated until greeting turn completes');
+	}
+
 	/** Inject all active directives into the LLM's context to prevent behavioral drift. */
 	private reinforceDirectives(): void {
 		const text = this.directiveManager.getReinforcementText();
@@ -1380,6 +1430,7 @@ export class VoiceSession {
 		const greetingText = directiveSuffix
 			? `${directiveSuffix}\n\n${agent.greeting}`
 			: agent.greeting;
+		this.activateGreetingAudioGate();
 		this.transport.sendContent([{ role: 'user', text: greetingText }], true);
 	}
 
@@ -1545,12 +1596,22 @@ export class VoiceSession {
 	private handleClientConnected(): void {
 		this.log(`Client connected (geminiActive=${this.sessionManager.isActive})`);
 		this.clientConnected = true;
+		this.activateGreetingAudioGate();
 
 		// Send audio format config so the client can negotiate correct sample rates
 		this.clientTransport.sendJsonToClient({
 			type: 'session.config',
 			audioFormat: this.transport.audioFormat,
 		});
+
+		if (this.ownsClientTransport) {
+			this.clientTransport.sendJsonToClient({
+				type: 'session.ready',
+				userId: this.config.userId,
+				sessionId: this.config.sessionId,
+				agentProfile: this.agentRouter.activeAgent.name,
+			});
+		}
 
 		this.behaviorManager?.sendCatalog();
 		if (this.sessionManager.isActive) {

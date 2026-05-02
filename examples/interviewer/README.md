@@ -37,10 +37,13 @@ Open the local web client and connect to `ws://localhost:9900`.
 |----------|---------|---------|
 | `PORT` | `9900` | Local WebSocket port |
 | `HOST` | `0.0.0.0` | Bind address |
-| `GEMINI_LIVE_MODEL` | `gemini-2.5-flash-native-audio-preview-12-2025` | Live voice model |
+| `GEMINI_LIVE_MODEL` | `gemini-3.1-flash-live-preview` | Live voice model |
 | `INTERVIEWER_REASONING_MODEL` | `gemini-2.5-flash` | Main voice-agent reasoning model |
 | `INTERVIEWER_SUBAGENT_MODEL` | `gemini-3.1-flash-lite-preview` | Persistent interviewer reasoning model |
+| `INTERVIEWER_SUBAGENT_THINKING_BUDGET` | `128` | Low reasoning budget for the persistent interviewer |
 | `GEMINI_VOICE` | `Puck` | Gemini voice name |
+
+The example also tunes Gemini Live server-side VAD with `END_SENSITIVITY_HIGH` and `silenceDurationMs: 500` so interview answers can close faster after the candidate stops speaking. Client microphone audio is gated until the greeting turn completes, which prevents startup microphone frames from racing the greeting `clientContent` request.
 
 ## Interview Flow
 

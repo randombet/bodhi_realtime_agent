@@ -178,6 +178,20 @@ describe('LLMTransport type definitions', () => {
 		expect(config.responseModality).toBe('text');
 	});
 
+	it('LLMTransportConfig accepts realtimeInputConfig', () => {
+		const config: LLMTransportConfig = {
+			auth: { type: 'api_key', apiKey: 'test' },
+			model: 'test-model',
+			realtimeInputConfig: {
+				automaticActivityDetection: {
+					endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
+					silenceDurationMs: 500,
+				},
+			},
+		};
+		expect(config.realtimeInputConfig).toBeDefined();
+	});
+
 	it('TransportCapabilities accepts optional textResponseModality', () => {
 		const caps: TransportCapabilities = {
 			messageTruncation: false,

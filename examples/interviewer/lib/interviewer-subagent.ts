@@ -53,6 +53,20 @@ const interviewDecisionSchema = z.object({
 type InterviewDecision = z.infer<typeof interviewDecisionSchema>;
 type DynamicQuestionKind = Exclude<InterviewQuestionKind, 'primary'>;
 const MAX_DYNAMIC_QUESTIONS_PER_PRIMARY = 2;
+type SubagentProviderOptions = NonNullable<Parameters<typeof generateObject>[0]['providerOptions']>;
+
+export function createLowReasoningSubagentProviderOptions(
+	thinkingBudget: number,
+): SubagentProviderOptions {
+	return {
+		google: {
+			thinkingConfig: {
+				thinkingBudget,
+				includeThoughts: false,
+			},
+		},
+	};
+}
 
 function logSubagentDebug(message: string): void {
 	const t = new Date().toISOString().slice(11, 23);
@@ -75,6 +89,15 @@ function modelLabel(model: LanguageModelV1): string {
 		(model as { modelId?: string; model?: string }).model ??
 		'unknown'
 	);
+}
+
+function thinkingBudgetLabel(providerOptions: SubagentProviderOptions): string {
+	const googleOptions = providerOptions.google;
+	if (!googleOptions || typeof googleOptions !== 'object') return 'default';
+	const thinkingConfig = googleOptions.thinkingConfig;
+	if (!thinkingConfig || typeof thinkingConfig !== 'object') return 'default';
+	const thinkingBudget = thinkingConfig.thinkingBudget;
+	return typeof thinkingBudget === 'number' ? String(thinkingBudget) : 'default';
 }
 
 function errorMessage(err: unknown): string {
@@ -133,6 +156,7 @@ export class SoftwareInterviewerSubagent implements PersistentSubagentInstance {
 		private readonly state: InterviewState,
 		private readonly documents: InterviewDocuments,
 		readonly reasoningModel: LanguageModelV1,
+		private readonly providerOptions: SubagentProviderOptions = {},
 	) {}
 
 	async prepare(): Promise<void> {
@@ -142,7 +166,9 @@ export class SoftwareInterviewerSubagent implements PersistentSubagentInstance {
 
 		const startedAt = Date.now();
 		const traceId = `prepare#${++this.prepareSequence}`;
-		logSubagentDebug(`${traceId} start key=${this.key} model=${modelLabel(this.reasoningModel)}`);
+		logSubagentDebug(
+			`${traceId} start key=${this.key} model=${modelLabel(this.reasoningModel)} thinkingBudget=${thinkingBudgetLabel(this.providerOptions)}`,
+		);
 		const buildPromptStartedAt = Date.now();
 		const system = buildSoftwareInterviewerInstructions(this.documents);
 		const prompt =
@@ -159,6 +185,7 @@ export class SoftwareInterviewerSubagent implements PersistentSubagentInstance {
 			model: this.reasoningModel,
 			system,
 			prompt,
+			providerOptions: this.providerOptions,
 			schema: interviewPlanSchema,
 			schemaName: 'interview_plan',
 			schemaDescription:
@@ -459,12 +486,13 @@ export class SoftwareInterviewerSubagent implements PersistentSubagentInstance {
 			);
 			const generateStartedAt = Date.now();
 			logSubagentDebug(
-				`${traceId} step=decision_generate_object.start anchor=${answeredQuestion.id} dynamicCount=${dynamicCount} answerChars=${answerText.trim().length} mode=json`,
+				`${traceId} step=decision_generate_object.start anchor=${answeredQuestion.id} dynamicCount=${dynamicCount} answerChars=${answerText.trim().length} mode=json thinkingBudget=${thinkingBudgetLabel(this.providerOptions)}`,
 			);
 			const { object } = await generateObject({
 				model: this.reasoningModel,
 				system,
 				prompt,
+				providerOptions: this.providerOptions,
 				schema: interviewDecisionSchema,
 				schemaName: 'interview_decision',
 				schemaDescription:

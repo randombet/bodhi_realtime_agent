@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: MIT
 
-import { GoogleGenAI, type LiveServerMessage, type Session } from '@google/genai';
+import {
+	GoogleGenAI,
+	type LiveServerMessage,
+	type RealtimeInputConfig,
+	type Session,
+} from '@google/genai';
 import { DEFAULT_CONNECT_TIMEOUT_MS, DEFAULT_RECONNECT_TIMEOUT_MS } from '../core/constants.js';
 import type { ToolDefinition } from '../types/tool.js';
 import type {
@@ -30,6 +35,8 @@ function toFunctionResponsePayload(value: unknown): Record<string, unknown> {
 	return { result: value };
 }
 
+export type GeminiRealtimeInputConfig = RealtimeInputConfig | Record<string, unknown>;
+
 /** Configuration for connecting to the Gemini Live API. */
 export interface GeminiTransportConfig {
 	/** Google API key for authentication. */
@@ -50,6 +57,8 @@ export interface GeminiTransportConfig {
 	googleSearch?: boolean;
 	/** Enable server-side transcription of user audio input (default: true). */
 	inputAudioTranscription?: boolean;
+	/** Gemini Live realtime input behavior, including server-side VAD tuning. */
+	realtimeInputConfig?: GeminiRealtimeInputConfig;
 	/** Timeout in ms for connect() to receive setupComplete (default: 30000). */
 	connectTimeoutMs?: number;
 	/** Timeout in ms for the overall reconnect operation (default: 45000). */
@@ -209,6 +218,10 @@ export class GeminiLiveTransport implements LLMTransport {
 			connectConfig.inputAudioTranscription = {};
 		}
 
+		if (this.config.realtimeInputConfig) {
+			connectConfig.realtimeInputConfig = this.config.realtimeInputConfig;
+		}
+
 		if (this.config.systemInstruction) {
 			connectConfig.systemInstruction = this.config.systemInstruction;
 		}
@@ -328,7 +341,7 @@ export class GeminiLiveTransport implements LLMTransport {
 	sendAudio(base64Data: string): void {
 		if (!this.session) return;
 		this.session.sendRealtimeInput({
-			media: { data: base64Data, mimeType: 'audio/pcm;rate=16000' },
+			audio: { data: base64Data, mimeType: 'audio/pcm;rate=16000' },
 		});
 	}
 
@@ -341,7 +354,13 @@ export class GeminiLiveTransport implements LLMTransport {
 		this.session.sendToolResponse({ functionResponses: responses });
 	}
 
-	/** Send text-based conversation turns to Gemini (legacy API, used for context replay). */
+	/**
+	 * Send text-based conversation turns to Gemini.
+	 *
+	 * @deprecated Prefer `sendContent()` for framework text turns. Live generation
+	 * text should use realtime input; keep this only for legacy callers and context
+	 * replay/prefill flows that need client-content ordering semantics.
+	 */
 	sendClientContent(
 		turns: Array<{ role: string; parts: Array<{ text: string }> }>,
 		turnComplete = true,
@@ -371,9 +390,27 @@ export class GeminiLiveTransport implements LLMTransport {
 
 	// --- LLMTransport methods ---
 
+	private shouldUseRealtimeTextForContent(): boolean {
+		const model = this.config.model ?? '';
+		return (
+			/^gemini-3(?:\.\d+)?-.*live/i.test(model) ||
+			/^gemini-2\.5-.*(?:live|native-audio)/i.test(model)
+		);
+	}
+
 	/** Send provider-neutral content turns to Gemini. Converts ContentTurn to Gemini format. */
 	sendContent(turns: ContentTurn[], turnComplete = true): void {
 		if (!this.session) return;
+		if (turnComplete && this.shouldUseRealtimeTextForContent()) {
+			const text = turns
+				.map((t) => t.text.trim())
+				.filter(Boolean)
+				.join('\n\n');
+			if (text.length > 0) {
+				this.session.sendRealtimeInput({ text });
+			}
+			return;
+		}
 		const geminiTurns = turns.map((t) => ({
 			role: t.role === 'assistant' ? 'model' : t.role,
 			parts: [{ text: t.text }],
@@ -481,6 +518,9 @@ export class GeminiLiveTransport implements LLMTransport {
 		}
 		if (config.transcription !== undefined) {
 			this.config.inputAudioTranscription = config.transcription.input ?? true;
+		}
+		if (config.realtimeInputConfig !== undefined) {
+			this.config.realtimeInputConfig = config.realtimeInputConfig;
 		}
 		if (config.providerOptions) {
 			if (typeof config.providerOptions.googleSearch === 'boolean') {

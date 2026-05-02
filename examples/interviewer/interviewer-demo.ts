@@ -18,11 +18,19 @@ import { createInterviewState, ensurePreparedWithFallback } from './lib/intervie
 import { createInterviewerAgent } from './lib/interviewer-agent.js';
 import {
 	SoftwareInterviewerSubagent,
+	createLowReasoningSubagentProviderOptions,
 	createSoftwareInterviewerSubagentConfig,
 } from './lib/interviewer-subagent.js';
 
 function ts(): string {
 	return new Date().toISOString().slice(11, 23);
+}
+
+function parseSubagentThinkingBudget(): number {
+	const value = process.env.INTERVIEWER_SUBAGENT_THINKING_BUDGET;
+	if (value === undefined) return 128;
+	const parsed = Number.parseInt(value, 10);
+	return Number.isFinite(parsed) && parsed >= 0 ? parsed : 128;
 }
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY ?? '';
@@ -34,9 +42,16 @@ if (!GEMINI_API_KEY) {
 const PORT = Number(process.env.PORT) || 9900;
 const HOST = process.env.HOST || '0.0.0.0';
 const SESSION_ID = `interviewer_${Date.now()}`;
-const LIVE_MODEL = process.env.GEMINI_LIVE_MODEL || 'gemini-2.5-flash-native-audio-preview-12-2025';
+const LIVE_MODEL = process.env.GEMINI_LIVE_MODEL || 'gemini-3.1-flash-live-preview';
 const REASONING_MODEL = process.env.INTERVIEWER_REASONING_MODEL || 'gemini-2.5-flash';
 const SUBAGENT_MODEL = process.env.INTERVIEWER_SUBAGENT_MODEL || 'gemini-3.1-flash-lite-preview';
+const SUBAGENT_THINKING_BUDGET = parseSubagentThinkingBudget();
+const REALTIME_INPUT_CONFIG = {
+	automaticActivityDetection: {
+		endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
+		silenceDurationMs: 500,
+	},
+};
 
 const google = createGoogleGenerativeAI({ apiKey: GEMINI_API_KEY });
 
@@ -50,6 +65,7 @@ async function main() {
 		state,
 		documents,
 		subagentReasoningModel,
+		createLowReasoningSubagentProviderOptions(SUBAGENT_THINKING_BUDGET),
 	);
 
 	console.log(`${ts()} [Interviewer] Preparing document-grounded interview plan...`);
@@ -86,6 +102,8 @@ async function main() {
 		},
 		geminiModel: LIVE_MODEL,
 		speechConfig: { voiceName: process.env.GEMINI_VOICE || 'Puck' },
+		realtimeInputConfig: REALTIME_INPUT_CONFIG,
+		gateAudioUntilGreetingComplete: true,
 		hooks: {
 			onSessionStart: (event) =>
 				console.log(`${ts()} [Session] Started: ${event.sessionId} (${event.agentName})`),
@@ -134,6 +152,9 @@ async function main() {
 	console.log(`  Voice model:     ${LIVE_MODEL}`);
 	console.log(`  Main model:      ${REASONING_MODEL}`);
 	console.log(`  Subagent model:  ${SUBAGENT_MODEL}`);
+	console.log(`  Subagent budget: ${SUBAGENT_THINKING_BUDGET}`);
+	console.log('  Gemini VAD:      end=HIGH silence=500ms');
+	console.log('  Startup audio:   gated until greeting completes');
 	console.log('  Documents:       examples/interviewer/docs/*.md');
 	console.log();
 	console.log('Connect via: pnpm web-client:dev');

@@ -123,6 +123,8 @@ export interface LLMTransportConfig {
 	/** Response modality. Default: 'audio' (LLM-native speech).
 	 *  Set to 'text' when using an external TTSProvider. */
 	responseModality?: 'audio' | 'text';
+	/** Provider-specific realtime input/VAD config. Gemini transport maps this to realtimeInputConfig. */
+	realtimeInputConfig?: Record<string, unknown>;
 	providerOptions?: Record<string, unknown>;
 }
 

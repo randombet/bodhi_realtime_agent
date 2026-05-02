@@ -217,6 +217,65 @@ describe('VoiceSession', () => {
 		expect(onSessionStart).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'sess_1' }));
 	});
 
+	it('sends session.config and session.ready for local demo clients', async () => {
+		session = new VoiceSession({
+			sessionId: 'sess_ready',
+			userId: 'user_ready',
+			apiKey: 'test-key',
+			agents: [createEchoAgent()],
+			initialAgent: 'echo',
+			port: 9926,
+			model: mockModel,
+		});
+
+		await session.start();
+
+		const WebSocket = (await import('ws')).default;
+		const ws = new WebSocket('ws://localhost:9926');
+		const received: string[] = [];
+		ws.on('message', (data, isBinary) => {
+			if (!isBinary) received.push(data.toString());
+		});
+		await new Promise<void>((r) => ws.on('open', r));
+		await new Promise((r) => setTimeout(r, 50));
+
+		const messages = received.map((m) => JSON.parse(m));
+		expect(messages).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ type: 'session.config' }),
+				expect.objectContaining({
+					type: 'session.ready',
+					userId: 'user_ready',
+					sessionId: 'sess_ready',
+					agentProfile: 'echo',
+				}),
+			]),
+		);
+
+		ws.close();
+		await new Promise<void>((r) => ws.on('close', r));
+	});
+
+	it('does not send session.ready from server-owned client sessions', async () => {
+		const sendJson = vi.fn();
+		session = new VoiceSession({
+			sessionId: 'sess_server_owned',
+			userId: 'user_server_owned',
+			apiKey: 'test-key',
+			agents: [createEchoAgent()],
+			initialAgent: 'echo',
+			clientSender: { sendAudio: vi.fn(), sendJson },
+			model: mockModel,
+		});
+
+		await session.start();
+		session.notifyClientConnected();
+
+		const messageTypes = sendJson.mock.calls.map((call) => call[0]?.type);
+		expect(messageTypes).toContain('session.config');
+		expect(messageTypes).not.toContain('session.ready');
+	});
+
 	it('forwards gui.update events to the client as JSON', async () => {
 		session = new VoiceSession({
 			sessionId: 'sess_1',
@@ -1402,6 +1461,50 @@ describe('VoiceSession', () => {
 				);
 			});
 			expect(greetingCall).toBeDefined();
+
+			ws.close();
+			await new Promise<void>((r) => ws.on('close', r));
+		});
+
+		it('can gate client audio until the greeting turn completes', async () => {
+			session = new VoiceSession({
+				sessionId: 'sess_1',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createGreetingAgent()],
+				initialAgent: 'greeter',
+				port: 9899,
+				model: mockModel,
+				gateAudioUntilGreetingComplete: true,
+			});
+
+			await session.start();
+
+			const WebSocket = (await import('ws')).default;
+			const ws = new WebSocket('ws://localhost:9899');
+			await new Promise<void>((r) => ws.on('open', r));
+			await new Promise((r) => setTimeout(r, 50));
+
+			const { _getMessageHandler, _getMockSession } = await import('@google/genai');
+			const mockGeminiSession = (
+				_getMockSession as unknown as () => Record<string, ReturnType<typeof vi.fn>>
+			)();
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+			mockGeminiSession.sendRealtimeInput.mockClear();
+			const audioData = Buffer.from([0x01, 0x02, 0x03, 0x04]);
+			ws.send(audioData);
+			await new Promise((r) => setTimeout(r, 50));
+
+			expect(mockGeminiSession.sendRealtimeInput).not.toHaveBeenCalled();
+
+			fire({ serverContent: { turnComplete: true } });
+			await new Promise((r) => setTimeout(r, 50));
+
+			ws.send(audioData);
+			await new Promise((r) => setTimeout(r, 50));
+
+			expect(mockGeminiSession.sendRealtimeInput).toHaveBeenCalled();
 
 			ws.close();
 			await new Promise<void>((r) => ws.on('close', r));

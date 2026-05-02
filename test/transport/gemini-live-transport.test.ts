@@ -130,6 +130,20 @@ describe('GeminiLiveTransport', () => {
 			expect(config.inputAudioTranscription).toEqual({});
 		});
 
+		it('includes realtimeInputConfig when provided', async () => {
+			const realtimeInputConfig = {
+				automaticActivityDetection: {
+					endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
+					silenceDurationMs: 500,
+				},
+			};
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key', realtimeInputConfig }, {});
+			await transport.connect();
+
+			const config = capturedConnectConfig.config as Record<string, unknown>;
+			expect(config.realtimeInputConfig).toEqual(realtimeInputConfig);
+		});
+
 		it('omits inputAudioTranscription when explicitly disabled', async () => {
 			const transport = new GeminiLiveTransport(
 				{ apiKey: 'test-key', inputAudioTranscription: false },
@@ -181,9 +195,26 @@ describe('GeminiLiveTransport', () => {
 			transport.sendAudio('base64audiodata');
 
 			expect(mockSession.sendRealtimeInput).toHaveBeenCalledWith({
-				media: { data: 'base64audiodata', mimeType: 'audio/pcm;rate=16000' },
+				audio: { data: 'base64audiodata', mimeType: 'audio/pcm;rate=16000' },
 			});
 		});
+
+		it.each(['gemini-live-2.5-flash-preview', 'gemini-3.1-flash-live-preview'])(
+			'sends non-deprecated audio realtime input for %s',
+			async (model) => {
+				const transport = new GeminiLiveTransport({ apiKey: 'test-key', model }, {});
+				await transport.connect();
+
+				transport.sendAudio('base64audiodata');
+
+				expect(mockSession.sendRealtimeInput).toHaveBeenCalledWith({
+					audio: { data: 'base64audiodata', mimeType: 'audio/pcm;rate=16000' },
+				});
+				expect(mockSession.sendRealtimeInput).not.toHaveBeenCalledWith(
+					expect.objectContaining({ media: expect.anything() }),
+				);
+			},
+		);
 
 		it('does nothing if not connected', () => {
 			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
@@ -677,6 +708,53 @@ describe('GeminiLiveTransport', () => {
 
 			expect(mockSession.sendClientContent).toHaveBeenCalledWith({
 				turns: [{ role: 'user', parts: [{ text: 'hello' }] }],
+				turnComplete: false,
+			});
+		});
+
+		it('uses realtime text for generation-triggering content on Gemini 3 live models', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', model: 'gemini-3.1-flash-live-preview' },
+				{},
+			);
+			await transport.connect();
+
+			transport.sendContent([
+				{ role: 'user', text: ' Say hello. ' },
+				{ role: 'user', text: 'Ask one question.' },
+			]);
+
+			expect(mockSession.sendRealtimeInput).toHaveBeenCalledWith({
+				text: 'Say hello.\n\nAsk one question.',
+			});
+			expect(mockSession.sendClientContent).not.toHaveBeenCalled();
+		});
+
+		it('uses realtime text for generation-triggering content on Gemini 2.5 native-audio live models', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', model: 'gemini-2.5-flash-native-audio-preview-12-2025' },
+				{},
+			);
+			await transport.connect();
+
+			transport.sendContent([{ role: 'user', text: 'Say hello.' }]);
+
+			expect(mockSession.sendRealtimeInput).toHaveBeenCalledWith({ text: 'Say hello.' });
+			expect(mockSession.sendClientContent).not.toHaveBeenCalled();
+		});
+
+		it('keeps non-generating content on clientContent for Gemini 3 live models', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', model: 'gemini-3.1-flash-live-preview' },
+				{},
+			);
+			await transport.connect();
+
+			transport.sendContent([{ role: 'user', text: 'prefill context' }], false);
+
+			expect(mockSession.sendRealtimeInput).not.toHaveBeenCalled();
+			expect(mockSession.sendClientContent).toHaveBeenCalledWith({
+				turns: [{ role: 'user', parts: [{ text: 'prefill context' }] }],
 				turnComplete: false,
 			});
 		});
