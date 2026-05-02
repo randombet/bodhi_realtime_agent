@@ -241,6 +241,41 @@ describe('processKnowledgeBase', () => {
 		expect(result.searchTool?.description).toBe('Custom search description for recruiting docs.');
 	});
 
+	it('truncates tool-mode corpus when maxIndexChars is exceeded', async () => {
+		const filler = 'word '.repeat(2000);
+		const config: KnowledgeBaseConfig = {
+			documents: [
+				{
+					source: 'text',
+					content: `gadget reference ${filler}`,
+					name: 'Huge',
+					mode: 'tool',
+				},
+			],
+			maxIndexChars: 500,
+			chunkSize: 10_000,
+			chunkOverlap: 0,
+			maxResults: 10,
+		};
+		const result = processKnowledgeBase(config);
+		const searchTool = result.searchTool;
+		expect(searchTool).toBeDefined();
+		if (!searchTool) return;
+		const searchResult = await searchTool.execute(
+			{ query: 'gadget reference' },
+			{
+				toolCallId: 't',
+				agentName: 'main',
+				sessionId: 's',
+				abortSignal: new AbortController().signal,
+			},
+		);
+		const parsed = searchResult as { status?: string; results?: Array<{ text: string }> };
+		expect(parsed.status).toBe('ok');
+		const totalChars = (parsed.results ?? []).reduce((n, r) => n + r.text.length, 0);
+		expect(totalChars).toBeLessThanOrEqual(500);
+	});
+
 	it('respects maxResults configuration', async () => {
 		const docs = Array.from({ length: 20 }, (_, i) => ({
 			source: 'text' as const,

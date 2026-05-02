@@ -26,6 +26,12 @@ const DEFAULT_AUTO_PROMPT_THRESHOLD = 50_000;
 const DEFAULT_CHUNK_SIZE = 1500;
 const DEFAULT_CHUNK_OVERLAP = 200;
 const DEFAULT_MAX_RESULTS = 5;
+/**
+ * Hard ceiling on the total text length routed to the tool index. Documents
+ * past this point are truncated. Tuned to keep search latency predictable on
+ * voice-agent footprints (~375k tokens at ~4 chars/token).
+ */
+const DEFAULT_MAX_INDEX_CHARS = 1_500_000;
 
 // ─── Document loading ───────────────────────────────────────────────
 
@@ -307,9 +313,12 @@ export function processKnowledgeBase(
 
 	const chunkSize = config.chunkSize ?? DEFAULT_CHUNK_SIZE;
 	const overlap = config.chunkOverlap ?? DEFAULT_CHUNK_OVERLAP;
+	const maxIndexChars = config.maxIndexChars ?? DEFAULT_MAX_INDEX_CHARS;
+
+	const cappedToolDocs = capToolDocs(toolDocs, maxIndexChars);
 
 	const allChunks: KnowledgeBaseChunk[] = [];
-	for (const doc of toolDocs) {
+	for (const doc of cappedToolDocs) {
 		const textChunks = chunkText(doc.text, chunkSize, overlap);
 		for (let i = 0; i < textChunks.length; i++) {
 			allChunks.push({
@@ -324,4 +333,49 @@ export function processKnowledgeBase(
 		promptInjection,
 		searchTool: buildSearchTool(allChunks, config),
 	};
+}
+
+const TRUNCATION_NOTICE = '\n\n[truncated to fit knowledge-base index cap]';
+
+/**
+ * Truncate the combined tool-mode corpus to `maxChars` characters total. We
+ * keep documents in declared order: each document is included until the budget
+ * is exhausted, then the current document is truncated (with a small notice)
+ * and remaining documents are dropped. Returns the original list when the
+ * budget is `0` (disabled) or the corpus already fits.
+ */
+function capToolDocs(toolDocs: LoadedDocument[], maxChars: number): LoadedDocument[] {
+	if (maxChars <= 0) return toolDocs;
+	const total = toolDocs.reduce((sum, d) => sum + d.text.length, 0);
+	if (total <= maxChars) return toolDocs;
+
+	const out: LoadedDocument[] = [];
+	let used = 0;
+	for (const doc of toolDocs) {
+		if (used >= maxChars) {
+			console.warn(
+				`[KnowledgeBase] tool corpus exceeded maxIndexChars (${maxChars}); dropping "${doc.name}".`,
+			);
+			continue;
+		}
+		const remaining = maxChars - used;
+		if (doc.text.length <= remaining) {
+			out.push(doc);
+			used += doc.text.length;
+			continue;
+		}
+		let truncated: string;
+		if (remaining > TRUNCATION_NOTICE.length) {
+			const bodyBudget = remaining - TRUNCATION_NOTICE.length;
+			truncated = `${doc.text.slice(0, bodyBudget)}${TRUNCATION_NOTICE}`;
+		} else {
+			truncated = doc.text.slice(0, remaining);
+		}
+		console.warn(
+			`[KnowledgeBase] truncating "${doc.name}" to ${truncated.length}/${doc.text.length} chars to satisfy maxIndexChars=${maxChars}.`,
+		);
+		out.push({ ...doc, text: truncated });
+		used += truncated.length;
+	}
+	return out;
 }
