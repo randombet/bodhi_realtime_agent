@@ -35,9 +35,25 @@ export interface InterviewAnswer {
 	timestamp: number;
 }
 
+export type InterviewQuestionKind = 'primary' | 'clarification' | 'follow_up' | 'deep_dive';
+
+export interface InterviewDynamicQuestion {
+	primaryQuestionId: InterviewQuestionId;
+	kind: Exclude<InterviewQuestionKind, 'primary'>;
+	text: string;
+	rationale: string;
+	timestamp: number;
+}
+
 export interface InterviewPlan {
 	digest: InterviewDocumentDigest;
 	questions: InterviewQuestion[];
+}
+
+export interface InterviewDocumentContext {
+	candidateName: string;
+	companyName: string;
+	roleTitle: string;
 }
 
 export interface InterviewState {
@@ -48,7 +64,10 @@ export interface InterviewState {
 	questions: InterviewQuestion[];
 	nextQuestionIndex: number;
 	activeQuestion?: InterviewQuestion;
+	activeQuestionKind?: InterviewQuestionKind;
 	answers: InterviewAnswer[];
+	dynamicQuestions: InterviewDynamicQuestion[];
+	dynamicQuestionCounts: Partial<Record<InterviewQuestionId, number>>;
 	usedFallback: boolean;
 	prepareError?: string;
 }
@@ -59,7 +78,19 @@ export function createInterviewState(): InterviewState {
 		questions: [],
 		nextQuestionIndex: 0,
 		answers: [],
+		dynamicQuestions: [],
+		dynamicQuestionCounts: {},
 		usedFallback: false,
+	};
+}
+
+export function extractInterviewDocumentContext(
+	documents: InterviewDocuments,
+): InterviewDocumentContext {
+	return {
+		candidateName: firstMarkdownHeading(documents.candidateResume) ?? 'the candidate',
+		companyName: firstMarkdownHeading(documents.companyIntro) ?? 'the company',
+		roleTitle: firstMarkdownHeading(documents.jobDescription) ?? 'the software engineering role',
 	};
 }
 
@@ -72,7 +103,10 @@ export function applyInterviewPlan(state: InterviewState, plan: InterviewPlan): 
 	state.questions = plan.questions;
 	state.nextQuestionIndex = 0;
 	state.activeQuestion = undefined;
+	state.activeQuestionKind = undefined;
 	state.answers = [];
+	state.dynamicQuestions = [];
+	state.dynamicQuestionCounts = {};
 	state.usedFallback = false;
 	state.prepareError = undefined;
 	return state;
@@ -127,7 +161,10 @@ export function ensurePreparedWithFallback(
 	state.questions = plan.questions;
 	state.nextQuestionIndex = 0;
 	state.activeQuestion = undefined;
+	state.activeQuestionKind = undefined;
 	state.answers = [];
+	state.dynamicQuestions = [];
+	state.dynamicQuestionCounts = {};
 	state.usedFallback = true;
 	state.prepareError = reason;
 	return state;
@@ -144,17 +181,19 @@ export function getNextInterviewQuestion(state: InterviewState): {
 	if (state.nextQuestionIndex >= state.questions.length) {
 		state.phase = 'completed';
 		state.activeQuestion = undefined;
+		state.activeQuestionKind = undefined;
 		const closingMessage = buildClosingMessage(state);
 		return {
 			status: 'completed',
 			totalQuestions: state.questions.length,
-			message: 'All three interview questions have been asked.',
+			message: 'All three primary interview anchors have been completed.',
 			closingMessage,
 		};
 	}
 
 	const question = state.questions[state.nextQuestionIndex];
 	state.activeQuestion = question;
+	state.activeQuestionKind = 'primary';
 	state.nextQuestionIndex += 1;
 	state.phase = 'questioning';
 
@@ -172,12 +211,17 @@ export function buildOpeningGreetingPrompt(state: InterviewState): string {
 	const companyName = state.companyName ?? 'the company';
 	const roleTitle = state.roleTitle ?? 'the software engineering role';
 
+	return buildOpeningGreetingPromptFromContext({ candidateName, companyName, roleTitle });
+}
+
+export function buildOpeningGreetingPromptFromContext(context: InterviewDocumentContext): string {
+	const spokenGreeting = `Hello ${context.candidateName}, I'm your software interviewer for the ${context.roleTitle} role at ${context.companyName}. Today we'll discuss your background, your interest in ${context.companyName}, and a technical challenge.`;
+
 	return [
-		`Greet ${candidateName} by name as their software interviewer.`,
-		`Say this is the interview for the ${roleTitle} role at ${companyName}.`,
-		`Mention that the conversation will cover their resume, interest in ${companyName}, and a technical challenge.`,
-		'Keep the greeting to two short sentences.',
-		'Then call record_answer_and_get_next_question without answerText to get the first prepared question.',
+		`Say exactly this greeting once: "${spokenGreeting}"`,
+		'Do not include labels, alternate drafts, revisions, or meta commentary.',
+		'After saying the greeting once, call record_answer_and_get_next_question without answerText.',
+		'When the tool returns, ask only the returned question text. Do not repeat or summarize the greeting.',
 	].join(' ');
 }
 
@@ -186,7 +230,7 @@ export function buildClosingMessage(state: InterviewState): string {
 	const companyName = state.companyName ?? 'the company';
 	const roleTitle = state.roleTitle ?? 'the role';
 
-	return `That covers the three questions. Thank you, ${candidateName}, for taking the time to speak with us about the ${roleTitle} role at ${companyName}. We appreciate your thoughtful answers, and we wish you the best of luck with the rest of the process. Goodbye.`;
+	return `That covers the main interview questions. Thank you, ${candidateName}, for taking the time to speak with us about the ${roleTitle} role at ${companyName}. We appreciate your thoughtful answers, and we wish you the best of luck with the rest of the process. Goodbye.`;
 }
 
 export function recordInterviewAnswer(
@@ -221,6 +265,7 @@ export function recordInterviewAnswer(
 		timestamp: Date.now(),
 	});
 	state.activeQuestion = undefined;
+	state.activeQuestionKind = undefined;
 
 	return {
 		status: 'recorded',
@@ -237,7 +282,9 @@ export function getInterviewStatus(state: InterviewState): Record<string, unknow
 		questionsPrepared: state.questions.length,
 		nextQuestionIndex: state.nextQuestionIndex,
 		activeQuestionId: state.activeQuestion?.id,
+		activeQuestionKind: state.activeQuestionKind,
 		answersRecorded: state.answers.length,
+		dynamicQuestionsAsked: state.dynamicQuestions.length,
 		remainingQuestions: Math.max(0, state.questions.length - state.nextQuestionIndex),
 		usedFallback: state.usedFallback,
 		prepareError: state.prepareError,

@@ -194,6 +194,16 @@ export class VoiceSession {
 	/** Resolves when memory/directives are loaded; used so greeting is sent after load without blocking connect. */
 	private _memoryReadyPromise: Promise<void> = Promise.resolve();
 	private externalAudioHandler: ((data: Buffer) => void) | null = null;
+	private audioVadSpeechActive = false;
+	private audioVadSpeechStartMs = 0;
+	private audioVadLastVoiceMs = 0;
+	private lastClientSpeechCompletedMs = 0;
+	private lastClientSpeechDurationMs = 0;
+	private lastGeminiRecognitionLoggedForSpeechEndMs = 0;
+	private lastInputTranscriptionLogText = '';
+	private static readonly AUDIO_VAD_SILENCE_MS = 900;
+	private static readonly AUDIO_VAD_PEAK_THRESHOLD = 1200;
+	private static readonly AUDIO_VAD_AVG_ABS_THRESHOLD = 220;
 
 	constructor(config: VoiceSessionConfig) {
 		this.config = config;
@@ -355,7 +365,11 @@ export class VoiceSession {
 		this.transport.onToolCall = (calls) => {
 			if (this.runtimeOrchestrator) {
 				const names = calls.map((c) => c.name).join(', ');
-				this.log(`Tool calls from LLM: [${names}]`);
+				this.logGeminiUserTurnRecognition('tool call received');
+				const sinceVadEnd = this.lastClientSpeechCompletedMs
+					? ` (${Date.now() - this.lastClientSpeechCompletedMs}ms after client audio VAD end)`
+					: '';
+				this.log(`Tool calls from LLM: [${names}]${sinceVadEnd}`);
 				this.transcriptManager.flushInput();
 				this.transcriptManager.saveOutputPrefix();
 			}
@@ -408,16 +422,21 @@ export class VoiceSession {
 			// Skipped on interrupted turns — Gemini may miss audio spoken during
 			// model output, producing incomplete transcripts.
 			this.transport.onInputTranscription = (text) => {
+				this.logInputTranscriptionLatency(text, 'gemini-correction');
 				if (this._turnWasInterrupted) return;
 				this.transcriptManager.correctInput(text);
 			};
 		} else {
 			// No external STT — use transport built-in transcription
-			this.transport.onInputTranscription = (text) => this.transcriptManager.handleInput(text);
+			this.transport.onInputTranscription = (text) => {
+				this.logInputTranscriptionLatency(text, 'gemini');
+				this.transcriptManager.handleInput(text);
+			};
 		}
 
 		// Wire onModelTurnStart for STT commit trigger
 		this.transport.onModelTurnStart = () => {
+			this.logGeminiUserTurnRecognition('model/tool processing started');
 			if (this.sttProvider && !this._commitFiredForTurn) {
 				this._commitFiredForTurn = true;
 				this.sttProvider.commit(this.turnId);
@@ -588,6 +607,7 @@ export class VoiceSession {
 					}
 					const hasPendingMessage = !!this.runtimeToolRegistry?.get(request.toolName)
 						?.pendingMessage;
+					const backgroundStartedAt = Date.now();
 					this.log(
 						`Background task started: ${request.toolName} (toolCallId=${request.toolCallId}, lifetime=${request.lifetime})`,
 					);
@@ -644,7 +664,7 @@ export class VoiceSession {
 							);
 						}
 						this.log(
-							`Background task completed: ${request.toolName} (toolCallId=${request.toolCallId})`,
+							`Background task completed: ${request.toolName} (toolCallId=${request.toolCallId}, duration=${Date.now() - backgroundStartedAt}ms)`,
 						);
 						return resultText;
 					} catch (err) {
@@ -671,7 +691,7 @@ export class VoiceSession {
 							);
 						}
 						this.log(
-							`Background task failed: ${request.toolName} (toolCallId=${request.toolCallId}): ${err instanceof Error ? err.message : String(err)}`,
+							`Background task failed: ${request.toolName} (toolCallId=${request.toolCallId}, duration=${Date.now() - backgroundStartedAt}ms): ${err instanceof Error ? err.message : String(err)}`,
 						);
 						throw err;
 					}
@@ -962,6 +982,7 @@ export class VoiceSession {
 
 	private handleAudioFromClient(data: Buffer): void {
 		if (this.sessionManager.isActive) {
+			this.updateClientAudioVad(data);
 			// When active agent uses external audio, don't forward to LLM transport.
 			// Route mic frames to the active external audio handler (e.g., TwilioBridge).
 			if (this.agentRouter.activeAgent.audioMode === 'external') {
@@ -978,6 +999,84 @@ export class VoiceSession {
 			this.transport.sendAudio(base64);
 			this.sttProvider?.feedAudio(base64);
 		}
+	}
+
+	private updateClientAudioVad(data: Buffer): void {
+		if (data.length < 2) return;
+
+		let maxAbs = 0;
+		let sumAbs = 0;
+		let samples = 0;
+		for (let i = 0; i + 1 < data.length; i += 2) {
+			const abs = Math.abs(data.readInt16LE(i));
+			if (abs > maxAbs) maxAbs = abs;
+			sumAbs += abs;
+			samples += 1;
+		}
+		if (samples === 0) return;
+
+		const now = Date.now();
+		const avgAbs = sumAbs / samples;
+		const hasVoice =
+			maxAbs >= VoiceSession.AUDIO_VAD_PEAK_THRESHOLD ||
+			avgAbs >= VoiceSession.AUDIO_VAD_AVG_ABS_THRESHOLD;
+
+		if (hasVoice) {
+			if (!this.audioVadSpeechActive) {
+				this.audioVadSpeechActive = true;
+				this.audioVadSpeechStartMs = now;
+				this.lastInputTranscriptionLogText = '';
+				this.log(
+					`[Latency] User voice input started (client audio VAD; peak=${maxAbs}; avgAbs=${Math.round(avgAbs)})`,
+				);
+			}
+			this.audioVadLastVoiceMs = now;
+			return;
+		}
+
+		if (
+			this.audioVadSpeechActive &&
+			this.audioVadLastVoiceMs > 0 &&
+			now - this.audioVadLastVoiceMs >= VoiceSession.AUDIO_VAD_SILENCE_MS
+		) {
+			this.completeClientAudioVad(now, 'silence');
+		}
+	}
+
+	private completeClientAudioVad(now: number, reason: string): void {
+		if (!this.audioVadSpeechActive || this.audioVadLastVoiceMs <= 0) return;
+		this.audioVadSpeechActive = false;
+		this.lastClientSpeechCompletedMs = this.audioVadLastVoiceMs;
+		this.lastClientSpeechDurationMs = Math.max(
+			0,
+			this.audioVadLastVoiceMs - this.audioVadSpeechStartMs,
+		);
+		this.log(
+			`[Latency] User voice input completed (client audio VAD; reason=${reason}; speechDuration=${this.lastClientSpeechDurationMs}ms; silenceObserved=${now - this.audioVadLastVoiceMs}ms)`,
+		);
+	}
+
+	private logInputTranscriptionLatency(text: string, source: string): void {
+		const trimmed = text.trim();
+		if (!trimmed || trimmed === this.lastInputTranscriptionLogText) return;
+		this.lastInputTranscriptionLogText = trimmed;
+		const sinceVadEnd = this.lastClientSpeechCompletedMs
+			? `; ${Date.now() - this.lastClientSpeechCompletedMs}ms after client audio VAD end`
+			: '';
+		const preview = trimmed.replace(/\s+/g, ' ').slice(0, 120);
+		this.log(
+			`[Latency] Gemini input transcription update (${source}; chars=${trimmed.length}${sinceVadEnd}; text="${preview}")`,
+		);
+	}
+
+	private logGeminiUserTurnRecognition(reason: string): void {
+		this.completeClientAudioVad(Date.now(), 'gemini-recognition');
+		if (!this.lastClientSpeechCompletedMs) return;
+		if (this.lastGeminiRecognitionLoggedForSpeechEndMs === this.lastClientSpeechCompletedMs) return;
+		this.lastGeminiRecognitionLoggedForSpeechEndMs = this.lastClientSpeechCompletedMs;
+		this.log(
+			`[Latency] Gemini Live recognized user input completed (${reason}; ${Date.now() - this.lastClientSpeechCompletedMs}ms after client audio VAD end; clientSpeechDuration=${this.lastClientSpeechDurationMs}ms)`,
+		);
 	}
 
 	private handleAudioOutput(data: string): void {

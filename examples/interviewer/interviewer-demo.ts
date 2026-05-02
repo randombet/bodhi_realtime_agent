@@ -1,7 +1,7 @@
 /**
  * Bodhi Interviewer Example
  *
- * Document-driven software interviewer using a dedicated planning subagent.
+ * Document-driven software interviewer using one persistent subagent.
  *
  * Usage:
  *   1. Set GEMINI_API_KEY in .env or the environment.
@@ -17,8 +17,8 @@ import { loadInterviewDocuments } from './lib/interview-documents.js';
 import { createInterviewState, ensurePreparedWithFallback } from './lib/interview-state.js';
 import { createInterviewerAgent } from './lib/interviewer-agent.js';
 import {
+	SoftwareInterviewerSubagent,
 	createSoftwareInterviewerSubagentConfig,
-	prepareInterviewPlanWithSubagent,
 } from './lib/interviewer-subagent.js';
 
 function ts(): string {
@@ -36,18 +36,25 @@ const HOST = process.env.HOST || '0.0.0.0';
 const SESSION_ID = `interviewer_${Date.now()}`;
 const LIVE_MODEL = process.env.GEMINI_LIVE_MODEL || 'gemini-2.5-flash-native-audio-preview-12-2025';
 const REASONING_MODEL = process.env.INTERVIEWER_REASONING_MODEL || 'gemini-2.5-flash';
+const SUBAGENT_MODEL = process.env.INTERVIEWER_SUBAGENT_MODEL || 'gemini-3.1-flash-lite-preview';
 
 const google = createGoogleGenerativeAI({ apiKey: GEMINI_API_KEY });
 
 async function main() {
 	const documents = loadInterviewDocuments();
 	const state = createInterviewState();
-	const softwareInterviewerSubagent = createSoftwareInterviewerSubagentConfig(state, documents);
 	const reasoningModel = google(REASONING_MODEL);
+	const subagentReasoningModel = google(SUBAGENT_MODEL);
+	const softwareInterviewerSubagent = new SoftwareInterviewerSubagent(
+		'record_answer_and_get_next_question',
+		state,
+		documents,
+		subagentReasoningModel,
+	);
 
 	console.log(`${ts()} [Interviewer] Preparing document-grounded interview plan...`);
 	try {
-		await prepareInterviewPlanWithSubagent(softwareInterviewerSubagent, reasoningModel);
+		await softwareInterviewerSubagent.prepare();
 		console.log(
 			`${ts()} [Interviewer] Prepared ${state.questions.length} questions for ${state.companyName ?? 'the company'}`,
 		);
@@ -59,7 +66,10 @@ async function main() {
 		ensurePreparedWithFallback(state, documents, message);
 	}
 
-	const interviewerAgent = createInterviewerAgent(state, documents);
+	const softwareInterviewerSubagentConfig = createSoftwareInterviewerSubagentConfig(
+		softwareInterviewerSubagent,
+	);
+	const interviewerAgent = createInterviewerAgent(documents);
 
 	const session = new VoiceSession({
 		sessionId: SESSION_ID,
@@ -70,6 +80,10 @@ async function main() {
 		port: PORT,
 		host: HOST,
 		model: reasoningModel,
+		orchestrationMode: 'actor',
+		subagentConfigs: {
+			record_answer_and_get_next_question: softwareInterviewerSubagentConfig,
+		},
 		geminiModel: LIVE_MODEL,
 		speechConfig: { voiceName: process.env.GEMINI_VOICE || 'Puck' },
 		hooks: {
@@ -118,7 +132,8 @@ async function main() {
 	console.log(`  WebSocket:       ws://localhost:${PORT}`);
 	console.log(`  Session:         ${SESSION_ID}`);
 	console.log(`  Voice model:     ${LIVE_MODEL}`);
-	console.log(`  Reasoning model: ${REASONING_MODEL}`);
+	console.log(`  Main model:      ${REASONING_MODEL}`);
+	console.log(`  Subagent model:  ${SUBAGENT_MODEL}`);
 	console.log('  Documents:       examples/interviewer/docs/*.md');
 	console.log();
 	console.log('Connect via: pnpm web-client:dev');
