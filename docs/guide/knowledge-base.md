@@ -2,6 +2,54 @@
 
 The framework can attach a **structured knowledge base** to a **`MainAgent`**: documents are loaded, split into prompt vs tool-backed chunks, and optionally exposed as an inline **`search_knowledge_base`** tool. This page explains how to integrate KB for **main** vs **subagents**, and how it differs from **persistent memory**.
 
+**Also read (product / hosted Studio):** `app/docs/agent-studio-knowledge-base.md` — upload limits, persisted shapes, and what the web UI exposes. When answering user questions about KB, use **both** docs.
+
+## Layers: memory vs prompt KB vs “retrieval” (tool KB)
+
+These are **separate mechanisms** in the codebase; KB is not a special case of memory, and “search” in KB does not mean Google or the open web.
+
+| Layer | What it is | Where it shows up |
+|--------|------------|-------------------|
+| **Memory** | Durable **facts** / directives per user (`MemoryStore`), updated by distillation and tools. | Injected via memory / distiller prompts and related hooks — **not** `KnowledgeBaseConfig`. |
+| **KB → prompt** | **Static text** appended to the main agent’s **system instructions** (plus the same **prompt-only** slice passed to subagents as `knowledgeBaseContext`). | `processKnowledgeBase()` → `promptInjection` → `resolveAgentWithKnowledgeBase()`. |
+| **KB → tool path (“retrieval-lite”)** | Documents routed to **`tool`** (or large **`auto`** docs) are **chunked** and indexed **in memory** for this session’s processed KB only. | The framework appends **one** auto-generated **inline** tool named **`search_knowledge_base`**. The model **chooses** to call it; the tool returns **chunk text** from that index. |
+
+So: **prompt KB** = always visible (up to context limits). **Tool KB** = on-demand pull via **`search_knowledge_base`** only on the **main** voice agent. There is **no** separate pluggable “retrieval service” interface in `src/` today — if you need vector DB / SQL / web RAG, you add normal **`ToolDefinition`s** (or subagent workers) yourself.
+
+## What `search_knowledge_base` is (exactly)
+
+- **Internal to the framework:** `processKnowledgeBase()` in `src/knowledge/knowledge-base-processor.ts` **constructs** a `ToolDefinition` with **`name: 'search_knowledge_base'`** (fixed string). It is **not** something you register by hand under a different name for the same behavior.
+- **Not generic search:** It only queries the **in-process chunk list** built from **this** `MainAgent.knowledgeBase` config. It does **not** hit the network, your DB, or embedding APIs unless you build that elsewhere.
+- **“Search” here means:** tokenize query + chunks, score overlap (TF–IDF-style), return up to **`maxResults`** chunks (default **5**). Query length is constrained by Zod on the tool schema (**2–500** characters).
+- **When it exists:** Only if at least one document ends up in the **tool-routed** set after `auto` / `tool` splitting. If everything is prompt-injected, **`searchTool` is omitted** — there is nothing to call.
+
+## Pure text — and what abstractions exist for load / edit
+
+**Yes:** the KB pipeline assumes **plain text** after loading. Sources are `text` (already a string) or `file` (read as UTF-8 into a string). There is **no** structured document model (pages, tables, PDF boxes) inside the framework.
+
+| Concern | Abstraction in `src/` |
+|--------|------------------------|
+| **Read / load `file`** | Default: sync **`readFileSync`** with `cwd` resolution. Optional: **`KnowledgeBaseProcessContext.readFileText`** passed into `processKnowledgeBase()` so hosts can read from sandboxes, object storage, etc., without changing core logic. |
+| **Read / load hosted bytes** | **Not in `src/`** — the Bodhi app downloads Storage objects and passes **`source: 'text'`** into the framework (`materialize-knowledge-base-attachments.ts`). |
+| **Edit / modify KB at runtime** | **No** dedicated KB editor API. You change **`MainAgent.knowledgeBase`** (or persisted Studio JSON), then re-run **`resolveAgentWithKnowledgeBase`** / rebuild the session config so the processor runs again. |
+
+## What the framework treats as “knowledge” (formats & limits)
+
+These rules apply to **`KnowledgeBaseConfig`** after your app (or built-ins) supply documents. There is **no** built-in PDF, Word, or HTML parser — content is **plain text** end-to-end for processing.
+
+| Topic | Behavior |
+|--------|----------|
+| **Document sources** | Each document is `source: 'text'` (string in memory) or `source: 'file'` (path on disk, read as **UTF-8** text via `readFileSync`, or via optional `KnowledgeBaseProcessContext.readFileText`). |
+| **Encoding** | Content is interpreted as **UTF-8 text**. Binary files (PDF, DOCX, images) are **not** decoded into structure; at best you get garbage or decode errors, and the document may be **skipped**. |
+| **Recommended file types for `file`** | `.txt`, `.md`, `.csv`, `.json` (UTF-8), or any export that is already **linear text**. |
+| **Per-document mode** | `prompt` (always in system string), `tool` (chunked + `search_knowledge_base` only on **main** agent), `auto` (framework picks by size). |
+| **`auto` threshold** | Default **50 000 characters** total for auto-mode docs before routing to the tool path (`autoPromptThreshold` on `KnowledgeBaseConfig`). |
+| **Chunking / search** | Token-overlap scoring over fixed character chunks (defaults: chunk **1500** chars, overlap **200**, up to **5** hits per `search_knowledge_base` call). Not vector / semantic embeddings. |
+| **`maxIndexChars`** | Hard cap (characters) on the **combined** text indexed for the tool path **before** chunking (default **1_500_000**). Larger corpora are truncated in document order with a `[truncated…]` notice and console warnings. Set **`0`** to disable the cap. |
+| **Size / count** | No hard cap on **prompt** path size beyond model context / latency; very large prompt paths can blow context or latency. |
+
+**Failure modes users should understand:** wrong path or unreadable `file` → document **skipped** (warned in logs). Empty or whitespace-only text after trim → treated as empty. Hosts that load from object storage should **pre-decode** to UTF-8 text (as Bodhi’s Studio materializer does) and pass `source: 'text'`.
+
 ## Configuration
 
 - Types: `KnowledgeBaseConfig`, `KnowledgeBaseDocument` in `src/types/knowledge-base.ts`.
@@ -22,7 +70,7 @@ Documents use `source: 'text'` (inline string) or `source: 'file'` (path resolve
 |--------|-------------------|------------------------------|
 | **Where KB is configured** | `MainAgent.knowledgeBase` on each main agent compiled into `VoiceSessionConfig.agents`. | `SubagentConfig` has **no** `knowledgeBase` field. |
 | **How KB reaches the model** | Full pipeline: prompt injection string appended to instructions + optional **`search_knowledge_base`** tool registered on the **live** LLM session. | A **text summary** of the KB prompt slice only: `VoiceSession` passes `processedKnowledgeBase.promptInjection` into `AgentRouter` as `getKnowledgeBaseContext`, which flows into `ConversationContext.getSubagentContext(..., knowledgeBaseContext)` and then into `buildSubagentSystemPrompt()` in `src/agent/subagent-runner.ts` under a `# Knowledge Base` section. |
-| **Tool retrieval (`mode: 'tool'`)** | Yes — chunked docs and semantic-ish keyword search via the generated inline tool on the **main** agent. | **No** — subagents do not receive the main’s `search_knowledge_base` tool automatically. They only see the **prompt-routed** portion of the KB as static text. |
+| **Tool retrieval (`mode: 'tool'`)** | Yes — chunked docs + in-process **`search_knowledge_base`** on the **main** agent. | **No** — subagents do not receive that tool; they only see the **prompt-routed** KB slice as static text. |
 | **Per-agent isolation** | Each `MainAgent` can have its own `knowledgeBase` (e.g. after `transfer_to_agent`). | All background runs for the session share the **same** `getKnowledgeBaseContext` callback (from the session’s current processed KB state / active main resolution). |
 
 **Practical guidance**
@@ -37,4 +85,6 @@ Documents use `source: 'text'` (inline string) or `source: 'file'` (path resolve
 
 ## App layer (Bodhi server)
 
-Hosted Agent Studio resolves Supabase-backed attachments **before** compile and passes **`source: 'text'`** into the framework. See **`app/docs/agent-studio-knowledge-base.md`** in this repository for upload paths, lifecycle, and naming.
+Hosted Agent Studio resolves Supabase-backed attachments **before** compile and passes **`source: 'text'`** into the framework. See **`app/docs/agent-studio-knowledge-base.md`** for upload paths, lifecycle, naming, and the **a/b/c support matrix** (framework vs service vs web UI).
+
+**Roadmap (ingestion APIs, noise, limits, subagent KB):** `dev_docs/app/design-knowledge-base-roadmap.md`.

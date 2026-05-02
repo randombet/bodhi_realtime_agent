@@ -239,7 +239,7 @@ app/                 # Usage examples
 ## Development
 
 ```bash
-pnpm install        # Install dependencies
+pnpm install        # Install dependencies (single package — no nested workspaces)
 pnpm build          # Build with tsup (ESM + CJS + declarations)
 pnpm test           # Run tests with vitest
 pnpm test:watch     # Run tests in watch mode
@@ -247,6 +247,10 @@ pnpm lint           # Check with Biome
 pnpm lint:fix       # Auto-fix lint issues
 pnpm typecheck      # TypeScript type checking
 ```
+
+Optional example-only setup (Python venv for SpatialReal, and similar) is **not** part of `pnpm install`; run `pnpm examples:setup` and see `examples/README.md`.
+
+Publishable browser embed packages (`@bodhi_lab/bodhi-sdk-core`, `@bodhi_lab/bodhi-web-sdk`, `@bodhi_lab/bodhi-widget`) live in a **separate git repository**, `bodhi-lab-client-packages`, typically cloned as a sibling of this repo.
 
 ### Integration Tests
 

@@ -73,6 +73,69 @@ describe('materializeKnowledgeBaseByAgentName', () => {
 		});
 	});
 
+	it('prefers normalizedTextObjectPath over the raw uploaded object', async () => {
+		const blob = new Blob(['parsed markdown body'], { type: 'text/plain' });
+		const download = vi.fn(async () => ({ data: blob, error: null }));
+		const from = vi.fn(() => ({ download }));
+		const supabase = { storage: { from } } as never;
+
+		const def = {
+			mainAgents: [],
+			workers: {},
+			knowledgeBaseByAgentName: {
+				main: {
+					documents: [
+						{
+							id: 'a',
+							name: 'PDF',
+							sourceKind: 'supabase_storage',
+							bucket: 'my-bucket',
+							objectPath: 'kb/u/a/doc.pdf',
+							normalizedTextObjectPath: 'kb/u/a/doc.normalized.txt',
+							ingestionStatus: 'ready',
+							mode: 'auto',
+						},
+					],
+				},
+			},
+		} as unknown as AgentDefinitionV2;
+
+		const out = await materializeKnowledgeBaseByAgentName(def, supabase, 'default-bucket');
+		expect(download).toHaveBeenCalledWith('kb/u/a/doc.normalized.txt');
+		expect(out?.main?.documents?.[0]?.content).toBe('parsed markdown body');
+	});
+
+	it('skips documents whose ingestion has not completed', async () => {
+		const download = vi.fn();
+		const from = vi.fn(() => ({ download }));
+		const supabase = { storage: { from } } as never;
+
+		const def = {
+			mainAgents: [],
+			workers: {},
+			knowledgeBaseByAgentName: {
+				main: {
+					documents: [
+						{
+							id: 'a',
+							name: 'Pending',
+							sourceKind: 'supabase_storage',
+							bucket: 'my-bucket',
+							objectPath: 'kb/u/a/doc.pdf',
+							ingestionStatus: 'failed',
+							errorMessage: 'no parser',
+							mode: 'auto',
+						},
+					],
+				},
+			},
+		} as unknown as AgentDefinitionV2;
+
+		const out = await materializeKnowledgeBaseByAgentName(def, supabase, 'default-bucket');
+		expect(out).toBeUndefined();
+		expect(download).not.toHaveBeenCalled();
+	});
+
 	it('returns undefined when no documents materialize', async () => {
 		const def = {
 			mainAgents: [],

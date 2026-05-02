@@ -58,6 +58,31 @@ describe('knowledge-base-storage-cleanup', () => {
 		]);
 	});
 
+	it('collects both raw objectPath and normalizedTextObjectPath', () => {
+		const def = {
+			...baseDef,
+			knowledgeBaseByAgentName: {
+				main: {
+					documents: [
+						{
+							id: '1',
+							name: 'Doc',
+							sourceKind: 'supabase_storage' as const,
+							bucket: 'b',
+							objectPath: 'kb/u/a/raw.pdf',
+							normalizedTextObjectPath: 'kb/u/a/raw.normalized.txt',
+						},
+					],
+				},
+			},
+		} as AgentDefinitionV2;
+		const refs = collectSupabaseStorageRefsFromDefinition(def, 'default-bucket');
+		expect(refs).toEqual([
+			{ bucket: 'b', objectPath: 'kb/u/a/raw.pdf' },
+			{ bucket: 'b', objectPath: 'kb/u/a/raw.normalized.txt' },
+		]);
+	});
+
 	it('diff returns refs removed from definition', () => {
 		const before = {
 			...baseDef,

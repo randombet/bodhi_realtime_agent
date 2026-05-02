@@ -4,6 +4,23 @@ Standalone single-user demos for testing individual framework features. Each exa
 
 > These demos are for development and testing. The production multi-user server is in [`app/`](../app/).
 
+## Install vs optional setup
+
+From the **repository root**, a single install covers the framework, `app/`, and running these TypeScript examples (they import `src/` and some `app/lib` modules):
+
+```bash
+pnpm install
+```
+
+Some demos need **extra** steps (not run by `pnpm install`). Use the helper:
+
+```bash
+pnpm examples:setup              # list optional targets
+pnpm examples:setup spatialreal  # Python venv for SpatialReal avatar bridge
+```
+
+See per-demo sections below for env vars and run commands.
+
 ## Quick Reference
 
 | Demo | Feature | Entry Point | Run |
@@ -15,6 +32,7 @@ Standalone single-user demos for testing individual framework features. Each exa
 | OpenClaw | Multi-tool agent with search, images, video | `openclaw/openclaw-demo.ts` | `pnpm tsx examples/openclaw/openclaw-demo.ts` |
 | SpatialReal Avatar Host Sync | Voice agent + avatar keyframe sync (host mode bridge) | `spatialreal_avatar_websdk/demo.ts` | `pnpm tsx examples/spatialreal_avatar_websdk/demo.ts` |
 | Interviewer | Document-driven software interview with a planning subagent | `interviewer/interviewer-demo.ts` | `pnpm tsx examples/interviewer/interviewer-demo.ts` |
+| Widget embed dump | Static page on port 8765 to test `wg_*` + `bodhi-widget.js` from another origin | `embed-widget-dump/server.mjs` | `pnpm examples:embed-widget-dump` |
 
 ## OpenAI Realtime
 
@@ -89,4 +107,12 @@ export GEMINI_API_KEY="your-gemini-key"
 pnpm tsx examples/interviewer/interviewer-demo.ts
 # In another terminal:
 pnpm web-client:dev
+```
+
+## Publishable widget embed (cross-origin)
+
+See [embed-widget-dump/README.md](embed-widget-dump/README.md). Run the Bodhi API + web client, then:
+
+```bash
+pnpm examples:embed-widget-dump
 ```

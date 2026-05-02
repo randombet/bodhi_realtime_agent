@@ -28,6 +28,8 @@
     "build": "tsup",
     "web-client:build": "vite build --config app/web-client/vite.config.ts",
     "web-client:dev": "vite --config app/web-client/vite.config.ts",
+    "examples:embed-widget-dump": "node examples/embed-widget-dump/server.mjs",
+    "examples:setup": "bash scripts/examples-setup.sh",
     "web-client": "pnpm web-client:build && tsx app/web-client/serve.ts",
     "test": "vitest run",
     "test:watch": "vitest",
