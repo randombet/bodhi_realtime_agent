@@ -85,6 +85,35 @@ Documents use `source: 'text'` (inline string) or `source: 'file'` (path resolve
 
 ## App layer (Bodhi server)
 
-Hosted Agent Studio resolves Supabase-backed attachments **before** compile and passes **`source: 'text'`** into the framework. See **`app/docs/agent-studio-knowledge-base.md`** for upload paths, lifecycle, naming, and the **a/b/c support matrix** (framework vs service vs web UI).
+Hosted **Agent Studio** resolves Supabase-backed attachments **before** compile and passes **`source: 'text'`** into the framework. See **`app/docs/agent-studio-knowledge-base.md`** for upload paths, ingestion, lifecycle, naming, the **a/b/c support matrix** (framework vs service vs web UI), **infra checklist**, **integration steps**, and **service-layer TODOs**.
 
-**Roadmap (ingestion APIs, noise, limits, subagent KB):** `dev_docs/app/design-knowledge-base-roadmap.md`.
+**Roadmap** (ingestion providers, noise, limits, subagent KB): `dev_docs/app/design-knowledge-base-roadmap.md`.
+
+**Vertical agents** (recruiting, interviewer toy demo, proposed profiles — how they *use* KB): `dev_docs/vertical_agents/README.md`.
+
+## Built-in profiles vs Studio-compiled agents
+
+| Source | Where `KnowledgeBaseConfig` comes from | Typical `source` |
+|--------|----------------------------------------|------------------|
+| **Built-in catalog** (e.g. recruiting) | TypeScript in **`app/agents/profiles/*.ts`** at process start | **`file`** paths under repo **`fixtures/`** (UTF-8 markdown) — see **`app/agents/profiles/recruiting-screen.ts`** (`buildRecruitingKnowledgeBase`). |
+| **User agents (`ua_*`)** | `AgentDefinitionV2.knowledgeBaseByAgentName` → **`materializeKnowledgeBaseByAgentName`** on the server | **`text`** only at framework boundary (Storage/inline resolved in `app/`). |
+
+As a framework developer you interact with the **same** `processKnowledgeBase()` / `resolveAgentWithKnowledgeBase()` APIs once `MainAgent.knowledgeBase` is set; only the **producer** of that config differs.
+
+## Integration quickstart (framework developers)
+
+1. Build a **`KnowledgeBaseConfig`** with one or more **`KnowledgeBaseDocument`** entries (`source: 'text'` or **`file`**).
+2. Attach **`knowledgeBase: config`** on your **`MainAgent`** before **`resolveAgentWithKnowledgeBase()`** (or equivalent compile step).
+3. Optionally pass **`KnowledgeBaseProcessContext.readFileText`** into **`processKnowledgeBase()`** if `file` paths should resolve from non-disk stores.
+4. Tune **`mode`**, **`autoPromptThreshold`**, **`chunkSize`**, **`maxResults`**, and **`maxIndexChars`** (tool-index size cap; default **1_500_000** characters, **`0`** disables) for latency vs recall.
+5. Remember: **`search_knowledge_base`** exists **only on the main** live agent, not inside generic subagent runners — see **Main agent vs subagents** above.
+
+## Open directions (framework-adjacent)
+
+These are mostly **product / app** concerns but affect how you wire KB:
+
+| Topic | Note |
+|-------|------|
+| **Subagent-owned KB** | No first-class **`SubagentConfig.knowledgeBase`** yet; subagents get **`knowledgeBaseContext`** (prompt slice only). Roadmap: `dev_docs/app/design-knowledge-base-roadmap.md` §5. |
+| **Vector / SQL / web RAG** | Not built into KB — add normal **`ToolDefinition`s** or workers and keep KB for static reference text. |
+| **Binary formats** | Framework does not parse PDF/DOCX; the **app** ingestion layer normalizes to text where configured (`app/agents/kb/*`). |

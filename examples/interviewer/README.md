@@ -1,5 +1,7 @@
 # Interviewer Example
 
+**Purpose:** Local **toy demo** for framework direction (persistent subagent + voice + KB). It is **not** the production Bodhi `./app` stack. Internal design history and how this relates to built-in recruiting live under **[`dev_docs/vertical_agents/`](../../dev_docs/vertical_agents/README.md)**; production-shaped screening starts from **[`app/agents/profiles/recruiting-screen.ts`](../../app/agents/profiles/recruiting-screen.ts)**.
+
 Document-driven software interviewer using one persistent `software_interviewer` subagent and a voice `MainAgent`.
 
 ## What It Does
