@@ -4,6 +4,23 @@ Standalone single-user demos for testing individual framework features. Each exa
 
 > These demos are for development and testing. The production multi-user server is in [`app/`](../app/).
 
+## Install vs optional setup
+
+From the **repository root**, a single install covers the framework, `app/`, and running these TypeScript examples (they import `src/` and some `app/lib` modules):
+
+```bash
+pnpm install
+```
+
+Some demos need **extra** steps (not run by `pnpm install`). Use the helper:
+
+```bash
+pnpm examples:setup              # list optional targets
+pnpm examples:setup spatialreal  # Python venv for SpatialReal avatar bridge
+```
+
+See per-demo sections below for env vars and run commands.
+
 ## Quick Reference
 
 | Demo | Feature | Entry Point | Run |

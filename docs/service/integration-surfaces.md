@@ -53,7 +53,7 @@ This document defines the **two external integration surfaces** for Agent Studio
 |------|-----|
 | Native app, custom UI, wearable hooks | **Surface A** — [Hosted Bodhi voice API](./hosted-voice-api.md) |
 | Marketing site / SaaS embed with minimal code | **Surface B** — [Widget embed](./widget-embed.md) |
-| Web app with full control but browser-only | **Surface A** using the same REST + `/ws` contract as documented, or npm **`@bodhi/web-sdk`** (see package READMEs under `packages/`). |
+| Web app with full control but browser-only | **Surface A** using the same REST + `/ws` contract as documented, or npm **`@bodhi_lab/bodhi-web-sdk`** (sibling repo **bodhi-lab-client-packages** — `packages/web-sdk`). |
 
 ---
 
