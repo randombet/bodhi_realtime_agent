@@ -103,7 +103,6 @@ async function main() {
 		geminiModel: LIVE_MODEL,
 		speechConfig: { voiceName: process.env.GEMINI_VOICE || 'Puck' },
 		realtimeInputConfig: REALTIME_INPUT_CONFIG,
-		gateAudioUntilGreetingComplete: true,
 		hooks: {
 			onSessionStart: (event) =>
 				console.log(`${ts()} [Session] Started: ${event.sessionId} (${event.agentName})`),
@@ -154,7 +153,6 @@ async function main() {
 	console.log(`  Subagent model:  ${SUBAGENT_MODEL}`);
 	console.log(`  Subagent budget: ${SUBAGENT_THINKING_BUDGET}`);
 	console.log('  Gemini VAD:      end=HIGH silence=500ms');
-	console.log('  Startup audio:   gated until greeting completes');
 	console.log('  Documents:       examples/interviewer/docs/*.md');
 	console.log();
 	console.log('Connect via: pnpm web-client:dev');

@@ -1465,50 +1465,6 @@ describe('VoiceSession', () => {
 			ws.close();
 			await new Promise<void>((r) => ws.on('close', r));
 		});
-
-		it('can gate client audio until the greeting turn completes', async () => {
-			session = new VoiceSession({
-				sessionId: 'sess_1',
-				userId: 'user_1',
-				apiKey: 'test-key',
-				agents: [createGreetingAgent()],
-				initialAgent: 'greeter',
-				port: 9899,
-				model: mockModel,
-				gateAudioUntilGreetingComplete: true,
-			});
-
-			await session.start();
-
-			const WebSocket = (await import('ws')).default;
-			const ws = new WebSocket('ws://localhost:9899');
-			await new Promise<void>((r) => ws.on('open', r));
-			await new Promise((r) => setTimeout(r, 50));
-
-			const { _getMessageHandler, _getMockSession } = await import('@google/genai');
-			const mockGeminiSession = (
-				_getMockSession as unknown as () => Record<string, ReturnType<typeof vi.fn>>
-			)();
-			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
-
-			mockGeminiSession.sendRealtimeInput.mockClear();
-			const audioData = Buffer.from([0x01, 0x02, 0x03, 0x04]);
-			ws.send(audioData);
-			await new Promise((r) => setTimeout(r, 50));
-
-			expect(mockGeminiSession.sendRealtimeInput).not.toHaveBeenCalled();
-
-			fire({ serverContent: { turnComplete: true } });
-			await new Promise((r) => setTimeout(r, 50));
-
-			ws.send(audioData);
-			await new Promise((r) => setTimeout(r, 50));
-
-			expect(mockGeminiSession.sendRealtimeInput).toHaveBeenCalled();
-
-			ws.close();
-			await new Promise<void>((r) => ws.on('close', r));
-		});
 	});
 
 	describe('reconnect error handling', () => {
