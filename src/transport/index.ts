@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: MIT
 
+export { createClientChannel } from './client-channel-factory.js';
+export type { CreateClientChannelParams } from './client-channel-factory.js';
+
 export { AudioBuffer } from './audio-buffer.js';
 export { CartesiaTTSProvider } from './cartesia-tts-provider.js';
 export type { CartesiaTTSConfig } from './cartesia-tts-provider.js';

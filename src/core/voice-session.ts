@@ -12,14 +12,14 @@ import type { ToolRoutingInfo } from '../runtime/actors/tool-router-actor.js';
 import { GeminiTransportAdapter } from '../runtime/adapters/gemini-transport-adapter.js';
 import { RuntimeOrchestrator } from '../runtime/runtime-orchestrator.js';
 import { ToolExecutor } from '../tools/tool-executor.js';
-import { ClientSenderAdapter } from '../transport/client-sender-adapter.js';
-import { ClientTransport } from '../transport/client-transport.js';
+import { createClientChannel } from '../transport/client-channel-factory.js';
 import {
 	GeminiLiveTransport,
 	type GeminiRealtimeInputConfig,
 } from '../transport/gemini-live-transport.js';
 import type { MainAgent, SubagentConfig } from '../types/agent.js';
 import type { BehaviorCategory } from '../types/behavior.js';
+import { type ClientMediaProfile, DEFAULT_CLIENT_MEDIA_PROFILE } from '../types/client-media.js';
 import type { ConversationHistoryStore } from '../types/history.js';
 import type { FrameworkHooks } from '../types/hooks.js';
 import type { ProcessedKnowledgeBase } from '../types/knowledge-base.js';
@@ -65,6 +65,11 @@ export interface VoiceSessionConfig {
 	 * via feedAudioFromClient / feedJsonFromClient and notifyClientConnected / notifyClientDisconnected.
 	 */
 	clientSender?: SessionClientSender;
+	/**
+	 * Client media plane profile (WebSocket PCM today; LiveKit/WebRTC reserved).
+	 * Defaults to WebSocket when omitted. See {@link createClientChannel}.
+	 */
+	clientMedia?: ClientMediaProfile;
 	/** Port for the local client WebSocket server (legacy/local mode). */
 	port?: number;
 	/** Host for the local client WebSocket server (legacy/local mode). */
@@ -458,23 +463,20 @@ export class VoiceSession {
 			this.wireTtsProvider();
 		}
 
-		if (config.clientSender) {
-			// Server-owned socket mode (multi-user/session router).
-			this.clientTransport = new ClientSenderAdapter(config.clientSender);
-		} else {
-			// Backward-compatible local mode used by demos/tests.
-			this.clientTransport = new ClientTransport(
-				config.port ?? 9900,
-				{
-					onAudioFromClient: (data) => this.handleAudioFromClient(data),
-					onJsonFromClient: (message) => this.handleJsonFromClient(message),
-					onClientConnected: () => this.handleClientConnected(),
-					onClientDisconnected: () => this.handleClientDisconnected(),
-				},
-				config.host ?? '0.0.0.0',
-				config.listenTimeoutMs ?? 10_000,
-			);
-		}
+		const clientMedia = config.clientMedia ?? DEFAULT_CLIENT_MEDIA_PROFILE;
+		this.clientTransport = createClientChannel({
+			profile: clientMedia,
+			clientSender: config.clientSender,
+			port: config.port,
+			host: config.host,
+			listenTimeoutMs: config.listenTimeoutMs,
+			callbacks: {
+				onAudioFromClient: (data) => this.handleAudioFromClient(data),
+				onJsonFromClient: (message) => this.handleJsonFromClient(message),
+				onClientConnected: () => this.handleClientConnected(),
+				onClientDisconnected: () => this.handleClientDisconnected(),
+			},
+		});
 
 		// Forward GUI events from EventBus to the client as JSON text frames
 		this.eventBus.subscribe('gui.update', (payload) => {

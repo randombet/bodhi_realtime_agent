@@ -54,6 +54,9 @@ export type { MemoryCategory, MemoryFact, MemoryStore } from './memory.js';
 
 export type { QueuedNotification } from './notification.js';
 
+export type { ClientMediaProfile } from './client-media.js';
+export { DEFAULT_CLIENT_MEDIA_PROFILE } from './client-media.js';
+
 export type {
 	IClientChannel,
 	SessionClientSender,
