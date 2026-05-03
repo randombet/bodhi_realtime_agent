@@ -28,6 +28,7 @@
     "build": "tsup",
     "web-client:build": "vite build --config app/web-client/vite.config.ts",
     "web-client:dev": "vite --config app/web-client/vite.config.ts",
+    "demo:direct-rtc": "tsx examples/direct-rtc-demo/server.ts",
     "examples:embed-widget-dump": "node examples/embed-widget-dump/server.mjs",
     "examples:setup": "bash scripts/examples-setup.sh",
     "web-client": "pnpm web-client:build && tsx app/web-client/serve.ts",
@@ -51,6 +52,7 @@
     "@anthropic-ai/claude-agent-sdk": "^0.2.71",
     "@emotion/react": "^11.14.0",
     "@emotion/styled": "^11.14.1",
+    "@evan/opus": "^1.0.3",
     "@google/genai": "^1.41.0",
     "@mui/icons-material": "^7.3.9",
     "@mui/material": "^7.3.9",
@@ -63,6 +65,7 @@
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
     "twilio": "^5.13.1",
+    "werift": "^0.23.0",
     "write-file-atomic": "^6.0.0",
     "ws": "^8.18.0",
     "zod": "^3.24.0"

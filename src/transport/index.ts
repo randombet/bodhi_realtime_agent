@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: MIT
 
 export { createClientChannel } from './client-channel-factory.js';
-export type { CreateClientChannelParams } from './client-channel-factory.js';
+export type {
+	CreateClientChannelParams,
+	DirectRtcMediaParams,
+} from './client-channel-factory.js';
 
 export { DirectRtcClientChannel } from './direct-rtc-client-channel.js';
 export type { DirectRtcClientChannelOptions } from './direct-rtc-client-channel.js';

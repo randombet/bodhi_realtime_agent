@@ -16,6 +16,11 @@ export type ClientMediaProfile =
 			 * Not consumed until the media stack is wired; safe to omit.
 			 */
 			readonly iceServers?: readonly IceServerEntry[];
+			/**
+			 * `none` (default): mic + assistant PCM on the WebSocket binary path.
+			 * `werift_opus`: Opus RTP over an embedded werift `RTCPeerConnection` (requires `VoiceSession` to pass `directRtcMedia` via `createClientChannel`).
+			 */
+			readonly rtcAudio?: 'none' | 'werift_opus';
 	  };
 
 /** STUN/TURN entry for `direct_rtc` (forwarded to the RTC stack when implemented). */

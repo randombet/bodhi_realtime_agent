@@ -8,4 +8,6 @@ export default defineConfig({
 	clean: true,
 	outDir: "dist",
 	tsconfig: "tsconfig.build.json",
+	/** Heavy / platform-specific — consumers install when using `rtcAudio: 'werift_opus'`. */
+	external: ["werift", "@evan/opus"],
 });

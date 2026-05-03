@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>Direct RTC + Opus voice demo</title>
+		<style>
+			body {
+				font-family: system-ui, sans-serif;
+				max-width: 52rem;
+				margin: 1.5rem auto;
+				padding: 0 1rem;
+				line-height: 1.45;
+			}
+			pre {
+				background: #111;
+				color: #e6e6e6;
+				padding: 0.75rem 1rem;
+				border-radius: 6px;
+				overflow: auto;
+				font-size: 0.85rem;
+			}
+			button {
+				margin-right: 0.5rem;
+				margin-bottom: 0.5rem;
+				padding: 0.4rem 0.75rem;
+			}
+		</style>
+	</head>
+	<body>
+		<h1>Direct RTC + Gemini Live</h1>
+		<p>
+			Control: WebSocket JSON (<code>rtc.*</code>). Voice: microphone and assistant audio over
+			<strong>Opus RTP</strong> (werift on the server). The page talks to your running demo server, which uses
+			<strong>Gemini Live</strong> — speak after WebRTC shows connected; assistant audio plays on the remote track.
+		</p>
+		<p>
+			<button type="button" id="btnWs">Connect WebSocket</button>
+			<button type="button" id="btnRtc" disabled>Start WebRTC (mic)</button>
+		</p>
+		<pre id="log"></pre>
+		<script>
+			const logEl = document.getElementById('log');
+			function log(...args) {
+				const line = args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
+				logEl.textContent += line + '\n';
+				logEl.scrollTop = logEl.scrollHeight;
+			}
+
+			const wsUrl = () => {
+				const u = new URL('/ws', window.location.href);
+				u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
+				return u.toString();
+			};
+
+			let ws = null;
+			let pc = null;
+			let micStream = null;
+			/** One element for assistant Opus decode → speakers (must attach on user gesture). */
+			let playoutAudio = null;
+
+			document.getElementById('btnWs').onclick = () => {
+				if (ws && ws.readyState === WebSocket.OPEN) {
+					log('WebSocket already open');
+					return;
+				}
+				ws = new WebSocket(wsUrl());
+				ws.binaryType = 'arraybuffer';
+				ws.onopen = () => {
+					log('WebSocket open', wsUrl());
+					document.getElementById('btnRtc').disabled = false;
+				};
+				ws.onclose = (ev) => {
+					log('WebSocket closed', ev.code, ev.reason || '');
+					document.getElementById('btnRtc').disabled = true;
+				};
+				ws.onerror = () => log('WebSocket error');
+				ws.onmessage = (ev) => {
+					if (ev.data instanceof ArrayBuffer) {
+						log('binary from server', ev.data.byteLength, 'bytes (assistant PCM fallback / early)');
+						return;
+					}
+					try {
+						const msg = JSON.parse(ev.data);
+						if (msg.type === 'rtc.error') {
+							log('← rtc.error', msg.message);
+							return;
+						}
+						log('←', msg.type, msg.type === 'rtc.answer' || msg.type === 'rtc.ice_candidate' ? msg : msg);
+					} catch {
+						log('← text', ev.data);
+					}
+				};
+			};
+
+			document.getElementById('btnRtc').onclick = async () => {
+				if (!ws || ws.readyState !== WebSocket.OPEN) {
+					log('Connect WebSocket first');
+					return;
+				}
+				if (pc) {
+					pc.close();
+					pc = null;
+				}
+				if (micStream) {
+					micStream.getTracks().forEach((t) => t.stop());
+					micStream = null;
+				}
+				micStream = await navigator.mediaDevices.getUserMedia({
+					audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+					video: false,
+				});
+				pc = new RTCPeerConnection({
+					iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+				});
+				for (const t of micStream.getAudioTracks()) {
+					pc.addTrack(t, micStream);
+				}
+				/* Critical: default can be sendonly → server answers recvonly and never sends assistant RTP.
+				   Duplex needs sendrecv so the answer includes server→browser audio. */
+				for (const tr of pc.getTransceivers()) {
+					const audio =
+						tr.kind === 'audio' ||
+						tr.sender?.track?.kind === 'audio' ||
+						tr.receiver?.track?.kind === 'audio';
+					if (audio) tr.direction = 'sendrecv';
+				}
+
+				pc.onicecandidate = (ev) => {
+					if (!ev.candidate) return;
+					ws.send(
+						JSON.stringify({
+							type: 'rtc.ice_candidate',
+							candidate: ev.candidate.toJSON(),
+						}),
+					);
+				};
+				pc.onconnectionstatechange = () => log('pc.connectionState', pc.connectionState);
+				pc.ontrack = (ev) => {
+					log('remote track', ev.track.kind, ev.track.id);
+					if (!playoutAudio) {
+						playoutAudio = new Audio();
+						playoutAudio.autoplay = true;
+						playoutAudio.setAttribute('playsinline', 'true');
+					}
+					playoutAudio.srcObject = ev.streams[0];
+					playoutAudio.play().catch((e) => log('audio.play()', e?.message ?? e));
+				};
+
+				const offer = await pc.createOffer();
+				await pc.setLocalDescription(offer);
+				ws.send(JSON.stringify({ type: 'rtc.offer', sdp: offer.sdp }));
+
+				const answerSdp = await new Promise((resolve, reject) => {
+					const timer = setTimeout(() => reject(new Error('timeout waiting for rtc.answer')), 30_000);
+					function onMsg(ev) {
+						if (typeof ev.data !== 'string') return;
+						let msg;
+						try {
+							msg = JSON.parse(ev.data);
+						} catch {
+							return;
+						}
+						if (msg.type === 'rtc.answer' && typeof msg.sdp === 'string') {
+							clearTimeout(timer);
+							ws.removeEventListener('message', onMsg);
+							resolve(msg.sdp);
+						}
+					}
+					ws.addEventListener('message', onMsg);
+				});
+				await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+				const ans = pc.remoteDescription?.sdp ?? '';
+				log(
+					'setRemoteDescription(answer) OK — duplex Opus RTP',
+					/sendrecv|sendonly|recvonly/.test(ans) ? ans.match(/a=(sendrecv|sendonly|recvonly)/g)?.join(' ') : '',
+				);
+			};
+		</script>
+	</body>
+</html>

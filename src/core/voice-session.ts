@@ -468,14 +468,23 @@ export class VoiceSession {
 		}
 
 		const clientMedia = config.clientMedia ?? DEFAULT_CLIENT_MEDIA_PROFILE;
+		const directRtcMedia =
+			clientMedia.kind === 'direct_rtc' && clientMedia.rtcAudio === 'werift_opus'
+				? {
+						inputPcmSampleRate: this.transport.audioFormat.inputSampleRate,
+						outputPcmSampleRate: this.transport.audioFormat.outputSampleRate,
+						onInboundPcm: (pcm: Buffer) => this.handleAudioFromClient(pcm, 'rtc'),
+					}
+				: undefined;
 		this.clientTransport = createClientChannel({
 			profile: clientMedia,
 			clientSender: config.clientSender,
+			directRtcMedia,
 			port: config.port,
 			host: config.host,
 			listenTimeoutMs: config.listenTimeoutMs,
 			callbacks: {
-				onAudioFromClient: (data) => this.handleAudioFromClient(data),
+				onAudioFromClient: (data) => this.handleAudioFromClient(data, 'websocket'),
 				onJsonFromClient: (message) => this.handleJsonFromClient(message),
 				onClientConnected: () => this.handleClientConnected(),
 				onClientDisconnected: () => this.handleClientDisconnected(),
@@ -1002,7 +1011,10 @@ export class VoiceSession {
 
 	// --- Audio fast-path (no EventBus) ---
 
-	private handleAudioFromClient(data: Buffer): void {
+	private handleAudioFromClient(data: Buffer, source: 'websocket' | 'rtc' = 'websocket'): void {
+		if (source === 'websocket' && this.directRtcChannel?.isRtcAudioReady) {
+			return;
+		}
 		if (this.sessionManager.isActive) {
 			this.updateClientAudioVad(data);
 			// When active agent uses external audio, don't forward to LLM transport.
@@ -1613,7 +1625,7 @@ export class VoiceSession {
 
 	/** Feed client audio into the session (LLM + STT). Used when the server owns the socket (multi-user). */
 	feedAudioFromClient(data: Buffer): void {
-		this.handleAudioFromClient(data);
+		this.handleAudioFromClient(data, 'websocket');
 	}
 
 	/** Feed client JSON (text_input, file_upload, etc.) into the session. Used when the server owns the socket. */
