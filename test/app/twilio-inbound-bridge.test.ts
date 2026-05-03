@@ -144,6 +144,8 @@ describe('TwilioInboundBridge phone path', () => {
 						'unknown',
 						undefined,
 						undefined,
+						false,
+						undefined,
 					);
 					// Let createSessionForCall() finish assigning call.session before media.
 					await new Promise((r) => setTimeout(r, 100));
@@ -328,6 +330,8 @@ describe('TwilioInboundBridge phone path', () => {
 				'unknown',
 				undefined,
 				undefined,
+				false,
+				undefined,
 			);
 		} finally {
 			bridge.dispose();
@@ -475,6 +479,8 @@ describe('TwilioInboundBridge phone path', () => {
 				'+15558889999',
 				'unknown',
 				undefined,
+				undefined,
+				false,
 				undefined,
 			);
 			expect(cleanup).toHaveBeenCalled();
