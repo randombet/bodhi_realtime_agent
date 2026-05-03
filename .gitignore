@@ -20,8 +20,6 @@ docs/api/
 .npmrc
 /.worktrees/
 .massgen/
-# Local-only recruiting fixtures (real JDs / resumes); committed samples live in fixtures/recruiting-screening/*.md
-/fixtures/recruiting-screening/local/
 /user-agents/
 /embed-widgets/
 

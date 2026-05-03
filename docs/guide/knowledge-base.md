@@ -89,13 +89,13 @@ Hosted **Agent Studio** resolves Supabase-backed attachments **before** compile 
 
 **Roadmap** (ingestion providers, noise, limits, subagent KB): `dev_docs/app/design-knowledge-base-roadmap.md`.
 
-**Vertical agents** (recruiting, interviewer toy demo, proposed profiles — how they *use* KB): `dev_docs/vertical_agents/README.md`.
+**Recruiting screen:** built-in profile `recruiting_screen` uses in-memory markdown (`source: 'text'`) from **`app/agents/recruiting-screen-default-content.ts`** or from a short-lived draft created by **`POST /api/recruiting-screen-draft`** (wired from the web explorer). Local **`examples/interviewer/`** is a separate framework toy demo.
 
 ## Built-in profiles vs Studio-compiled agents
 
 | Source | Where `KnowledgeBaseConfig` comes from | Typical `source` |
 |--------|----------------------------------------|------------------|
-| **Built-in catalog** (e.g. recruiting) | TypeScript in **`app/agents/profiles/*.ts`** at process start | **`file`** paths under repo **`fixtures/`** (UTF-8 markdown) — see **`app/agents/profiles/recruiting-screen.ts`** (`buildRecruitingKnowledgeBase`). |
+| **Built-in catalog** (e.g. recruiting) | **`assembleBodhiProfile`** merges text KB for `recruiting_screen` — see **`app/agents/profiles/recruiting-screen.ts`** (`buildRecruitingKnowledgeBaseFromTexts`). |
 | **User agents (`ua_*`)** | `AgentDefinitionV2.knowledgeBaseByAgentName` → **`materializeKnowledgeBaseByAgentName`** on the server | **`text`** only at framework boundary (Storage/inline resolved in `app/`). |
 
 As a framework developer you interact with the **same** `processKnowledgeBase()` / `resolveAgentWithKnowledgeBase()` APIs once `MainAgent.knowledgeBase` is set; only the **producer** of that config differs.

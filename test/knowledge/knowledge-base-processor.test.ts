@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { chunkText, processKnowledgeBase } from '../../src/knowledge/knowledge-base-processor.js';
@@ -183,21 +185,27 @@ describe('processKnowledgeBase', () => {
 	});
 
 	it('loads documents from files', () => {
-		const fixtureDir = path.resolve(process.cwd(), 'fixtures', 'recruiting-screening');
-		const config: KnowledgeBaseConfig = {
-			documents: [
-				{
-					source: 'file',
-					content: path.join(fixtureDir, 'company.md'),
-					name: 'Company',
-					mode: 'prompt',
-				},
-			],
-		};
+		const dir = mkdtempSync(path.join(tmpdir(), 'bodhi-kb-'));
+		const fp = path.join(dir, 'company.md');
+		writeFileSync(fp, '# Acme Corp\nScheduling product.', 'utf8');
+		try {
+			const config: KnowledgeBaseConfig = {
+				documents: [
+					{
+						source: 'file',
+						content: fp,
+						name: 'Company',
+						mode: 'prompt',
+					},
+				],
+			};
 
-		const result = processKnowledgeBase(config);
-		expect(result.promptInjection).toContain('Company');
-		expect(result.promptInjection.length).toBeGreaterThan(50);
+			const result = processKnowledgeBase(config);
+			expect(result.promptInjection).toContain('Acme Corp');
+			expect(result.promptInjection.length).toBeGreaterThan(50);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
 	it('uses readFileText from context when provided for file sources', () => {

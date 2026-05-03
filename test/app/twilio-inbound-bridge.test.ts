@@ -137,7 +137,14 @@ describe('TwilioInboundBridge phone path', () => {
 				const interval = setInterval(async () => {
 					if (createSession.mock.calls.length === 0) return;
 					clearInterval(interval);
-					expect(createSession).toHaveBeenCalledWith('phone_15551234567', callSid, from, 'unknown');
+					expect(createSession).toHaveBeenCalledWith(
+						'phone_15551234567',
+						callSid,
+						from,
+						'unknown',
+						undefined,
+						undefined,
+					);
 					// Let createSessionForCall() finish assigning call.session before media.
 					await new Promise((r) => setTimeout(r, 100));
 
@@ -319,6 +326,8 @@ describe('TwilioInboundBridge phone path', () => {
 				callSid,
 				'+15557778888',
 				'unknown',
+				undefined,
+				undefined,
 			);
 		} finally {
 			bridge.dispose();
@@ -465,6 +474,8 @@ describe('TwilioInboundBridge phone path', () => {
 				callSid,
 				'+15558889999',
 				'unknown',
+				undefined,
+				undefined,
 			);
 			expect(cleanup).toHaveBeenCalled();
 			expect(feedAudioFromClient).toHaveBeenCalledTimes(0);
