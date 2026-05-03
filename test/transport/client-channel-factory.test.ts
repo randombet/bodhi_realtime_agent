@@ -4,23 +4,33 @@ import { describe, expect, it, vi } from 'vitest';
 import { TransportError } from '../../src/core/errors.js';
 import { createClientChannel } from '../../src/transport/client-channel-factory.js';
 import { ClientTransport } from '../../src/transport/client-transport.js';
+import { DirectRtcClientChannel } from '../../src/transport/direct-rtc-client-channel.js';
 
 describe('createClientChannel', () => {
-	it('throws TransportError for livekit profile', () => {
+	it('throws TransportError for direct_rtc without clientSender', () => {
 		expect(() =>
 			createClientChannel({
-				profile: {
-					kind: 'livekit',
-					serverUrl: 'wss://example.invalid',
-					roomName: 'room',
-					participantToken: 'token',
-				},
+				profile: { kind: 'direct_rtc' },
 				callbacks: {},
 			}),
 		).toThrow(TransportError);
 	});
 
-	it('routes sendAudioToClient through SessionClientSender when clientSender is set', () => {
+	it('returns DirectRtcClientChannel for direct_rtc with clientSender', () => {
+		const sendAudio = vi.fn();
+		const sendJson = vi.fn();
+		const ch = createClientChannel({
+			profile: { kind: 'direct_rtc' },
+			clientSender: { sendAudio, sendJson },
+			callbacks: {},
+		});
+		expect(ch).toBeInstanceOf(DirectRtcClientChannel);
+		const buf = Buffer.from([1, 2, 3]);
+		ch.sendAudioToClient(buf);
+		expect(sendAudio).toHaveBeenCalledWith(buf);
+	});
+
+	it('routes sendAudioToClient through SessionClientSender when websocket + clientSender', () => {
 		const sendAudio = vi.fn();
 		const sendJson = vi.fn();
 		const ch = createClientChannel({

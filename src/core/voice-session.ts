@@ -13,6 +13,7 @@ import { GeminiTransportAdapter } from '../runtime/adapters/gemini-transport-ada
 import { RuntimeOrchestrator } from '../runtime/runtime-orchestrator.js';
 import { ToolExecutor } from '../tools/tool-executor.js';
 import { createClientChannel } from '../transport/client-channel-factory.js';
+import { DirectRtcClientChannel } from '../transport/direct-rtc-client-channel.js';
 import {
 	GeminiLiveTransport,
 	type GeminiRealtimeInputConfig,
@@ -24,6 +25,7 @@ import type { ConversationHistoryStore } from '../types/history.js';
 import type { FrameworkHooks } from '../types/hooks.js';
 import type { ProcessedKnowledgeBase } from '../types/knowledge-base.js';
 import type { MemoryStore } from '../types/memory.js';
+import { tryParseRtcClientSignaling } from '../types/rtc-signaling.js';
 import type { IClientChannel } from '../types/session-client.js';
 import type { SessionClientSender } from '../types/session-client.js';
 import type { ToolDefinition } from '../types/tool.js';
@@ -66,7 +68,7 @@ export interface VoiceSessionConfig {
 	 */
 	clientSender?: SessionClientSender;
 	/**
-	 * Client media plane profile (WebSocket PCM today; LiveKit/WebRTC reserved).
+	 * Client media plane profile (`websocket` PCM+JSON, or `direct_rtc` split plane: JSON on WS, RTC audio later).
 	 * Defaults to WebSocket when omitted. See {@link createClientChannel}.
 	 */
 	clientMedia?: ClientMediaProfile;
@@ -160,6 +162,8 @@ export class VoiceSession {
 	readonly hooks: HooksManager;
 	private transport: LLMTransport;
 	private clientTransport: IClientChannel;
+	/** Set when `clientMedia.kind === 'direct_rtc'` for WebSocket JSON signaling routing. */
+	private directRtcChannel: DirectRtcClientChannel | null = null;
 	private agentRouter: AgentRouter;
 	private toolExecutor: ToolExecutor;
 	private toolCallRouter?: ToolCallRouter;
@@ -477,6 +481,8 @@ export class VoiceSession {
 				onClientDisconnected: () => this.handleClientDisconnected(),
 			},
 		});
+		this.directRtcChannel =
+			this.clientTransport instanceof DirectRtcClientChannel ? this.clientTransport : null;
 
 		// Forward GUI events from EventBus to the client as JSON text frames
 		this.eventBus.subscribe('gui.update', (payload) => {
@@ -1493,6 +1499,14 @@ export class VoiceSession {
 	// --- Client transport handlers ---
 
 	private handleJsonFromClient(message: Record<string, unknown>): void {
+		if (this.directRtcChannel) {
+			const rtc = tryParseRtcClientSignaling(message);
+			if (rtc) {
+				this.directRtcChannel.feedSignaling(rtc);
+				return;
+			}
+		}
+
 		if (
 			message.type === 'behavior.set' &&
 			typeof message.key === 'string' &&

@@ -54,8 +54,11 @@ export type { MemoryCategory, MemoryFact, MemoryStore } from './memory.js';
 
 export type { QueuedNotification } from './notification.js';
 
-export type { ClientMediaProfile } from './client-media.js';
+export type { ClientMediaProfile, IceServerEntry } from './client-media.js';
 export { DEFAULT_CLIENT_MEDIA_PROFILE } from './client-media.js';
+
+export type { RtcClientSignalingMessage, RtcServerSignalingMessage } from './rtc-signaling.js';
+export { tryParseRtcClientSignaling } from './rtc-signaling.js';
 
 export type {
 	IClientChannel,

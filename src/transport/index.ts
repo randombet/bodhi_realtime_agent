@@ -3,6 +3,9 @@
 export { createClientChannel } from './client-channel-factory.js';
 export type { CreateClientChannelParams } from './client-channel-factory.js';
 
+export { DirectRtcClientChannel } from './direct-rtc-client-channel.js';
+export type { DirectRtcClientChannelOptions } from './direct-rtc-client-channel.js';
+
 export { AudioBuffer } from './audio-buffer.js';
 export { CartesiaTTSProvider } from './cartesia-tts-provider.js';
 export type { CartesiaTTSConfig } from './cartesia-tts-provider.js';
