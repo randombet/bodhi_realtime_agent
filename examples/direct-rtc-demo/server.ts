@@ -1,9 +1,15 @@
 // SPDX-License-Identifier: MIT
 /**
- * End-to-end voice demo: Gemini Live + `clientMedia: { kind: 'direct_rtc', rtcAudio: 'werift_opus' }`.
- * Mic and assistant audio use Opus RTP (werift + @evan/opus); JSON/control stays on the WebSocket.
+ * Voice agent over direct RTC — end-to-end Gemini Live conversation.
  *
- * Run: `pnpm demo:direct-rtc` — requires `GEMINI_API_KEY` or `GOOGLE_API_KEY`.
+ * Audio transport: browser ←→ server via Opus RTP (WebRTC).
+ * Control / transcripts: WebSocket JSON (same contract as all other examples).
+ * Agent ←→ Gemini Live: the normal VoiceSession WebSocket path — unchanged.
+ *
+ * Usage:
+ *   1. Set GEMINI_API_KEY (or GOOGLE_API_KEY) in .env or environment.
+ *   2. pnpm demo:direct-rtc
+ *   3. Open http://127.0.0.1:8788 — click Connect, allow mic, talk.
  */
 
 import 'dotenv/config';
@@ -19,31 +25,28 @@ import type { MainAgent } from '../../src/types/agent.js';
 import type { SessionClientSender } from '../../src/types/session-client.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-
 const PORT = Number(process.env.DIRECT_RTC_DEMO_PORT) || 8788;
 const STUN = process.env.DIRECT_RTC_STUN ?? 'stun:stun.l.google.com:19302';
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY ?? '';
 if (!GEMINI_API_KEY) {
-	console.error('Error: set GEMINI_API_KEY or GOOGLE_API_KEY for Gemini Live.');
+	console.error('Set GEMINI_API_KEY or GOOGLE_API_KEY to run this demo.');
 	process.exit(1);
 }
 
 const LIVE_MODEL = process.env.GEMINI_LIVE_MODEL ?? 'gemini-2.5-flash-native-audio-preview-12-2025';
 const TEXT_MODEL = process.env.DIRECT_RTC_DEMO_TEXT_MODEL ?? 'gemini-2.5-flash';
-
 const google = createGoogleGenerativeAI({ apiKey: GEMINI_API_KEY });
 
 function ts(): string {
 	return new Date().toISOString().slice(11, 23);
 }
 
-const assistantAgent: MainAgent = {
+const agent: MainAgent = {
 	name: 'assistant',
-	instructions:
-		'You are a friendly, concise voice companion. Keep replies short and natural for spoken conversation. Do not use markdown or lists unless the user asks.',
+	instructions: 'You are a friendly voice companion. Keep replies short and conversational.',
 	tools: [],
-	greeting: 'Greet the user briefly and ask what they would like to talk about.',
+	greeting: 'Say hi briefly and ask what the user wants to talk about.',
 };
 
 function toBuffer(data: RawData): Buffer {
@@ -70,10 +73,10 @@ async function main(): Promise<void> {
 	};
 
 	const session = new VoiceSession({
-		sessionId: `direct_rtc_voice_${Date.now()}`,
-		userId: 'direct_rtc_demo_user',
+		sessionId: `rtc_voice_${Date.now()}`,
+		userId: 'rtc_demo_user',
 		apiKey: GEMINI_API_KEY,
-		agents: [assistantAgent],
+		agents: [agent],
 		initialAgent: 'assistant',
 		model: google(TEXT_MODEL),
 		geminiModel: LIVE_MODEL,
@@ -98,6 +101,17 @@ async function main(): Promise<void> {
 		},
 	});
 
+	let lastLoggedIndex = 0;
+	session.eventBus.subscribe('turn.end', (payload) => {
+		const items = session.conversationContext.items;
+		for (const item of items.slice(lastLoggedIndex)) {
+			if (item.role === 'user' || item.role === 'assistant') {
+				console.log(`${ts()} [${item.role}] ${item.content}`);
+			}
+		}
+		lastLoggedIndex = items.length;
+	});
+
 	await session.start();
 
 	const indexHtml = readFileSync(join(__dirname, 'public', 'index.html'), 'utf8');
@@ -117,7 +131,7 @@ async function main(): Promise<void> {
 	wss.on('connection', (ws: WebSocket) => {
 		if (activeWs && activeWs.readyState === WebSocket.OPEN && activeWs !== ws) {
 			session.notifyClientDisconnected();
-			activeWs.close(4000, 'replaced by new tab');
+			activeWs.close(4000, 'replaced');
 		}
 		activeWs = ws;
 
@@ -127,10 +141,11 @@ async function main(): Promise<void> {
 					session.feedAudioFromClient(toBuffer(data));
 					return;
 				}
-				const parsed = JSON.parse(toBuffer(data).toString('utf8')) as Record<string, unknown>;
-				session.feedJsonFromClient(parsed);
+				session.feedJsonFromClient(
+					JSON.parse(toBuffer(data).toString('utf8')) as Record<string, unknown>,
+				);
 			} catch (err) {
-				console.error('[direct-rtc-demo] message error:', err);
+				console.error(`${ts()} [ws] message error:`, err);
 			}
 		});
 
@@ -154,22 +169,16 @@ async function main(): Promise<void> {
 			return;
 		}
 		if (pathname === '/ws') {
-			wss.handleUpgrade(req, socket, head, (client) => {
-				wss.emit('connection', client, req);
-			});
+			wss.handleUpgrade(req, socket, head, (client) => wss.emit('connection', client, req));
 		} else {
 			socket.destroy();
 		}
 	});
 
-	await new Promise<void>((resolve) => {
-		httpServer.listen(PORT, () => resolve());
-	});
+	await new Promise<void>((r) => httpServer.listen(PORT, r));
 
 	const shutdown = async () => {
-		if (activeWs?.readyState === WebSocket.OPEN) {
-			activeWs.close();
-		}
+		activeWs?.close();
 		await session.close('shutdown');
 		httpServer.close();
 		process.exit(0);
@@ -178,14 +187,13 @@ async function main(): Promise<void> {
 	process.on('SIGTERM', () => void shutdown());
 
 	console.log('============================================================');
-	console.log('Direct RTC + Gemini Live (Opus RTP)');
+	console.log('Voice Agent — Direct RTC (Gemini Live)');
 	console.log('============================================================');
-	console.log(`  Page:        http://127.0.0.1:${PORT}/`);
-	console.log(`  WebSocket:   ws://127.0.0.1:${PORT}/ws`);
-	console.log(`  Live model:  ${LIVE_MODEL}`);
-	console.log(`  Text model:  ${TEXT_MODEL}`);
-	console.log(`  STUN:        ${STUN}`);
-	console.log('  Allow mic → Connect WebSocket → Start WebRTC, then talk.');
+	console.log(`  Page:       http://127.0.0.1:${PORT}/`);
+	console.log(`  WebSocket:  ws://127.0.0.1:${PORT}/ws`);
+	console.log(`  Live model: ${LIVE_MODEL}`);
+	console.log(`  Voice:      ${process.env.GEMINI_VOICE ?? 'Puck'}`);
+	console.log('  Click Connect, allow mic, then talk.');
 }
 
 void main().catch((err) => {

@@ -32,7 +32,7 @@ See per-demo sections below for env vars and run commands.
 | OpenClaw | Multi-tool agent with search, images, video | `openclaw/openclaw-demo.ts` | `pnpm tsx examples/openclaw/openclaw-demo.ts` |
 | SpatialReal Avatar Host Sync | Voice agent + avatar keyframe sync (host mode bridge) | `spatialreal_avatar_websdk/demo.ts` | `pnpm tsx examples/spatialreal_avatar_websdk/demo.ts` |
 | Interviewer | Document-driven software interview with a planning subagent | `interviewer/interviewer-demo.ts` | `pnpm tsx examples/interviewer/interviewer-demo.ts` |
-| Direct RTC | Gemini Live voice over `direct_rtc` + `werift_opus` (no tools/subagents) | `direct-rtc-demo/server.ts` | `pnpm demo:direct-rtc` (needs `GEMINI_API_KEY`) |
+| Direct RTC | Gemini Live voice agent over Opus WebRTC (no tools/subagents) | `direct-rtc-demo/server.ts` | `pnpm demo:direct-rtc` (needs `GEMINI_API_KEY`) |
 | Widget embed dump | Static page on port 8765 to test `wg_*` + `bodhi-widget.js` from another origin | `embed-widget-dump/server.mjs` | `pnpm examples:embed-widget-dump` |
 
 ## OpenAI Realtime
@@ -99,9 +99,9 @@ pnpm tsx examples/spatialreal_avatar_websdk/demo.ts
 pnpm tsx examples/spatialreal_avatar_websdk/web-client.ts
 ```
 
-## Direct RTC + Gemini Live
+## Direct RTC (Opus WebRTC voice)
 
-See [direct-rtc-demo/README.md](direct-rtc-demo/README.md).
+See [direct-rtc-demo/README.md](direct-rtc-demo/README.md). Full Gemini Live conversation — audio over WebRTC instead of WebSocket binary.
 
 ```bash
 export GEMINI_API_KEY="your-key"

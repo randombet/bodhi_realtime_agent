@@ -1,11 +1,10 @@
-# Direct RTC + Gemini Live (end-to-end voice)
+# Voice Agent — Direct RTC
 
-Minimal **voice companion** over **WebSocket control + Opus RTP** (`clientMedia: { kind: 'direct_rtc', rtcAudio: 'werift_opus' }`). One `MainAgent`, **no tools, no subagents**. Uses **Gemini Live** for real speech in/out.
+End-to-end voice agent: **Gemini Live** for conversation, **Opus WebRTC** for mic + assistant audio (no LiveKit, no SFU). Transcripts and control messages stay on the same WebSocket as every other Bodhi example.
 
 ## Prerequisites
 
 - `GEMINI_API_KEY` or `GOOGLE_API_KEY`
-- Optional: `GEMINI_LIVE_MODEL` (default `gemini-2.5-flash-native-audio-preview-12-2025`), `GEMINI_VOICE`, `DIRECT_RTC_DEMO_TEXT_MODEL` (Vercel AI model for the session router; default `gemini-2.5-flash`), `DIRECT_RTC_STUN`, `DIRECT_RTC_DEMO_PORT`
 
 ## Run
 
@@ -14,13 +13,36 @@ export GEMINI_API_KEY="your-key"
 pnpm demo:direct-rtc
 ```
 
-Open **http://127.0.0.1:8788/** → allow microphone → **Connect WebSocket** → **Start WebRTC** → talk. You should hear a short greeting, then a normal voice back-and-forth.
+Open **http://127.0.0.1:8788/** → click **Connect** → allow microphone → talk. You should hear the agent greet you and respond.
 
-If you see transcripts but **no sound**: the browser must negotiate **`sendrecv`** on the audio m-line (the page sets `transceiver.direction = 'sendrecv'` before the offer). If the server’s answer still shows only `recvonly`, check the browser console and try headphones to rule out echo cancellation muting the remote track.
+## Optional env
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GEMINI_LIVE_MODEL` | `gemini-2.5-flash-native-audio-preview-12-2025` | Gemini Live model |
+| `DIRECT_RTC_DEMO_TEXT_MODEL` | `gemini-2.5-flash` | Text model (session router) |
+| `GEMINI_VOICE` | `Puck` | Gemini speech voice |
+| `DIRECT_RTC_DEMO_PORT` | `8788` | HTTP + WebSocket port |
+| `DIRECT_RTC_STUN` | `stun:stun.l.google.com:19302` | STUN server |
+
+## Architecture
+
+```
+Browser                          Server
+┌──────────┐  Opus RTP (WebRTC)  ┌──────────────┐  WebSocket  ┌───────────┐
+│ mic/spkr ├─────────────────────┤ VoiceSession ├────────────┤ Gemini    │
+└──────────┘                     │ (werift +    │            │ Live API  │
+    ▲                            │  @evan/opus) │            └───────────┘
+    │  JSON (WebSocket)          └──────┬───────┘
+    └───────────────────────────────────┘
+        transcripts, session.config, turn signals
+```
+
+Audio path: `getUserMedia` → browser Opus encode → RTP → werift decode → PCM 16 kHz → Gemini Live. Return path: Gemini 24 kHz PCM → Opus encode → RTP → browser decode → speakers.
 
 ## Layout
 
 | Path | Role |
 |------|------|
-| `server.ts` | HTTP + WebSocket, `VoiceSession` + Gemini |
-| `public/index.html` | Browser: mic + `RTCPeerConnection`, play remote assistant track |
+| `server.ts` | HTTP, WebSocket, VoiceSession + Gemini Live |
+| `public/index.html` | Browser client: RTC audio + transcript UI |

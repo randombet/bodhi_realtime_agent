@@ -263,6 +263,9 @@ export class WeriftOpusRtcEngine {
 
 		try {
 			await this.pc.setRemoteDescription({ type: 'offer', sdp });
+			for (const tx of this.pc.getTransceivers()) {
+				if (tx.kind === 'audio') tx.setDirection('sendrecv');
+			}
 			await this.flushPendingIce();
 			const answer = await this.pc.createAnswer();
 			await this.pc.setLocalDescription({ type: 'answer', sdp: answer.sdp });

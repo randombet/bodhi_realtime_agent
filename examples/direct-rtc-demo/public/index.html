@@ -1,181 +1,304 @@
 <!doctype html>
 <html lang="en">
-	<head>
-		<meta charset="utf-8" />
-		<meta name="viewport" content="width=device-width, initial-scale=1" />
-		<title>Direct RTC + Opus voice demo</title>
-		<style>
-			body {
-				font-family: system-ui, sans-serif;
-				max-width: 52rem;
-				margin: 1.5rem auto;
-				padding: 0 1rem;
-				line-height: 1.45;
-			}
-			pre {
-				background: #111;
-				color: #e6e6e6;
-				padding: 0.75rem 1rem;
-				border-radius: 6px;
-				overflow: auto;
-				font-size: 0.85rem;
-			}
-			button {
-				margin-right: 0.5rem;
-				margin-bottom: 0.5rem;
-				padding: 0.4rem 0.75rem;
-			}
-		</style>
-	</head>
-	<body>
-		<h1>Direct RTC + Gemini Live</h1>
-		<p>
-			Control: WebSocket JSON (<code>rtc.*</code>). Voice: microphone and assistant audio over
-			<strong>Opus RTP</strong> (werift on the server). The page talks to your running demo server, which uses
-			<strong>Gemini Live</strong> — speak after WebRTC shows connected; assistant audio plays on the remote track.
-		</p>
-		<p>
-			<button type="button" id="btnWs">Connect WebSocket</button>
-			<button type="button" id="btnRtc" disabled>Start WebRTC (mic)</button>
-		</p>
-		<pre id="log"></pre>
-		<script>
-			const logEl = document.getElementById('log');
-			function log(...args) {
-				const line = args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
-				logEl.textContent += line + '\n';
-				logEl.scrollTop = logEl.scrollHeight;
-			}
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Bodhi Voice Agent — Direct RTC</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: #0f0f1a; color: #ccc;
+  display: flex; flex-direction: column; align-items: center;
+  padding: 24px 16px; min-height: 100vh;
+}
+h1 { color: #fff; font-size: 1.4em; margin-bottom: 4px; }
+.sub { color: #666; font-size: 0.85em; margin-bottom: 20px; }
+.panel { width: 100%; max-width: 700px; background: #1a1a2e; border-radius: 12px; padding: 16px 20px; margin-bottom: 12px; }
+.row { display: flex; gap: 8px; align-items: center; }
+input[type=text] { flex: 1; padding: 9px 12px; border-radius: 8px; border: 1px solid #333; background: #12122a; color: #fff; font-size: 13px; outline: none; }
+input:focus { border-color: #4a6fa5; }
+button { padding: 9px 18px; border-radius: 8px; border: none; font-size: 13px; font-weight: 600; cursor: pointer; transition: background 0.15s; white-space: nowrap; }
+.btn-connect { background: #1e5128; color: #fff; }
+.btn-connect:hover { background: #277334; }
+.btn-disconnect { background: #8b1a1a; color: #fff; }
+.btn-disconnect:hover { background: #a52222; }
+.indicator { display: flex; align-items: center; gap: 8px; font-size: 12px; margin-top: 10px; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: #333; transition: background 0.3s; }
+.dot.live { background: #4ecca3; box-shadow: 0 0 6px #4ecca3; }
+.dot.error { background: #e94560; }
+#transcript {
+  width: 100%; max-width: 700px; background: #12122a; border-radius: 12px; padding: 14px 16px;
+  max-height: 50vh; overflow-y: auto; font-size: 14px; line-height: 1.8; margin-bottom: 12px;
+}
+.t-entry { margin-bottom: 4px; }
+.t-user { color: #64b5f6; }
+.t-user::before { content: 'You: '; font-weight: 600; }
+.t-assistant { color: #a5d6a7; }
+.t-assistant::before { content: 'Agent: '; font-weight: 600; }
+.t-system { color: #888; font-style: italic; font-size: 12px; }
+.t-interim { opacity: 0.5; }
+#debug {
+  width: 100%; max-width: 700px; background: #0a0a15; border-radius: 12px; padding: 12px 14px;
+  max-height: 20vh; overflow-y: auto; font-size: 11px; line-height: 1.6;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+}
+.d-entry { color: #555; }
+.d-entry.err { color: #ef5350; }
+.d-entry.event { color: #9575cd; }
+</style>
+</head>
+<body>
+<h1>Bodhi Voice Agent</h1>
+<div class="sub">Direct RTC — audio over Opus WebRTC, control over WebSocket</div>
 
-			const wsUrl = () => {
-				const u = new URL('/ws', window.location.href);
-				u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
-				return u.toString();
-			};
+<div class="panel">
+  <div class="row">
+    <input type="text" id="wsUrl" />
+    <button id="btn" class="btn-connect">Connect</button>
+  </div>
+  <div class="indicator">
+    <div class="dot" id="dot"></div>
+    <span id="status">Disconnected</span>
+  </div>
+</div>
 
-			let ws = null;
-			let pc = null;
-			let micStream = null;
-			/** One element for assistant Opus decode → speakers (must attach on user gesture). */
-			let playoutAudio = null;
+<div id="transcript"></div>
+<div id="debug"></div>
 
-			document.getElementById('btnWs').onclick = () => {
-				if (ws && ws.readyState === WebSocket.OPEN) {
-					log('WebSocket already open');
-					return;
-				}
-				ws = new WebSocket(wsUrl());
-				ws.binaryType = 'arraybuffer';
-				ws.onopen = () => {
-					log('WebSocket open', wsUrl());
-					document.getElementById('btnRtc').disabled = false;
-				};
-				ws.onclose = (ev) => {
-					log('WebSocket closed', ev.code, ev.reason || '');
-					document.getElementById('btnRtc').disabled = true;
-				};
-				ws.onerror = () => log('WebSocket error');
-				ws.onmessage = (ev) => {
-					if (ev.data instanceof ArrayBuffer) {
-						log('binary from server', ev.data.byteLength, 'bytes (assistant PCM fallback / early)');
-						return;
-					}
-					try {
-						const msg = JSON.parse(ev.data);
-						if (msg.type === 'rtc.error') {
-							log('← rtc.error', msg.message);
-							return;
-						}
-						log('←', msg.type, msg.type === 'rtc.answer' || msg.type === 'rtc.ice_candidate' ? msg : msg);
-					} catch {
-						log('← text', ev.data);
-					}
-				};
-			};
+<script>
+const $ = id => document.getElementById(id);
 
-			document.getElementById('btnRtc').onclick = async () => {
-				if (!ws || ws.readyState !== WebSocket.OPEN) {
-					log('Connect WebSocket first');
-					return;
-				}
-				if (pc) {
-					pc.close();
-					pc = null;
-				}
-				if (micStream) {
-					micStream.getTracks().forEach((t) => t.stop());
-					micStream = null;
-				}
-				micStream = await navigator.mediaDevices.getUserMedia({
-					audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
-					video: false,
-				});
-				pc = new RTCPeerConnection({
-					iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
-				});
-				for (const t of micStream.getAudioTracks()) {
-					pc.addTrack(t, micStream);
-				}
-				/* Critical: default can be sendonly → server answers recvonly and never sends assistant RTP.
-				   Duplex needs sendrecv so the answer includes server→browser audio. */
-				for (const tr of pc.getTransceivers()) {
-					const audio =
-						tr.kind === 'audio' ||
-						tr.sender?.track?.kind === 'audio' ||
-						tr.receiver?.track?.kind === 'audio';
-					if (audio) tr.direction = 'sendrecv';
-				}
+// Default WS URL
+$('wsUrl').value = (() => {
+  const u = new URL('/ws', window.location.href);
+  u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
+  return u.toString();
+})();
 
-				pc.onicecandidate = (ev) => {
-					if (!ev.candidate) return;
-					ws.send(
-						JSON.stringify({
-							type: 'rtc.ice_candidate',
-							candidate: ev.candidate.toJSON(),
-						}),
-					);
-				};
-				pc.onconnectionstatechange = () => log('pc.connectionState', pc.connectionState);
-				pc.ontrack = (ev) => {
-					log('remote track', ev.track.kind, ev.track.id);
-					if (!playoutAudio) {
-						playoutAudio = new Audio();
-						playoutAudio.autoplay = true;
-						playoutAudio.setAttribute('playsinline', 'true');
-					}
-					playoutAudio.srcObject = ev.streams[0];
-					playoutAudio.play().catch((e) => log('audio.play()', e?.message ?? e));
-				};
+let ws = null;
+let pc = null;
+let micStream = null;
+let playoutAudio = null;
+let connected = false;
+let currentUserEl = null;
+let currentAssistantEl = null;
 
-				const offer = await pc.createOffer();
-				await pc.setLocalDescription(offer);
-				ws.send(JSON.stringify({ type: 'rtc.offer', sdp: offer.sdp }));
+function dbg(msg, cls) {
+  const d = document.createElement('div');
+  d.className = 'd-entry' + (cls ? ' ' + cls : '');
+  d.textContent = new Date().toISOString().slice(11, 23) + ' ' + msg;
+  $('debug').appendChild(d);
+  $('debug').scrollTop = $('debug').scrollHeight;
+}
 
-				const answerSdp = await new Promise((resolve, reject) => {
-					const timer = setTimeout(() => reject(new Error('timeout waiting for rtc.answer')), 30_000);
-					function onMsg(ev) {
-						if (typeof ev.data !== 'string') return;
-						let msg;
-						try {
-							msg = JSON.parse(ev.data);
-						} catch {
-							return;
-						}
-						if (msg.type === 'rtc.answer' && typeof msg.sdp === 'string') {
-							clearTimeout(timer);
-							ws.removeEventListener('message', onMsg);
-							resolve(msg.sdp);
-						}
-					}
-					ws.addEventListener('message', onMsg);
-				});
-				await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
-				const ans = pc.remoteDescription?.sdp ?? '';
-				log(
-					'setRemoteDescription(answer) OK — duplex Opus RTP',
-					/sendrecv|sendonly|recvonly/.test(ans) ? ans.match(/a=(sendrecv|sendonly|recvonly)/g)?.join(' ') : '',
-				);
-			};
-		</script>
-	</body>
+function setStatus(text, state) {
+  $('status').textContent = text;
+  $('dot').className = 'dot' + (state === 'live' ? ' live' : state === 'error' ? ' error' : '');
+}
+
+function addSystem(text) {
+  const el = document.createElement('div');
+  el.className = 't-entry t-system';
+  el.textContent = text;
+  $('transcript').appendChild(el);
+  $('transcript').scrollTop = $('transcript').scrollHeight;
+}
+
+function handleTranscript(role, text, partial) {
+  if (role === 'user') {
+    if (!currentUserEl) {
+      currentUserEl = document.createElement('div');
+      currentUserEl.className = 't-entry t-user t-interim';
+      $('transcript').appendChild(currentUserEl);
+    }
+    currentUserEl.textContent = text;
+    if (!partial) {
+      currentUserEl.classList.remove('t-interim');
+      currentUserEl = null;
+    }
+  } else if (role === 'assistant') {
+    if (!currentAssistantEl) {
+      currentAssistantEl = document.createElement('div');
+      currentAssistantEl.className = 't-entry t-assistant t-interim';
+      $('transcript').appendChild(currentAssistantEl);
+    }
+    currentAssistantEl.textContent = text;
+    if (!partial) {
+      currentAssistantEl.classList.remove('t-interim');
+      currentAssistantEl = null;
+    }
+  }
+  $('transcript').scrollTop = $('transcript').scrollHeight;
+}
+
+async function startRtc() {
+  if (pc) { pc.close(); pc = null; }
+  if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    video: false,
+  });
+  dbg('Mic acquired: ' + (micStream.getAudioTracks()[0].getSettings().sampleRate || '?') + ' Hz');
+
+  pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+
+  for (const t of micStream.getAudioTracks()) pc.addTrack(t, micStream);
+
+  // Duplex: sendrecv so the server answer includes outbound assistant audio
+  for (const tr of pc.getTransceivers()) {
+    if (tr.sender?.track?.kind === 'audio' || tr.receiver?.track?.kind === 'audio') {
+      tr.direction = 'sendrecv';
+    }
+  }
+
+  pc.onicecandidate = ev => {
+    if (!ev.candidate || !ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: 'rtc.ice_candidate', candidate: ev.candidate.toJSON() }));
+  };
+
+  pc.onconnectionstatechange = () => {
+    dbg('RTC state: ' + pc.connectionState);
+    if (pc.connectionState === 'connected') {
+      setStatus('Live — speak now', 'live');
+      addSystem('Voice connected. Speak now.');
+    } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+      setStatus('RTC ' + pc.connectionState, 'error');
+    }
+  };
+
+  pc.ontrack = ev => {
+    dbg('Remote track: ' + ev.track.kind + ' id=' + ev.track.id);
+    if (!playoutAudio) {
+      playoutAudio = new Audio();
+      playoutAudio.autoplay = true;
+      playoutAudio.setAttribute('playsinline', 'true');
+    }
+    playoutAudio.srcObject = ev.streams[0] || new MediaStream([ev.track]);
+    playoutAudio.play().catch(e => dbg('audio.play: ' + (e?.message ?? e), 'err'));
+  };
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  ws.send(JSON.stringify({ type: 'rtc.offer', sdp: offer.sdp }));
+
+  dbg('Sent RTC offer, waiting for answer…');
+  setStatus('Negotiating RTC…', '');
+
+  // Wait for answer
+  const answerSdp = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('timeout waiting for rtc.answer')), 30000);
+    function onMsg(ev) {
+      if (typeof ev.data !== 'string') return;
+      try {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === 'rtc.answer' && typeof msg.sdp === 'string') {
+          clearTimeout(timer);
+          ws.removeEventListener('message', onMsg);
+          resolve(msg.sdp);
+        }
+      } catch {}
+    }
+    ws.addEventListener('message', onMsg);
+  });
+  await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+  const dirs = answerSdp.match(/a=(sendrecv|sendonly|recvonly)/g) || [];
+  dbg('Answer applied: ' + dirs.join(' '));
+}
+
+function stopRtc() {
+  if (pc) { pc.close(); pc = null; }
+  if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+  if (playoutAudio) { playoutAudio.srcObject = null; }
+}
+
+function connectWs() {
+  const url = $('wsUrl').value.trim();
+  if (!url) return;
+  dbg('Connecting WS: ' + url);
+  setStatus('Connecting…', '');
+
+  ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = async () => {
+    dbg('WS open');
+    connected = true;
+    $('btn').textContent = 'Disconnect';
+    $('btn').className = 'btn-disconnect';
+    try {
+      await startRtc();
+    } catch (err) {
+      dbg('RTC/mic error: ' + err.message, 'err');
+      setStatus('Mic error', 'error');
+      addSystem('Microphone denied or RTC failed. Allow mic and retry.');
+    }
+  };
+
+  ws.onmessage = ev => {
+    if (ev.data instanceof ArrayBuffer) {
+      // Fallback binary PCM (before RTC is up or if engine not ready) — ignore silently;
+      // assistant audio arrives via the RTC remote track once connected.
+      return;
+    }
+    try {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === 'session.config') {
+        dbg('session.config: input=' + msg.audioFormat?.inputSampleRate + ' output=' + msg.audioFormat?.outputSampleRate, 'event');
+      } else if (msg.type === 'transcript') {
+        handleTranscript(msg.role, msg.text, msg.partial !== false);
+      } else if (msg.type === 'turn.end') {
+        currentUserEl = null;
+        currentAssistantEl = null;
+      } else if (msg.type === 'turn.interrupted') {
+        currentUserEl = null;
+        currentAssistantEl = null;
+      } else if (msg.type === 'rtc.ice_candidate') {
+        if (pc && pc.remoteDescription) {
+          pc.addIceCandidate(msg.candidate).catch(e => dbg('addIceCandidate: ' + e.message, 'err'));
+        }
+      } else if (msg.type === 'rtc.error') {
+        dbg('rtc.error: ' + msg.message, 'err');
+      } else if (msg.type === 'session.ready') {
+        dbg('session.ready: agent=' + msg.agentProfile, 'event');
+      } else {
+        dbg('← ' + msg.type, 'event');
+      }
+    } catch {
+      dbg('Bad JSON frame', 'err');
+    }
+  };
+
+  ws.onclose = ev => {
+    dbg('WS closed: ' + ev.code);
+    doCleanup();
+    addSystem('Disconnected.');
+  };
+
+  ws.onerror = () => {
+    dbg('WS error', 'err');
+    setStatus('Connection failed', 'error');
+    addSystem('Connection error — is the server running?');
+  };
+}
+
+function doCleanup() {
+  stopRtc();
+  connected = false;
+  setStatus('Disconnected', '');
+  $('btn').textContent = 'Connect';
+  $('btn').className = 'btn-connect';
+}
+
+$('btn').onclick = () => {
+  if (connected) {
+    if (ws) { ws.close(); ws = null; }
+    doCleanup();
+  } else {
+    connectWs();
+  }
+};
+</script>
+</body>
 </html>
