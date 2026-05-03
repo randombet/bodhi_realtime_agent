@@ -287,7 +287,7 @@ describe('artifact registry wiring in bodhi session config', () => {
 		expect(nanoclaw.agents[0]?.tools.some((t) => t.name === 'list_artifacts')).toBe(true);
 	});
 
-	it('recruiting profile uses knowledgeBase config and resolves documents at session time', async () => {
+	it('structured_screening profile uses knowledgeBase config and resolves documents at session time', async () => {
 		const config = await createBodhiSessionConfig({
 			apiKey: 'test-key',
 			memoryStore: {
@@ -298,14 +298,14 @@ describe('artifact registry wiring in bodhi session config', () => {
 				setDirectives: vi.fn(),
 			},
 			clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
-			sessionId: 'sess_recruiting_profile',
+			sessionId: 'sess_structured_screening_profile',
 			userId: 'user_test',
 			getSessionRef: () => null,
-			agentProfile: 'recruiting_screen',
+			agentProfile: 'structured_screening',
 		});
 
 		const mainAgent = config.agents[0];
-		// The new recruiting profile uses knowledgeBase instead of legacy augmentation
+		// structured_screening uses knowledgeBase instead of legacy augmentation
 		expect(mainAgent?.knowledgeBase).toBeDefined();
 		expect(mainAgent?.knowledgeBase?.documents).toHaveLength(3);
 		expect(mainAgent?.knowledgeBase?.documents.map((d) => d.name)).toEqual([
