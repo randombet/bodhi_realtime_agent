@@ -4,6 +4,14 @@
 
 This document defines the **two external integration surfaces** for Agent Studio agents on a hosted Bodhi deployment. Pick **one primary surface** per product integration; they are intentionally separate.
 
+**Where the hosted client fits** (your app only implements **Leg 1**; Bodhi runs **Leg 2** to the model vendor):
+
+```text
+[Your app / browser] ─── Leg 1 ───> [Bodhi / VoiceSession] ─── Leg 2 ───> [Gemini or OpenAI]
+```
+
+Surface A and Surface B both attach at **Leg 1** (HTTPS + WebSocket or embed). They do **not** change how Bodhi connects to Google/OpenAI internally.
+
 ---
 
 ## Surface A — Programmable API (full control)

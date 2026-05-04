@@ -12,7 +12,15 @@ This document is for **teams building mobile or native apps** that call a **depl
 
 ### First time here? How the two connections fit
 
-- **Two layers:** **HTTPS** (`/api/...`) for **bootstrap** and **WSS** (`/ws/mobile`) for **realtime voice and control**. The `POST` that creates a session **intent** does **not** open the WebSocket for you and does **not** carry audio. Your client performs **both** the HTTPS call **and** the WebSocket connect.
+**Same session, two “legs” to remember** (hosted mobile path is Leg 1 only; the cloud model is Leg 2 inside Bodhi):
+
+```text
+[Your mobile / web app] ─── Leg 1 ───> [Bodhi app / VoiceSession] ─── Leg 2 ───> [Gemini or OpenAI]
+```
+
+On **`bodhiagent.live`**, your client only speaks **Leg 1** (HTTPS bootstrap + **`/ws/mobile`** PCM + JSON). **Leg 2** (vendor realtime) runs **inside** Bodhi’s backend — you do not open a second WebSocket to Google/OpenAI from your app.
+
+- **Two layers on Leg 1:** **HTTPS** (`/api/...`) for **bootstrap** and **WSS** (`/ws/mobile`) for **realtime voice and control**. The `POST` that creates a session **intent** does **not** open the WebSocket for you and does **not** carry audio. Your client performs **both** the HTTPS call **and** the WebSocket connect.
 
 - **Typical order:** (1) `POST /api/mobile/sessions` with auth → you get `sessionIntentId`, `token`, and usually `wsPath` (`/ws/mobile`). (2) Your app **opens** `wss://bodhiagent.live/ws/mobile?sessionIntentId=...&token=...` (same `Authorization: Bearer` on the upgrade if your client sends it for `bsk_` or other tokens). (3) On the socket, wait for **`session.config`** (audio format) then **`session.ready`** (gives a real `sessionId`, `userId`, `agentProfile`). (4) **Stream** user mic as **binary** WebSocket messages; **receive** assistant audio as **binary** and UI/transcripts as **JSON** text frames.
 

@@ -11,6 +11,12 @@ At a high level:
 
 ## Realtime links: client media vs LLM transport
 
+**Two legs on the wire** (Leg 1 = what integrators often build; Leg 2 = always inside your Bodhi server to the vendor):
+
+```text
+[Browser or device] ─── Leg 1 ───> [App server / VoiceSession] ─── Leg 2 ───> [Gemini or OpenAI]
+```
+
 There are **three** links in a typical deployment — not one monolithic “voice socket”:
 
 1. **Client or device ↔ your Bodhi app server** — capture, playback, and JSON control (and optional WebRTC signaling) on paths you own.

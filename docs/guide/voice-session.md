@@ -2,6 +2,15 @@
 
 `VoiceSession` is the top-level runtime integration point.
 
+**How this fits the two network legs** (browser or device vs cloud model):
+
+```text
+[Browser or device] ─── Leg 1 ───> [App server / VoiceSession] ─── Leg 2 ───> [Gemini or OpenAI]
+```
+
+- **Leg 1:** `IClientChannel` / `clientSender` / `clientMedia` — your app’s WebSocket (and optional WebRTC) to the user.
+- **Leg 2:** `LLMTransport` — the server’s separate realtime session to the vendor. Independent of Leg 1’s encoding.
+
 It manages:
 
 - live transport connection

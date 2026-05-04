@@ -2,6 +2,15 @@
 
 Transport abstracts provider-specific realtime APIs behind a common interface.
 
+**Two legs (do not conflate them):**
+
+```text
+[Browser or device] ─── Leg 1 ───> [App server / VoiceSession] ─── Leg 2 ───> [Gemini or OpenAI]
+```
+
+- **Leg 2** in this doc’s main sections is **`LLMTransport`** — Gemini Live or OpenAI Realtime from **your server** to the **vendor**.
+- **Leg 1** is **client media** (`IClientChannel`, `ClientMediaProfile`) — the **user’s** connection **into** your app / `VoiceSession`. See the section *Client media* below and [VoiceSession](/guide/voice-session).
+
 ## LLM transport (Gemini / OpenAI)
 
 This is what most people mean by “transport” in the framework: the **`LLMTransport`** that connects **`VoiceSession`** to the **cloud realtime voice model** (Gemini Live or OpenAI Realtime).
