@@ -31,6 +31,12 @@ This document is for **teams building mobile or native apps** that call a **depl
 
 All sessions are keyed by a string **`userId`** resolved by the server (from your auth layer or, where explicitly supported, a documented query parameter). That id ties together **memory** and **conversation history** for the user.
 
+### Current hosted contract vs framework `direct_rtc`
+
+**What hosted Bodhi documents and supports today:** **`/ws/mobile`** is **PCM over WebSocket** (binary frames) plus **JSON** text frames for control and transcripts, as described in §4. Do **not** assume a public **hosted** WebRTC/Opus-RTP leg exists until your operator ships and documents it.
+
+The TypeScript framework separately supports **`clientMedia: { kind: 'direct_rtc' }`** for **self-hosted** or custom app servers that wire `SessionClientSender`, relay **`rtc.*`** JSON on the same WebSocket, and own STUN/TURN policy. That is **orthogonal** to the vendor **`LLMTransport`** socket to Gemini/OpenAI — see [Transport](/guide/transport) and [Client voice transport (app server)](../../app/docs/client-voice-transport.md) (repo path).
+
 ---
 
 ## 2. Authentication

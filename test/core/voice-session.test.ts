@@ -242,12 +242,20 @@ describe('VoiceSession', () => {
 		const messages = received.map((m) => JSON.parse(m));
 		expect(messages).toEqual(
 			expect.arrayContaining([
-				expect.objectContaining({ type: 'session.config' }),
+				expect.objectContaining({
+					type: 'session.config',
+					clientMedia: { kind: 'websocket' },
+					clientSignalSource: 'websocket_json',
+					clientAudioSource: 'websocket_pcm',
+				}),
 				expect.objectContaining({
 					type: 'session.ready',
 					userId: 'user_ready',
 					sessionId: 'sess_ready',
 					agentProfile: 'echo',
+					clientMedia: { kind: 'websocket' },
+					clientSignalSource: 'websocket_json',
+					clientAudioSource: 'websocket_pcm',
 				}),
 			]),
 		);
@@ -274,6 +282,14 @@ describe('VoiceSession', () => {
 		const messageTypes = sendJson.mock.calls.map((call) => call[0]?.type);
 		expect(messageTypes).toContain('session.config');
 		expect(messageTypes).not.toContain('session.ready');
+		expect(sendJson).toHaveBeenCalledWith(
+			expect.objectContaining({
+				type: 'session.config',
+				clientMedia: { kind: 'websocket' },
+				clientSignalSource: 'websocket_json',
+				clientAudioSource: 'websocket_pcm',
+			}),
+		);
 	});
 
 	it('forwards gui.update events to the client as JSON', async () => {

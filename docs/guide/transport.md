@@ -2,19 +2,43 @@
 
 Transport abstracts provider-specific realtime APIs behind a common interface.
 
-## Providers
+## LLM transport (Gemini / OpenAI)
+
+This is what most people mean by “transport” in the framework: the **`LLMTransport`** that connects **`VoiceSession`** to the **cloud realtime voice model** (Gemini Live or OpenAI Realtime).
+
+### Providers
 
 - Gemini Live transport
 - OpenAI Realtime transport
 
-## Responsibilities
+### Responsibilities
 
 - live session connect/disconnect
 - turn and interruption handling
 - tool call/result protocol mapping
 - provider-specific session update and recovery logic
 
-## STT/TTS
+### STT/TTS
 
 - Built-in transcription is supported via transport/provider capabilities.
 - External STT/TTS providers can be attached at session level.
+
+---
+
+## Client media (separate from LLM transport)
+
+The **client ↔ framework** audio/control path is **not** the same socket as the LLM vendor connection. It is implemented by **`IClientChannel`** (see `createClientChannel` in the framework) and selected with **`ClientMediaProfile`** on **`VoiceSessionConfig`**.
+
+| Profile | Meaning |
+|---------|--------|
+| **`websocket` (default)** | Mic and assistant PCM use **binary WebSocket** frames on the same connection as JSON control (or local `ClientTransport` when the server does not own the socket). |
+| **`direct_rtc`** | **Split plane:** JSON control (and RTC signaling) stay on the **WebSocket** via **`SessionClientSender.sendJson`**; optional **Opus RTP** for mic/assistant audio when `rtcAudio: 'werift_opus'` is enabled. |
+
+**Important:** `direct_rtc` does **not** replace **`VoiceSession`** or **`LLMTransport`**. Gemini/OpenAI still use their **existing** provider WebSockets from the server. Only the **device ↔ your app server ↔ `VoiceSession` input/output** audio encoding changes when you opt into direct RTC.
+
+See also:
+
+- [VoiceSession](/guide/voice-session) — `clientMedia`, `clientSender`, and session wiring
+- [Architecture overview](/guide/architecture) — two independent realtime links (client leg vs vendor leg)
+
+Internal implementation notes: `dev_docs/framework/low-signal-client-transport-implementation-plan.md` (repository path).

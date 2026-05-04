@@ -25,6 +25,7 @@ describe('user-agents-api save payload round-trip', () => {
 			name: 'Roundtrip Agent',
 			description: 'd',
 			realtimeProvider: 'gemini',
+			clientMedia: { kind: 'direct_rtc', rtcAudio: 'werift_opus' },
 			geminiVoiceName: 'Puck',
 			openaiVoice: 'coral',
 			geminiSttModel: 'gemini-3-flash-preview',
@@ -55,11 +56,13 @@ describe('user-agents-api save payload round-trip', () => {
 		expect(payload.studioBackgroundTools).toHaveLength(1);
 		expect(payload.studioBackgroundTools?.[0]?.toolName).toBe('my_studio_tool');
 		expect(payload.enabledToolIds).toContain('my_studio_tool');
+		expect(payload.clientMedia).toEqual({ kind: 'direct_rtc', rtcAudio: 'werift_opus' });
 
 		const rebuilt = buildAgentDefinitionV2FromSavePayload(payload, ctx);
 		expect(parseAgentDefinitionV2(rebuilt)).not.toBeNull();
 		expect(rebuilt.workers.my_studio_tool).toEqual(v2.workers.my_studio_tool);
 		expect(rebuilt.mainAgents[0]?.toolIds).toEqual(expect.arrayContaining(['my_studio_tool']));
+		expect(rebuilt.clientMedia).toEqual({ kind: 'direct_rtc', rtcAudio: 'werift_opus' });
 	});
 
 	it('round-trips reasoning fields on studio_background_tool', () => {

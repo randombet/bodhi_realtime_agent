@@ -20,7 +20,11 @@ import {
 } from '../transport/gemini-live-transport.js';
 import type { MainAgent, SubagentConfig } from '../types/agent.js';
 import type { BehaviorCategory } from '../types/behavior.js';
-import { type ClientMediaProfile, DEFAULT_CLIENT_MEDIA_PROFILE } from '../types/client-media.js';
+import {
+	type ClientMediaProfile,
+	DEFAULT_CLIENT_MEDIA_PROFILE,
+	describeClientTransport,
+} from '../types/client-media.js';
 import type { ConversationHistoryStore } from '../types/history.js';
 import type { FrameworkHooks } from '../types/hooks.js';
 import type { ProcessedKnowledgeBase } from '../types/knowledge-base.js';
@@ -1596,11 +1600,15 @@ export class VoiceSession {
 	private handleClientConnected(): void {
 		this.log(`Client connected (geminiActive=${this.sessionManager.isActive})`);
 		this.clientConnected = true;
+		const transportInfo = describeClientTransport(this.config.clientMedia);
 
 		// Send audio format config so the client can negotiate correct sample rates
 		this.clientTransport.sendJsonToClient({
 			type: 'session.config',
 			audioFormat: this.transport.audioFormat,
+			clientMedia: transportInfo.clientMedia,
+			clientSignalSource: transportInfo.clientSignalSource,
+			clientAudioSource: transportInfo.clientAudioSource,
 		});
 
 		if (this.ownsClientTransport) {
@@ -1609,6 +1617,9 @@ export class VoiceSession {
 				userId: this.config.userId,
 				sessionId: this.config.sessionId,
 				agentProfile: this.agentRouter.activeAgent.name,
+				clientMedia: transportInfo.clientMedia,
+				clientSignalSource: transportInfo.clientSignalSource,
+				clientAudioSource: transportInfo.clientAudioSource,
 			});
 		}
 

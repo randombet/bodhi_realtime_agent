@@ -32,3 +32,29 @@ export interface IceServerEntry {
 
 /** Default client media profile: binary PCM + JSON over WebSocket (`IClientChannel`). */
 export const DEFAULT_CLIENT_MEDIA_PROFILE: ClientMediaProfile = { kind: 'websocket' };
+
+/** Current control/signaling plane used by Bodhi client sessions. */
+export type ClientSignalSource = 'websocket_json';
+
+/** Current audio plane used on the client leg. */
+export type ClientAudioSource = 'websocket_pcm' | 'rtc_opus';
+
+/** Wire-visible transport summary for a client session. */
+export interface ClientTransportDescriptor {
+	readonly clientMedia: ClientMediaProfile;
+	readonly clientSignalSource: ClientSignalSource;
+	readonly clientAudioSource: ClientAudioSource;
+}
+
+export function describeClientTransport(
+	profile: ClientMediaProfile = DEFAULT_CLIENT_MEDIA_PROFILE,
+): ClientTransportDescriptor {
+	return {
+		clientMedia: profile,
+		clientSignalSource: 'websocket_json',
+		clientAudioSource:
+			profile.kind === 'direct_rtc' && profile.rtcAudio === 'werift_opus'
+				? 'rtc_opus'
+				: 'websocket_pcm',
+	};
+}
