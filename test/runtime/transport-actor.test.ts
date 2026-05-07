@@ -102,6 +102,10 @@ describe('TransportActor', () => {
 	describe('inbound callback → canonical message', () => {
 		beforeEach(async () => {
 			await actor.onStart();
+			// onStart now sends an initial `notification.subscribe` envelope; clear
+			// it so each test asserts against only the messages produced by the
+			// adapter callback under test.
+			sender.messages.length = 0;
 		});
 
 		it('onSessionReady → transport.session_ready to session actor', () => {
@@ -111,19 +115,30 @@ describe('TransportActor', () => {
 			expect(sender.messages[0].to).toBe('session');
 		});
 
-		it('onTurnComplete → transport.turn_complete to session actor', () => {
+		it('onTurnComplete → transport.turn_complete to session + notification.turn_complete to notification', () => {
 			adapter.onTurnComplete?.('turn-1');
-			expect(sender.messages).toHaveLength(1);
-			expect(sender.messages[0].type).toBe('transport.turn_complete');
-			expect(sender.messages[0].to).toBe('session');
-			expect(sender.messages[0].payload).toEqual({ turnId: 'turn-1' });
+			// One mirror to SessionActor (existing) + one mirror to NotificationActor (new).
+			expect(sender.messages).toHaveLength(2);
+			const toSession = sender.messages.find((m) => m.to === 'session');
+			expect(toSession?.type).toBe('transport.turn_complete');
+			expect(toSession?.payload).toEqual({ turnId: 'turn-1' });
+			const toNotification = sender.messages.find((m) => m.to === 'notification');
+			expect(toNotification?.type).toBe('notification.turn_complete');
+			expect(toNotification?.payload).toEqual({ turnId: 'turn-1' });
 		});
 
-		it('onInterrupted → transport.interrupted to session actor', () => {
+		it('onInterrupted → transport.interrupted, then paired notification.reset_audio + interrupted (in order)', () => {
 			adapter.onInterrupted?.();
-			expect(sender.messages).toHaveLength(1);
+			// SessionActor mirror plus the notification pair.
+			expect(sender.messages).toHaveLength(3);
 			expect(sender.messages[0].type).toBe('transport.interrupted');
 			expect(sender.messages[0].to).toBe('session');
+			// Order matters: reset_audio first, then interrupted (mirrors legacy
+			// VoiceSession.handleInterrupted: resetAudio() then markInterrupted()).
+			expect(sender.messages[1].type).toBe('notification.reset_audio');
+			expect(sender.messages[1].to).toBe('notification');
+			expect(sender.messages[2].type).toBe('notification.interrupted');
+			expect(sender.messages[2].to).toBe('notification');
 		});
 
 		it('onToolCallReceived → transport.tool_call_received to tool-router', () => {
@@ -238,6 +253,115 @@ describe('TransportActor', () => {
 				),
 			);
 			expect(adapter.sendToolResult).toHaveBeenCalledWith('tc-1', 'tool', 'ok', 'when_idle');
+		});
+	});
+
+	// -- NotificationActor subscription + delivery handler ------------------
+
+	describe('notification subsystem subscription', () => {
+		it('onStart sends notification.subscribe with default (no filter)', async () => {
+			await actor.onStart();
+			const sub = sender.messages.find((m) => m.type === 'notification.subscribe');
+			expect(sub).toBeDefined();
+			expect(sub?.to).toBe('notification');
+			expect(sub?.payload).toEqual({ subscriberId: 'transport', filter: undefined });
+		});
+
+		it('onStart honors a configured transportSubscriptionFilter', async () => {
+			const filteredSender = createMessageSender();
+			const filteredActor = new TransportActor(
+				'transport',
+				createMockAdapter(),
+				filteredSender.send,
+				'session',
+				'tool-router',
+				'notification',
+				{ labels: ['SYSTEM'], minPriority: 'high' },
+			);
+			await filteredActor.onStart();
+			const sub = filteredSender.messages.find((m) => m.type === 'notification.subscribe');
+			expect(sub?.payload).toEqual({
+				subscriberId: 'transport',
+				filter: { labels: ['SYSTEM'], minPriority: 'high' },
+			});
+		});
+
+		it('honors a custom notificationActorId', async () => {
+			const customSender = createMessageSender();
+			const customActor = new TransportActor(
+				'transport',
+				createMockAdapter(),
+				customSender.send,
+				'session',
+				'tool-router',
+				'my-notify',
+			);
+			await customActor.onStart();
+			const sub = customSender.messages.find((m) => m.type === 'notification.subscribe');
+			expect(sub?.to).toBe('my-notify');
+		});
+
+		it('onStop sends notification.unsubscribe', async () => {
+			await actor.onStart();
+			sender.messages.length = 0;
+			await actor.onStop('shutdown');
+			const unsub = sender.messages.find((m) => m.type === 'notification.unsubscribe');
+			expect(unsub).toBeDefined();
+			expect(unsub?.to).toBe('notification');
+			expect(unsub?.payload).toEqual({ subscriberId: 'transport' });
+		});
+	});
+
+	describe('notification.delivered handler (wire-out path)', () => {
+		it('builds [label]: text and dispatches to adapter.sendContent', async () => {
+			await actor.onMessage(
+				createEnvelope(
+					'notification.delivered',
+					{
+						id: 'n-1',
+						label: 'SYSTEM',
+						text: 'background task generate_image completed',
+						priority: 'normal',
+						turnComplete: true,
+						publishedAtMs: 1,
+						deliveredAtMs: 2,
+						deferredMs: 1,
+					},
+					'transport',
+				),
+			);
+			expect(adapter.sendContent).toHaveBeenCalledWith(
+				[
+					{
+						role: 'user',
+						parts: [{ text: '[SYSTEM]: background task generate_image completed' }],
+					},
+				],
+				true,
+			);
+		});
+
+		it('preserves turnComplete=false from the delivered payload', async () => {
+			await actor.onMessage(
+				createEnvelope(
+					'notification.delivered',
+					{
+						id: 'n-2',
+						label: 'SUBAGENT QUESTION',
+						text: 'which airline?',
+						priority: 'high',
+						turnComplete: false,
+						publishedAtMs: 1,
+						deliveredAtMs: 1,
+						deferredMs: 0,
+					},
+					'transport',
+				),
+			);
+			expect(adapter.sendContent).toHaveBeenCalledWith(
+				[{ role: 'user', parts: [{ text: '[SUBAGENT QUESTION]: which airline?' }] }],
+				false,
+			);
 		});
 	});
 });
