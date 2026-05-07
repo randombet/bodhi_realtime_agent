@@ -248,6 +248,53 @@ describe('RuntimeOrchestrator', () => {
 			expect(orchestrator.runtime.hasActor('background-agents')).toBe(true);
 		});
 
+		it('end-to-end: agent.transfer_completed reaches BackgroundAgentSupervisor and updates ctx.session.activeAgent', async () => {
+			// This test locks in the fix from commit 30c3a16: MainAgentActor sends
+			// agent.transfer_completed only to SessionActor; SessionActor must
+			// fan it out to 'background-agents' or the supervisor's onAgentTransfer
+			// + cancelOnTransfer + ctx.session.activeAgent updates are all dead
+			// code in the integrated runtime.
+			const onTransfer = vi.fn();
+			let observedActiveAgentBefore = '';
+			let observedActiveAgentAfter = '';
+			const probe = {
+				name: 'probe',
+				onStart: (ctx: { session: { activeAgent: string } }) => {
+					observedActiveAgentBefore = ctx.session.activeAgent;
+					(probe as { _readLater?: () => void })._readLater = () => {
+						observedActiveAgentAfter = ctx.session.activeAgent;
+					};
+				},
+				onAgentTransfer: onTransfer,
+			};
+			orchestrator = new RuntimeOrchestrator(
+				createConfig({
+					sessionId: 'sess-x',
+					initialAgent: 'main',
+					backgroundAgents: [probe],
+				}),
+			);
+			await orchestrator.start();
+
+			// Drive the session into 'active'.
+			orchestrator.runtime.tell('transport.session_ready', {}, 'session');
+			await vi.waitFor(() => expect(observedActiveAgentBefore).toBe('main'));
+
+			// Send agent.transfer_completed straight to SessionActor (mimics
+			// MainAgentActor's emit path — main-agent-actor.ts:141).
+			orchestrator.runtime.tell(
+				'agent.transfer_completed',
+				{ fromAgent: 'main', toAgent: 'specialist', transferCorrelationId: 't-1' },
+				'session',
+			);
+
+			await vi.waitFor(() => expect(onTransfer).toHaveBeenCalledTimes(1));
+			expect(onTransfer).toHaveBeenCalledWith({ fromAgent: 'main', toAgent: 'specialist' });
+
+			(probe as { _readLater?: () => void })._readLater?.();
+			expect(observedActiveAgentAfter).toBe('specialist');
+		});
+
 		it('end-to-end: BackgroundAgent.onStart fires after first session.connected; ctx.publish reaches the wire', async () => {
 			const adapter = createMockAdapter();
 			const onStart = vi.fn();

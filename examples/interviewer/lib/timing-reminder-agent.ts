@@ -59,15 +59,31 @@ export class TimingReminderBackgroundAgent implements BackgroundAgent {
 		const log = ctx.log.bind(ctx);
 		log(`started: budget=${this.totalBudgetMs}ms interval=${this.intervalMs}ms`);
 
+		// Forward declaration so `tick` can clearInterval(handle) when it
+		// detects a terminal condition (interview completed or budget elapsed).
+		let handle: ReturnType<typeof setInterval> | null = null;
+		const stop = (reason: string) => {
+			if (handle !== null) {
+				clearInterval(handle);
+				handle = null;
+				log(`stopped: ${reason}`);
+			}
+		};
+
 		const tick = () => {
-			// Stop nudging once the interview is done. The interval keeps running
-			// (it's harmless), but we no longer publish.
-			if (this.state.phase === 'completed') return;
+			// Hard stop once the interview is done — clear the interval so we
+			// don't keep ticking (and pinning the event loop) until session close.
+			if (this.state.phase === 'completed') {
+				stop('interview phase=completed');
+				return;
+			}
 
 			const elapsedMs = Date.now() - startedAt;
 			const remainingMin = Math.max(0, Math.round((this.totalBudgetMs - elapsedMs) / 60_000));
 			if (remainingMin <= 0) {
-				log('budget elapsed; suppressing further reminders');
+				// Budget exhausted: clear the interval so we don't log "elapsed"
+				// every interval forever.
+				stop('budget elapsed');
 				return;
 			}
 
@@ -83,17 +99,15 @@ export class TimingReminderBackgroundAgent implements BackgroundAgent {
 			log(`emitted reminder: ${remainingMin} min remaining`);
 		};
 
-		const handle = setInterval(tick, this.intervalMs);
+		handle = setInterval(tick, this.intervalMs);
 		// Cancel cleanly on session close (or other abort signals).
-		ctx.signal.addEventListener('abort', () => {
-			clearInterval(handle);
-			log('signal aborted; interval cleared');
-		});
+		ctx.signal.addEventListener('abort', () => stop('signal aborted'));
 	}
 
 	onStop(reason: string): void {
-		// Nothing extra to do — the AbortSignal listener above already cleared
-		// the interval. This hook is here to log the reason for visibility.
+		// The AbortSignal listener above already cleared the interval; the
+		// terminal-condition branches in `tick` may also have cleared it. This
+		// hook just exists to surface the close reason in logs.
 		void reason;
 	}
 }
