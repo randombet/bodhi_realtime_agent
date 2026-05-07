@@ -12,6 +12,7 @@
  */
 
 import { ActorRuntime } from './actor-runtime.js';
+import type { ActorSendFn } from './actor-send-fn.js';
 import { ClientGatewayActor } from './actors/client-gateway-actor.js';
 import type { ClientSendFn } from './actors/client-gateway-actor.js';
 import { MainAgentActor } from './actors/main-agent-actor.js';
@@ -25,8 +26,6 @@ import type { InlineToolExecutor, ToolRoutingInfo } from './actors/tool-router-a
 import { TransportActor } from './actors/transport-actor.js';
 import type { TransportAdapter } from './adapters/transport-adapter.js';
 import { DeadLetterQueue } from './dead-letter-queue.js';
-import type { ActorId } from './envelope.js';
-import type { RuntimeMessage } from './messages.js';
 import { RuntimeObserver } from './observability.js';
 import { DEFAULT_POLICIES, Supervisor } from './supervisor.js';
 
@@ -93,9 +92,11 @@ export class RuntimeOrchestrator {
 		}
 		this.runtime.setSupervisor(this.supervisor);
 
-		// Message routing: all actor sends go through the runtime
-		const sendFn = (type: RuntimeMessage['type'], payload: unknown, to: ActorId) => {
-			this.runtime.tell(type, payload, to);
+		// Message routing: all actor sends go through the runtime.
+		// Forwards the optional 4th `options` argument so envelope metadata
+		// (correlation id, causation id, sender id) propagates end-to-end.
+		const sendFn: ActorSendFn = (type, payload, to, options) => {
+			this.runtime.tell(type, payload, to, options);
 		};
 
 		// Create actors

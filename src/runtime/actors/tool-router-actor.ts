@@ -12,8 +12,8 @@
  */
 
 import type { Actor } from '../actor-runtime.js';
+import type { ActorSendFn } from '../actor-send-fn.js';
 import type { ActorId, Envelope } from '../envelope.js';
-import type { RuntimeMessage } from '../messages.js';
 
 /** Tool metadata needed for routing decisions. */
 export interface ToolRoutingInfo {
@@ -40,7 +40,7 @@ export class ToolRouterActor implements Actor {
 		id: ActorId,
 		private toolRegistry: Map<string, ToolRoutingInfo>,
 		private inlineExecutor: InlineToolExecutor,
-		private sendMessage: (type: RuntimeMessage['type'], payload: unknown, to: ActorId) => void,
+		private sendMessage: ActorSendFn,
 		private transportActorId: ActorId,
 		private subagentSupervisorId: ActorId,
 		private mainAgentActorId: ActorId,

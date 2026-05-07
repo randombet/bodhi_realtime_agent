@@ -11,6 +11,7 @@
  */
 
 import type { Actor } from '../actor-runtime.js';
+import type { ActorSendFn } from '../actor-send-fn.js';
 import type { TransportAdapter } from '../adapters/transport-adapter.js';
 import type { ActorId, Envelope } from '../envelope.js';
 import type { RuntimeMessage } from '../messages.js';
@@ -27,7 +28,7 @@ export class TransportActor implements Actor {
 	constructor(
 		id: ActorId,
 		private adapter: TransportAdapter,
-		private sendMessage: (type: RuntimeMessage['type'], payload: unknown, to: ActorId) => void,
+		private sendMessage: ActorSendFn,
 		private sessionActorId: ActorId,
 		private toolRouterActorId: ActorId,
 	) {

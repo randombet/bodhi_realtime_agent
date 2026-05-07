@@ -11,8 +11,8 @@
  */
 
 import type { Actor } from '../actor-runtime.js';
+import type { ActorSendFn } from '../actor-send-fn.js';
 import type { ActorId, Envelope } from '../envelope.js';
-import type { RuntimeMessage } from '../messages.js';
 
 /** Reconnect backoff configuration owned by SessionActor. */
 export interface ReconnectPolicy {
@@ -48,7 +48,7 @@ export class SessionActor implements Actor {
 
 	constructor(
 		id: ActorId,
-		private sendMessage: (type: RuntimeMessage['type'], payload: unknown, to: ActorId) => void,
+		private sendMessage: ActorSendFn,
 		private transportActorId: ActorId,
 		reconnectPolicy?: Partial<ReconnectPolicy>,
 	) {

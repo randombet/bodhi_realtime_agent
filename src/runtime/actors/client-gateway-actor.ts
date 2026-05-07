@@ -14,8 +14,8 @@
  */
 
 import type { Actor } from '../actor-runtime.js';
+import type { ActorSendFn } from '../actor-send-fn.js';
 import type { ActorId, Envelope } from '../envelope.js';
-import type { RuntimeMessage } from '../messages.js';
 import type { SubagentCompletion } from '../subagent-completion.js';
 
 /** Callback to send a JSON message to the connected client. */
@@ -28,7 +28,7 @@ export class ClientGatewayActor implements Actor {
 
 	constructor(
 		id: ActorId,
-		private sendMessage: (type: RuntimeMessage['type'], payload: unknown, to: ActorId) => void,
+		private sendMessage: ActorSendFn,
 		private clientSend: ClientSendFn,
 		private sessionActorId: ActorId,
 	) {
