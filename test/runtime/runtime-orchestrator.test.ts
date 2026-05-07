@@ -241,6 +241,52 @@ describe('RuntimeOrchestrator', () => {
 			expect(event.deferredMs).toBeGreaterThanOrEqual(0);
 		});
 
+		it('always constructs BackgroundAgentSupervisorActor (even with no backgroundAgents)', async () => {
+			orchestrator = new RuntimeOrchestrator(createConfig());
+			await orchestrator.start();
+			expect(orchestrator.backgroundAgentSupervisor).toBeDefined();
+			expect(orchestrator.runtime.hasActor('background-agents')).toBe(true);
+		});
+
+		it('end-to-end: BackgroundAgent.onStart fires after first session.connected; ctx.publish reaches the wire', async () => {
+			const adapter = createMockAdapter();
+			const onStart = vi.fn();
+			const reminder = {
+				name: 'reminder',
+				onStart: (ctx: {
+					sessionId: string;
+					publish: (n: { label: string; text: string }) => void;
+				}) => {
+					onStart(ctx.sessionId);
+					ctx.publish({ label: 'TIME REMINDER', text: '5 min left' });
+				},
+			};
+			orchestrator = new RuntimeOrchestrator(
+				createConfig({
+					adapter,
+					sessionId: 'sess-1',
+					backgroundAgents: [reminder],
+				}),
+			);
+			await orchestrator.start();
+
+			// Trigger the SessionActor → 'background-agents' fan-out chain.
+			adapter.onSessionReady?.();
+
+			// onStart fires once.
+			await vi.waitFor(() => expect(onStart).toHaveBeenCalledTimes(1));
+			expect(onStart).toHaveBeenCalledWith('sess-1');
+
+			// And ctx.publish reaches TransportActor → adapter.sendContent
+			// (wrapped as "[TIME REMINDER]: 5 min left").
+			await vi.waitFor(() => {
+				expect(adapter.sendContent).toHaveBeenCalledWith(
+					[{ role: 'user', parts: [{ text: '[TIME REMINDER]: 5 min left' }] }],
+					true,
+				);
+			});
+		});
+
 		it('honors a custom transportSubscriptionFilter end-to-end (label allowlist)', async () => {
 			const adapter = createMockAdapter();
 			orchestrator = new RuntimeOrchestrator(
