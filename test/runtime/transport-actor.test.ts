@@ -364,103 +364,30 @@ describe('TransportActor', () => {
 			);
 		});
 
-		// "Cancel-and-deliver" for high-priority on truncation-capable transport
-		// (OpenAI). The design contract states that a high-priority notification
-		// arriving during an active response must interrupt the model audio
-		// before the new synthetic turn lands; sendContent alone does not do this.
-		describe('cancel-and-deliver semantics', () => {
-			it('cancels generation BEFORE sending on high-priority + messageTruncation=true (OpenAI)', async () => {
-				const truncationAdapter = createMockAdapter();
-				truncationAdapter.capabilities = { messageTruncation: true };
-				const truncationSender = createMessageSender();
-				const truncationActor = new TransportActor(
+		// notification.delivered handler is intentionally single-purpose:
+		// format and send. The "cancel-and-deliver" semantics for
+		// high-priority on truncation-capable transports are encoded as a
+		// separate `transport.cancel_generation` envelope from
+		// NotificationActor.deliver() — see notification-actor.test.ts.
+		it('does not call adapter.cancelGeneration directly from notification.delivered (cancel is via separate transport.cancel_generation envelope)', async () => {
+			await actor.onMessage(
+				createEnvelope(
+					'notification.delivered',
+					{
+						id: 'n-h',
+						label: 'SUBAGENT QUESTION',
+						text: 'urgent',
+						priority: 'high',
+						turnComplete: true,
+						publishedAtMs: 1,
+						deliveredAtMs: 2,
+						deferredMs: 1,
+					},
 					'transport',
-					truncationAdapter,
-					truncationSender.send,
-					'session',
-					'tool-router',
-				);
-
-				await truncationActor.onMessage(
-					createEnvelope(
-						'notification.delivered',
-						{
-							id: 'n-h',
-							label: 'SUBAGENT QUESTION',
-							text: 'urgent question',
-							priority: 'high',
-							turnComplete: true,
-							publishedAtMs: 1,
-							deliveredAtMs: 2,
-							deferredMs: 1,
-						},
-						'transport',
-					),
-				);
-
-				// Both calls fire, in order: cancel first, then sendContent.
-				expect(truncationAdapter.cancelGeneration).toHaveBeenCalledTimes(1);
-				expect(truncationAdapter.sendContent).toHaveBeenCalledTimes(1);
-				const cancelOrder = (truncationAdapter.cancelGeneration as ReturnType<typeof vi.fn>).mock
-					.invocationCallOrder[0];
-				const sendOrder = (truncationAdapter.sendContent as ReturnType<typeof vi.fn>).mock
-					.invocationCallOrder[0];
-				expect(cancelOrder).toBeLessThan(sendOrder);
-			});
-
-			it('does NOT cancel on Gemini (messageTruncation=false) even for high-priority', async () => {
-				// Default mock adapter has messageTruncation: false.
-				await actor.onMessage(
-					createEnvelope(
-						'notification.delivered',
-						{
-							id: 'n-h',
-							label: 'SUBAGENT QUESTION',
-							text: 'urgent',
-							priority: 'high',
-							turnComplete: true,
-							publishedAtMs: 1,
-							deliveredAtMs: 2,
-							deferredMs: 1,
-						},
-						'transport',
-					),
-				);
-				expect(adapter.cancelGeneration).not.toHaveBeenCalled();
-				expect(adapter.sendContent).toHaveBeenCalledTimes(1);
-			});
-
-			it('does NOT cancel on normal-priority notifications even on truncation transport', async () => {
-				const truncationAdapter = createMockAdapter();
-				truncationAdapter.capabilities = { messageTruncation: true };
-				const truncationSender = createMessageSender();
-				const truncationActor = new TransportActor(
-					'transport',
-					truncationAdapter,
-					truncationSender.send,
-					'session',
-					'tool-router',
-				);
-
-				await truncationActor.onMessage(
-					createEnvelope(
-						'notification.delivered',
-						{
-							id: 'n-n',
-							label: 'SYSTEM',
-							text: 'normal-priority text',
-							priority: 'normal',
-							turnComplete: true,
-							publishedAtMs: 1,
-							deliveredAtMs: 2,
-							deferredMs: 1,
-						},
-						'transport',
-					),
-				);
-				expect(truncationAdapter.cancelGeneration).not.toHaveBeenCalled();
-				expect(truncationAdapter.sendContent).toHaveBeenCalledTimes(1);
-			});
+				),
+			);
+			expect(adapter.cancelGeneration).not.toHaveBeenCalled();
+			expect(adapter.sendContent).toHaveBeenCalledTimes(1);
 		});
 	});
 });

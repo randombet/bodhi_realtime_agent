@@ -131,23 +131,15 @@ export class TransportActor implements Actor {
 				// Single wire-out path for queue-routed text in actor mode.
 				// Wraps the producer-supplied label/text into `[label]: text` here
 				// (centralized at the boundary, not at every emitter).
+				//
+				// "Cancel-and-deliver" semantics for high-priority on truncation-
+				// capable transports are NOT implemented here — they are encoded
+				// as a separate `transport.cancel_generation` envelope sent by
+				// NotificationActor.deliver() *before* this notification.delivered.
+				// That keeps the cancel visible as a first-class actor message
+				// in observer/DLQ traces, and keeps this handler single-purpose:
+				// format and write.
 				const p = msg.payload as Omit<NotificationDelivered, 'type'>;
-
-				// "Cancel-and-deliver" for high-priority notifications on
-				// truncation-capable transports (OpenAI). Matches the design's
-				// stated behavior: when messageTruncation is true and a
-				// high-priority notification arrives during an active response,
-				// the in-flight model audio must be cancelled before the new
-				// synthetic user turn lands; otherwise sendContent alone does
-				// not interrupt the active OpenAI response. NotificationActor's
-				// gate already guarantees that high-priority+messageTruncation
-				// notifications take the immediate-deliver path (instead of
-				// being queued), so by the time we get here the cancel is
-				// always the right call.
-				if (p.priority === 'high' && this.adapter.capabilities.messageTruncation) {
-					this.adapter.cancelGeneration();
-				}
-
 				this.adapter.sendContent(
 					[{ role: 'user', parts: [{ text: `[${p.label}]: ${p.text}` }] }],
 					p.turnComplete,

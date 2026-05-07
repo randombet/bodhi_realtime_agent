@@ -109,14 +109,16 @@ export class NotificationActor implements Actor {
 	private subscribers = new Map<ActorId, NotificationFilter | undefined>();
 
 	private readonly log: (msg: string) => void;
+	private readonly transportActorId: ActorId;
 
 	constructor(
 		id: ActorId,
 		private sendMessage: ActorSendFn,
-		options: NotificationActorOptions,
+		options: NotificationActorOptions & { transportActorId?: ActorId },
 	) {
 		this.id = id;
 		this.messageTruncation = options.messageTruncation;
+		this.transportActorId = options.transportActorId ?? 'transport';
 		this.log = options.log ?? (() => {});
 	}
 
@@ -233,6 +235,23 @@ export class NotificationActor implements Actor {
 	}
 
 	private deliver(n: QueuedNotification): void {
+		// "Cancel-and-deliver" for high-priority notifications on truncation-capable
+		// transports (OpenAI). The design's contract is: when messageTruncation is
+		// true and a high-priority notification is delivered immediately while the
+		// model is mid-utterance, the active response must be cancelled BEFORE the
+		// new synthetic user turn lands. We send `transport.cancel_generation`
+		// (the existing actor message handled by TransportActor's onMessage) so
+		// the cancel is an explicit, traceable envelope in the observer + DLQ —
+		// not a side-effect of the delivered handler reaching into the adapter
+		// directly. The cancel is gated on audioReceived as well: there is no
+		// active response to interrupt if the model is idle.
+		if (n.priority === 'high' && this.messageTruncation && this.audioReceived) {
+			this.sendMessage('transport.cancel_generation', {}, this.transportActorId, {
+				correlationId: n.correlationId,
+				from: this.id,
+			});
+		}
+
 		n.deliveredAtMs = Date.now();
 		const deferredMs = n.deliveredAtMs - n.publishedAtMs;
 		const payload: Omit<NotificationDelivered, 'type'> = {

@@ -115,7 +115,8 @@ export class SessionActor implements Actor {
 				break;
 			}
 			case 'session.close_requested': {
-				this.handleCloseRequested();
+				const p = envelope.payload as { reason?: string };
+				this.handleCloseRequested(p.reason);
 				break;
 			}
 			case 'session.reconnect_timeout': {
@@ -149,12 +150,21 @@ export class SessionActor implements Actor {
 		// agents can run their deferred onStart on first activation, or
 		// onReconnect on subsequent activations. Distinguishing the two events
 		// avoids forcing the supervisor to subscribe to raw transport.session_ready.
+		//
+		// Strict gating per the design contract: BackgroundAgent.onStart fires
+		// EXACTLY ONCE per session. Only `created → active` and `connecting →
+		// active` qualify as "first activation". A duplicate session_ready
+		// while already active (rare; some transports re-emit on session
+		// refresh) or activations from other phases (`transferring → active`,
+		// `closed → active`) must NOT re-fire `session.connected`, which would
+		// re-run user agents' onStart and break the once-per-session contract.
 		if (this.backgroundAgentSupervisorId) {
-			if (prevPhase === 'reconnecting') {
-				this.sendMessage('session.reconnected', {}, this.backgroundAgentSupervisorId);
-			} else {
+			if (prevPhase === 'created' || prevPhase === 'connecting') {
 				this.sendMessage('session.connected', {}, this.backgroundAgentSupervisorId);
+			} else if (prevPhase === 'reconnecting') {
+				this.sendMessage('session.reconnected', {}, this.backgroundAgentSupervisorId);
 			}
+			// else: already-active / transferring / closed → no fan-out.
 		}
 	}
 
@@ -204,12 +214,14 @@ export class SessionActor implements Actor {
 		this.clearTimers();
 	}
 
-	private handleCloseRequested(): void {
+	private handleCloseRequested(reason?: string): void {
 		this.phase = 'closed';
 		this.clearTimers();
-		// Fan-out copy: BackgroundAgentSupervisorActor stops registered agents.
+		// Fan-out copy: BackgroundAgentSupervisorActor stops registered agents
+		// with the original reason so logs / `BackgroundAgent.onStop(reason)`
+		// see the same value the close was initiated with.
 		if (this.backgroundAgentSupervisorId) {
-			this.sendMessage('session.close_requested', {}, this.backgroundAgentSupervisorId);
+			this.sendMessage('session.close_requested', { reason }, this.backgroundAgentSupervisorId);
 		}
 	}
 

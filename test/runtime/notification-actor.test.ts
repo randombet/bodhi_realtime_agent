@@ -470,6 +470,109 @@ describe('NotificationActor — correlationId propagation', () => {
 	});
 });
 
+describe('NotificationActor — cancel-and-deliver semantics (high-priority on truncation-capable transport)', () => {
+	it('emits transport.cancel_generation BEFORE notification.delivered when busy', async () => {
+		const { actor, sends } = makeActor({ messageTruncation: true });
+		await subscribe(actor, 'transport');
+
+		// Audio is active — model is mid-utterance.
+		await tell(actor, 'notification.audio_started', {});
+
+		// High-priority publish: design contract is cancel-and-deliver.
+		await publish(actor, 'SUBAGENT QUESTION', 'urgent', { priority: 'high' });
+
+		// We expect: subscribe (from earlier) is already in sends, then
+		// transport.cancel_generation, then notification.delivered.
+		const after = sends.filter(
+			(s) => s.type === 'transport.cancel_generation' || s.type === 'notification.delivered',
+		);
+		expect(after).toHaveLength(2);
+		expect(after[0].type).toBe('transport.cancel_generation');
+		expect(after[0].to).toBe('transport');
+		expect(after[1].type).toBe('notification.delivered');
+	});
+
+	it('does NOT emit transport.cancel_generation when audio is not active (idle)', async () => {
+		const { actor, sends } = makeActor({ messageTruncation: true });
+		await subscribe(actor, 'transport');
+
+		// audioReceived = false (no notification.audio_started yet).
+		await publish(actor, 'SUBAGENT QUESTION', 'urgent', { priority: 'high' });
+
+		const cancels = sends.filter((s) => s.type === 'transport.cancel_generation');
+		expect(cancels).toHaveLength(0);
+	});
+
+	it('does NOT emit transport.cancel_generation on Gemini (messageTruncation=false)', async () => {
+		const { actor, sends } = makeActor({ messageTruncation: false });
+		await subscribe(actor, 'transport');
+
+		await tell(actor, 'notification.audio_started', {});
+		// On Gemini, high-priority while audio active goes to the queue (front).
+		await publish(actor, 'SUBAGENT QUESTION', 'urgent', { priority: 'high' });
+		// And on flush:
+		await tell(actor, 'notification.turn_complete', {});
+
+		const cancels = sends.filter((s) => s.type === 'transport.cancel_generation');
+		expect(cancels).toHaveLength(0);
+	});
+
+	it('does NOT emit transport.cancel_generation for normal priority on truncation-capable transport', async () => {
+		const { actor, sends } = makeActor({ messageTruncation: true });
+		await subscribe(actor, 'transport');
+
+		await tell(actor, 'notification.audio_started', {});
+		await publish(actor, 'SYSTEM', 'normal-text');
+
+		const cancels = sends.filter((s) => s.type === 'transport.cancel_generation');
+		expect(cancels).toHaveLength(0);
+	});
+
+	it('uses a custom transportActorId when provided', async () => {
+		const sendsRecorded: RecordedSend[] = [];
+		const sendMessage = vi.fn(
+			(type: RuntimeMessage['type'], payload: unknown, to: ActorId, options?: ActorSendOptions) => {
+				sendsRecorded.push({ type, payload, to, options });
+			},
+		);
+		const customActor = new NotificationActor('notification', sendMessage, {
+			messageTruncation: true,
+			transportActorId: 'my-transport',
+		});
+		await customActor.onMessage(
+			createEnvelope('notification.subscribe', { subscriberId: 'transport' }, 'notification'),
+		);
+		await customActor.onMessage(createEnvelope('notification.audio_started', {}, 'notification'));
+		await customActor.onMessage(
+			createEnvelope(
+				'notification.publish',
+				{ label: 'SYSTEM', text: 'urgent', priority: 'high' },
+				'notification',
+			),
+		);
+
+		const cancel = sendsRecorded.find((s) => s.type === 'transport.cancel_generation');
+		expect(cancel?.to).toBe('my-transport');
+	});
+
+	it('propagates correlationId on the transport.cancel_generation envelope', async () => {
+		const { actor, sends } = makeActor({ messageTruncation: true });
+		await subscribe(actor, 'transport');
+
+		await tell(actor, 'notification.audio_started', {});
+		await publish(
+			actor,
+			'SUBAGENT QUESTION',
+			'urgent',
+			{ priority: 'high' },
+			{ correlationId: 'trace-xyz' },
+		);
+
+		const cancel = sends.find((s) => s.type === 'transport.cancel_generation');
+		expect(cancel?.options?.correlationId).toBe('trace-xyz');
+	});
+});
+
 describe('NotificationActor — onStop', () => {
 	it('clears queue and subscribers on stop', async () => {
 		const { actor, sends } = makeActor();

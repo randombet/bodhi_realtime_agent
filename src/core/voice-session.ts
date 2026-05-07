@@ -751,6 +751,21 @@ export class VoiceSession {
 					},
 					onError: (info) => this.reportError(info.component, info.error),
 				},
+				// Session id is threaded into the BackgroundAgentContext (Phase 2)
+				// and into the onBackgroundNotification event payload below.
+				sessionId: config.sessionId,
+				// Wire FrameworkHooks.onBackgroundNotification through to the
+				// RuntimeOrchestrator's NotificationHooksObserverActor. We only
+				// supply the callback when one is actually registered so the
+				// orchestrator stays zero-overhead (it skips constructing the
+				// observer when this is undefined). At session-construction
+				// time the user has already registered hooks via config.hooks
+				// (HooksManager.register fired up top), so reading
+				// `this.hooks.onBackgroundNotification` here yields the
+				// caller-supplied callback if any.
+				notification: this.hooks.onBackgroundNotification
+					? { onBackgroundNotification: this.hooks.onBackgroundNotification }
+					: undefined,
 			});
 		} else {
 			// Set up legacy tool call router. notificationQueue is guaranteed
