@@ -404,6 +404,33 @@ describe('SessionActor', () => {
 			expect(fanned).toHaveLength(0);
 		});
 
+		it('emits agent.transfer_completed fan-out copy with payload preserved', async () => {
+			const { actor, messages } = setupWithSupervisor();
+			await actor.onMessage(createEnvelope('transport.session_ready', {}, 'session'));
+			messages.length = 0;
+
+			await actor.onMessage(
+				createEnvelope(
+					'agent.transfer_completed',
+					{
+						fromAgent: 'general',
+						toAgent: 'booking',
+						transferCorrelationId: 'corr-1',
+					},
+					'session',
+				),
+			);
+
+			const fanned = messages.filter((m) => m.to === 'background-agents');
+			expect(fanned).toHaveLength(1);
+			expect(fanned[0].type).toBe('agent.transfer_completed');
+			expect(fanned[0].payload).toEqual({
+				fromAgent: 'general',
+				toAgent: 'booking',
+				transferCorrelationId: 'corr-1',
+			});
+		});
+
 		it('emits transport.closed fan-out copy on transport close', async () => {
 			const { actor, messages } = setupWithSupervisor();
 			await actor.onMessage(createEnvelope('transport.session_ready', {}, 'session'));
@@ -424,6 +451,13 @@ describe('SessionActor', () => {
 			const { actor, messages } = setup();
 
 			await actor.onMessage(createEnvelope('transport.session_ready', {}, 'session'));
+			await actor.onMessage(
+				createEnvelope(
+					'agent.transfer_completed',
+					{ fromAgent: 'a', toAgent: 'b', transferCorrelationId: 'c' },
+					'session',
+				),
+			);
 			await actor.onMessage(
 				createEnvelope('session.close_requested', { reason: 'user' }, 'session'),
 			);

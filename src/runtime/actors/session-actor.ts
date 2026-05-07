@@ -53,10 +53,12 @@ export class SessionActor implements Actor {
 		reconnectPolicy?: Partial<ReconnectPolicy>,
 		/**
 		 * Optional fan-out target for `session.connected`, `session.reconnected`,
-		 * `session.close_requested`, and `transport.closed` mirror sends. Wired by
-		 * `RuntimeOrchestrator` to `'background-agents'` so the
-		 * `BackgroundAgentSupervisorActor` can drive `BackgroundAgent.onStart` /
-		 * `onReconnect` / `onStop`. Omit (legacy / tests) to suppress fan-out.
+		 * `session.close_requested`, `transport.closed`, and
+		 * `agent.transfer_completed` mirror sends. Wired by `RuntimeOrchestrator`
+		 * to `'background-agents'` so the `BackgroundAgentSupervisorActor` can
+		 * drive `BackgroundAgent.onStart` / `onReconnect` / `onStop` /
+		 * `onAgentTransfer` (and `cancelOnTransfer` cleanup). Omit (legacy /
+		 * tests) to suppress fan-out.
 		 */
 		private backgroundAgentSupervisorId?: ActorId,
 	) {
@@ -106,7 +108,12 @@ export class SessionActor implements Actor {
 				break;
 			}
 			case 'agent.transfer_completed': {
-				this.handleTransferCompleted();
+				const p = envelope.payload as {
+					fromAgent: string;
+					toAgent: string;
+					transferCorrelationId?: string;
+				};
+				this.handleTransferCompleted(p);
 				break;
 			}
 			case 'agent.transfer_failed': {
@@ -202,9 +209,21 @@ export class SessionActor implements Actor {
 		}
 	}
 
-	private handleTransferCompleted(): void {
+	private handleTransferCompleted(payload: {
+		fromAgent: string;
+		toAgent: string;
+		transferCorrelationId?: string;
+	}): void {
 		if (this.phase === 'transferring') {
 			this.phase = 'active';
+		}
+		// Fan-out copy: BackgroundAgentSupervisorActor drives onAgentTransfer
+		// (and cancelOnTransfer cleanup) from this envelope. MainAgentActor only
+		// addresses the SessionActor, so without this fan-out the supervisor's
+		// `agent.transfer_completed` handler would be unreachable in the
+		// integrated graph.
+		if (this.backgroundAgentSupervisorId) {
+			this.sendMessage('agent.transfer_completed', payload, this.backgroundAgentSupervisorId);
 		}
 	}
 
