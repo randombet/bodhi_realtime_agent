@@ -259,6 +259,14 @@ export interface SessionReconnected {
 // to subscribers via `notification.delivered`. See
 // `dev_docs/framework/design-background-notification-actor.md`.
 
+/**
+ * Documented label vocabulary used by in-tree emitters. Producers may pass any
+ * string; NotificationActor normalizes it on ingest. This union is a
+ * type-level autocomplete hint — combine with `(string & {})` to keep arbitrary
+ * user labels valid.
+ */
+export type KnownNotificationLabel = 'SYSTEM' | 'SUBAGENT UPDATE' | 'SUBAGENT QUESTION';
+
 /** Optional filter on a subscription registration. */
 export interface NotificationFilter {
 	/** Only deliver notifications whose label is in this set. Omit to receive all labels. */
