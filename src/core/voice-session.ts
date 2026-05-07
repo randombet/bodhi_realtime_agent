@@ -1481,10 +1481,16 @@ export class VoiceSession {
 		this.reinforceDirectives();
 
 		// Reset audio flag and flush one queued notification (skips if interrupted).
-		// Actor mode: TransportActor sends notification.turn_complete from the
-		// adapter callback (step 1.6); VoiceSession only clears its debounce flag.
+		// We send notification.turn_complete from HERE (the effective turn
+		// boundary) rather than from TransportActor's raw adapter.onTurnComplete
+		// callback. When an external TTSProvider is wired, handleTurnComplete
+		// defers via ttsMaybeCompleteTurn until TTS audio actually finishes,
+		// so this is the only place where the model-and-audio turn really
+		// ends. The legacy queue's `onTurnComplete()` is called from this same
+		// site for the same reason — actor-mode parity matches.
 		if (this._isActorMode) {
 			this._audioStartedThisTurn = false;
+			this.runtimeOrchestrator?.runtime.tell('notification.turn_complete', {}, 'notification');
 		} else {
 			this.notificationQueue?.onTurnComplete();
 		}
@@ -1543,11 +1549,18 @@ export class VoiceSession {
 			this._ttsCurrentRequestId++;
 			this.ttsClearTimers();
 		}
-		// Audio-gate reset + interrupted flag. Actor mode: TransportActor sends
-		// notification.reset_audio + notification.interrupted from the adapter
-		// callback (step 1.6); VoiceSession only clears its debounce flag.
+		// Audio-gate reset + interrupted flag. We own these sends in
+		// VoiceSession (not TransportActor) because handleInterrupted is also
+		// the entry point for TTS speech-started barge-in (line 1340 area)
+		// — that path doesn't traverse adapter.onInterrupted, so a TransportActor
+		// mirror would miss it. The legacy queue's resetAudio()+markInterrupted()
+		// pair is called here for the same reason; actor-mode parity matches.
+		// Order matters: reset_audio FIRST (clears the gate), then interrupted
+		// (suppresses the next flush).
 		if (this._isActorMode) {
 			this._audioStartedThisTurn = false;
+			this.runtimeOrchestrator?.runtime.tell('notification.reset_audio', {}, 'notification');
+			this.runtimeOrchestrator?.runtime.tell('notification.interrupted', {}, 'notification');
 		} else {
 			this.notificationQueue?.resetAudio();
 			this.notificationQueue?.markInterrupted();

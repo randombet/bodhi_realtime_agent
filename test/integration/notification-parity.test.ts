@@ -23,11 +23,18 @@
  *   (f) priority='high' on Gemini: queue at front
  *   (g) reset_audio (pre-greeting) reopens the gate
  *
- * Out of scope (per the design's "Phase 4" list):
+ * Out of scope:
  *   - OpenAI / messageTruncation=true parity (cancel-and-deliver semantics).
- *     Test scaffolding for that lands as a follow-up.
- *   - Legacy dedupKey: not implemented in BackgroundNotificationQueue, so
- *     dedup parity isn't applicable.
+ *     Phase 4 of the design plan; test scaffolding lands as a follow-up.
+ *   - Legacy dedupKey: BackgroundNotificationQueue does not implement
+ *     dedupKey, so cross-mode parity is not applicable. Actor-only dedup
+ *     is covered in test/runtime/notification-actor.test.ts.
+ *   - Agent transfer mid-turn: covered as a runtime e2e test in
+ *     test/runtime/runtime-orchestrator.test.ts ("agent.transfer_completed
+ *     reaches BackgroundAgentSupervisor"). The notification gate itself is
+ *     transfer-agnostic — agent transfer doesn't touch
+ *     audioReceived / interrupted / queue, so a parity comparison would be
+ *     trivially identical.
  */
 
 import { describe, expect, it, vi } from 'vitest';
@@ -286,7 +293,36 @@ describe('Notification subsystem parity (Gemini, messageTruncation=false)', () =
 		expectSameWireSequence(legacy, actor);
 	});
 
-	it('(h) full turn cycle: publish during idle + during audio + flush across two turns', async () => {
+	it('(h) reconnect mid-turn: queued notifications survive reconnect, flush on the next post-reconnect turn_complete', async () => {
+		// Both legacy and actor paths are unaware of session phase — they only
+		// track audioReceived / interrupted / turn_complete. So a "reconnect
+		// mid-turn" sequence from their perspective is just: publishes during
+		// audio_started state, no clear() call, then a single turn_complete on
+		// the post-reconnect turn flushes one queued item. The post-reconnect
+		// audio_started + turn_complete pair drains the rest. Both paths
+		// preserve the queue identically.
+		const steps: Step[] = [
+			{ op: 'audio_started' }, // pre-disconnect turn begins
+			{ op: 'publish', label: 'SYSTEM', text: 'queued-pre-disconnect' },
+			// (transport drops mid-turn; queue/actor are unchanged because no
+			//  reset/turn_complete fires)
+			{ op: 'audio_started' }, // post-reconnect turn begins
+			{ op: 'publish', label: 'SYSTEM', text: 'queued-post-reconnect' },
+			{ op: 'turn_complete' }, // flushes the oldest = queued-pre-disconnect
+			{ op: 'audio_started' },
+			{ op: 'turn_complete' }, // flushes queued-post-reconnect
+		];
+		const legacy = driveLegacy(steps);
+		const actor = await driveActor(steps);
+
+		expect(legacy.map((e) => e.text)).toEqual([
+			'[SYSTEM]: queued-pre-disconnect',
+			'[SYSTEM]: queued-post-reconnect',
+		]);
+		expectSameWireSequence(legacy, actor);
+	});
+
+	it('(i) full turn cycle: publish during idle + during audio + flush across two turns', async () => {
 		const steps: Step[] = [
 			{ op: 'publish', label: 'SYSTEM', text: 'idle-1' }, // immediate
 			{ op: 'audio_started' },

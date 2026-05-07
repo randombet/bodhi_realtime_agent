@@ -248,6 +248,50 @@ describe('RuntimeOrchestrator', () => {
 			expect(orchestrator.runtime.hasActor('background-agents')).toBe(true);
 		});
 
+		it('adapter.onTurnComplete does NOT flush queued notifications — VoiceSession owns notification.turn_complete (TTS-gating fix)', async () => {
+			// Locks in the H1 fix: the raw adapter.onTurnComplete callback fires
+			// when the LLM finishes generating, which is BEFORE TTS audio finishes
+			// when an external TTSProvider is wired. If TransportActor mirrored
+			// that callback to notification.turn_complete (as in step 1.6's
+			// original wiring), notifications would flush mid-TTS. Ownership
+			// has moved to VoiceSession.handleTurnCompleteInternal — the
+			// effective turn boundary that already TTS-gates.
+			const adapter = createMockAdapter();
+			orchestrator = new RuntimeOrchestrator(createConfig({ adapter }));
+			await orchestrator.start();
+
+			// Activate session (so SessionActor is in 'active') and start audio.
+			adapter.onSessionReady?.();
+			orchestrator.runtime.tell('notification.audio_started', {}, 'notification');
+
+			// Queue a notification.
+			orchestrator.runtime.tell(
+				'notification.publish',
+				{ label: 'SYSTEM', text: 'queued-during-audio' },
+				'notification',
+			);
+
+			// Wait one tick to let the publish land.
+			await new Promise((r) => setTimeout(r, 0));
+
+			// Reset adapter.sendContent recording and fire the RAW transport
+			// turn-complete callback. With the fix, this MUST NOT flush.
+			(adapter.sendContent as ReturnType<typeof vi.fn>).mockClear();
+			adapter.onTurnComplete?.('turn-1');
+			await new Promise((r) => setTimeout(r, 10));
+			expect(adapter.sendContent).not.toHaveBeenCalled();
+
+			// Now simulate VoiceSession.handleTurnCompleteInternal sending the
+			// notification.turn_complete envelope (the new effective boundary).
+			orchestrator.runtime.tell('notification.turn_complete', {}, 'notification');
+			await vi.waitFor(() => {
+				expect(adapter.sendContent).toHaveBeenCalledWith(
+					[{ role: 'user', parts: [{ text: '[SYSTEM]: queued-during-audio' }] }],
+					true,
+				);
+			});
+		});
+
 		it('end-to-end: agent.transfer_completed reaches BackgroundAgentSupervisor and updates ctx.session.activeAgent', async () => {
 			// This test locks in the fix from commit 30c3a16: MainAgentActor sends
 			// agent.transfer_completed only to SessionActor; SessionActor must

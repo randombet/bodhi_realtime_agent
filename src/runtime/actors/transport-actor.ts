@@ -55,19 +55,22 @@ export class TransportActor implements Actor {
 		};
 
 		this.adapter.onTurnComplete = (turnId?: string) => {
-			// Existing: drive SessionActor's phase machine.
+			// Drive SessionActor's phase machine. We do NOT mirror to
+			// `notification.turn_complete` here — that signal must come from
+			// the EFFECTIVE turn boundary (which defers when an external TTS
+			// provider is mid-audio). VoiceSession.handleTurnCompleteInternal
+			// owns the actor-mode `notification.turn_complete` send so the
+			// gate matches the legacy queue's `onTurnComplete()` call site.
 			this.sendMessage('transport.turn_complete', { turnId }, this.sessionActorId);
-			// Notification subsystem mirror: drives flushOne in NotificationActor.
-			this.sendMessage('notification.turn_complete', { turnId }, this.notificationActorId);
 		};
 
 		this.adapter.onInterrupted = () => {
+			// Same rationale: VoiceSession.handleInterrupted is the effective
+			// interrupt boundary (it also fires from the TTS speech-started
+			// callback when the user barges in during TTS audio). It owns the
+			// `notification.reset_audio` + `notification.interrupted` pair so
+			// barge-in detection during TTS is covered.
 			this.sendMessage('transport.interrupted', {}, this.sessionActorId);
-			// Pair order matters and matches legacy VoiceSession.handleInterrupted:
-			//   :1447 resetAudio()      → notification.reset_audio (clears the gate)
-			//   :1448 markInterrupted() → notification.interrupted  (suppresses next flush)
-			this.sendMessage('notification.reset_audio', {}, this.notificationActorId);
-			this.sendMessage('notification.interrupted', {}, this.notificationActorId);
 		};
 
 		this.adapter.onToolCallReceived = (calls) => {

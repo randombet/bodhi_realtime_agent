@@ -115,30 +115,34 @@ describe('TransportActor', () => {
 			expect(sender.messages[0].to).toBe('session');
 		});
 
-		it('onTurnComplete → transport.turn_complete to session + notification.turn_complete to notification', () => {
+		it('onTurnComplete → transport.turn_complete to session ONLY (notification.turn_complete is owned by VoiceSession)', () => {
+			// VoiceSession.handleTurnCompleteInternal owns the actor-mode
+			// `notification.turn_complete` send so the gate honors TTS deferral
+			// (legacy queue.onTurnComplete() is also called from that site).
+			// TransportActor MUST NOT mirror the raw adapter callback to the
+			// notification subsystem — doing so flushes notifications mid-TTS.
 			adapter.onTurnComplete?.('turn-1');
-			// One mirror to SessionActor (existing) + one mirror to NotificationActor (new).
-			expect(sender.messages).toHaveLength(2);
-			const toSession = sender.messages.find((m) => m.to === 'session');
-			expect(toSession?.type).toBe('transport.turn_complete');
-			expect(toSession?.payload).toEqual({ turnId: 'turn-1' });
-			const toNotification = sender.messages.find((m) => m.to === 'notification');
-			expect(toNotification?.type).toBe('notification.turn_complete');
-			expect(toNotification?.payload).toEqual({ turnId: 'turn-1' });
+			expect(sender.messages).toHaveLength(1);
+			expect(sender.messages[0].type).toBe('transport.turn_complete');
+			expect(sender.messages[0].to).toBe('session');
+			expect(sender.messages[0].payload).toEqual({ turnId: 'turn-1' });
+			// And explicitly: no notification.turn_complete envelope.
+			expect(sender.messages.find((m) => m.type === 'notification.turn_complete')).toBeUndefined();
 		});
 
-		it('onInterrupted → transport.interrupted, then paired notification.reset_audio + interrupted (in order)', () => {
+		it('onInterrupted → transport.interrupted to session ONLY (notification.interrupted+reset_audio are owned by VoiceSession)', () => {
+			// VoiceSession.handleInterrupted is the effective interrupt
+			// boundary — including the TTS speech-started barge-in path
+			// (voice-session.ts:1340) which never traverses adapter.onInterrupted.
+			// TransportActor MUST NOT mirror the raw adapter callback to the
+			// notification subsystem; that would miss the TTS barge-in path.
 			adapter.onInterrupted?.();
-			// SessionActor mirror plus the notification pair.
-			expect(sender.messages).toHaveLength(3);
+			expect(sender.messages).toHaveLength(1);
 			expect(sender.messages[0].type).toBe('transport.interrupted');
 			expect(sender.messages[0].to).toBe('session');
-			// Order matters: reset_audio first, then interrupted (mirrors legacy
-			// VoiceSession.handleInterrupted: resetAudio() then markInterrupted()).
-			expect(sender.messages[1].type).toBe('notification.reset_audio');
-			expect(sender.messages[1].to).toBe('notification');
-			expect(sender.messages[2].type).toBe('notification.interrupted');
-			expect(sender.messages[2].to).toBe('notification');
+			// Explicitly: no notification.* envelopes from this path.
+			expect(sender.messages.find((m) => m.type === 'notification.interrupted')).toBeUndefined();
+			expect(sender.messages.find((m) => m.type === 'notification.reset_audio')).toBeUndefined();
 		});
 
 		it('onToolCallReceived → transport.tool_call_received to tool-router', () => {

@@ -89,9 +89,9 @@ describe('Step 87 cutover validation', () => {
 				'notification.subscribe',
 				'transport.session_ready',
 				'transport.tool_call_received',
-				// onTurnComplete fans out to both SessionActor and NotificationActor.
+				// onTurnComplete is now SessionActor-only — VoiceSession owns the
+				// notification.turn_complete send so TTS gating is honored.
 				'transport.turn_complete',
-				'notification.turn_complete',
 				'transport.closed',
 			]);
 		});
