@@ -20,6 +20,10 @@ Common hooks include:
 - `onToolCall`
 - `onToolResult`
 - `onSubagentStep`
+- `onAgentTransfer`
+- `onTurnLatency`
+- `onMemoryExtraction`
+- `onBackgroundNotification` — fired when a background notification (BackgroundAgent, tool-completion bridge, interactive subagent question, or `VoiceSession.notifyBackground`) is delivered to the LLM. The event includes `label`, `priority`, `publishedAtMs`, `deliveredAtMs`, `deferredMs`, and the envelope `correlationId`. See [Background Agents](/advanced/background-agents).
 - `onError`
 
 Hooks are ideal for logging, tracing, and metrics.

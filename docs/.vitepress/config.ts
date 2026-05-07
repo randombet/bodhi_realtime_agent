@@ -63,6 +63,7 @@ export default withMermaid(
 								text: 'Persistent Subagent Lifecycle',
 								link: '/advanced/persistent-subagent-lifecycle',
 							},
+							{ text: 'Background Agents', link: '/advanced/background-agents' },
 							{ text: 'Persistence', link: '/advanced/persistence' },
 							{ text: 'Multimodal Features', link: '/advanced/multimodal' },
 							{ text: 'Deployment', link: '/advanced/deployment' },

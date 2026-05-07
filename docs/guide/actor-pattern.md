@@ -35,9 +35,9 @@ Main actors:
 - `MainAgentActor`: agent transfer lifecycle hooks
 - `ClientGatewayActor`: client message bridge
 
-Designed and planned (see [design-background-notification-actor.md](../../dev_docs/framework/design-background-notification-actor.md)):
+Notification subsystem (implemented — see [Background Agents](/advanced/background-agents) for usage and [design-background-notification-actor.md](../../dev_docs/framework/design-background-notification-actor.md) for the full design):
 
-- `NotificationActor`: owns the **background notification queue** as a first-class actor — handles `notification.publish`, priority + audio-received + turn-complete gating, label normalization, and pub/sub fan-out to subscribers. Replaces the in-process `BackgroundNotificationQueue` in actor mode.
+- `NotificationActor`: owns the **background notification queue** as a first-class actor — handles `notification.publish`, priority + audio-received + turn-complete gating, dedup, label normalization, and pub/sub fan-out to subscribers. Replaces the in-process `BackgroundNotificationQueue` in actor mode.
 - `BackgroundAgentSupervisorActor`: hosts user-defined `BackgroundAgent` instances (always-on producers — wall-clock reminders, polling, external alerts). Drives their `onStart` / `onAgentTransfer` / `onReconnect` / `onStop` lifecycle from session events.
 - `NotificationHooksObserverActor` (opt-in): a built-in subscriber that fires `FrameworkHooks.onBackgroundNotification` for parity with `onToolCall`, `onAgentTransfer`, etc. Constructed only when a hook handler is configured.
 
@@ -51,11 +51,10 @@ Designed and planned (see [design-background-notification-actor.md](../../dev_do
 
 ## Message flow (high level)
 
-The full actor graph, including the planned `NotificationActor` / `BackgroundAgentSupervisorActor` / `NotificationHooksObserverActor` (dashed nodes — see the design doc linked under "Related docs"). Currently-implemented actors are solid; planned actors and their edges are dashed so the diagram is honest about today's runtime state.
+The full actor graph, including `NotificationActor` / `BackgroundAgentSupervisorActor` / `NotificationHooksObserverActor` (the latter two are constructed only when the application configures `backgroundAgents` or `onBackgroundNotification`).
 
 ```mermaid
 flowchart LR
-  %% Currently implemented actors (solid)
   C[ClientGatewayActor]
   T[TransportActor]
   A[SessionActor]
@@ -63,12 +62,10 @@ flowchart LR
   R[ToolRouterActor]
   S[SubagentSupervisorActor]
 
-  %% Planned actors (per design doc) — labelled with the planned tag in text
-  N["NotificationActor (planned)"]
-  B["BackgroundAgentSupervisorActor (planned)"]
-  H["NotificationHooksObserverActor (planned)"]
+  N[NotificationActor]
+  B[BackgroundAgentSupervisorActor]
+  H[NotificationHooksObserverActor]
 
-  %% Adapter on the wire
   L((Live LLM))
 
   %% Client to session and back
@@ -89,34 +86,41 @@ flowchart LR
   M -->|agent.transfer_requested| T
   M -->|agent.transfer_completed and failed| A
 
-  %% Session to background-agents fan-out (planned)
-  A -.->|session.connected and reconnected and close_requested| B
+  %% Session lifecycle fan-out to background-agents
+  A -->|session.connected and reconnected and close_requested| B
+  M -->|agent.transfer_completed fan-out| B
 
-  %% Notification publish path (planned)
-  B -.->|notification.publish from BackgroundAgent ctx.publish| N
-  S -.->|notification.publish from interactive sendToUser| N
-  R -.->|notification.publish from tool completion bridge| N
+  %% Notification publish path
+  B -->|notification.publish from BackgroundAgent ctx.publish| N
+  S -->|notification.publish from interactive sendToUser| N
+  R -->|notification.publish from tool completion bridge| N
 
-  %% Notification gating ticks (planned)
-  T -.->|notification.audio_started and interrupted and turn_complete and reset_audio| N
+  %% Lifecycle ticks (TTS-aware boundary owned by VoiceSession)
+  T -->|notification.audio_started| N
+  V[VoiceSession] -->|notification.turn_complete and interrupted and reset_audio| N
 
-  %% Notification fan-out (planned)
-  N -.->|notification.delivered| T
-  N -.->|notification.delivered| H
+  %% Notification fan-out
+  N -->|notification.delivered| T
+  N -->|notification.delivered| H
+
+  %% Optional cancel-and-deliver on truncation-capable transports
+  N -->|transport.cancel_generation| T
 
   %% Wire-out
   T -->|adapter.sendContent| L
 ```
 
+> **TTS-aware turn boundary.** `notification.turn_complete`, `notification.interrupted`, and `notification.reset_audio` are sent by `VoiceSession.handleTurnCompleteInternal` / `handleInterrupted` — the **effective** turn boundary that already gates on TTS audio completion via `ttsMaybeCompleteTurn`. They are deliberately **not** mirrored from `TransportActor`'s raw `adapter.onTurnComplete` callback, which fires when the LLM finishes generating, before the TTS provider has flushed its audio. This guarantees notifications wait for the user-perceived end of the model's reply.
+
 Typical paths:
 
 - **Inline tool:** `transport.tool_call_received` → `tool.inline.completed` → `transport.send_tool_result`.
-- **Background tool:** `transport.tool_call_received` → `subagent.spawn_requested` → `subagent.completed` → `transport.send_tool_result` (and, in actor mode after the design lands, an additional `notification.publish` with `label: 'SYSTEM'` so the model speaks a follow-up).
+- **Background tool:** `transport.tool_call_received` → `subagent.spawn_requested` → `subagent.completed` → `transport.send_tool_result` plus a `notification.publish` (label `'SYSTEM'`) so the model speaks a follow-up at the next idle boundary.
 - **Agent transfer:** `agent.transfer_requested` → `transport.transfer_session` → `agent.transfer_completed`.
-- **External producer (planned — wall-clock reminder, alert):** `BackgroundAgent.ctx.publish` → `notification.publish` → queue/gate inside `NotificationActor` → `notification.delivered` → `TransportActor` builds `[label]: text` and calls `adapter.sendContent`.
-- **Interactive subagent question (planned routing):** `SubagentSession.sendToUser({ blocking: true })` → `notification.publish` with `label: 'SUBAGENT QUESTION'`, `priority: 'high'` → same delivery path as above.
+- **External producer (wall-clock reminder, alert):** `BackgroundAgent.ctx.publish` → `notification.publish` → queue/gate inside `NotificationActor` → `notification.delivered` → `TransportActor` wraps as `[label]: text` and calls `adapter.sendContent`. On truncation-capable transports a `priority: 'high'` envelope mid-turn also emits `transport.cancel_generation` first (cancel-and-deliver).
+- **Interactive subagent question:** `SubagentSession.sendToUser({ blocking: true })` → `notification.publish` with `label: 'SUBAGENT QUESTION'`, `priority: 'high'` → same delivery path as above.
 
-### Notification subsystem (zoom-in, planned)
+### Notification subsystem (zoom-in)
 
 For illustration, here's the same notification path isolated from the rest of the actor graph. Producers fan in on the left; `NotificationActor` does the priority + audio-received + turn-complete gating in the middle; subscribers fan out on the right.
 
@@ -133,11 +137,11 @@ flowchart LR
     Q[NotificationActor queue and gate]
   end
 
-  subgraph Ticks
-    K1[notification.audio_started]
-    K2[notification.interrupted]
-    K3[notification.turn_complete]
-    K4[notification.reset_audio]
+  subgraph Ticks ["Lifecycle ticks (TransportActor and VoiceSession)"]
+    K1[notification.audio_started — TransportActor]
+    K2[notification.interrupted — VoiceSession]
+    K3[notification.turn_complete — VoiceSession]
+    K4[notification.reset_audio — VoiceSession]
   end
 
   subgraph Subscribers
@@ -162,7 +166,7 @@ flowchart LR
   SUB1 -->|adapter.sendContent| L
 ```
 
-The four producer rows on the left are the **only** sources of `notification.publish` in actor mode; the four lifecycle ticks are the **only** way `NotificationActor` learns about the model's turn state (audio chunks themselves never enter the mailbox — see "Audio fast-path bridge" in the design doc); fan-out is one envelope per matching subscriber, so adding observability or a label-filtered consumer is a `notification.subscribe` away.
+The four producer rows on the left are the **only** sources of `notification.publish` in actor mode. The four lifecycle ticks are the **only** way `NotificationActor` learns about the model's turn state (audio chunks themselves never enter the mailbox — see "Audio fast-path bridge" in the design doc). Three of those ticks (`turn_complete`, `interrupted`, `reset_audio`) are owned by `VoiceSession`'s effective turn boundary so TTS gating is honored; only `audio_started` comes directly from `TransportActor`. Fan-out is one envelope per matching subscriber, so adding observability or a label-filtered consumer is a `notification.subscribe` away.
 
 See [design-background-notification-actor.md](../../dev_docs/framework/design-background-notification-actor.md) for the full notification message contracts, lifecycle ownership matrix, and step-by-step implementation plan.
 
@@ -198,15 +202,16 @@ Prefer actor mode when you need:
 - strict timeout/retry/message ordering
 - richer observability of runtime internals
 - stronger fault isolation between orchestration components
-- (with `NotificationActor` / `BackgroundAgentSupervisorActor`) wall-clock or event-driven background producers — e.g. periodic reminders, DB-poll alerts, external-channel nudges — that need to inject synthetic user turns into the live LLM without holding a `VoiceSession` reference
+- wall-clock or event-driven background producers via `BackgroundAgent` (periodic reminders, DB-poll alerts, external-channel nudges) — they inject synthetic user turns into the live LLM without holding a `VoiceSession` reference. See [Background Agents](/advanced/background-agents).
 
 Use legacy mode only if you need minimal migration risk for older flows.
 
 ## Related docs
 
+- [Background Agents](/advanced/background-agents) — implementing always-on producers (reminders, polls, alerts) with the BackgroundAgent interface
 - [Subagent Patterns](/advanced/subagents)
 - [Persistent Subagent Lifecycle](/advanced/persistent-subagent-lifecycle)
 - [API: ActorRuntime](/api/classes/ActorRuntime)
 - [API: RuntimeOrchestrator](/api/classes/RuntimeOrchestrator)
-- [Investigation: background notifications status quo](../../dev_docs/framework/investigation-background-agent-status-quo.md) — current emitters, abstraction, wiring; gaps that motivate `NotificationActor`.
-- [Design: `NotificationActor` + `BackgroundAgent`](../../dev_docs/framework/design-background-notification-actor.md) — message contracts, lifecycle ownership, step-by-step implementation plan.
+- [Investigation: background notifications status quo](../../dev_docs/framework/investigation-background-agent-status-quo.md) — emitters, abstractions, original gaps that motivated `NotificationActor`.
+- [Design: `NotificationActor` + `BackgroundAgent`](../../dev_docs/framework/design-background-notification-actor.md) — message contracts, lifecycle ownership matrix, full implementation plan.
