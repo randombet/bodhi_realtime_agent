@@ -3,6 +3,7 @@
 import type { LanguageModelV1 } from 'ai';
 import { resolveAgentWithKnowledgeBase } from '../agent/agent-context.js';
 import { AgentRouter } from '../agent/agent-router.js';
+import type { BackgroundAgent } from '../agent/background-agent.js';
 import { PersistentSubagentManager } from '../agent/persistent-subagent-manager.js';
 import type { SubagentMessage } from '../agent/subagent-session.js';
 import { resamplePcm } from '../audio/resample.js';
@@ -134,6 +135,14 @@ export interface VoiceSessionConfig {
 		): string;
 		dispose(): void;
 	};
+	/**
+	 * User-defined `BackgroundAgent` instances. Hosted by
+	 * `BackgroundAgentSupervisorActor`; each agent's `onStart` fires once on
+	 * the first `session.connected` envelope. Actor-mode only — ignored in
+	 * legacy mode (the legacy queue has no equivalent host). See
+	 * `dev_docs/framework/design-background-notification-actor.md`.
+	 */
+	backgroundAgents?: BackgroundAgent[];
 }
 
 /**
@@ -754,6 +763,8 @@ export class VoiceSession {
 				// Session id is threaded into the BackgroundAgentContext (Phase 2)
 				// and into the onBackgroundNotification event payload below.
 				sessionId: config.sessionId,
+				userId: config.userId,
+				backgroundAgents: config.backgroundAgents,
 				// Wire FrameworkHooks.onBackgroundNotification through to the
 				// RuntimeOrchestrator's NotificationHooksObserverActor. We only
 				// supply the callback when one is actually registered so the
