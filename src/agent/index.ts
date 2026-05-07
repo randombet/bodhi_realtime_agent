@@ -7,6 +7,12 @@ export {
 } from './agent-context.js';
 export { AgentRouter } from './agent-router.js';
 export type { SubagentEventCallbacks } from './agent-router.js';
+export type {
+	BackgroundAgent,
+	BackgroundAgentContext,
+	BackgroundAgentSessionView,
+	PublishNotification,
+} from './background-agent.js';
 export { PersistentSubagentManager } from './persistent-subagent-manager.js';
 export type {
 	PersistentSubagentFactory,
