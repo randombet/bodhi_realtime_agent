@@ -289,4 +289,94 @@ describe('SessionActor', () => {
 			expect(timeouts).toHaveLength(0);
 		});
 	});
+
+	// -- Background-agent supervisor fan-out ------------------------------
+
+	describe('background-agent supervisor fan-out', () => {
+		function setupWithSupervisor() {
+			const messages: SentMessage[] = [];
+			const send = (type: string, payload: unknown, to: string) => {
+				messages.push({ type, payload, to });
+			};
+			const actor = new SessionActor('session', send, 'transport', undefined, 'background-agents');
+			return { actor, messages };
+		}
+
+		it('emits session.connected to background-agents on first activation', async () => {
+			const { actor, messages } = setupWithSupervisor();
+
+			await actor.onMessage(createEnvelope('transport.session_ready', {}, 'session'));
+
+			const fanned = messages.filter((m) => m.to === 'background-agents');
+			expect(fanned).toHaveLength(1);
+			expect(fanned[0].type).toBe('session.connected');
+		});
+
+		it('emits session.reconnected to background-agents on subsequent activation', async () => {
+			const { actor, messages } = setupWithSupervisor();
+
+			// First activation: created → active.
+			await actor.onMessage(createEnvelope('transport.session_ready', {}, 'session'));
+			// Recoverable error pushes us into reconnecting.
+			await actor.onMessage(
+				createEnvelope(
+					'transport.error',
+					{ error: 'connection lost', recoverable: true },
+					'session',
+				),
+			);
+			expect(actor.currentPhase).toBe('reconnecting');
+			messages.length = 0;
+
+			// Second activation: reconnecting → active. Should fan out reconnected.
+			await actor.onMessage(createEnvelope('transport.session_ready', {}, 'session'));
+
+			const fanned = messages.filter((m) => m.to === 'background-agents');
+			expect(fanned).toHaveLength(1);
+			expect(fanned[0].type).toBe('session.reconnected');
+		});
+
+		it('emits session.close_requested fan-out copy on close', async () => {
+			const { actor, messages } = setupWithSupervisor();
+			await actor.onMessage(createEnvelope('transport.session_ready', {}, 'session'));
+			messages.length = 0;
+
+			await actor.onMessage(
+				createEnvelope('session.close_requested', { reason: 'user' }, 'session'),
+			);
+
+			const fanned = messages.filter((m) => m.to === 'background-agents');
+			expect(fanned).toHaveLength(1);
+			expect(fanned[0].type).toBe('session.close_requested');
+		});
+
+		it('emits transport.closed fan-out copy on transport close', async () => {
+			const { actor, messages } = setupWithSupervisor();
+			await actor.onMessage(createEnvelope('transport.session_ready', {}, 'session'));
+			messages.length = 0;
+
+			await actor.onMessage(
+				createEnvelope('transport.closed', { reason: 'remote hangup' }, 'session'),
+			);
+
+			const fanned = messages.filter((m) => m.to === 'background-agents');
+			expect(fanned).toHaveLength(1);
+			expect(fanned[0].type).toBe('transport.closed');
+			expect((fanned[0].payload as { reason?: string }).reason).toBe('remote hangup');
+		});
+
+		it('does NOT fan out when supervisorId is omitted (legacy / tests)', async () => {
+			// Default `setup()` constructs without backgroundAgentSupervisorId.
+			const { actor, messages } = setup();
+
+			await actor.onMessage(createEnvelope('transport.session_ready', {}, 'session'));
+			await actor.onMessage(
+				createEnvelope('session.close_requested', { reason: 'user' }, 'session'),
+			);
+
+			// No envelope addressed to 'background-agents' should appear.
+			const fanned = messages.filter((m) => m.to === 'background-agents');
+			expect(fanned).toHaveLength(0);
+		});
+	});
 });

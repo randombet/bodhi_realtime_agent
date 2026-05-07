@@ -51,6 +51,14 @@ export class SessionActor implements Actor {
 		private sendMessage: ActorSendFn,
 		private transportActorId: ActorId,
 		reconnectPolicy?: Partial<ReconnectPolicy>,
+		/**
+		 * Optional fan-out target for `session.connected`, `session.reconnected`,
+		 * `session.close_requested`, and `transport.closed` mirror sends. Wired by
+		 * `RuntimeOrchestrator` to `'background-agents'` so the
+		 * `BackgroundAgentSupervisorActor` can drive `BackgroundAgent.onStart` /
+		 * `onReconnect` / `onStop`. Omit (legacy / tests) to suppress fan-out.
+		 */
+		private backgroundAgentSupervisorId?: ActorId,
 	) {
 		this.id = id;
 		this.reconnectPolicy = {
@@ -129,12 +137,25 @@ export class SessionActor implements Actor {
 	}
 
 	private handleSessionReady(): void {
-		if (this.phase === 'reconnecting') {
+		const prevPhase = this.phase;
+		if (prevPhase === 'reconnecting') {
 			// Successful reconnect
 			this.reconnectAttempt = 0;
 			this.clearTimers();
 		}
 		this.phase = 'active';
+
+		// Fan out to BackgroundAgentSupervisorActor (when wired) so background
+		// agents can run their deferred onStart on first activation, or
+		// onReconnect on subsequent activations. Distinguishing the two events
+		// avoids forcing the supervisor to subscribe to raw transport.session_ready.
+		if (this.backgroundAgentSupervisorId) {
+			if (prevPhase === 'reconnecting') {
+				this.sendMessage('session.reconnected', {}, this.backgroundAgentSupervisorId);
+			} else {
+				this.sendMessage('session.connected', {}, this.backgroundAgentSupervisorId);
+			}
+		}
 	}
 
 	private handleTurnComplete(turnId?: string): void {
@@ -165,7 +186,10 @@ export class SessionActor implements Actor {
 	private handleTransportClosed(reason?: string): void {
 		this.phase = 'closed';
 		this.clearTimers();
-		void reason;
+		// Fan-out copy: BackgroundAgentSupervisorActor stops registered agents.
+		if (this.backgroundAgentSupervisorId) {
+			this.sendMessage('transport.closed', { reason }, this.backgroundAgentSupervisorId);
+		}
 	}
 
 	private handleTransferCompleted(): void {
@@ -183,6 +207,10 @@ export class SessionActor implements Actor {
 	private handleCloseRequested(): void {
 		this.phase = 'closed';
 		this.clearTimers();
+		// Fan-out copy: BackgroundAgentSupervisorActor stops registered agents.
+		if (this.backgroundAgentSupervisorId) {
+			this.sendMessage('session.close_requested', {}, this.backgroundAgentSupervisorId);
+		}
 	}
 
 	private handleReconnectTimeout(attempt: number): void {
