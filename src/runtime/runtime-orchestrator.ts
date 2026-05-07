@@ -27,6 +27,7 @@ import type { InlineToolExecutor, ToolRoutingInfo } from './actors/tool-router-a
 import { TransportActor } from './actors/transport-actor.js';
 import type { TransportAdapter } from './adapters/transport-adapter.js';
 import { DeadLetterQueue } from './dead-letter-queue.js';
+import type { NotificationFilter } from './messages.js';
 import { RuntimeObserver } from './observability.js';
 import { DEFAULT_POLICIES, Supervisor } from './supervisor.js';
 
@@ -52,6 +53,15 @@ export interface OrchestratorConfig {
 	onTransferRequested?: (toAgent: string) => Promise<void> | void;
 	/** Optional execution bridge for background subagent workflows. */
 	backgroundExecutor?: SubagentExecutionHandler;
+	/** Optional notification subsystem configuration (NotificationActor + subscribers). */
+	notification?: {
+		/**
+		 * Subscription filter for `TransportActor` (the default subscriber that
+		 * wraps `notification.delivered` into `[label]: text` and writes via
+		 * `adapter.sendContent`). Omit to subscribe to all labels.
+		 */
+		transportSubscriptionFilter?: NotificationFilter;
+	};
 }
 
 /**
@@ -108,6 +118,8 @@ export class RuntimeOrchestrator {
 			sendFn,
 			'session',
 			'tool-router',
+			'notification',
+			config.notification?.transportSubscriptionFilter,
 		);
 		// Step 1.4 wires SessionActor's optional fan-out target. When the
 		// BackgroundAgentSupervisorActor lands (step 2.2) the orchestrator will

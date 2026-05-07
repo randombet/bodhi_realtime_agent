@@ -151,4 +151,81 @@ describe('RuntimeOrchestrator', () => {
 		expect(orchestrator.observer).toBeDefined();
 		expect(orchestrator.deadLetterQueue).toBeDefined();
 	});
+
+	// -- Notification subsystem wiring (step 1.7) ---------------------------
+
+	describe('notification subsystem', () => {
+		it('starts NotificationActor and registers it with the runtime', async () => {
+			orchestrator = new RuntimeOrchestrator(createConfig());
+			await orchestrator.start();
+			expect(orchestrator.notificationActor).toBeDefined();
+			expect(orchestrator.runtime.hasActor('notification')).toBe(true);
+		});
+
+		it('TransportActor self-subscribes; default filter forwards every label', async () => {
+			const adapter = createMockAdapter();
+			orchestrator = new RuntimeOrchestrator(createConfig({ adapter }));
+			await orchestrator.start();
+
+			// Producer publishes with two different labels — both should be wrapped
+			// and dispatched to adapter.sendContent (default = subscribe to all labels).
+			orchestrator.runtime.tell(
+				'notification.publish',
+				{ label: 'SYSTEM', text: 's-text' },
+				'notification',
+			);
+			orchestrator.runtime.tell(
+				'notification.publish',
+				{ label: 'TIME REMINDER', text: 't-text' },
+				'notification',
+			);
+
+			await vi.waitFor(() => {
+				expect(adapter.sendContent).toHaveBeenCalledTimes(2);
+			});
+			expect(adapter.sendContent).toHaveBeenCalledWith(
+				[{ role: 'user', parts: [{ text: '[SYSTEM]: s-text' }] }],
+				true,
+			);
+			expect(adapter.sendContent).toHaveBeenCalledWith(
+				[{ role: 'user', parts: [{ text: '[TIME REMINDER]: t-text' }] }],
+				true,
+			);
+		});
+
+		it('honors a custom transportSubscriptionFilter end-to-end (label allowlist)', async () => {
+			const adapter = createMockAdapter();
+			orchestrator = new RuntimeOrchestrator(
+				createConfig({
+					adapter,
+					notification: { transportSubscriptionFilter: { labels: ['SYSTEM'] } },
+				}),
+			);
+			await orchestrator.start();
+
+			// Two publishes — only SYSTEM should reach the adapter.
+			orchestrator.runtime.tell(
+				'notification.publish',
+				{ label: 'SYSTEM', text: 'should-pass' },
+				'notification',
+			);
+			orchestrator.runtime.tell(
+				'notification.publish',
+				{ label: 'TIME REMINDER', text: 'should-be-filtered' },
+				'notification',
+			);
+
+			// Wait for the SYSTEM one to land; assert the filtered one never does.
+			await vi.waitFor(() => {
+				expect(adapter.sendContent).toHaveBeenCalledWith(
+					[{ role: 'user', parts: [{ text: '[SYSTEM]: should-pass' }] }],
+					true,
+				);
+			});
+			// Drain microtasks then verify only one sendContent call was made.
+			await vi.waitFor(() => {
+				expect(adapter.sendContent).toHaveBeenCalledTimes(1);
+			});
+		});
+	});
 });
