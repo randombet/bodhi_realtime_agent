@@ -95,6 +95,27 @@ export interface FrameworkHooks {
 		requestId: number;
 	}): void;
 
+	/**
+	 * Fires once per background notification, after `NotificationActor` flushes
+	 * it to its subscribers. Driven by the built-in `NotificationHooksObserverActor`
+	 * (a default subscriber). Useful for end-to-end tracing of background
+	 * tool completions, interactive subagent questions, and wall-clock /
+	 * external producer events. `deferredMs` reports the time the notification
+	 * spent in the queue (0 for immediate-deliver paths).
+	 *
+	 * Actor mode only — only fires when `orchestrationMode: 'actor'`.
+	 */
+	onBackgroundNotification?(event: {
+		sessionId: string;
+		id: string;
+		label: string;
+		priority: 'normal' | 'high';
+		publishedAtMs: number;
+		deliveredAtMs: number;
+		deferredMs: number;
+		correlationId?: string;
+	}): void;
+
 	/** Fires on any framework error. Use for centralized error logging/alerting. */
 	onError?(event: {
 		sessionId?: string;

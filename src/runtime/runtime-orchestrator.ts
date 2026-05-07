@@ -18,6 +18,8 @@ import type { ClientSendFn } from './actors/client-gateway-actor.js';
 import { MainAgentActor } from './actors/main-agent-actor.js';
 import type { AgentDefinition, MainAgentHooks } from './actors/main-agent-actor.js';
 import { NotificationActor } from './actors/notification-actor.js';
+import { NotificationHooksObserverActor } from './actors/notification-hooks-observer-actor.js';
+import type { OnBackgroundNotificationCallback } from './actors/notification-hooks-observer-actor.js';
 import { SessionActor } from './actors/session-actor.js';
 import type { ReconnectPolicy } from './actors/session-actor.js';
 import { SubagentSupervisorActor } from './actors/subagent-supervisor-actor.js';
@@ -53,6 +55,8 @@ export interface OrchestratorConfig {
 	onTransferRequested?: (toAgent: string) => Promise<void> | void;
 	/** Optional execution bridge for background subagent workflows. */
 	backgroundExecutor?: SubagentExecutionHandler;
+	/** Required so `BackgroundAgentContext.sessionId` and the `onBackgroundNotification` event payload carry a stable session id. */
+	sessionId?: string;
 	/** Optional notification subsystem configuration (NotificationActor + subscribers). */
 	notification?: {
 		/**
@@ -61,6 +65,13 @@ export interface OrchestratorConfig {
 		 * `adapter.sendContent`). Omit to subscribe to all labels.
 		 */
 		transportSubscriptionFilter?: NotificationFilter;
+		/**
+		 * Callback invoked by `NotificationHooksObserverActor` on every
+		 * delivered notification. Wired by VoiceSession to forward
+		 * `FrameworkHooks.onBackgroundNotification`. Omit to disable the
+		 * observer (orchestrator skips constructing it — zero-overhead).
+		 */
+		onBackgroundNotification?: OnBackgroundNotificationCallback;
 	};
 }
 
@@ -85,6 +96,9 @@ export class RuntimeOrchestrator {
 	readonly transportActor: TransportActor;
 	readonly sessionActor: SessionActor;
 	readonly notificationActor: NotificationActor;
+	/** Built-in observability subscriber. Constructed only when an
+	 *  onBackgroundNotification callback is configured. */
+	readonly notificationHooksObserver: NotificationHooksObserverActor | null;
 	readonly toolRouterActor: ToolRouterActor;
 	readonly subagentSupervisor: SubagentSupervisorActor;
 	readonly mainAgentActor: MainAgentActor;
@@ -140,6 +154,17 @@ export class RuntimeOrchestrator {
 		this.notificationActor = new NotificationActor('notification', sendFn, {
 			messageTruncation: config.adapter.capabilities.messageTruncation,
 		});
+		// NotificationHooksObserverActor: built-in subscriber. Construct only
+		// when a callback is configured (zero-overhead when unattached).
+		this.notificationHooksObserver = config.notification?.onBackgroundNotification
+			? new NotificationHooksObserverActor(
+					'notification-hooks-observer',
+					sendFn,
+					'notification',
+					config.notification.onBackgroundNotification,
+					config.sessionId ?? '',
+				)
+			: null;
 		this.toolRouterActor = new ToolRouterActor(
 			'tool-router',
 			config.tools,
@@ -188,8 +213,13 @@ export class RuntimeOrchestrator {
 
 		// Order: NotificationActor must start before any subscriber so subscribe
 		// envelopes do not dead-letter. TransportActor self-subscribes in step 1.6.
+		// NotificationHooksObserverActor (when configured) starts after the
+		// queue and before TransportActor — same reason.
 		await this.runtime.startActor(this.sessionActor);
 		await this.runtime.startActor(this.notificationActor);
+		if (this.notificationHooksObserver) {
+			await this.runtime.startActor(this.notificationHooksObserver);
+		}
 		await this.runtime.startActor(this.transportActor);
 		await this.runtime.startActor(this.toolRouterActor);
 		await this.runtime.startActor(this.subagentSupervisor);

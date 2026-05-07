@@ -193,6 +193,54 @@ describe('RuntimeOrchestrator', () => {
 			);
 		});
 
+		it('does not construct the hooks observer when no callback is configured', async () => {
+			orchestrator = new RuntimeOrchestrator(createConfig());
+			await orchestrator.start();
+			expect(orchestrator.notificationHooksObserver).toBeNull();
+			expect(orchestrator.runtime.hasActor('notification-hooks-observer')).toBe(false);
+		});
+
+		it('constructs and starts the hooks observer when onBackgroundNotification is configured', async () => {
+			const onBackgroundNotification = vi.fn();
+			orchestrator = new RuntimeOrchestrator(
+				createConfig({
+					sessionId: 'sess-1',
+					notification: { onBackgroundNotification },
+				}),
+			);
+			await orchestrator.start();
+			expect(orchestrator.notificationHooksObserver).not.toBeNull();
+			expect(orchestrator.runtime.hasActor('notification-hooks-observer')).toBe(true);
+		});
+
+		it('hook fires end-to-end with timing and sessionId fields populated', async () => {
+			const onBackgroundNotification = vi.fn();
+			orchestrator = new RuntimeOrchestrator(
+				createConfig({
+					sessionId: 'sess-trace',
+					notification: { onBackgroundNotification },
+				}),
+			);
+			await orchestrator.start();
+
+			orchestrator.runtime.tell(
+				'notification.publish',
+				{ label: 'SYSTEM', text: 'hello' },
+				'notification',
+			);
+
+			await vi.waitFor(() => {
+				expect(onBackgroundNotification).toHaveBeenCalledTimes(1);
+			});
+			const event = onBackgroundNotification.mock.calls[0][0];
+			expect(event.sessionId).toBe('sess-trace');
+			expect(event.label).toBe('SYSTEM');
+			expect(event.priority).toBe('normal');
+			expect(typeof event.publishedAtMs).toBe('number');
+			expect(typeof event.deliveredAtMs).toBe('number');
+			expect(event.deferredMs).toBeGreaterThanOrEqual(0);
+		});
+
 		it('honors a custom transportSubscriptionFilter end-to-end (label allowlist)', async () => {
 			const adapter = createMockAdapter();
 			orchestrator = new RuntimeOrchestrator(
