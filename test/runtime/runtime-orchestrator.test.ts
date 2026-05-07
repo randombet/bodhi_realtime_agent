@@ -15,6 +15,7 @@ import type { OrchestratorConfig } from '../../src/runtime/runtime-orchestrator.
 
 function createMockAdapter(): TransportAdapter {
 	return {
+		capabilities: { messageTruncation: false },
 		onSessionReady: undefined,
 		onTurnComplete: undefined,
 		onInterrupted: undefined,

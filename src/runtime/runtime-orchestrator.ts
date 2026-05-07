@@ -17,6 +17,7 @@ import { ClientGatewayActor } from './actors/client-gateway-actor.js';
 import type { ClientSendFn } from './actors/client-gateway-actor.js';
 import { MainAgentActor } from './actors/main-agent-actor.js';
 import type { AgentDefinition, MainAgentHooks } from './actors/main-agent-actor.js';
+import { NotificationActor } from './actors/notification-actor.js';
 import { SessionActor } from './actors/session-actor.js';
 import type { ReconnectPolicy } from './actors/session-actor.js';
 import { SubagentSupervisorActor } from './actors/subagent-supervisor-actor.js';
@@ -73,6 +74,7 @@ export class RuntimeOrchestrator {
 	// Actors (exposed for testing/inspection)
 	readonly transportActor: TransportActor;
 	readonly sessionActor: SessionActor;
+	readonly notificationActor: NotificationActor;
 	readonly toolRouterActor: ToolRouterActor;
 	readonly subagentSupervisor: SubagentSupervisorActor;
 	readonly mainAgentActor: MainAgentActor;
@@ -107,7 +109,25 @@ export class RuntimeOrchestrator {
 			'session',
 			'tool-router',
 		);
-		this.sessionActor = new SessionActor('session', sendFn, 'transport', config.reconnectPolicy);
+		// Step 1.4 wires SessionActor's optional fan-out target. When the
+		// BackgroundAgentSupervisorActor lands (step 2.2) the orchestrator will
+		// construct it with id 'background-agents'; until then SessionActor's
+		// fan-out envelopes will dead-letter at the runtime, which is harmless
+		// (DeadLetterQueue logs them) and matches the design's incremental
+		// rollout. See dev_docs/framework/design-background-notification-actor.md.
+		this.sessionActor = new SessionActor(
+			'session',
+			sendFn,
+			'transport',
+			config.reconnectPolicy,
+			'background-agents',
+		);
+		// NotificationActor: actor-mode home of the legacy
+		// BackgroundNotificationQueue. Started immediately after SessionActor so
+		// any subsequent subscriber's onStart can register without dead-lettering.
+		this.notificationActor = new NotificationActor('notification', sendFn, {
+			messageTruncation: config.adapter.capabilities.messageTruncation,
+		});
 		this.toolRouterActor = new ToolRouterActor(
 			'tool-router',
 			config.tools,
@@ -154,7 +174,10 @@ export class RuntimeOrchestrator {
 			throw new Error('RuntimeOrchestrator already started');
 		}
 
+		// Order: NotificationActor must start before any subscriber so subscribe
+		// envelopes do not dead-letter. TransportActor self-subscribes in step 1.6.
 		await this.runtime.startActor(this.sessionActor);
+		await this.runtime.startActor(this.notificationActor);
 		await this.runtime.startActor(this.transportActor);
 		await this.runtime.startActor(this.toolRouterActor);
 		await this.runtime.startActor(this.subagentSupervisor);

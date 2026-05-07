@@ -28,6 +28,7 @@ import { RuntimeOrchestrator } from '../../src/runtime/runtime-orchestrator.js';
 
 function createAdapter(): TransportAdapter {
 	return {
+		capabilities: { messageTruncation: false },
 		onSessionReady: undefined,
 		onTurnComplete: undefined,
 		onInterrupted: undefined,
