@@ -143,4 +143,26 @@ export const DEFAULT_POLICIES: Record<string, SupervisionPolicy> = {
 	'client-gateway': {
 		defaultAction: 'resume',
 	},
+	// `'resume'` is REQUIRED for `notification`. NotificationActor.onStop clears
+	// the subscribers map, so a `'restart'` policy would silently lose every
+	// subscriber registration (their onStart only runs when they themselves
+	// restart). With `resume`, the actor instance plus its queue and
+	// subscribers map all survive a thrown handler — matching the legacy
+	// queue's catch-and-continue behavior. See
+	// dev_docs/framework/design-background-notification-actor.md for the
+	// full rationale.
+	notification: {
+		defaultAction: 'resume',
+	},
+	// User-defined BackgroundAgents may misbehave; resume so a single agent's
+	// throw does not bring down the session.
+	'background-agents': {
+		defaultAction: 'resume',
+	},
+	// Built-in observability subscriber that fires FrameworkHooks
+	// .onBackgroundNotification for every delivered notification. A
+	// misbehaving consumer hook must not kill the session.
+	'notification-hooks-observer': {
+		defaultAction: 'resume',
+	},
 };
