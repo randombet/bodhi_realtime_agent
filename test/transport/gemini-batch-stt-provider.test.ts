@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: MIT
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { GeminiBatchSTTProvider } from '../../src/transport/gemini-batch-stt-provider.js';
+import {
+	GeminiBatchSTTProvider,
+	stripMetaEnvelope,
+} from '../../src/transport/gemini-batch-stt-provider.js';
 import { generateSilence, generateTone } from '../__tests__/helpers/test-audio.js';
 
 const mockGenerateContent = vi.fn();
@@ -270,6 +273,134 @@ describe('GeminiBatchSTTProvider', () => {
 				expect(onTranscript).toHaveBeenCalled();
 			});
 			expect(onPartial).not.toHaveBeenCalled();
+		});
+	});
+
+	describe('prompt + system instruction', () => {
+		it('passes a systemInstruction with strict output rules', () => {
+			provider.feedAudio(toneChunk);
+			mockGenerateContent.mockResolvedValue({
+				candidates: [{ content: { parts: [{ text: 'hello' }] } }],
+			});
+			provider.commit(0);
+
+			const callArgs = mockGenerateContent.mock.calls[0][0];
+			const sys = callArgs.config?.systemInstruction;
+			expect(typeof sys).toBe('string');
+			expect(sys).toMatch(/verbatim/i);
+			expect(sys).toMatch(/no preamble|forbidden/i);
+			expect(sys).toMatch(/\[SILENCE\]/);
+		});
+
+		it('keeps the user-facing text minimal (no embedded rules)', () => {
+			provider.feedAudio(toneChunk);
+			mockGenerateContent.mockResolvedValue({
+				candidates: [{ content: { parts: [{ text: 'hello' }] } }],
+			});
+			provider.commit(0);
+
+			const userText = mockGenerateContent.mock.calls[0][0].contents[0].parts[1].text as string;
+			expect(userText.length).toBeLessThan(40);
+		});
+	});
+
+	describe('meta-envelope stripping', () => {
+		it('strips "The transcription for the audio provided is as follows: …" + surrounding quotes', async () => {
+			const onTranscript = vi.fn();
+			provider.onTranscript = onTranscript;
+			provider.feedAudio(toneChunk);
+			mockGenerateContent.mockResolvedValue({
+				candidates: [
+					{
+						content: {
+							parts: [
+								{
+									text: 'The transcription for the audio provided is as follows: \n\n"Uh, sounds great. Can you send me an email?"',
+								},
+							],
+						},
+					},
+				],
+			});
+			provider.commit(7);
+
+			await vi.waitFor(() => expect(onTranscript).toHaveBeenCalled());
+			expect(onTranscript).toHaveBeenCalledWith('Uh, sounds great. Can you send me an email?', 7);
+		});
+
+		it('strips a leading "Sure," + transcription envelope', async () => {
+			const onTranscript = vi.fn();
+			provider.onTranscript = onTranscript;
+			provider.feedAudio(toneChunk);
+			mockGenerateContent.mockResolvedValue({
+				candidates: [
+					{
+						content: {
+							parts: [{ text: 'Sure, the transcription is: hello world' }],
+						},
+					},
+				],
+			});
+			provider.commit(0);
+
+			await vi.waitFor(() => expect(onTranscript).toHaveBeenCalled());
+			expect(onTranscript).toHaveBeenCalledWith('hello world', 0);
+		});
+
+		it('strips "Here is the transcription:" + outer quotes', async () => {
+			const onTranscript = vi.fn();
+			provider.onTranscript = onTranscript;
+			provider.feedAudio(toneChunk);
+			mockGenerateContent.mockResolvedValue({
+				candidates: [
+					{
+						content: { parts: [{ text: 'Here is the transcription: "what time is it"' }] },
+					},
+				],
+			});
+			provider.commit(0);
+
+			await vi.waitFor(() => expect(onTranscript).toHaveBeenCalled());
+			expect(onTranscript).toHaveBeenCalledWith('what time is it', 0);
+		});
+
+		it('filters [SILENCE] even when wrapped in an envelope', async () => {
+			const onTranscript = vi.fn();
+			provider.onTranscript = onTranscript;
+			provider.feedAudio(toneChunk);
+			mockGenerateContent.mockResolvedValue({
+				candidates: [{ content: { parts: [{ text: 'The transcription is: [SILENCE]' }] } }],
+			});
+			provider.commit(0);
+
+			await new Promise((r) => setTimeout(r, 10));
+			expect(onTranscript).not.toHaveBeenCalled();
+		});
+
+		it('does not strip phrases that legitimately start an utterance', () => {
+			// User actually says: "the transcription tool I'm building" — no colon, must not match.
+			expect(stripMetaEnvelope("the transcription tool I'm building")).toBe(
+				"the transcription tool I'm building",
+			);
+			// User says: "Here is what I think" — no transcription/transcribed reference, must not match.
+			expect(stripMetaEnvelope('Here is what I think')).toBe('Here is what I think');
+		});
+
+		it('handles nested layered envelopes', () => {
+			expect(
+				stripMetaEnvelope('Sure, the transcription is: "Here is the transcription: actual words"'),
+			).toBe('actual words');
+		});
+
+		it('preserves unaffected output unchanged', () => {
+			expect(stripMetaEnvelope('hello world')).toBe('hello world');
+			expect(stripMetaEnvelope('  hello world  ')).toBe('hello world');
+			expect(stripMetaEnvelope('[SILENCE]')).toBe('[SILENCE]');
+		});
+
+		it('strips a single layer of surrounding curly quotes', () => {
+			expect(stripMetaEnvelope('“actual words”')).toBe('actual words');
+			expect(stripMetaEnvelope('"actual words"')).toBe('actual words');
 		});
 	});
 });

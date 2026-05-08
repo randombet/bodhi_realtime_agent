@@ -76,7 +76,9 @@ function makeFakeStore(): {
 	return { store, calls };
 }
 
-let port = 9900;
+// Use a high port range to avoid collisions with other parallel test files
+// (e.g. voice-session.test.ts uses ports starting at 9870).
+let port = 19_900;
 function nextPort() {
 	return port++;
 }
