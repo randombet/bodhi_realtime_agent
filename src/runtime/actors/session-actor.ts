@@ -55,12 +55,12 @@ export class SessionActor implements Actor {
 		 * Optional fan-out target for `session.connected`, `session.reconnected`,
 		 * `session.close_requested`, `transport.closed`, and
 		 * `agent.transfer_completed` mirror sends. Wired by `RuntimeOrchestrator`
-		 * to `'background-agents'` so the `BackgroundAgentSupervisorActor` can
-		 * drive `BackgroundAgent.onStart` / `onReconnect` / `onStop` /
+		 * to `'background-agents'` so the `BackgroundAgentHostActor` can drive
+		 * `BackgroundAgent.onStart` / `onReconnect` / `onStop` /
 		 * `onAgentTransfer` (and `cancelOnTransfer` cleanup). Omit (legacy /
 		 * tests) to suppress fan-out.
 		 */
-		private backgroundAgentSupervisorId?: ActorId,
+		private backgroundAgentHostId?: ActorId,
 	) {
 		this.id = id;
 		this.reconnectPolicy = {
@@ -153,10 +153,10 @@ export class SessionActor implements Actor {
 		}
 		this.phase = 'active';
 
-		// Fan out to BackgroundAgentSupervisorActor (when wired) so background
-		// agents can run their deferred onStart on first activation, or
-		// onReconnect on subsequent activations. Distinguishing the two events
-		// avoids forcing the supervisor to subscribe to raw transport.session_ready.
+		// Fan out to BackgroundAgentHostActor (when wired) so background agents
+		// can run their deferred onStart on first activation, or onReconnect on
+		// subsequent activations. Distinguishing the two events avoids forcing
+		// the host to subscribe to raw transport.session_ready.
 		//
 		// Strict gating per the design contract: BackgroundAgent.onStart fires
 		// EXACTLY ONCE per session. Only `created → active` and `connecting →
@@ -165,11 +165,11 @@ export class SessionActor implements Actor {
 		// refresh) or activations from other phases (`transferring → active`,
 		// `closed → active`) must NOT re-fire `session.connected`, which would
 		// re-run user agents' onStart and break the once-per-session contract.
-		if (this.backgroundAgentSupervisorId) {
+		if (this.backgroundAgentHostId) {
 			if (prevPhase === 'created' || prevPhase === 'connecting') {
-				this.sendMessage('session.connected', {}, this.backgroundAgentSupervisorId);
+				this.sendMessage('session.connected', {}, this.backgroundAgentHostId);
 			} else if (prevPhase === 'reconnecting') {
-				this.sendMessage('session.reconnected', {}, this.backgroundAgentSupervisorId);
+				this.sendMessage('session.reconnected', {}, this.backgroundAgentHostId);
 			}
 			// else: already-active / transferring / closed → no fan-out.
 		}
@@ -203,9 +203,9 @@ export class SessionActor implements Actor {
 	private handleTransportClosed(reason?: string): void {
 		this.phase = 'closed';
 		this.clearTimers();
-		// Fan-out copy: BackgroundAgentSupervisorActor stops registered agents.
-		if (this.backgroundAgentSupervisorId) {
-			this.sendMessage('transport.closed', { reason }, this.backgroundAgentSupervisorId);
+		// Fan-out copy: BackgroundAgentHostActor stops registered agents.
+		if (this.backgroundAgentHostId) {
+			this.sendMessage('transport.closed', { reason }, this.backgroundAgentHostId);
 		}
 	}
 
@@ -217,13 +217,13 @@ export class SessionActor implements Actor {
 		if (this.phase === 'transferring') {
 			this.phase = 'active';
 		}
-		// Fan-out copy: BackgroundAgentSupervisorActor drives onAgentTransfer
-		// (and cancelOnTransfer cleanup) from this envelope. MainAgentActor only
-		// addresses the SessionActor, so without this fan-out the supervisor's
+		// Fan-out copy: BackgroundAgentHostActor drives onAgentTransfer (and
+		// cancelOnTransfer cleanup) from this envelope. MainAgentActor only
+		// addresses the SessionActor, so without this fan-out the host's
 		// `agent.transfer_completed` handler would be unreachable in the
 		// integrated graph.
-		if (this.backgroundAgentSupervisorId) {
-			this.sendMessage('agent.transfer_completed', payload, this.backgroundAgentSupervisorId);
+		if (this.backgroundAgentHostId) {
+			this.sendMessage('agent.transfer_completed', payload, this.backgroundAgentHostId);
 		}
 	}
 
@@ -236,11 +236,11 @@ export class SessionActor implements Actor {
 	private handleCloseRequested(reason?: string): void {
 		this.phase = 'closed';
 		this.clearTimers();
-		// Fan-out copy: BackgroundAgentSupervisorActor stops registered agents
-		// with the original reason so logs / `BackgroundAgent.onStop(reason)`
-		// see the same value the close was initiated with.
-		if (this.backgroundAgentSupervisorId) {
-			this.sendMessage('session.close_requested', { reason }, this.backgroundAgentSupervisorId);
+		// Fan-out copy: BackgroundAgentHostActor stops registered agents with
+		// the original reason so logs / `BackgroundAgent.onStop(reason)` see
+		// the same value the close was initiated with.
+		if (this.backgroundAgentHostId) {
+			this.sendMessage('session.close_requested', { reason }, this.backgroundAgentHostId);
 		}
 	}
 

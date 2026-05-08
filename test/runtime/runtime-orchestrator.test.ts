@@ -241,10 +241,10 @@ describe('RuntimeOrchestrator', () => {
 			expect(event.deferredMs).toBeGreaterThanOrEqual(0);
 		});
 
-		it('always constructs BackgroundAgentSupervisorActor (even with no backgroundAgents)', async () => {
+		it('always constructs BackgroundAgentHostActor (even with no backgroundAgents)', async () => {
 			orchestrator = new RuntimeOrchestrator(createConfig());
 			await orchestrator.start();
-			expect(orchestrator.backgroundAgentSupervisor).toBeDefined();
+			expect(orchestrator.backgroundAgentHost).toBeDefined();
 			expect(orchestrator.runtime.hasActor('background-agents')).toBe(true);
 		});
 
@@ -292,10 +292,10 @@ describe('RuntimeOrchestrator', () => {
 			});
 		});
 
-		it('end-to-end: agent.transfer_completed reaches BackgroundAgentSupervisor and updates ctx.session.activeAgent', async () => {
+		it('end-to-end: agent.transfer_completed reaches BackgroundAgentHost and updates ctx.session.activeAgent', async () => {
 			// This test locks in the fix from commit 30c3a16: MainAgentActor sends
 			// agent.transfer_completed only to SessionActor; SessionActor must
-			// fan it out to 'background-agents' or the supervisor's onAgentTransfer
+			// fan it out to 'background-agents' or the host's onAgentTransfer
 			// + cancelOnTransfer + ctx.session.activeAgent updates are all dead
 			// code in the integrated runtime.
 			const onTransfer = vi.fn();

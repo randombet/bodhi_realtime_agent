@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 
 /**
- * Tests for `BackgroundAgentSupervisorActor`
- * (`src/runtime/actors/background-agent-supervisor-actor.ts`).
+ * Tests for `BackgroundAgentHostActor`
+ * (`src/runtime/actors/background-agent-host-actor.ts`).
  *
  * Covers the lifecycle table from the design doc:
  *   - Deferred first onStart on session.connected.
@@ -18,7 +18,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { BackgroundAgent, BackgroundAgentContext } from '../../src/agent/background-agent.js';
 import type { ActorSendOptions } from '../../src/runtime/actor-send-fn.js';
-import { BackgroundAgentSupervisorActor } from '../../src/runtime/actors/background-agent-supervisor-actor.js';
+import { BackgroundAgentHostActor } from '../../src/runtime/actors/background-agent-host-actor.js';
 import type { ActorId } from '../../src/runtime/envelope.js';
 import { createEnvelope } from '../../src/runtime/envelope.js';
 import type { RuntimeMessage } from '../../src/runtime/messages.js';
@@ -30,7 +30,7 @@ interface RecordedSend {
 	options?: ActorSendOptions;
 }
 
-function makeSupervisor(
+function makeHost(
 	agents: BackgroundAgent[],
 	overrides: { sessionId?: string; userId?: string; initialAgent?: string } = {},
 ) {
@@ -40,7 +40,7 @@ function makeSupervisor(
 			sends.push({ type, payload, to, options });
 		},
 	);
-	const supervisor = new BackgroundAgentSupervisorActor(
+	const host = new BackgroundAgentHostActor(
 		'background-agents',
 		sendMessage,
 		'notification',
@@ -51,41 +51,41 @@ function makeSupervisor(
 			initialAgent: overrides.initialAgent ?? 'main',
 		},
 	);
-	return { supervisor, sends };
+	return { host, sends };
 }
 
 async function tell(
-	supervisor: BackgroundAgentSupervisorActor,
+	host: BackgroundAgentHostActor,
 	type: RuntimeMessage['type'],
 	payload: unknown,
 ) {
-	await supervisor.onMessage(createEnvelope(type, payload, 'background-agents'));
+	await host.onMessage(createEnvelope(type, payload, 'background-agents'));
 }
 
 // ---------------------------------------------------------------------------
 // Lifecycle: deferred first onStart
 // ---------------------------------------------------------------------------
 
-describe('BackgroundAgentSupervisorActor — deferred first onStart', () => {
+describe('BackgroundAgentHostActor — deferred first onStart', () => {
 	it('does NOT call agent.onStart at construction time', () => {
 		const onStart = vi.fn();
 		const agent: BackgroundAgent = { name: 'a', onStart };
-		makeSupervisor([agent]);
+		makeHost([agent]);
 		expect(onStart).not.toHaveBeenCalled();
 	});
 
 	it('calls agent.onStart exactly once on the first session.connected envelope', async () => {
 		const onStart = vi.fn();
 		const agent: BackgroundAgent = { name: 'a', onStart };
-		const { supervisor } = makeSupervisor([agent]);
+		const { host } = makeHost([agent]);
 
-		await tell(supervisor, 'session.connected', {});
+		await tell(host, 'session.connected', {});
 		expect(onStart).toHaveBeenCalledTimes(1);
 
 		// Subsequent session.connected (which the strict gating in step 1.4
 		// fix prevents from being emitted, but we test defensively here)
 		// must NOT re-fire onStart.
-		await tell(supervisor, 'session.connected', {});
+		await tell(host, 'session.connected', {});
 		expect(onStart).toHaveBeenCalledTimes(1);
 	});
 
@@ -94,9 +94,9 @@ describe('BackgroundAgentSupervisorActor — deferred first onStart', () => {
 		const startB = vi.fn();
 		const a: BackgroundAgent = { name: 'a', onStart: startA };
 		const b: BackgroundAgent = { name: 'b', onStart: startB };
-		const { supervisor } = makeSupervisor([a, b]);
+		const { host } = makeHost([a, b]);
 
-		await tell(supervisor, 'session.connected', {});
+		await tell(host, 'session.connected', {});
 		expect(startA).toHaveBeenCalledTimes(1);
 		expect(startB).toHaveBeenCalledTimes(1);
 	});
@@ -108,9 +108,9 @@ describe('BackgroundAgentSupervisorActor — deferred first onStart', () => {
 		const startB = vi.fn();
 		const a: BackgroundAgent = { name: 'a', onStart: startA };
 		const b: BackgroundAgent = { name: 'b', onStart: startB };
-		const { supervisor } = makeSupervisor([a, b]);
+		const { host } = makeHost([a, b]);
 
-		await tell(supervisor, 'session.connected', {});
+		await tell(host, 'session.connected', {});
 		expect(startA).toHaveBeenCalledTimes(1);
 		expect(startB).toHaveBeenCalledTimes(1);
 	});
@@ -120,37 +120,37 @@ describe('BackgroundAgentSupervisorActor — deferred first onStart', () => {
 // Lifecycle: reconnect, transfer, close
 // ---------------------------------------------------------------------------
 
-describe('BackgroundAgentSupervisorActor — reconnect', () => {
+describe('BackgroundAgentHostActor — reconnect', () => {
 	it('does NOT call onReconnect before onStart has fired (deferred lifecycle)', async () => {
 		const onReconnect = vi.fn();
 		const agent: BackgroundAgent = { name: 'a', onStart: vi.fn(), onReconnect };
-		const { supervisor } = makeSupervisor([agent]);
+		const { host } = makeHost([agent]);
 
 		// session.reconnected without prior session.connected — agent isn't running.
-		await tell(supervisor, 'session.reconnected', {});
+		await tell(host, 'session.reconnected', {});
 		expect(onReconnect).not.toHaveBeenCalled();
 	});
 
 	it('calls onReconnect on running agents only', async () => {
 		const onReconnect = vi.fn();
 		const agent: BackgroundAgent = { name: 'a', onStart: vi.fn(), onReconnect };
-		const { supervisor } = makeSupervisor([agent]);
+		const { host } = makeHost([agent]);
 
-		await tell(supervisor, 'session.connected', {});
-		await tell(supervisor, 'session.reconnected', {});
+		await tell(host, 'session.connected', {});
+		await tell(host, 'session.reconnected', {});
 		expect(onReconnect).toHaveBeenCalledTimes(1);
 	});
 
 	it('skips agents whose onReconnect is undefined', async () => {
 		const startedAgent: BackgroundAgent = { name: 'no-reconnect', onStart: vi.fn() };
-		const { supervisor } = makeSupervisor([startedAgent]);
-		await tell(supervisor, 'session.connected', {});
+		const { host } = makeHost([startedAgent]);
+		await tell(host, 'session.connected', {});
 		// Should not throw even though onReconnect is undefined.
-		await tell(supervisor, 'session.reconnected', {});
+		await tell(host, 'session.reconnected', {});
 	});
 });
 
-describe('BackgroundAgentSupervisorActor — agent transfer', () => {
+describe('BackgroundAgentHostActor — agent transfer', () => {
 	it('invokes onAgentTransfer on every running agent regardless of cancelOnTransfer', async () => {
 		const transferA = vi.fn();
 		const transferB = vi.fn();
@@ -162,10 +162,10 @@ describe('BackgroundAgentSupervisorActor — agent transfer', () => {
 			onStop: vi.fn(),
 			onAgentTransfer: transferB,
 		};
-		const { supervisor } = makeSupervisor([a, b]);
-		await tell(supervisor, 'session.connected', {});
+		const { host } = makeHost([a, b]);
+		await tell(host, 'session.connected', {});
 
-		await tell(supervisor, 'agent.transfer_completed', {
+		await tell(host, 'agent.transfer_completed', {
 			fromAgent: 'main',
 			toAgent: 'specialist',
 			transferCorrelationId: 't-1',
@@ -195,10 +195,10 @@ describe('BackgroundAgentSupervisorActor — agent transfer', () => {
 			},
 			onStop: stopB,
 		};
-		const { supervisor } = makeSupervisor([a, b]);
-		await tell(supervisor, 'session.connected', {});
+		const { host } = makeHost([a, b]);
+		await tell(host, 'session.connected', {});
 
-		await tell(supervisor, 'agent.transfer_completed', {
+		await tell(host, 'agent.transfer_completed', {
 			fromAgent: 'main',
 			toAgent: 'specialist',
 			transferCorrelationId: 't-1',
@@ -227,11 +227,11 @@ describe('BackgroundAgentSupervisorActor — agent transfer', () => {
 				(agent as { _readLater?: () => void })._readLater = later;
 			},
 		};
-		const { supervisor } = makeSupervisor([agent], { initialAgent: 'main' });
-		await tell(supervisor, 'session.connected', {});
+		const { host } = makeHost([agent], { initialAgent: 'main' });
+		await tell(host, 'session.connected', {});
 		expect(observedActiveBefore).toBe('main');
 
-		await tell(supervisor, 'agent.transfer_completed', {
+		await tell(host, 'agent.transfer_completed', {
 			fromAgent: 'main',
 			toAgent: 'specialist',
 			transferCorrelationId: 't-1',
@@ -242,7 +242,7 @@ describe('BackgroundAgentSupervisorActor — agent transfer', () => {
 	});
 });
 
-describe('BackgroundAgentSupervisorActor — onStop', () => {
+describe('BackgroundAgentHostActor — onStop', () => {
 	it('aborts signal + calls onStop on session.close_requested with the reason', async () => {
 		const stop = vi.fn();
 		let signal: AbortSignal | null = null;
@@ -253,10 +253,10 @@ describe('BackgroundAgentSupervisorActor — onStop', () => {
 			},
 			onStop: stop,
 		};
-		const { supervisor } = makeSupervisor([agent]);
-		await tell(supervisor, 'session.connected', {});
+		const { host } = makeHost([agent]);
+		await tell(host, 'session.connected', {});
 
-		await tell(supervisor, 'session.close_requested', { reason: 'user-initiated' });
+		await tell(host, 'session.close_requested', { reason: 'user-initiated' });
 
 		expect(stop).toHaveBeenCalledWith('user-initiated');
 		expect(signal?.aborted).toBe(true);
@@ -265,10 +265,10 @@ describe('BackgroundAgentSupervisorActor — onStop', () => {
 	it('aborts signal + calls onStop on transport.closed with the reason', async () => {
 		const stop = vi.fn();
 		const agent: BackgroundAgent = { name: 'a', onStart: vi.fn(), onStop: stop };
-		const { supervisor } = makeSupervisor([agent]);
-		await tell(supervisor, 'session.connected', {});
+		const { host } = makeHost([agent]);
+		await tell(host, 'session.connected', {});
 
-		await tell(supervisor, 'transport.closed', { reason: 'remote-hangup' });
+		await tell(host, 'transport.closed', { reason: 'remote-hangup' });
 
 		expect(stop).toHaveBeenCalledWith('remote-hangup');
 	});
@@ -276,10 +276,10 @@ describe('BackgroundAgentSupervisorActor — onStop', () => {
 	it('falls back to a generic reason when none is supplied', async () => {
 		const stop = vi.fn();
 		const agent: BackgroundAgent = { name: 'a', onStart: vi.fn(), onStop: stop };
-		const { supervisor } = makeSupervisor([agent]);
-		await tell(supervisor, 'session.connected', {});
+		const { host } = makeHost([agent]);
+		await tell(host, 'session.connected', {});
 
-		await tell(supervisor, 'session.close_requested', {});
+		await tell(host, 'session.close_requested', {});
 
 		expect(stop).toHaveBeenCalledWith('session_close_requested');
 	});
@@ -296,11 +296,11 @@ describe('BackgroundAgentSupervisorActor — onStop', () => {
 				(agent as { _readLater?: () => void })._readLater = later;
 			},
 		};
-		const { supervisor } = makeSupervisor([agent]);
-		await tell(supervisor, 'session.connected', {});
+		const { host } = makeHost([agent]);
+		await tell(host, 'session.connected', {});
 		expect(observedPhase).toBe('active');
 
-		await tell(supervisor, 'session.close_requested', { reason: 'done' });
+		await tell(host, 'session.close_requested', { reason: 'done' });
 		(agent as { _readLater?: () => void })._readLater?.();
 		expect(observedPhase).toBe('closed');
 	});
@@ -313,16 +313,16 @@ describe('BackgroundAgentSupervisorActor — onStop', () => {
 			onStart: vi.fn(),
 			onStop: stop,
 		};
-		const { supervisor } = makeSupervisor([agent]);
-		await tell(supervisor, 'session.connected', {});
-		await tell(supervisor, 'agent.transfer_completed', {
+		const { host } = makeHost([agent]);
+		await tell(host, 'session.connected', {});
+		await tell(host, 'agent.transfer_completed', {
 			fromAgent: 'main',
 			toAgent: 'specialist',
 			transferCorrelationId: 't-1',
 		});
 		expect(stop).toHaveBeenCalledTimes(1); // 'transfer'
 
-		await tell(supervisor, 'session.close_requested', { reason: 'done' });
+		await tell(host, 'session.close_requested', { reason: 'done' });
 		// Should NOT invoke onStop again — already stopped.
 		expect(stop).toHaveBeenCalledTimes(1);
 	});
@@ -332,7 +332,7 @@ describe('BackgroundAgentSupervisorActor — onStop', () => {
 // ctx.publish correlationId precedence
 // ---------------------------------------------------------------------------
 
-describe('BackgroundAgentSupervisorActor — ctx.publish', () => {
+describe('BackgroundAgentHostActor — ctx.publish', () => {
 	it('forwards a publish with the supplied label/text/priority/dedupKey to NotificationActor', async () => {
 		let published = false;
 		const agent: BackgroundAgent = {
@@ -347,8 +347,8 @@ describe('BackgroundAgentSupervisorActor — ctx.publish', () => {
 				published = true;
 			},
 		};
-		const { supervisor, sends } = makeSupervisor([agent]);
-		await tell(supervisor, 'session.connected', {});
+		const { host, sends } = makeHost([agent]);
+		await tell(host, 'session.connected', {});
 		expect(published).toBe(true);
 
 		const publish = sends.find((s) => s.type === 'notification.publish');
@@ -369,8 +369,8 @@ describe('BackgroundAgentSupervisorActor — ctx.publish', () => {
 				ctx.publish({ label: 'SYSTEM', text: 't' });
 			},
 		};
-		const { supervisor, sends } = makeSupervisor([agent], { sessionId: 'sess-42' });
-		await tell(supervisor, 'session.connected', {});
+		const { host, sends } = makeHost([agent], { sessionId: 'sess-42' });
+		await tell(host, 'session.connected', {});
 
 		const publish = sends.find((s) => s.type === 'notification.publish');
 		expect(publish?.options?.correlationId).toMatch(/^sess-42-reminder-[a-z0-9]+$/);
@@ -387,8 +387,8 @@ describe('BackgroundAgentSupervisorActor — ctx.publish', () => {
 				});
 			},
 		};
-		const { supervisor, sends } = makeSupervisor([agent]);
-		await tell(supervisor, 'session.connected', {});
+		const { host, sends } = makeHost([agent]);
+		await tell(host, 'session.connected', {});
 
 		const publish = sends.find((s) => s.type === 'notification.publish');
 		expect(publish?.options?.correlationId).toBe('caller-trace-xyz');

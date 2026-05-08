@@ -1,7 +1,15 @@
 // SPDX-License-Identifier: MIT
 
 /**
- * BackgroundAgentSupervisorActor — hosts user-defined `BackgroundAgent`s.
+ * BackgroundAgentHostActor — hosts user-defined `BackgroundAgent`s.
+ *
+ * Named "Host" rather than "Supervisor" to avoid confusion with the
+ * runtime-level `Supervisor` (`src/runtime/supervisor.ts`), which is the
+ * fault-policy decider. This actor is just an OOP host: it owns the
+ * `BackgroundAgent` instances, builds their per-session contexts, and
+ * drives their lifecycle hooks. Failure handling for the host itself is
+ * delegated to the runtime `Supervisor` via the `'background-agents': resume`
+ * policy (see `supervisor.ts` DEFAULT_POLICIES).
  *
  * Drives the BackgroundAgent lifecycle from session-level envelopes that
  * SessionActor fans out to `'background-agents'`:
@@ -24,7 +32,7 @@
  * does not bring down the session.
  *
  * See `dev_docs/framework/design-background-notification-actor.md` —
- * "BackgroundAgent and BackgroundAgentSupervisorActor" section.
+ * "BackgroundAgent and BackgroundAgentHostActor" section.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -39,7 +47,7 @@ import type { ActorId, Envelope } from '../envelope.js';
 import type { RuntimeMessage } from '../messages.js';
 
 /** Mutable internal state, exposed read-only to BackgroundAgents via the session view. */
-interface SupervisorCache {
+interface HostCache {
 	phase: 'created' | 'connecting' | 'active' | 'reconnecting' | 'transferring' | 'closed';
 	activeAgent: string;
 }
@@ -54,7 +62,7 @@ interface AgentState {
 	failed: boolean;
 }
 
-export interface BackgroundAgentSupervisorOptions {
+export interface BackgroundAgentHostOptions {
 	sessionId: string;
 	userId: string;
 	/** Initial active main-agent name; usually `OrchestratorConfig.initialAgent`. */
@@ -63,10 +71,10 @@ export interface BackgroundAgentSupervisorOptions {
 	log?: (msg: string) => void;
 }
 
-export class BackgroundAgentSupervisorActor implements Actor {
+export class BackgroundAgentHostActor implements Actor {
 	readonly id: ActorId;
 
-	private readonly cache: SupervisorCache;
+	private readonly cache: HostCache;
 	private readonly states = new Map<string, AgentState>();
 	private readonly sessionId: string;
 	private readonly userId: string;
@@ -77,7 +85,7 @@ export class BackgroundAgentSupervisorActor implements Actor {
 		private sendMessage: ActorSendFn,
 		private notificationActorId: ActorId,
 		agents: BackgroundAgent[],
-		options: BackgroundAgentSupervisorOptions,
+		options: BackgroundAgentHostOptions,
 	) {
 		this.id = id;
 		this.sessionId = options.sessionId;
@@ -246,7 +254,7 @@ export class BackgroundAgentSupervisorActor implements Actor {
 				if (state.agent.onStop) {
 					try {
 						const result = state.agent.onStop('transfer');
-						// Allow async onStop, but don't block the supervisor.
+						// Allow async onStop, but don't block the host.
 						if (result instanceof Promise) {
 							result.catch((err) => {
 								this.log(

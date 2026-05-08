@@ -5,7 +5,7 @@
  *
  * BackgroundAgents inject synthetic user turns into the live LLM via
  * `NotificationActor`. They run in their own lifecycle (independent of any
- * tool call) and are hosted by `BackgroundAgentSupervisorActor`. Typical use
+ * tool call) and are hosted by `BackgroundAgentHostActor`. Typical use
  * cases: wall-clock reminders (e.g. "5 minutes left in this interview"),
  * external-channel alerts that should be spoken by the live agent, polling
  * for changes in an external system.
@@ -22,7 +22,7 @@
  *     being invoked by the live LLM.
  *
  * See `dev_docs/framework/design-background-notification-actor.md` —
- * "BackgroundAgent and BackgroundAgentSupervisorActor" section.
+ * "BackgroundAgent and BackgroundAgentHostActor" section.
  */
 
 import type { KnownNotificationLabel } from '../runtime/messages.js';
@@ -33,7 +33,7 @@ import type { KnownNotificationLabel } from '../runtime/messages.js';
  * Shape mirrors the inbound `notification.publish` actor message minus
  * caller-side conveniences:
  *   - `id` is auto-assigned by NotificationActor when omitted.
- *   - `correlationId` is destructured by the supervisor and forwarded as the
+ *   - `correlationId` is destructured by the host actor and forwarded as the
  *     envelope's correlationId — it is NOT a payload field on the wire.
  */
 export interface PublishNotification {
@@ -62,8 +62,8 @@ export interface PublishNotification {
 
 	/**
 	 * Optional caller-supplied envelope correlation id. Caller ergonomics only —
-	 * the supervisor strips this off the publish payload before sending and
-	 * forwards it as the envelope's correlationId. If omitted, the supervisor
+	 * the host actor strips this off the publish payload before sending and
+	 * forwards it as the envelope's correlationId. If omitted, the host
 	 * synthesizes `${sessionId}-${agent.name}-${randomId}` for trace
 	 * continuity.
 	 */
@@ -72,7 +72,7 @@ export interface PublishNotification {
 
 /**
  * Read-only view of the live session state, threaded into BackgroundAgents
- * via `BackgroundAgentContext.session`. The supervisor maintains an internal
+ * via `BackgroundAgentContext.session`. The host actor maintains an internal
  * cache (mailbox-serialized) updated on every lifecycle envelope; agents read
  * the current values via these getters without reaching across actor
  * boundaries.
@@ -90,7 +90,7 @@ export interface BackgroundAgentSessionView {
 
 /**
  * Runtime context passed to each BackgroundAgent's lifecycle hooks. Built
- * fresh per session by the supervisor.
+ * fresh per session by the host actor.
  */
 export interface BackgroundAgentContext {
 	readonly sessionId: string;
@@ -99,7 +99,7 @@ export interface BackgroundAgentContext {
 	/**
 	 * Publish a synthetic user turn through NotificationActor. Equivalent to
 	 * sending `notification.publish` with the producer-supplied label, text,
-	 * priority, etc. The supervisor handles correlationId routing — it is
+	 * priority, etc. The host actor handles correlationId routing — it is
 	 * stripped from the payload and forwarded as envelope metadata.
 	 */
 	publish(notification: PublishNotification): void;
@@ -112,7 +112,7 @@ export interface BackgroundAgentContext {
 	readonly signal: AbortSignal;
 
 	/**
-	 * Live read-only view of session state. Backed by the supervisor's cache,
+	 * Live read-only view of session state. Backed by the host actor's cache,
 	 * not by direct cross-actor reads.
 	 */
 	readonly session: BackgroundAgentSessionView;
@@ -135,7 +135,7 @@ export interface BackgroundAgentContext {
  *   4. `onStop(reason)` fires on `session.close_requested` / `transport.closed`,
  *      or on `agent.transfer_completed` when `cancelOnTransfer === true`.
  *
- * Throws inside any hook are caught by the supervisor and logged — a
+ * Throws inside any hook are caught by the host actor and logged — a
  * misbehaving agent does not bring down the session (per the
  * `'background-agents': resume` supervision policy).
  */
@@ -167,9 +167,9 @@ export interface BackgroundAgent {
 
 	/**
 	 * Called on every transport reconnect (after the initial `onStart`).
-	 * Optional — most agents don't need it because the supervisor preserves
-	 * their state across reconnect. Implement only when you need to resync
-	 * state with external systems.
+	 * Optional — most agents don't need it because the host preserves their
+	 * state across reconnect. Implement only when you need to resync state
+	 * with external systems.
 	 */
 	onReconnect?(): void;
 }

@@ -137,8 +137,8 @@ export interface VoiceSessionConfig {
 	};
 	/**
 	 * User-defined `BackgroundAgent` instances. Hosted by
-	 * `BackgroundAgentSupervisorActor`; each agent's `onStart` fires once on
-	 * the first `session.connected` envelope. Actor-mode only — ignored in
+	 * `BackgroundAgentHostActor`; each agent's `onStart` fires once on the
+	 * first `session.connected` envelope. Actor-mode only — ignored in
 	 * legacy mode (the legacy queue has no equivalent host). See
 	 * `dev_docs/framework/design-background-notification-actor.md`.
 	 */

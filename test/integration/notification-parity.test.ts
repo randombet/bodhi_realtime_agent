@@ -31,7 +31,7 @@
  *     is covered in test/runtime/notification-actor.test.ts.
  *   - Agent transfer mid-turn: covered as a runtime e2e test in
  *     test/runtime/runtime-orchestrator.test.ts ("agent.transfer_completed
- *     reaches BackgroundAgentSupervisor"). The notification gate itself is
+ *     reaches BackgroundAgentHost"). The notification gate itself is
  *     transfer-agnostic — agent transfer doesn't touch
  *     audioReceived / interrupted / queue, so a parity comparison would be
  *     trivially identical.

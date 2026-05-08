@@ -14,7 +14,7 @@
 import type { BackgroundAgent } from '../agent/background-agent.js';
 import { ActorRuntime } from './actor-runtime.js';
 import type { ActorSendFn } from './actor-send-fn.js';
-import { BackgroundAgentSupervisorActor } from './actors/background-agent-supervisor-actor.js';
+import { BackgroundAgentHostActor } from './actors/background-agent-host-actor.js';
 import { ClientGatewayActor } from './actors/client-gateway-actor.js';
 import type { ClientSendFn } from './actors/client-gateway-actor.js';
 import { MainAgentActor } from './actors/main-agent-actor.js';
@@ -63,7 +63,7 @@ export interface OrchestratorConfig {
 	userId?: string;
 	/**
 	 * User-defined BackgroundAgents to host. Each is started by
-	 * BackgroundAgentSupervisorActor on the first session.connected envelope
+	 * BackgroundAgentHostActor on the first session.connected envelope
 	 * (deferred so the first publish lands on a live wire).
 	 */
 	backgroundAgents?: BackgroundAgent[];
@@ -112,7 +112,7 @@ export class RuntimeOrchestrator {
 	/** Hosts user-defined BackgroundAgents. Always constructed (even when
 	 *  no agents are registered) so SessionActor's fan-out envelopes have
 	 *  a live recipient and don't dead-letter. */
-	readonly backgroundAgentSupervisor: BackgroundAgentSupervisorActor;
+	readonly backgroundAgentHost: BackgroundAgentHostActor;
 	readonly toolRouterActor: ToolRouterActor;
 	readonly subagentSupervisor: SubagentSupervisorActor;
 	readonly mainAgentActor: MainAgentActor;
@@ -149,12 +149,13 @@ export class RuntimeOrchestrator {
 			'notification',
 			config.notification?.transportSubscriptionFilter,
 		);
-		// Step 1.4 wires SessionActor's optional fan-out target. When the
-		// BackgroundAgentSupervisorActor lands (step 2.2) the orchestrator will
-		// construct it with id 'background-agents'; until then SessionActor's
-		// fan-out envelopes will dead-letter at the runtime, which is harmless
-		// (DeadLetterQueue logs them) and matches the design's incremental
-		// rollout. See dev_docs/framework/design-background-notification-actor.md.
+		// SessionActor fan-out target: the BackgroundAgentHostActor below is
+		// addressed via id 'background-agents'. SessionActor sends lifecycle
+		// envelopes (session.connected, session.reconnected,
+		// session.close_requested, transport.closed) to that address; the host
+		// invokes onStart / onReconnect / onStop on each registered
+		// BackgroundAgent. See
+		// dev_docs/framework/design-background-notification-actor.md.
 		this.sessionActor = new SessionActor(
 			'session',
 			sendFn,
@@ -179,11 +180,11 @@ export class RuntimeOrchestrator {
 					config.sessionId ?? '',
 				)
 			: null;
-		// BackgroundAgentSupervisorActor: hosts user-defined BackgroundAgents
-		// AND receives SessionActor's lifecycle fan-out envelopes (step 1.4).
-		// Always constructed, even with zero agents, so SessionActor's sends
-		// to 'background-agents' have a live recipient.
-		this.backgroundAgentSupervisor = new BackgroundAgentSupervisorActor(
+		// BackgroundAgentHostActor: hosts user-defined BackgroundAgents AND
+		// receives SessionActor's lifecycle fan-out envelopes. Always
+		// constructed, even with zero agents, so SessionActor's sends to
+		// 'background-agents' have a live recipient.
+		this.backgroundAgentHost = new BackgroundAgentHostActor(
 			'background-agents',
 			sendFn,
 			'notification',
@@ -244,16 +245,16 @@ export class RuntimeOrchestrator {
 		//   1. NotificationActor before any subscriber (TransportActor,
 		//      NotificationHooksObserverActor) so notification.subscribe
 		//      envelopes don't dead-letter.
-		//   2. BackgroundAgentSupervisorActor before TransportActor so the
-		//      first session.connected envelope (emitted indirectly by the
-		//      adapter's onSessionReady → SessionActor) doesn't race ahead of
-		//      the supervisor's onStart and dead-letter at 'background-agents'.
+		//   2. BackgroundAgentHostActor before TransportActor so the first
+		//      session.connected envelope (emitted indirectly by the adapter's
+		//      onSessionReady → SessionActor) doesn't race ahead of the host's
+		//      onStart and dead-letter at 'background-agents'.
 		await this.runtime.startActor(this.sessionActor);
 		await this.runtime.startActor(this.notificationActor);
 		if (this.notificationHooksObserver) {
 			await this.runtime.startActor(this.notificationHooksObserver);
 		}
-		await this.runtime.startActor(this.backgroundAgentSupervisor);
+		await this.runtime.startActor(this.backgroundAgentHost);
 		await this.runtime.startActor(this.transportActor);
 		await this.runtime.startActor(this.toolRouterActor);
 		await this.runtime.startActor(this.subagentSupervisor);

@@ -38,7 +38,7 @@ Main actors:
 Notification subsystem (implemented — see [Background Agents](/advanced/background-agents) for usage and [design-background-notification-actor.md](../../dev_docs/framework/design-background-notification-actor.md) for the full design):
 
 - `NotificationActor`: owns the **background notification queue** as a first-class actor — handles `notification.publish`, priority + audio-received + turn-complete gating, dedup, label normalization, and pub/sub fan-out to subscribers. Replaces the in-process `BackgroundNotificationQueue` in actor mode.
-- `BackgroundAgentSupervisorActor`: hosts user-defined `BackgroundAgent` instances (always-on producers — wall-clock reminders, polling, external alerts). Drives their `onStart` / `onAgentTransfer` / `onReconnect` / `onStop` lifecycle from session events.
+- `BackgroundAgentHostActor`: hosts user-defined `BackgroundAgent` instances (always-on producers — wall-clock reminders, polling, external alerts). Drives their `onStart` / `onAgentTransfer` / `onReconnect` / `onStop` lifecycle from session events.
 - `NotificationHooksObserverActor` (opt-in): a built-in subscriber that fires `FrameworkHooks.onBackgroundNotification` for parity with `onToolCall`, `onAgentTransfer`, etc. Constructed only when a hook handler is configured.
 
 ## Actor invariants
@@ -51,7 +51,7 @@ Notification subsystem (implemented — see [Background Agents](/advanced/backgr
 
 ## Message flow (high level)
 
-The full actor graph, including `NotificationActor` / `BackgroundAgentSupervisorActor` / `NotificationHooksObserverActor` (the latter two are constructed only when the application configures `backgroundAgents` or `onBackgroundNotification`).
+The full actor graph, including `NotificationActor` / `BackgroundAgentHostActor` / `NotificationHooksObserverActor` (the latter two are constructed only when the application configures `backgroundAgents` or `onBackgroundNotification`).
 
 ```mermaid
 flowchart LR
@@ -63,7 +63,7 @@ flowchart LR
   S[SubagentSupervisorActor]
 
   N[NotificationActor]
-  B[BackgroundAgentSupervisorActor]
+  B[BackgroundAgentHostActor]
   H[NotificationHooksObserverActor]
 
   L((Live LLM))

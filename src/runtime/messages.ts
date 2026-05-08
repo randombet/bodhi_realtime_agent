@@ -229,7 +229,7 @@ export interface SessionCloseRequested {
 /**
  * First-time activation. Emitted by `SessionActor.handleSessionReady` when the
  * previous phase was `'created'` or `'connecting'`. Drives
- * `BackgroundAgentSupervisorActor`'s deferred first `agent.onStart(ctx)` so
+ * `BackgroundAgentHostActor`'s deferred first `agent.onStart(ctx)` so
  * background agents only start publishing after the live transport is ready.
  */
 export interface SessionConnected {

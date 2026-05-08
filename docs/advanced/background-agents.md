@@ -15,7 +15,7 @@ This page covers what background agents are, how their lifecycle works, how to p
 
 ## Lifecycle
 
-`BackgroundAgentSupervisorActor` drives the lifecycle from session events:
+`BackgroundAgentHostActor` drives the lifecycle from session events:
 
 | Hook | When it fires | Notes |
 |---|---|---|
@@ -139,7 +139,7 @@ Key patterns to mirror in your own agents:
 
 ```mermaid
 flowchart LR
-  Sess[SessionActor] -->|session.connected / reconnected / close_requested| Sup[BackgroundAgentSupervisorActor]
+  Sess[SessionActor] -->|session.connected / reconnected / close_requested| Sup[BackgroundAgentHostActor]
   Main[MainAgentActor] -->|agent.transfer_completed fan-out| Sup
   Sup -->|notification.publish| Notif[NotificationActor]
   VS[VoiceSession] -->|notification.turn_complete / interrupted / reset_audio| Notif

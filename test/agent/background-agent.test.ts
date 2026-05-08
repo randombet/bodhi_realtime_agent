@@ -2,9 +2,9 @@
 
 /**
  * Type-only tests for the BackgroundAgent public surface
- * (`src/agent/background-agent.ts`). The supervisor's runtime behavior is
+ * (`src/agent/background-agent.ts`). The host actor's runtime behavior is
  * tested separately in
- * `test/runtime/background-agent-supervisor-actor.test.ts` (step 2.2).
+ * `test/runtime/background-agent-host-actor.test.ts`.
  */
 
 import { describe, expect, expectTypeOf, it } from 'vitest';

@@ -446,8 +446,8 @@ describe('SessionActor', () => {
 			expect((fanned[0].payload as { reason?: string }).reason).toBe('remote hangup');
 		});
 
-		it('does NOT fan out when supervisorId is omitted (legacy / tests)', async () => {
-			// Default `setup()` constructs without backgroundAgentSupervisorId.
+		it('does NOT fan out when hostId is omitted (legacy / tests)', async () => {
+			// Default `setup()` constructs without backgroundAgentHostId.
 			const { actor, messages } = setup();
 
 			await actor.onMessage(createEnvelope('transport.session_ready', {}, 'session'));
