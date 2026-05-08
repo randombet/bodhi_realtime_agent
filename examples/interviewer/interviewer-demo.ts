@@ -8,10 +8,20 @@
  *   2. Run: pnpm tsx examples/interviewer/interviewer-demo.ts
  *   3. In another terminal: pnpm web-client:dev
  *   4. Open the local web client and connect to ws://localhost:9900.
+ *
+ * Environment Variables:
+ *   GEMINI_API_KEY    - Required: Google AI Studio API key
+ *   PORT              - WebSocket port (default: 9900)
+ *   HOST              - Bind address (default: 0.0.0.0)
+ *   GEMINI_LIVE_MODEL - Live model id (default: gemini-3.1-flash-live-preview)
+ *   GEMINI_VOICE      - TTS voice (default: Puck)
+ *   TRANSCRIPT_DIR    - Directory for per-session WhatsApp-style markdown
+ *                       transcripts (default: ./transcripts)
  */
 
 import 'dotenv/config';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
+import { MarkdownConversationHistoryStore } from '../../src/core/markdown-conversation-history-store.js';
 import { VoiceSession } from '../../src/core/voice-session.js';
 import { loadInterviewDocuments } from './lib/interview-documents.js';
 import { createInterviewState, ensurePreparedWithFallback } from './lib/interview-state.js';
@@ -43,6 +53,10 @@ if (!GEMINI_API_KEY) {
 const PORT = Number(process.env.PORT) || 9900;
 const HOST = process.env.HOST || '0.0.0.0';
 const SESSION_ID = `interviewer_${Date.now()}`;
+// Where the WhatsApp-style markdown transcript for each session is written.
+// Each session lands as `{TRANSCRIPT_DIR}/{sessionId}.md`. See
+// dev_docs/framework/design-markdown-conversation-history-store.md.
+const TRANSCRIPT_DIR = process.env.TRANSCRIPT_DIR || './transcripts';
 const LIVE_MODEL = process.env.GEMINI_LIVE_MODEL || 'gemini-3.1-flash-live-preview';
 const REASONING_MODEL = process.env.INTERVIEWER_REASONING_MODEL || 'gemini-2.5-flash';
 const SUBAGENT_MODEL = process.env.INTERVIEWER_SUBAGENT_MODEL || 'gemini-3.1-flash-lite-preview';
@@ -94,6 +108,16 @@ async function main() {
 	// `dev_docs/framework/design-background-notification-actor.md`.
 	const timingReminder = new TimingReminderBackgroundAgent(state);
 
+	// Markdown transcript store — emits a per-session .md chat log to
+	// TRANSCRIPT_DIR. Configured as a sole store; reads (getSession etc.) are
+	// not used by the writer. If you also want queryable history, add a
+	// JsonConversationHistoryStore alongside.
+	const transcriptStore = new MarkdownConversationHistoryStore({
+		baseDir: TRANSCRIPT_DIR,
+		modelName: LIVE_MODEL,
+		log: (msg) => console.error(`${ts()} [Transcript] ${msg}`),
+	});
+
 	const session = new VoiceSession({
 		sessionId: SESSION_ID,
 		userId: 'interviewer_demo_user',
@@ -104,6 +128,7 @@ async function main() {
 		host: HOST,
 		model: reasoningModel,
 		orchestrationMode: 'actor',
+		conversationHistoryStores: [transcriptStore],
 		subagentConfigs: {
 			record_answer_and_get_next_question: softwareInterviewerSubagentConfig,
 		},
@@ -166,6 +191,7 @@ async function main() {
 	console.log(`  Subagent budget: ${SUBAGENT_THINKING_BUDGET}`);
 	console.log('  Gemini VAD:      end=HIGH silence=500ms');
 	console.log('  Documents:       examples/interviewer/docs/*.md');
+	console.log(`  Transcript:      ${TRANSCRIPT_DIR}/${SESSION_ID}.md`);
 	console.log();
 	console.log('Connect via: pnpm web-client:dev');
 	console.log('Press Ctrl+C to stop.');
