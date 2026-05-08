@@ -55,6 +55,7 @@ export interface SessionSummary {
 	startedAt: number;
 	endedAt?: number;
 	durationMs?: number;
+	metadata?: Record<string, unknown>;
 }
 
 /** Cursor-based pagination options for history queries. */

@@ -122,6 +122,8 @@ export interface VoiceSessionConfig {
 	};
 	/** When provided, conversation items are persisted at turn boundaries and on session close. */
 	conversationHistoryStore?: ConversationHistoryStore;
+	/** Application metadata persisted alongside the session record (e.g. channel, surface, callSid). */
+	sessionMetadata?: Record<string, unknown>;
 	/** When provided, agents/tools can persist artifacts (images, docs, etc.) via session.workspace.saveArtifact(). */
 	artifactStore?: ArtifactStore;
 	/** External TTS provider for speech synthesis (actor-mode only).
@@ -379,6 +381,7 @@ export class VoiceSession {
 				this.eventBus,
 				this.conversationContext,
 				config.conversationHistoryStore,
+				config.sessionMetadata,
 			);
 		}
 

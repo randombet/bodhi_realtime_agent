@@ -31,6 +31,7 @@ export class ConversationHistoryWriter {
 		private eventBus: IEventBus,
 		private conversationContext: ConversationContext,
 		private store: ConversationHistoryStore,
+		private sessionMetadata?: Record<string, unknown>,
 	) {
 		this.subscribe();
 	}
@@ -71,6 +72,7 @@ export class ConversationHistoryWriter {
 			initialAgentName: agentName,
 			status: 'active',
 			startedAt: Date.now(),
+			metadata: this.sessionMetadata,
 		});
 	}
 
@@ -91,6 +93,7 @@ export class ConversationHistoryWriter {
 			startedAt: 0,
 			disconnectReason: this.mapReason(reason),
 			analytics: { ...this.analytics },
+			metadata: this.sessionMetadata,
 			items,
 			pendingToolCalls: [],
 		});
