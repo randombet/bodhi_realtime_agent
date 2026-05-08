@@ -47,6 +47,7 @@ import { EventBus } from './event-bus.js';
 import { HooksManager } from './hooks.js';
 import { InteractionModeManager } from './interaction-mode.js';
 import { MemoryCacheManager } from './memory-cache-manager.js';
+import { MultiplexConversationHistoryStore } from './multiplex-conversation-history-store.js';
 import { SessionManager } from './session-manager.js';
 import { ToolCallRouter } from './tool-call-router.js';
 import { TranscriptManager } from './transcript-manager.js';
@@ -120,8 +121,18 @@ export interface VoiceSessionConfig {
 		/** Extract every N turns (default: 5). */
 		turnFrequency?: number;
 	};
-	/** When provided, conversation items are persisted at turn boundaries and on session close. */
+	/** When provided, conversation items are persisted at turn boundaries and on session close.
+	 *  For fan-out to multiple stores (e.g. JSON queryable + markdown human-readable), use
+	 *  `conversationHistoryStores` instead — both fields can be combined; this singular field
+	 *  is resolved first so existing read routing is preserved. */
 	conversationHistoryStore?: ConversationHistoryStore;
+	/** When provided alongside or in place of `conversationHistoryStore`, writes fan out to every
+	 *  store via `MultiplexConversationHistoryStore`; reads delegate to the first configured store
+	 *  (singular before plural). Use this to run a queryable store (JSON / Supabase) alongside a
+	 *  write-only artifact store like `MarkdownConversationHistoryStore`. Sole-store configurations
+	 *  (e.g. markdown alone) are valid; read methods will throw if your app calls them and the
+	 *  first store does not support reads. */
+	conversationHistoryStores?: ConversationHistoryStore[];
 	/** When provided, agents/tools can persist artifacts (images, docs, etc.) via session.workspace.saveArtifact(). */
 	artifactStore?: ArtifactStore;
 	/** External TTS provider for speech synthesis (actor-mode only).
@@ -370,15 +381,28 @@ export class VoiceSession {
 			this.log(`Memory distillation enabled (every ${freq} turns)`);
 		}
 
-		// Persist conversation history when store is provided (writer subscribes to EventBus; disposes on session.close)
-		if (config.conversationHistoryStore) {
+		// Persist conversation history when store(s) are provided. Singular field is appended
+		// FIRST so that read routing (multiplex delegates reads to stores[0]) preserves existing
+		// behavior when callers add markdown as an additional plural entry.
+		const historyStores: ConversationHistoryStore[] = [
+			...(config.conversationHistoryStore ? [config.conversationHistoryStore] : []),
+			...(config.conversationHistoryStores ?? []),
+		];
+		if (historyStores.length > 0) {
+			const resolvedStore =
+				historyStores.length === 1
+					? historyStores[0]
+					: new MultiplexConversationHistoryStore({
+							stores: historyStores,
+							log: (msg) => this.log(msg),
+						});
 			new ConversationHistoryWriter(
 				config.sessionId,
 				config.userId,
 				config.initialAgent,
 				this.eventBus,
 				this.conversationContext,
-				config.conversationHistoryStore,
+				resolvedStore,
 			);
 		}
 
