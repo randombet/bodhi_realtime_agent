@@ -7,9 +7,18 @@
  */
 
 import type { LLMTransport, TransportToolResult } from '../../types/transport.js';
-import type { AdapterToolCall, TransportAdapter } from './transport-adapter.js';
+import type {
+	AdapterCapabilities,
+	AdapterToolCall,
+	TransportAdapter,
+} from './transport-adapter.js';
 
 export abstract class BaseTransportAdapter implements TransportAdapter {
+	// -- Static capabilities -------------------------------------------------
+	get capabilities(): AdapterCapabilities {
+		return { messageTruncation: this.transport.capabilities.messageTruncation };
+	}
+
 	// -- Inbound callbacks (set by TransportActor) ---------------------------
 	onSessionReady?: () => void;
 	onTurnComplete?: (turnId?: string) => void;

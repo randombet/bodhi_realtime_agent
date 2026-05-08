@@ -226,8 +226,155 @@ export interface SessionCloseRequested {
 	reason?: string;
 }
 
+/**
+ * First-time activation. Emitted by `SessionActor.handleSessionReady` when the
+ * previous phase was `'created'` or `'connecting'`. Drives
+ * `BackgroundAgentHostActor`'s deferred first `agent.onStart(ctx)` so
+ * background agents only start publishing after the live transport is ready.
+ */
+export interface SessionConnected {
+	type: 'session.connected';
+}
+
+/**
+ * Subsequent activation after a recoverable transport error. Emitted by
+ * `SessionActor.handleSessionReady` when the previous phase was
+ * `'reconnecting'`. Drives `BackgroundAgent.onReconnect`. Distinguishing this
+ * from `session.connected` keeps the supervisor's lifecycle handlers
+ * single-purpose without forcing it to subscribe to raw
+ * `transport.session_ready` (which fires on every activation indistinguishably).
+ */
+export interface SessionReconnected {
+	type: 'session.reconnected';
+}
+
 // ---------------------------------------------------------------------------
-// 6. Timeout messages (explicit timer-as-message)
+// 6. Background notification subsystem
+// ---------------------------------------------------------------------------
+//
+// `NotificationActor` is the actor-mode home of the legacy
+// `BackgroundNotificationQueue`. Producers send `notification.publish` to
+// inject a synthetic user turn into the live LLM; the actor handles priority,
+// audio-received gating, turn-complete flushing, and label-filtered fan-out
+// to subscribers via `notification.delivered`. See
+// `dev_docs/framework/design-background-notification-actor.md`.
+
+/**
+ * Documented label vocabulary used by in-tree emitters. Producers may pass any
+ * string; NotificationActor normalizes it on ingest. This union is a
+ * type-level autocomplete hint — combine with `(string & {})` to keep arbitrary
+ * user labels valid.
+ */
+export type KnownNotificationLabel = 'SYSTEM' | 'SUBAGENT UPDATE' | 'SUBAGENT QUESTION';
+
+/** Optional filter on a subscription registration. */
+export interface NotificationFilter {
+	/** Only deliver notifications whose label is in this set. Omit to receive all labels. */
+	labels?: string[];
+	/** Only deliver if priority >= this. Default: 'normal' (all). */
+	minPriority?: 'normal' | 'high';
+}
+
+/**
+ * Inject a synthetic user turn ("[label]: text") into the live LLM. Wrapping
+ * happens at TransportActor on `notification.delivered`, not at producers.
+ */
+export interface NotificationPublish {
+	type: 'notification.publish';
+	/** Optional caller-supplied id; NotificationActor assigns one when absent. */
+	id?: string;
+	/** Producer-supplied label (validated/normalized: uppercase + sanitize). */
+	label: string;
+	/** Producer-supplied body text. */
+	text: string;
+	/** Default `'normal'`. */
+	priority?: 'normal' | 'high';
+	/** Default `true`. */
+	turnComplete?: boolean;
+	/** When set, replaces any pending entry with the same key (latest-wins). */
+	dedupKey?: string;
+}
+
+export interface NotificationSubscribe {
+	type: 'notification.subscribe';
+	subscriberId: string;
+	/** Omitted filter ⇒ deliver every notification. */
+	filter?: NotificationFilter;
+}
+
+export interface NotificationUnsubscribe {
+	type: 'notification.unsubscribe';
+	subscriberId: string;
+}
+
+/**
+ * Once-per-turn signal that the model has begun producing audio this turn.
+ * Sent by `VoiceSession` (debounced at the audio fast-path call site) so the
+ * audio bytes themselves never enter the actor mailbox.
+ */
+export interface NotificationAudioStarted {
+	type: 'notification.audio_started';
+	turnId?: string;
+}
+
+/**
+ * User barge-in signal mirrored from `adapter.onInterrupted`. Always paired
+ * with `notification.reset_audio` (sent first) to match the legacy
+ * `resetAudio() + markInterrupted()` call sequence.
+ */
+export interface NotificationInterrupted {
+	type: 'notification.interrupted';
+}
+
+/**
+ * Model turn boundary mirrored from `adapter.onTurnComplete`. Triggers the
+ * flush of one queued notification (unless the turn was interrupted).
+ */
+export interface NotificationTurnComplete {
+	type: 'notification.turn_complete';
+	turnId?: string;
+}
+
+/**
+ * Pre-greeting and post-interrupt reset of the per-turn audio flag. Mirrors
+ * legacy `BackgroundNotificationQueue.resetAudio()`. The queue itself is
+ * preserved; only the gating flag is cleared.
+ */
+export interface NotificationResetAudio {
+	type: 'notification.reset_audio';
+}
+
+/**
+ * Drop all pending notifications. Reserved for future explicit drops (e.g.
+ * agent-transfer-clears-pending). Not emitted on session close — that is
+ * handled by `NotificationActor.onStop` clearing its own state in-place.
+ */
+export interface NotificationClear {
+	type: 'notification.clear';
+	reason: string;
+}
+
+/**
+ * Outbound fan-out envelope to every matching subscriber. TransportActor's
+ * handler translates this into `adapter.sendContent` with the wrapped
+ * "[label]: text" form; other subscribers (observability, UI) consume the
+ * structured payload directly.
+ */
+export interface NotificationDelivered {
+	type: 'notification.delivered';
+	id: string;
+	label: string;
+	text: string;
+	priority: 'normal' | 'high';
+	turnComplete: boolean;
+	publishedAtMs: number;
+	deliveredAtMs: number;
+	/** = deliveredAtMs - publishedAtMs. */
+	deferredMs: number;
+}
+
+// ---------------------------------------------------------------------------
+// 7. Timeout messages (explicit timer-as-message)
 // ---------------------------------------------------------------------------
 
 export interface SubagentTimeout {
@@ -289,6 +436,18 @@ export type RuntimeMessage =
 	| AgentTransferCompleted
 	| AgentTransferFailed
 	| SessionCloseRequested
+	| SessionConnected
+	| SessionReconnected
+	// Background notification subsystem
+	| NotificationPublish
+	| NotificationSubscribe
+	| NotificationUnsubscribe
+	| NotificationAudioStarted
+	| NotificationInterrupted
+	| NotificationTurnComplete
+	| NotificationResetAudio
+	| NotificationClear
+	| NotificationDelivered
 	// Timeouts
 	| SubagentTimeout
 	| InteractionInputTimeout

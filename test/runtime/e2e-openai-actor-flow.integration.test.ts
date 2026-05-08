@@ -31,6 +31,7 @@ import { createEnvelope } from '../../src/runtime/envelope.js';
 
 function createOpenAIAdapter(): TransportAdapter {
 	return {
+		capabilities: { messageTruncation: true },
 		onSessionReady: undefined,
 		onTurnComplete: undefined,
 		onInterrupted: undefined,

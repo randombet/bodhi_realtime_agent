@@ -44,6 +44,9 @@ export class HooksManager {
 	get onTTSSynthesis() {
 		return this.hooks.onTTSSynthesis;
 	}
+	get onBackgroundNotification() {
+		return this.hooks.onBackgroundNotification;
+	}
 	get onError() {
 		return this.hooks.onError;
 	}

@@ -21,6 +21,7 @@ import {
 	createLowReasoningSubagentProviderOptions,
 	createSoftwareInterviewerSubagentConfig,
 } from './lib/interviewer-subagent.js';
+import { TimingReminderBackgroundAgent } from './lib/timing-reminder-agent.js';
 
 function ts(): string {
 	return new Date().toISOString().slice(11, 23);
@@ -87,6 +88,12 @@ async function main() {
 	);
 	const interviewerAgent = createInterviewerAgent(documents);
 
+	// Periodic time-remaining reminder (5 min interval, 30 min total budget).
+	// Demonstrates the actor-mode BackgroundAgent surface: produces wall-clock
+	// notifications without holding a VoiceSession reference. See
+	// `dev_docs/framework/design-background-notification-actor.md`.
+	const timingReminder = new TimingReminderBackgroundAgent(state);
+
 	const session = new VoiceSession({
 		sessionId: SESSION_ID,
 		userId: 'interviewer_demo_user',
@@ -100,6 +107,7 @@ async function main() {
 		subagentConfigs: {
 			record_answer_and_get_next_question: softwareInterviewerSubagentConfig,
 		},
+		backgroundAgents: [timingReminder],
 		geminiModel: LIVE_MODEL,
 		speechConfig: { voiceName: process.env.GEMINI_VOICE || 'Puck' },
 		realtimeInputConfig: REALTIME_INPUT_CONFIG,
@@ -114,6 +122,10 @@ async function main() {
 			onSubagentStep: (event) =>
 				console.log(
 					`${ts()} [Subagent] ${event.subagentName} step ${event.stepNumber} tools=[${event.toolCalls.join(',')}]`,
+				),
+			onBackgroundNotification: (event) =>
+				console.log(
+					`${ts()} [BgNotify] ${event.label} (priority=${event.priority}, deferred=${event.deferredMs}ms)`,
 				),
 			onError: (event) =>
 				console.error(`${ts()} [Error] ${event.component}: ${event.error.message}`),

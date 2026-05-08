@@ -32,6 +32,7 @@ import { createEnvelope } from '../../src/runtime/envelope.js';
 
 function createGeminiAdapter(): TransportAdapter {
 	return {
+		capabilities: { messageTruncation: false },
 		onSessionReady: undefined,
 		onTurnComplete: undefined,
 		onInterrupted: undefined,

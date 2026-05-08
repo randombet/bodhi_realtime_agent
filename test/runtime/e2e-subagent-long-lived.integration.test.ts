@@ -26,6 +26,7 @@ import { createEnvelope } from '../../src/runtime/envelope.js';
 
 function createMockAdapter(): TransportAdapter {
 	return {
+		capabilities: { messageTruncation: false },
 		onSessionReady: undefined,
 		onTurnComplete: undefined,
 		onInterrupted: undefined,

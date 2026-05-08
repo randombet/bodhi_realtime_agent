@@ -28,6 +28,7 @@ import { RuntimeOrchestrator } from '../../src/runtime/runtime-orchestrator.js';
 
 function createAdapter(): TransportAdapter {
 	return {
+		capabilities: { messageTruncation: false },
 		onSessionReady: undefined,
 		onTurnComplete: undefined,
 		onInterrupted: undefined,
@@ -84,8 +85,12 @@ describe('Step 87 cutover validation', () => {
 			// Both produce the exact same canonical message types
 			expect(messages1).toEqual(messages2);
 			expect(messages1).toEqual([
+				// onStart self-subscribes to NotificationActor (added step 1.6).
+				'notification.subscribe',
 				'transport.session_ready',
 				'transport.tool_call_received',
+				// onTurnComplete is now SessionActor-only — VoiceSession owns the
+				// notification.turn_complete send so TTS gating is honored.
 				'transport.turn_complete',
 				'transport.closed',
 			]);

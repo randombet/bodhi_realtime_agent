@@ -3,6 +3,7 @@
 import type { LanguageModelV1 } from 'ai';
 import { resolveAgentWithKnowledgeBase } from '../agent/agent-context.js';
 import { AgentRouter } from '../agent/agent-router.js';
+import type { BackgroundAgent } from '../agent/background-agent.js';
 import { PersistentSubagentManager } from '../agent/persistent-subagent-manager.js';
 import type { SubagentMessage } from '../agent/subagent-session.js';
 import { resamplePcm } from '../audio/resample.js';
@@ -10,6 +11,7 @@ import { BehaviorManager } from '../behaviors/behavior-manager.js';
 import { MemoryDistiller } from '../memory/memory-distiller.js';
 import type { ToolRoutingInfo } from '../runtime/actors/tool-router-actor.js';
 import { GeminiTransportAdapter } from '../runtime/adapters/gemini-transport-adapter.js';
+import type { KnownNotificationLabel } from '../runtime/messages.js';
 import { RuntimeOrchestrator } from '../runtime/runtime-orchestrator.js';
 import { ToolExecutor } from '../tools/tool-executor.js';
 import { createClientChannel } from '../transport/client-channel-factory.js';
@@ -133,6 +135,14 @@ export interface VoiceSessionConfig {
 		): string;
 		dispose(): void;
 	};
+	/**
+	 * User-defined `BackgroundAgent` instances. Hosted by
+	 * `BackgroundAgentHostActor`; each agent's `onStart` fires once on the
+	 * first `session.connected` envelope. Actor-mode only — ignored in
+	 * legacy mode (the legacy queue has no equivalent host). See
+	 * `dev_docs/framework/design-background-notification-actor.md`.
+	 */
+	backgroundAgents?: BackgroundAgent[];
 }
 
 /**
@@ -203,8 +213,24 @@ export class VoiceSession {
 	private transcriptManager!: TranscriptManager;
 	/** Whether a client WebSocket connection is currently active. */
 	private clientConnected = false;
-	private notificationQueue!: BackgroundNotificationQueue;
+	/**
+	 * Legacy in-process notification queue. Constructed only when
+	 * `orchestrationMode !== 'actor'`. In actor mode, NotificationActor
+	 * (`src/runtime/actors/notification-actor.ts`) takes over, and every
+	 * legacy call site that touches `this.notificationQueue` is guarded
+	 * with `if (this.notificationQueue)` or branched on `_isActorMode`.
+	 */
+	private notificationQueue?: BackgroundNotificationQueue;
 	private interactionMode = new InteractionModeManager();
+	/** True when `config.orchestrationMode === 'actor'`. */
+	private _isActorMode = false;
+	/**
+	 * Per-turn debounce flag for `notification.audio_started` (actor mode only).
+	 * Set on first audio chunk of a turn; cleared on turn-complete, interrupt,
+	 * and pre-greeting. The audio-fast-path contract requires we send the
+	 * debounced control-plane signal once per turn — never per chunk.
+	 */
+	private _audioStartedThisTurn = false;
 	/** Tracks consecutive reconnect attempts to prevent infinite reconnect storms. */
 	private reconnectAttempts = 0;
 	private static readonly MAX_RECONNECT_ATTEMPTS = 3;
@@ -251,22 +277,25 @@ export class VoiceSession {
 			}
 		};
 
-		// NotificationQueue is created early but messageTruncation is not known until
-		// transport is configured below. It defaults to false and is updated after
-		// transport setup in the 'Wire LLMTransport' section. For pre-constructed
-		// transports, capabilities are available immediately so we pass them here.
-		this.notificationQueue = new BackgroundNotificationQueue(
-			(turns, turnComplete) => {
-				// Convert the Gemini-format turns from the notification queue to ContentTurn[]
-				const contentTurns = turns.map((t) => ({
-					role: (t.role === 'model' ? 'assistant' : t.role) as 'user' | 'assistant',
-					text: t.parts[0]?.text ?? '',
-				}));
-				this.transport.sendContent(contentTurns, turnComplete);
-			},
-			(msg) => this.log(msg),
-			config.transport?.capabilities?.messageTruncation ?? false,
-		);
+		this._isActorMode = config.orchestrationMode === 'actor';
+
+		// Legacy mode: in-process BackgroundNotificationQueue. Actor mode skips
+		// this — NotificationActor (constructed in RuntimeOrchestrator) takes
+		// over and every legacy call site below is guarded.
+		if (!this._isActorMode) {
+			this.notificationQueue = new BackgroundNotificationQueue(
+				(turns, turnComplete) => {
+					// Convert the Gemini-format turns from the notification queue to ContentTurn[]
+					const contentTurns = turns.map((t) => ({
+						role: (t.role === 'model' ? 'assistant' : t.role) as 'user' | 'assistant',
+						text: t.parts[0]?.text ?? '',
+					}));
+					this.transport.sendContent(contentTurns, turnComplete);
+				},
+				(msg) => this.log(msg),
+				config.transport?.capabilities?.messageTruncation ?? false,
+			);
+		}
 
 		if (config.hooks) {
 			this.hooks.register(config.hooks);
@@ -679,18 +708,11 @@ export class VoiceSession {
 							result: resultText,
 						});
 						if (hasPendingMessage) {
-							this.notificationQueue.sendOrQueue(
-								[
-									{
-										role: 'user',
-										parts: [
-											{
-												text: `[SYSTEM: Background task "${request.toolName}" completed successfully. Result: ${resultText}. Please inform the user now.]`,
-											},
-										],
-									},
-								],
-								true,
+							// Actor mode: publish the SYSTEM completion notification through
+							// NotificationActor. TransportActor wraps it as "[SYSTEM]: text"
+							// at the wire-out boundary (centralized label rendering).
+							this.publishSystemNotification(
+								`Background task "${request.toolName}" completed successfully. Result: ${resultText}. Please inform the user now.`,
 							);
 						}
 						this.log(
@@ -706,18 +728,8 @@ export class VoiceSession {
 						});
 						if (hasPendingMessage) {
 							const msg = err instanceof Error ? err.message : String(err);
-							this.notificationQueue.sendOrQueue(
-								[
-									{
-										role: 'user',
-										parts: [
-											{
-												text: `[SYSTEM: Background task "${request.toolName}" failed. Exact error details: ${msg}. Tell the user the exact error details first, then ask how to proceed.]`,
-											},
-										],
-									},
-								],
-								true,
+							this.publishSystemNotification(
+								`Background task "${request.toolName}" failed. Exact error details: ${msg}. Tell the user the exact error details first, then ask how to proceed.`,
 							);
 						}
 						this.log(
@@ -748,14 +760,35 @@ export class VoiceSession {
 					},
 					onError: (info) => this.reportError(info.component, info.error),
 				},
+				// Session id is threaded into the BackgroundAgentContext (Phase 2)
+				// and into the onBackgroundNotification event payload below.
+				sessionId: config.sessionId,
+				userId: config.userId,
+				backgroundAgents: config.backgroundAgents,
+				// Wire FrameworkHooks.onBackgroundNotification through to the
+				// RuntimeOrchestrator's NotificationHooksObserverActor. We only
+				// supply the callback when one is actually registered so the
+				// orchestrator stays zero-overhead (it skips constructing the
+				// observer when this is undefined). At session-construction
+				// time the user has already registered hooks via config.hooks
+				// (HooksManager.register fired up top), so reading
+				// `this.hooks.onBackgroundNotification` here yields the
+				// caller-supplied callback if any.
+				notification: this.hooks.onBackgroundNotification
+					? { onBackgroundNotification: this.hooks.onBackgroundNotification }
+					: undefined,
 			});
 		} else {
-			// Set up legacy tool call router
+			// Set up legacy tool call router. notificationQueue is guaranteed
+			// to be defined on this branch (constructed above when
+			// orchestrationMode !== 'actor'); the non-null assertion just
+			// communicates that to TypeScript.
 			this.toolCallRouter = new ToolCallRouter({
 				toolExecutor: this.toolExecutor,
 				agentRouter: this.agentRouter,
 				conversationContext: this.conversationContext,
-				notificationQueue: this.notificationQueue,
+				// biome-ignore lint/style/noNonNullAssertion: legacy branch only
+				notificationQueue: this.notificationQueue!,
 				transcriptManager: this.transcriptManager,
 				subagentConfigs: this.subagentConfigs,
 				sendToolResult: (result) => this.transport.sendToolResult(result),
@@ -769,16 +802,49 @@ export class VoiceSession {
 	/**
 	 * Queue a short spoken update for the user.
 	 * Delivered immediately when possible, otherwise after the current turn.
+	 *
+	 * `options.label` is widened from the original
+	 * `'SUBAGENT UPDATE' | 'SUBAGENT QUESTION'` union to allow user-defined
+	 * labels (e.g. `'TIME REMINDER'`). Non-breaking: the two literal strings
+	 * still type-check. NotificationActor normalizes the label on ingest in
+	 * actor mode (uppercase + sanitize to `[A-Z0-9 _-]`, max 32 chars,
+	 * fallback to `'SYSTEM'` if empty after sanitize).
 	 */
 	notifyBackground(
 		text: string,
-		options?: { priority?: 'normal' | 'high'; label?: 'SUBAGENT UPDATE' | 'SUBAGENT QUESTION' },
+		options?: {
+			priority?: 'normal' | 'high';
+			label?: KnownNotificationLabel | (string & {});
+		},
 	): void {
 		const label = options?.label ?? 'SUBAGENT UPDATE';
-		this.notificationQueue.sendOrQueue(
+		const priority = options?.priority ?? 'normal';
+		if (this._isActorMode) {
+			this.runtimeOrchestrator?.runtime.tell(
+				'notification.publish',
+				{ label, text, priority },
+				'notification',
+			);
+			return;
+		}
+		this.notificationQueue?.sendOrQueue(
 			[{ role: 'user', parts: [{ text: `[${label}]: ${text}` }] }],
 			true,
-			{ priority: options?.priority ?? 'normal' },
+			{ priority },
+		);
+	}
+
+	/**
+	 * Internal helper for actor-mode SYSTEM notifications. Centralizes the
+	 * `runtime.tell('notification.publish', ...)` call shape used by the
+	 * background-tool completion path. Caller passes only the body text;
+	 * TransportActor wraps it as `[SYSTEM]: text` at the wire-out boundary.
+	 */
+	private publishSystemNotification(text: string): void {
+		this.runtimeOrchestrator?.runtime.tell(
+			'notification.publish',
+			{ label: 'SYSTEM', text, priority: 'normal' },
+			'notification',
 		);
 	}
 
@@ -873,8 +939,10 @@ export class VoiceSession {
 
 	/** Gracefully shut down: disconnect Gemini, stop the WebSocket server, transition to CLOSED. */
 	async close(_reason = 'normal'): Promise<void> {
-		// Drop any queued background notifications — session is ending
-		this.notificationQueue.clear();
+		// Drop any queued background notifications — session is ending.
+		// Actor mode: NotificationActor.onStop clears its own state when the
+		// runtime orchestrator stops below.
+		this.notificationQueue?.clear();
 
 		// Flush any buffered transcription before closing
 		this.transcriptManager.flush();
@@ -1127,9 +1195,27 @@ export class VoiceSession {
 	}
 
 	private handleAudioOutput(data: string): void {
-		this.notificationQueue.markAudioReceived();
+		this.signalAudioStarted();
 		const buffer = Buffer.from(data, 'base64');
 		this.clientTransport.sendAudioToClient(buffer);
+	}
+
+	/**
+	 * Signal that the model has begun producing audio this turn. In legacy
+	 * mode this calls `notificationQueue.markAudioReceived()`. In actor mode
+	 * this debounces (once per turn) and sends `notification.audio_started`
+	 * through the runtime — keeping audio chunks themselves off the actor
+	 * mailbox per the audio fast-path contract.
+	 */
+	private signalAudioStarted(): void {
+		if (this._isActorMode) {
+			if (!this._audioStartedThisTurn) {
+				this._audioStartedThisTurn = true;
+				this.runtimeOrchestrator?.runtime.tell('notification.audio_started', {}, 'notification');
+			}
+			return;
+		}
+		this.notificationQueue?.markAudioReceived();
 	}
 
 	// --- TTS wiring (actor-mode only) ---
@@ -1191,7 +1277,7 @@ export class VoiceSession {
 				);
 			}
 			this.clientTransport.sendAudioToClient(buffer);
-			this.notificationQueue.markAudioReceived();
+			this.signalAudioStarted();
 			this._ttsSpeaking = true;
 			if (this._ttsFirstAudioMs === 0) {
 				this._ttsFirstAudioMs = Date.now();
@@ -1394,8 +1480,20 @@ export class VoiceSession {
 		// Reinforce active directives so Gemini doesn't drift
 		this.reinforceDirectives();
 
-		// Reset audio flag and flush one queued notification (skips if interrupted)
-		this.notificationQueue.onTurnComplete();
+		// Reset audio flag and flush one queued notification (skips if interrupted).
+		// We send notification.turn_complete from HERE (the effective turn
+		// boundary) rather than from TransportActor's raw adapter.onTurnComplete
+		// callback. When an external TTSProvider is wired, handleTurnComplete
+		// defers via ttsMaybeCompleteTurn until TTS audio actually finishes,
+		// so this is the only place where the model-and-audio turn really
+		// ends. The legacy queue's `onTurnComplete()` is called from this same
+		// site for the same reason — actor-mode parity matches.
+		if (this._isActorMode) {
+			this._audioStartedThisTurn = false;
+			this.runtimeOrchestrator?.runtime.tell('notification.turn_complete', {}, 'notification');
+		} else {
+			this.notificationQueue?.onTurnComplete();
+		}
 	}
 
 	/** Inject all active directives into the LLM's context to prevent behavioral drift. */
@@ -1411,7 +1509,14 @@ export class VoiceSession {
 		const agent = this.agentRouter.activeAgent;
 		if (!agent.greeting) return;
 		this.log(`Sending greeting for agent "${agent.name}"`);
-		this.notificationQueue.resetAudio();
+		// Pre-greeting audio-gate reset: legacy queue.resetAudio() vs actor
+		// notification.reset_audio. In actor mode also clear the debounce flag.
+		if (this._isActorMode) {
+			this._audioStartedThisTurn = false;
+			this.runtimeOrchestrator?.runtime.tell('notification.reset_audio', {}, 'notification');
+		} else {
+			this.notificationQueue?.resetAudio();
+		}
 
 		// Inject stored memory facts so the LLM knows the user from the first turn
 		const cachedFacts = this.memoryCacheManager?.facts ?? [];
@@ -1444,8 +1549,22 @@ export class VoiceSession {
 			this._ttsCurrentRequestId++;
 			this.ttsClearTimers();
 		}
-		this.notificationQueue.resetAudio();
-		this.notificationQueue.markInterrupted();
+		// Audio-gate reset + interrupted flag. We own these sends in
+		// VoiceSession (not TransportActor) because handleInterrupted is also
+		// the entry point for TTS speech-started barge-in (line 1340 area)
+		// — that path doesn't traverse adapter.onInterrupted, so a TransportActor
+		// mirror would miss it. The legacy queue's resetAudio()+markInterrupted()
+		// pair is called here for the same reason; actor-mode parity matches.
+		// Order matters: reset_audio FIRST (clears the gate), then interrupted
+		// (suppresses the next flush).
+		if (this._isActorMode) {
+			this._audioStartedThisTurn = false;
+			this.runtimeOrchestrator?.runtime.tell('notification.reset_audio', {}, 'notification');
+			this.runtimeOrchestrator?.runtime.tell('notification.interrupted', {}, 'notification');
+		} else {
+			this.notificationQueue?.resetAudio();
+			this.notificationQueue?.markInterrupted();
+		}
 		this.transcriptManager.flush();
 		this.eventBus.publish('turn.interrupted', {
 			sessionId: this.config.sessionId,
@@ -1463,10 +1582,19 @@ export class VoiceSession {
 		}
 
 		const label = msg.type === 'question' ? 'SUBAGENT QUESTION' : 'SUBAGENT UPDATE';
-		this.notificationQueue.sendOrQueue(
+		const priority = msg.blocking ? 'high' : 'normal';
+		if (this._isActorMode) {
+			this.runtimeOrchestrator?.runtime.tell(
+				'notification.publish',
+				{ label, text: msg.text, priority },
+				'notification',
+			);
+			return;
+		}
+		this.notificationQueue?.sendOrQueue(
 			[{ role: 'user', parts: [{ text: `[${label}]: ${msg.text}` }] }],
 			true,
-			{ priority: msg.blocking ? 'high' : 'normal' },
+			{ priority },
 		);
 	}
 

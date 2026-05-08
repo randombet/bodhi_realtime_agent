@@ -11,6 +11,7 @@ import { createEnvelope } from '../../src/runtime/envelope.js';
 
 function createMockAdapter(): TransportAdapter {
 	return {
+		capabilities: { messageTruncation: false },
 		onSessionReady: undefined,
 		onTurnComplete: undefined,
 		onInterrupted: undefined,
@@ -101,6 +102,10 @@ describe('TransportActor', () => {
 	describe('inbound callback → canonical message', () => {
 		beforeEach(async () => {
 			await actor.onStart();
+			// onStart now sends an initial `notification.subscribe` envelope; clear
+			// it so each test asserts against only the messages produced by the
+			// adapter callback under test.
+			sender.messages.length = 0;
 		});
 
 		it('onSessionReady → transport.session_ready to session actor', () => {
@@ -110,19 +115,34 @@ describe('TransportActor', () => {
 			expect(sender.messages[0].to).toBe('session');
 		});
 
-		it('onTurnComplete → transport.turn_complete to session actor', () => {
+		it('onTurnComplete → transport.turn_complete to session ONLY (notification.turn_complete is owned by VoiceSession)', () => {
+			// VoiceSession.handleTurnCompleteInternal owns the actor-mode
+			// `notification.turn_complete` send so the gate honors TTS deferral
+			// (legacy queue.onTurnComplete() is also called from that site).
+			// TransportActor MUST NOT mirror the raw adapter callback to the
+			// notification subsystem — doing so flushes notifications mid-TTS.
 			adapter.onTurnComplete?.('turn-1');
 			expect(sender.messages).toHaveLength(1);
 			expect(sender.messages[0].type).toBe('transport.turn_complete');
 			expect(sender.messages[0].to).toBe('session');
 			expect(sender.messages[0].payload).toEqual({ turnId: 'turn-1' });
+			// And explicitly: no notification.turn_complete envelope.
+			expect(sender.messages.find((m) => m.type === 'notification.turn_complete')).toBeUndefined();
 		});
 
-		it('onInterrupted → transport.interrupted to session actor', () => {
+		it('onInterrupted → transport.interrupted to session ONLY (notification.interrupted+reset_audio are owned by VoiceSession)', () => {
+			// VoiceSession.handleInterrupted is the effective interrupt
+			// boundary — including the TTS speech-started barge-in path
+			// (voice-session.ts:1340) which never traverses adapter.onInterrupted.
+			// TransportActor MUST NOT mirror the raw adapter callback to the
+			// notification subsystem; that would miss the TTS barge-in path.
 			adapter.onInterrupted?.();
 			expect(sender.messages).toHaveLength(1);
 			expect(sender.messages[0].type).toBe('transport.interrupted');
 			expect(sender.messages[0].to).toBe('session');
+			// Explicitly: no notification.* envelopes from this path.
+			expect(sender.messages.find((m) => m.type === 'notification.interrupted')).toBeUndefined();
+			expect(sender.messages.find((m) => m.type === 'notification.reset_audio')).toBeUndefined();
 		});
 
 		it('onToolCallReceived → transport.tool_call_received to tool-router', () => {
@@ -237,6 +257,141 @@ describe('TransportActor', () => {
 				),
 			);
 			expect(adapter.sendToolResult).toHaveBeenCalledWith('tc-1', 'tool', 'ok', 'when_idle');
+		});
+	});
+
+	// -- NotificationActor subscription + delivery handler ------------------
+
+	describe('notification subsystem subscription', () => {
+		it('onStart sends notification.subscribe with default (no filter)', async () => {
+			await actor.onStart();
+			const sub = sender.messages.find((m) => m.type === 'notification.subscribe');
+			expect(sub).toBeDefined();
+			expect(sub?.to).toBe('notification');
+			expect(sub?.payload).toEqual({ subscriberId: 'transport', filter: undefined });
+		});
+
+		it('onStart honors a configured transportSubscriptionFilter', async () => {
+			const filteredSender = createMessageSender();
+			const filteredActor = new TransportActor(
+				'transport',
+				createMockAdapter(),
+				filteredSender.send,
+				'session',
+				'tool-router',
+				'notification',
+				{ labels: ['SYSTEM'], minPriority: 'high' },
+			);
+			await filteredActor.onStart();
+			const sub = filteredSender.messages.find((m) => m.type === 'notification.subscribe');
+			expect(sub?.payload).toEqual({
+				subscriberId: 'transport',
+				filter: { labels: ['SYSTEM'], minPriority: 'high' },
+			});
+		});
+
+		it('honors a custom notificationActorId', async () => {
+			const customSender = createMessageSender();
+			const customActor = new TransportActor(
+				'transport',
+				createMockAdapter(),
+				customSender.send,
+				'session',
+				'tool-router',
+				'my-notify',
+			);
+			await customActor.onStart();
+			const sub = customSender.messages.find((m) => m.type === 'notification.subscribe');
+			expect(sub?.to).toBe('my-notify');
+		});
+
+		it('onStop sends notification.unsubscribe', async () => {
+			await actor.onStart();
+			sender.messages.length = 0;
+			await actor.onStop('shutdown');
+			const unsub = sender.messages.find((m) => m.type === 'notification.unsubscribe');
+			expect(unsub).toBeDefined();
+			expect(unsub?.to).toBe('notification');
+			expect(unsub?.payload).toEqual({ subscriberId: 'transport' });
+		});
+	});
+
+	describe('notification.delivered handler (wire-out path)', () => {
+		it('builds [label]: text and dispatches to adapter.sendContent', async () => {
+			await actor.onMessage(
+				createEnvelope(
+					'notification.delivered',
+					{
+						id: 'n-1',
+						label: 'SYSTEM',
+						text: 'background task generate_image completed',
+						priority: 'normal',
+						turnComplete: true,
+						publishedAtMs: 1,
+						deliveredAtMs: 2,
+						deferredMs: 1,
+					},
+					'transport',
+				),
+			);
+			expect(adapter.sendContent).toHaveBeenCalledWith(
+				[
+					{
+						role: 'user',
+						parts: [{ text: '[SYSTEM]: background task generate_image completed' }],
+					},
+				],
+				true,
+			);
+		});
+
+		it('preserves turnComplete=false from the delivered payload', async () => {
+			await actor.onMessage(
+				createEnvelope(
+					'notification.delivered',
+					{
+						id: 'n-2',
+						label: 'SUBAGENT QUESTION',
+						text: 'which airline?',
+						priority: 'high',
+						turnComplete: false,
+						publishedAtMs: 1,
+						deliveredAtMs: 1,
+						deferredMs: 0,
+					},
+					'transport',
+				),
+			);
+			expect(adapter.sendContent).toHaveBeenCalledWith(
+				[{ role: 'user', parts: [{ text: '[SUBAGENT QUESTION]: which airline?' }] }],
+				false,
+			);
+		});
+
+		// notification.delivered handler is intentionally single-purpose:
+		// format and send. The "cancel-and-deliver" semantics for
+		// high-priority on truncation-capable transports are encoded as a
+		// separate `transport.cancel_generation` envelope from
+		// NotificationActor.deliver() — see notification-actor.test.ts.
+		it('does not call adapter.cancelGeneration directly from notification.delivered (cancel is via separate transport.cancel_generation envelope)', async () => {
+			await actor.onMessage(
+				createEnvelope(
+					'notification.delivered',
+					{
+						id: 'n-h',
+						label: 'SUBAGENT QUESTION',
+						text: 'urgent',
+						priority: 'high',
+						turnComplete: true,
+						publishedAtMs: 1,
+						deliveredAtMs: 2,
+						deferredMs: 1,
+					},
+					'transport',
+				),
+			);
+			expect(adapter.cancelGeneration).not.toHaveBeenCalled();
+			expect(adapter.sendContent).toHaveBeenCalledTimes(1);
 		});
 	});
 });
