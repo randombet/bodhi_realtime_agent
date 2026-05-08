@@ -4,8 +4,14 @@ import type { LanguageModelV1 } from 'ai';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { VoiceSession } from '../../src/core/voice-session.js';
+import { DEFAULT_GEMINI_REALTIME_INPUT_CONFIG } from '../../src/transport/gemini-live-transport.js';
 import type { MainAgent } from '../../src/types/agent.js';
-import type { STTProvider } from '../../src/types/transport.js';
+import type {
+	AudioFormatSpec,
+	LLMTransport,
+	STTProvider,
+	TransportCapabilities,
+} from '../../src/types/transport.js';
 
 // Mock the external deps
 vi.mock('@google/genai', () => {
@@ -2207,5 +2213,115 @@ describe('VoiceSession', () => {
 			expect(stt.commit).toHaveBeenCalledWith(1);
 			expect(stt.commit).toHaveBeenCalledTimes(2);
 		});
+	});
+});
+
+describe('VoiceSession realtimeInputConfig defaulting', () => {
+	let session: VoiceSession | null = null;
+
+	afterEach(async () => {
+		if (session) {
+			await session.close();
+			session = null;
+		}
+	});
+
+	function createMockTransport(): LLMTransport {
+		return {
+			capabilities: {
+				messageTruncation: false,
+				turnDetection: true,
+				userTranscription: true,
+				inPlaceSessionUpdate: false,
+				sessionResumption: true,
+				contextCompression: true,
+				groundingMetadata: true,
+				textResponseModality: true,
+			} satisfies TransportCapabilities,
+			audioFormat: {
+				inputSampleRate: 16000,
+				outputSampleRate: 24000,
+				channels: 1,
+				bitDepth: 16,
+				encoding: 'pcm',
+			} satisfies AudioFormatSpec,
+			isConnected: false,
+			connect: vi.fn().mockResolvedValue(undefined),
+			disconnect: vi.fn().mockResolvedValue(undefined),
+			reconnect: vi.fn().mockResolvedValue(undefined),
+			sendAudio: vi.fn(),
+			commitAudio: vi.fn(),
+			clearAudio: vi.fn(),
+			updateSession: vi.fn(),
+			transferSession: vi.fn().mockResolvedValue(undefined),
+			sendContent: vi.fn(),
+			sendFile: vi.fn(),
+			sendToolResult: vi.fn(),
+			triggerGeneration: vi.fn(),
+		};
+	}
+
+	function getResolved(s: VoiceSession): unknown {
+		return (s as unknown as { resolvedRealtimeInputConfig?: unknown }).resolvedRealtimeInputConfig;
+	}
+
+	it('applies the framework default on the built-in Gemini path when realtimeInputConfig is omitted', () => {
+		session = new VoiceSession({
+			sessionId: 'sess_default',
+			userId: 'user_1',
+			apiKey: 'test-key',
+			agents: [createEchoAgent()],
+			initialAgent: 'echo',
+			port: 9881,
+			model: mockModel,
+		});
+
+		expect(getResolved(session)).toEqual(DEFAULT_GEMINI_REALTIME_INPUT_CONFIG);
+	});
+
+	it('deep-merges a partial user override with the default', () => {
+		session = new VoiceSession({
+			sessionId: 'sess_partial',
+			userId: 'user_1',
+			apiKey: 'test-key',
+			agents: [createEchoAgent()],
+			initialAgent: 'echo',
+			port: 9882,
+			model: mockModel,
+			realtimeInputConfig: {
+				automaticActivityDetection: { silenceDurationMs: 800 },
+			},
+		});
+
+		const aad = (getResolved(session) as Record<string, Record<string, unknown>>)
+			.automaticActivityDetection;
+		expect(aad).toEqual({
+			endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
+			silenceDurationMs: 800,
+		});
+	});
+
+	it('does NOT apply the default when an external transport is injected', () => {
+		const injected = createMockTransport();
+		session = new VoiceSession({
+			sessionId: 'sess_injected',
+			userId: 'user_1',
+			apiKey: 'test-key',
+			agents: [createEchoAgent()],
+			initialAgent: 'echo',
+			port: 9883,
+			model: mockModel,
+			transport: injected,
+			// User-supplied realtimeInputConfig is silently ignored on the injected
+			// path today (status quo) — the resolver must not run here.
+			realtimeInputConfig: {
+				automaticActivityDetection: { silenceDurationMs: 999 },
+			},
+		});
+
+		expect(getResolved(session)).toBeUndefined();
+		// The injected transport's connect was not pre-called with VAD args; we just
+		// confirm it was used by VoiceSession (updateSession was invoked at construct).
+		expect(injected.updateSession).toHaveBeenCalled();
 	});
 });

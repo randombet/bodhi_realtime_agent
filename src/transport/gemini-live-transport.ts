@@ -37,6 +37,44 @@ function toFunctionResponsePayload(value: unknown): Record<string, unknown> {
 
 export type GeminiRealtimeInputConfig = RealtimeInputConfig | Record<string, unknown>;
 
+/**
+ * Framework default applied by VoiceSession when no realtimeInputConfig is
+ * provided. Tuned to feel less eager than Gemini's stock VAD
+ * (silenceDurationMs=100); matches the values used in the
+ * interviewer/direct-rtc demos so most apps can omit the field entirely.
+ *
+ * Only applied on the built-in Gemini construction path in VoiceSession.
+ * Injected transports own their own config.
+ */
+export const DEFAULT_GEMINI_REALTIME_INPUT_CONFIG: GeminiRealtimeInputConfig = {
+	automaticActivityDetection: {
+		endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
+		silenceDurationMs: 500,
+	},
+};
+
+/**
+ * Deep-merges a user-supplied realtimeInputConfig over
+ * DEFAULT_GEMINI_REALTIME_INPUT_CONFIG. Merge depth is exactly one level into
+ * automaticActivityDetection — user fields win, missing fields fall back to
+ * the default. If user is undefined, returns the default unchanged.
+ */
+export function resolveGeminiRealtimeInputConfig(
+	user: GeminiRealtimeInputConfig | undefined,
+): GeminiRealtimeInputConfig {
+	if (!user) return DEFAULT_GEMINI_REALTIME_INPUT_CONFIG;
+	const defaultAad = (DEFAULT_GEMINI_REALTIME_INPUT_CONFIG as Record<string, unknown>)
+		.automaticActivityDetection as Record<string, unknown> | undefined;
+	const userAad = (user as Record<string, unknown>).automaticActivityDetection as
+		| Record<string, unknown>
+		| undefined;
+	return {
+		...DEFAULT_GEMINI_REALTIME_INPUT_CONFIG,
+		...user,
+		automaticActivityDetection: { ...(defaultAad ?? {}), ...(userAad ?? {}) },
+	} as GeminiRealtimeInputConfig;
+}
+
 /** Configuration for connecting to the Gemini Live API. */
 export interface GeminiTransportConfig {
 	/** Google API key for authentication. */

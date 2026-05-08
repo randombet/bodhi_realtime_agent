@@ -19,6 +19,7 @@ import { DirectRtcClientChannel } from '../transport/direct-rtc-client-channel.j
 import {
 	GeminiLiveTransport,
 	type GeminiRealtimeInputConfig,
+	resolveGeminiRealtimeInputConfig,
 } from '../transport/gemini-live-transport.js';
 import type { MainAgent, SubagentConfig } from '../types/agent.js';
 import type { BehaviorCategory } from '../types/behavior.js';
@@ -96,7 +97,15 @@ export interface VoiceSessionConfig {
 	 *  Has no effect when sttProvider is set (built-in is disabled automatically).
 	 *  Use false to disable all input transcription for privacy or cost control. */
 	inputAudioTranscription?: boolean;
-	/** Gemini Live realtime input/VAD tuning. Applied when using the built-in Gemini transport. */
+	/**
+	 * Gemini Live realtime input/VAD tuning. Applied only on the built-in
+	 * Gemini transport path. When omitted, the framework applies
+	 * `DEFAULT_GEMINI_REALTIME_INPUT_CONFIG` (END_SENSITIVITY_HIGH,
+	 * silenceDurationMs=500). User-supplied fields deep-merge over the default
+	 * at the `automaticActivityDetection` level. Has no effect when an external
+	 * transport is injected via `config.transport` — that transport owns its
+	 * own VAD config.
+	 */
 	realtimeInputConfig?: GeminiRealtimeInputConfig;
 	/** External STT provider for user input transcription.
 	 *  When set, transport built-in transcription is automatically disabled.
@@ -185,6 +194,8 @@ export class VoiceSession {
 	private runtimeToolRegistry?: Map<string, ToolRoutingInfo>;
 	private subagentConfigs: Record<string, SubagentConfig>;
 	private persistentSubagents = new PersistentSubagentManager();
+	/** Resolved Gemini VAD config for the built-in transport path. Undefined when `config.transport` is injected. */
+	private resolvedRealtimeInputConfig?: GeminiRealtimeInputConfig;
 	private behaviorManager?: BehaviorManager;
 	private memoryDistiller?: MemoryDistiller;
 	private memoryCacheManager?: MemoryCacheManager;
@@ -395,6 +406,9 @@ export class VoiceSession {
 			});
 		} else {
 			// Construct GeminiLiveTransport from config (backward compatibility)
+			this.resolvedRealtimeInputConfig = resolveGeminiRealtimeInputConfig(
+				config.realtimeInputConfig,
+			);
 			this.transport = new GeminiLiveTransport(
 				{
 					apiKey: config.apiKey,
@@ -405,7 +419,7 @@ export class VoiceSession {
 					speechConfig: config.speechConfig,
 					compressionConfig: config.compressionConfig,
 					inputAudioTranscription: inputTranscription,
-					realtimeInputConfig: config.realtimeInputConfig,
+					realtimeInputConfig: this.resolvedRealtimeInputConfig,
 				},
 				{},
 			);
@@ -882,9 +896,9 @@ export class VoiceSession {
 			await this.transport.connect({
 				auth: { type: 'api_key', apiKey: this.config.apiKey },
 				model: this.config.geminiModel ?? 'gemini-live-2.5-flash-preview',
-				...(this.config.realtimeInputConfig
+				...(this.resolvedRealtimeInputConfig
 					? {
-							realtimeInputConfig: this.config.realtimeInputConfig as Record<string, unknown>,
+							realtimeInputConfig: this.resolvedRealtimeInputConfig as Record<string, unknown>,
 						}
 					: {}),
 				...(this.ttsProvider ? { responseModality: 'text' as const } : {}),

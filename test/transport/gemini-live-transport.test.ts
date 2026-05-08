@@ -2,7 +2,11 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
-import { GeminiLiveTransport } from '../../src/transport/gemini-live-transport.js';
+import {
+	DEFAULT_GEMINI_REALTIME_INPUT_CONFIG,
+	GeminiLiveTransport,
+	resolveGeminiRealtimeInputConfig,
+} from '../../src/transport/gemini-live-transport.js';
 import type { ToolDefinition } from '../../src/types/tool.js';
 
 // Mock @google/genai
@@ -1078,5 +1082,66 @@ describe('GeminiLiveTransport', () => {
 
 			expect(onModelTurnStart).toHaveBeenCalledTimes(2);
 		});
+	});
+});
+
+describe('resolveGeminiRealtimeInputConfig', () => {
+	it('returns the default when user is undefined', () => {
+		const result = resolveGeminiRealtimeInputConfig(undefined);
+		expect(result).toEqual(DEFAULT_GEMINI_REALTIME_INPUT_CONFIG);
+		expect(
+			(result as { automaticActivityDetection: { endOfSpeechSensitivity: string } })
+				.automaticActivityDetection.endOfSpeechSensitivity,
+		).toBe('END_SENSITIVITY_HIGH');
+	});
+
+	it('deep-merges partial automaticActivityDetection — user fields win, defaults fill in', () => {
+		const result = resolveGeminiRealtimeInputConfig({
+			automaticActivityDetection: { silenceDurationMs: 800 },
+		});
+		expect((result as Record<string, Record<string, unknown>>).automaticActivityDetection).toEqual({
+			endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
+			silenceDurationMs: 800,
+		});
+	});
+
+	it('preserves default silenceDurationMs when user only overrides sensitivity', () => {
+		const result = resolveGeminiRealtimeInputConfig({
+			automaticActivityDetection: { endOfSpeechSensitivity: 'END_SENSITIVITY_LOW' },
+		});
+		expect((result as Record<string, Record<string, unknown>>).automaticActivityDetection).toEqual({
+			endOfSpeechSensitivity: 'END_SENSITIVITY_LOW',
+			silenceDurationMs: 500,
+		});
+	});
+
+	it('retains a user-supplied disabled flag without dropping default keys', () => {
+		const result = resolveGeminiRealtimeInputConfig({
+			automaticActivityDetection: { disabled: true },
+		});
+		const aad = (result as Record<string, Record<string, unknown>>).automaticActivityDetection;
+		expect(aad.disabled).toBe(true);
+		expect(aad.endOfSpeechSensitivity).toBe('END_SENSITIVITY_HIGH');
+		expect(aad.silenceDurationMs).toBe(500);
+	});
+
+	it('preserves user-provided top-level keys outside automaticActivityDetection', () => {
+		const result = resolveGeminiRealtimeInputConfig({
+			automaticActivityDetection: { silenceDurationMs: 800 },
+			activityHandling: 'NO_INTERRUPTION',
+		} as Record<string, unknown>);
+		expect((result as Record<string, unknown>).activityHandling).toBe('NO_INTERRUPTION');
+		expect(
+			(result as Record<string, Record<string, unknown>>).automaticActivityDetection
+				.endOfSpeechSensitivity,
+		).toBe('END_SENSITIVITY_HIGH');
+	});
+
+	it('does not mutate the default constant', () => {
+		const before = JSON.stringify(DEFAULT_GEMINI_REALTIME_INPUT_CONFIG);
+		resolveGeminiRealtimeInputConfig({
+			automaticActivityDetection: { silenceDurationMs: 999 },
+		});
+		expect(JSON.stringify(DEFAULT_GEMINI_REALTIME_INPUT_CONFIG)).toBe(before);
 	});
 });
