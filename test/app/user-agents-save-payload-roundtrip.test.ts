@@ -387,4 +387,49 @@ describe('user-agents-api save payload round-trip', () => {
 		};
 		expect(parseAgentDefinitionV2(raw)).toBeNull();
 	});
+
+	it('round-trips studioTelephony on AgentDefinitionV2 through save payload', () => {
+		const v2: AgentDefinitionV2 = {
+			schemaVersion: 2,
+			id: ctx.id,
+			userId: ctx.userId,
+			name: 'Tel agent',
+			description: '',
+			realtimeProvider: 'gemini',
+			geminiVoiceName: 'Puck',
+			openaiVoice: 'coral',
+			geminiSttModel: 'gemini-3-flash-preview',
+			mainAgents: [
+				{
+					name: 'main',
+					greeting: 'Hi',
+					instructions: 'You are a test agent.',
+					googleSearch: true,
+					toolIds: ['end_session'],
+				},
+			],
+			workers: {},
+			studioTelephony: {
+				verifiedCallerIds: [
+					{
+						sid: 'PNcccccccccccccccccccccccccccccccc',
+						phoneNumber: '+14155550199',
+						verifiedAt: 100,
+					},
+				],
+				outboundCallerIdPhone: '+14155550199',
+			},
+			createdAt: ctx.createdAt,
+			updatedAt: ctx.updatedAt,
+		};
+		const payload = userAgentWireToSavePayload(v2);
+		expect(payload.studioTelephony?.verifiedCallerIds).toHaveLength(1);
+		const rebuilt = buildAgentDefinitionV2FromSavePayload(payload, {
+			...ctx,
+			updatedAt: ctx.updatedAt + 1,
+		});
+		expect(rebuilt.studioTelephony?.verifiedCallerIds[0]?.phoneNumber).toBe('+14155550199');
+		expect(rebuilt.studioTelephony?.outboundCallerIdPhone).toBe('+14155550199');
+		expect(parseAgentDefinitionV2(rebuilt)).not.toBeNull();
+	});
 });
