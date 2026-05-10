@@ -133,6 +133,8 @@ export interface VoiceSessionConfig {
 	 *  (e.g. markdown alone) are valid; read methods will throw if your app calls them and the
 	 *  first store does not support reads. */
 	conversationHistoryStores?: ConversationHistoryStore[];
+	/** Application metadata persisted alongside the session record (e.g. channel, surface, callSid). */
+	sessionMetadata?: Record<string, unknown>;
 	/** When provided, agents/tools can persist artifacts (images, docs, etc.) via session.workspace.saveArtifact(). */
 	artifactStore?: ArtifactStore;
 	/** External TTS provider for speech synthesis (actor-mode only).
@@ -403,6 +405,7 @@ export class VoiceSession {
 				this.eventBus,
 				this.conversationContext,
 				resolvedStore,
+				config.sessionMetadata,
 			);
 		}
 
