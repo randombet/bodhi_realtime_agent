@@ -14,6 +14,7 @@ docs/.vitepress/dist/
 docs/.vitepress/.temp/
 docs/api/
 /memory/
+/transcripts/
 /history/
 /workspaces/
 # Optional local pnpm config (e.g. store-dir); do not commit

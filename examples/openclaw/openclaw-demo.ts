@@ -28,6 +28,8 @@
  *   OPENCLAW_TOKEN     - OpenClaw auth token (default: empty string)
  *   PORT               - Voice agent WebSocket port (default: 9900)
  *   HOST               - Voice agent bind address (default: 0.0.0.0)
+ *   TRANSCRIPT_DIR     - Directory for per-session WhatsApp-style markdown
+ *                        transcripts (default: ./transcripts)
  */
 
 import 'dotenv/config';
@@ -38,6 +40,7 @@ import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { GoogleGenAI } from '@google/genai';
 import { tool } from 'ai';
 import { z } from 'zod';
+import { MarkdownConversationHistoryStore } from '../../src/core/markdown-conversation-history-store.js';
 import { VoiceSession } from '../../src/core/voice-session.js';
 import { GeminiBatchSTTProvider } from '../../src/transport/gemini-batch-stt-provider.js';
 import type { MainAgent, SubagentConfig } from '../../src/types/agent.js';
@@ -76,6 +79,11 @@ const HOST = process.env.HOST || '0.0.0.0';
 const OPENCLAW_URL = process.env.OPENCLAW_URL || 'ws://127.0.0.1:18789';
 const OPENCLAW_TOKEN = process.env.OPENCLAW_TOKEN || '';
 const SESSION_ID = `session_${Date.now()}`;
+// Where the WhatsApp-style markdown transcript for each session is written.
+// Each session lands as `{TRANSCRIPT_DIR}/{sessionId}.md`. See
+// dev_docs/framework/design-markdown-conversation-history-store.md.
+const TRANSCRIPT_DIR = process.env.TRANSCRIPT_DIR || './transcripts';
+const LIVE_MODEL = 'gemini-2.5-flash-native-audio-preview-12-2025';
 const google = createGoogleGenerativeAI({ apiKey: API_KEY });
 
 // Mutable ref so subagent tool closures can publish events on the session
@@ -444,6 +452,18 @@ async function main() {
 	);
 
 	// -------------------------------------------------------------------------
+	// Markdown transcript store — emits a per-session .md chat log to
+	// TRANSCRIPT_DIR. Configured as a sole store; reads (getSession etc.) are
+	// not used by the writer. If you also want queryable history, add a
+	// JsonConversationHistoryStore alongside.
+	// -------------------------------------------------------------------------
+	const transcriptStore = new MarkdownConversationHistoryStore({
+		baseDir: TRANSCRIPT_DIR,
+		modelName: LIVE_MODEL,
+		log: (msg) => console.error(`${ts()} [Transcript] ${msg}`),
+	});
+
+	// -------------------------------------------------------------------------
 	// Voice Session
 	// -------------------------------------------------------------------------
 	const session = new VoiceSession({
@@ -457,13 +477,14 @@ async function main() {
 		model: google('gemini-2.5-flash'),
 		orchestrationMode: 'actor',
 		artifactRegistry,
+		conversationHistoryStores: [transcriptStore],
 		subagentConfigs: {
 			ask_work_agent: workSubagent,
 			ask_general_agent: generalSubagent,
 			generate_image: imageSubagent,
 			generate_video: videoSubagent,
 		},
-		geminiModel: 'gemini-2.5-flash-native-audio-preview-12-2025',
+		geminiModel: LIVE_MODEL,
 		sttProvider: new GeminiBatchSTTProvider({ apiKey: API_KEY, model: 'gemini-3-flash-preview' }),
 		speechConfig: { voiceName: 'Puck' },
 		hooks: {
@@ -531,6 +552,7 @@ async function main() {
 	console.log(`  Voice agent:     ws://localhost:${PORT}`);
 	console.log(`  OpenClaw:        ${OPENCLAW_HTTP_URL ?? OPENCLAW_URL}`);
 	console.log(`  Session ID:      ${SESSION_ID}`);
+	console.log(`  Transcript:      ${TRANSCRIPT_DIR}/${SESSION_ID}.md`);
 	console.log();
 	console.log('Start the web client in another terminal:');
 	console.log('  pnpm tsx examples/openclaw/web-client.ts');

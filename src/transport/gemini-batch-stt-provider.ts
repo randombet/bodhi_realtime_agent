@@ -21,6 +21,67 @@ const MIN_DURATION_BYTES = 9600;
 const MIN_RMS_THRESHOLD = 300;
 
 /**
+ * Output rules pinned via systemInstruction. Output rules are stronger as a
+ * system instruction than embedded in the user message; the gemini-flash
+ * models occasionally drift into a chatty wrapper ("The transcription for the
+ * audio provided is as follows:") when the rules sit only in the user prompt.
+ */
+const SYSTEM_INSTRUCTION = [
+	'You are a verbatim audio transcription engine.',
+	'Reply with ONLY the spoken words from the audio — nothing else.',
+	'Forbidden: preamble, labels, quotation marks, brackets, headings, explanations.',
+	'Do NOT prefix the response with phrases like "The transcription is", "Here is what was said", or "The transcribed text".',
+	'Do NOT wrap the transcript in quotation marks.',
+	'If the audio contains only silence, background noise, or no clear speech, reply with exactly: [SILENCE]',
+].join('\n');
+
+const USER_PROMPT = 'Transcribe.';
+
+/** Conservative regexes for envelope phrases the model occasionally still leaks. */
+const ENVELOPE_PATTERNS: RegExp[] = [
+	// Leading filler / agreement.
+	/^(?:Sure[,.]?\s+|Okay[,.]?\s+|Of course[,.]?\s+)/i,
+	// "The transcription […]:" / "The transcribed […]:" — must end with a colon
+	// to avoid eating user content that legitimately starts with these words.
+	/^(?:The )?transcription\b[^\n]{0,120}?:\s*\n?/i,
+	/^(?:The )?transcribed (?:text|audio|content)\b[^\n]{0,120}?:\s*\n?/i,
+	// "Here is/Here's the transcription […]:"
+	/^Here(?:'s| is)\s+(?:the\s+)?(?:transcription|transcribed)\b[^\n]{0,120}?:\s*\n?/i,
+	// "The audio […] contains/says […]:"
+	/^The audio\b[^\n]{0,120}?:\s*\n?/i,
+];
+
+/**
+ * Strip the meta-envelope phrases that gemini-flash models occasionally wrap
+ * around their transcription output, plus paired surrounding quotes if the
+ * entire response is quoted. Conservative by design — every pattern requires
+ * a colon (or the audio-meta lead phrase), which is unlikely in real speech.
+ */
+export function stripMetaEnvelope(text: string): string {
+	let s = text.trim();
+	// Apply repeatedly in case the model layers prefixes/quotes
+	// (e.g. `Sure, the transcription is: "Here is the transcription: ...."`).
+	for (let i = 0; i < 6; i++) {
+		let changed = false;
+		for (const pat of ENVELOPE_PATTERNS) {
+			const next = s.replace(pat, '');
+			if (next !== s) {
+				s = next.trimStart();
+				changed = true;
+			}
+		}
+		// Strip surrounding quotes if the entire remaining string is wrapped.
+		const quoted = s.match(/^["“”'`]\s*([\s\S]*?)\s*["“”'`]$/);
+		if (quoted) {
+			s = quoted[1].trim();
+			changed = true;
+		}
+		if (!changed) break;
+	}
+	return s.trim();
+}
+
+/**
  * STTProvider that uses a separate Gemini model via generateContent() for
  * batch transcription of buffered user audio.
  *
@@ -102,17 +163,20 @@ export class GeminiBatchSTTProvider implements STTProvider {
 									mimeType: 'audio/wav',
 								},
 							},
-							{
-								text: 'Transcribe the spoken words in this audio. If the audio contains only silence, background noise, or no clear speech, respond with exactly: [SILENCE]',
-							},
+							{ text: USER_PROMPT },
 						],
 					},
 				],
+				config: { systemInstruction: SYSTEM_INSTRUCTION },
 			})
 			.then((response) => {
-				const text = response.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-				if (text && text !== '[SILENCE]') {
-					this.onTranscript?.(text, turnId);
+				const raw = response.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+				if (!raw) return;
+				const cleaned = stripMetaEnvelope(raw);
+				// Apply [SILENCE] filter AFTER stripping so a leaked
+				// "The transcription is: [SILENCE]" still gets filtered.
+				if (cleaned && cleaned !== '[SILENCE]') {
+					this.onTranscript?.(cleaned, turnId);
 				}
 			})
 			.catch(() => {
