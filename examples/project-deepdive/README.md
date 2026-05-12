@@ -2,7 +2,7 @@
 
 **Purpose:** A toy demo that mirrors [`examples/interviewer/`](../interviewer/) but specializes the persistent subagent's brain to deep-dive a candidate's past project using the STAR frame. Useful both as a more realistic interview demo and as a template for users building their own probe-frame variants.
 
-It is **not** the production Bodhi `./app` stack. Production-shaped voice screening lives in [`app/agents/profiles/structured-screening-profile.ts`](../../app/agents/profiles/structured-screening-profile.ts).
+It is **not** the production Bodhi `./app` stack. Production-shaped voice screening lives in [`app/agents/builtin/structured-screening/`](../../app/agents/builtin/structured-screening/README.md).
 
 ## What It Does
 

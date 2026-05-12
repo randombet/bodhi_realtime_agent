@@ -89,13 +89,13 @@ Hosted **Agent Studio** resolves Supabase-backed attachments **before** compile 
 
 **Roadmap** (ingestion providers, noise, limits, subagent KB): `dev_docs/app/design-knowledge-base-roadmap.md`.
 
-**Structured screening:** built-in profile `structured_screening` uses in-memory markdown (`source: 'text'`) from **`app/agents/structured-screening-default-content.ts`** or from a short-lived draft created by **`POST /api/structured-screening-draft`** (wired from `/structured-screening`). Local **`examples/interviewer/`** is a separate framework toy demo.
+**Structured screening:** built-in profile `structured_screening` uses in-memory markdown (`source: 'text'`) from **`app/agents/builtin/structured-screening/defaults.ts`** or from a short-lived draft created by **`POST /api/structured-screening-draft`** (wired from `/structured-screening`). Local **`examples/interviewer/`** is a separate framework toy demo.
 
 ## Built-in profiles vs Studio-compiled agents
 
 | Source | Where `KnowledgeBaseConfig` comes from | Typical `source` |
 |--------|----------------------------------------|------------------|
-| **Built-in catalog** (e.g. structured screening) | **`assembleBodhiProfile`** merges text KB for `structured_screening` — see **`app/agents/profiles/structured-screening-profile.ts`** (`buildStructuredScreeningKnowledgeBaseFromTexts`). |
+| **Built-in catalog** (e.g. structured screening) | **`assembleBodhiProfile`** merges text KB for `structured_screening` — see **`app/agents/builtin/structured-screening/knowledge-base.ts`** (`buildStructuredScreeningKnowledgeBaseFromTexts`). |
 | **User agents (`ua_*`)** | `AgentDefinitionV2.knowledgeBaseByAgentName` → **`materializeKnowledgeBaseByAgentName`** on the server | **`text`** only at framework boundary (Storage/inline resolved in `app/`). |
 
 As a framework developer you interact with the **same** `processKnowledgeBase()` / `resolveAgentWithKnowledgeBase()` APIs once `MainAgent.knowledgeBase` is set; only the **producer** of that config differs.
