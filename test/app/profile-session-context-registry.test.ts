@@ -71,6 +71,47 @@ describe('profile-session-context-registry', () => {
 		});
 	});
 
+	it('maps interview draft with custom anchors to structured_interview profile input', () => {
+		const body = {
+			companyIntroMd: 'Intro',
+			jobDescriptionMd: 'JD',
+			candidateResumeMd: 'CV',
+			anchors: [
+				{ id: 'opening', focus: 'Warm-up' },
+				{ id: 'deep_dive', focus: 'Architecture depth' },
+			],
+		};
+		const put = putDraftForPath(handlers, '/api/structured-interview-draft', body);
+		expect(put.matched).toBe(true);
+		if (!put.matched) return;
+		expect(put.result.ok).toBe(true);
+		if (!put.result.ok) return;
+
+		const inputs = resolveProfileSessionInputsFromTokens(handlers, 'structured_interview', {
+			interviewContextToken: put.result.token,
+		});
+		expect(inputs?.structured_interview).toMatchObject({
+			companyIntroMd: 'Intro',
+			anchors: [
+				{ id: 'opening', focus: 'Warm-up' },
+				{ id: 'deep_dive', focus: 'Architecture depth' },
+			],
+		});
+	});
+
+	it('rejects interview draft with invalid anchors', () => {
+		const body = {
+			companyIntroMd: 'Intro',
+			jobDescriptionMd: 'JD',
+			candidateResumeMd: 'CV',
+			anchors: [{ id: 'BadId' }],
+		};
+		const put = putDraftForPath(handlers, '/api/structured-interview-draft', body);
+		expect(put.matched).toBe(true);
+		if (!put.matched) return;
+		expect(put.result.ok).toBe(false);
+	});
+
 	it('collectProfileContextTokensFromBody mirrors registry token param names', () => {
 		const tokens = collectProfileContextTokensFromBody(handlers, {
 			recruitingContextToken: ' r1 ',
