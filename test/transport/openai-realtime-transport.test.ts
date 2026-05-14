@@ -938,17 +938,15 @@ describe('OpenAIRealtimeTransport — Phase 1 features (gpt-realtime-2)', () => 
 			transport.onReasoningDone = done;
 
 			mockRt.emit('response.created', { response: { id: 'r1' } });
-			// biome-ignore lint/suspicious/noExplicitAny: SDK union missing 'reasoning'
 			mockRt.emit('response.output_item.added', {
-				item: { id: 'r_item', type: 'reasoning' } as any,
+				item: { id: 'r_item', type: 'reasoning' } as unknown,
 			});
 			expect(started).toHaveBeenCalledOnce();
 
 			await new Promise((r) => setTimeout(r, 5));
 
-			// biome-ignore lint/suspicious/noExplicitAny: SDK union missing 'reasoning'
 			mockRt.emit('response.output_item.done', {
-				item: { id: 'r_item', type: 'reasoning' } as any,
+				item: { id: 'r_item', type: 'reasoning' } as unknown,
 			});
 			expect(done).toHaveBeenCalledOnce();
 			const info = done.mock.calls[0]?.[0] as { durationMs: number };
