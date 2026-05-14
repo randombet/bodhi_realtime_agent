@@ -104,6 +104,10 @@ describe('OpenAIRealtimeTransport', () => {
 				contextCompression: false,
 				groundingMetadata: false,
 				textResponseModality: true,
+				parallelToolCalls: false,
+				reasoningEffort: false,
+				automaticPreambles: false,
+				quiescible: true,
 			});
 		});
 

@@ -14,6 +14,7 @@ import type {
 	LLMTransportConfig,
 	LLMTransportError,
 	RealtimeLLMUsageEvent,
+	ReasoningEffort,
 	ReconnectState,
 	ReplayItem,
 	SessionUpdate,
@@ -21,6 +22,12 @@ import type {
 	TransportToolCall,
 	TransportToolResult,
 } from '../types/transport.js';
+import {
+	type OpenAIRealtimeAudioFormat,
+	type OpenAIRealtimeModel,
+	type ReasoningSummary,
+	supports,
+} from './openai-realtime-models.js';
 import {
 	normalizeOpenAIResponseUsage,
 	normalizeOpenAITranscriptionUsage,
@@ -31,8 +38,8 @@ import { zodToJsonSchema } from './zod-to-schema.js';
 export interface OpenAIRealtimeConfig {
 	/** OpenAI API key. */
 	apiKey: string;
-	/** Model identifier (default: 'gpt-realtime'). */
-	model?: string;
+	/** Model identifier (default: 'gpt-realtime-2'). */
+	model?: OpenAIRealtimeModel;
 	/** Voice name (default: 'coral'). */
 	voice?: string;
 	/** Transcription model (default: 'gpt-4o-mini-transcribe'). Set to null to disable input transcription. */
@@ -41,6 +48,22 @@ export interface OpenAIRealtimeConfig {
 	turnDetection?: Record<string, unknown>;
 	/** Noise reduction configuration. */
 	noiseReduction?: Record<string, unknown>;
+	/** Reasoning effort + optional summary verbosity. Only honoured when the
+	 *  active model supports reasoning (gated via the FEATURES table). Dropped
+	 *  with a warn — or thrown under `strict: true` — on older models. */
+	reasoning?: { effort?: ReasoningEffort; summary?: ReasoningSummary };
+	/** Wire-level input audio format. Default `{ type: 'audio/pcm', rate: 24000 }`.
+	 *  Telephony bridges set this to `{ type: 'audio/pcmu' }` (rate is always 8000
+	 *  for G.711). PCM rates other than 24000 are rejected at build-config time. */
+	audioInputFormat?: OpenAIRealtimeAudioFormat;
+	/** Wire-level output audio format. Default `{ type: 'audio/pcm', rate: 24000 }`.
+	 *  Same constraints as `audioInputFormat`. */
+	audioOutputFormat?: OpenAIRealtimeAudioFormat;
+	/** When `true`, supplying a feature unsupported for the active model throws
+	 *  `FrameworkError('UNSUPPORTED_FEATURE')` from `buildSessionConfig()`.
+	 *  When `false`/omitted (production default), the feature is dropped and a
+	 *  `warn` is logged. Framework Vitest suites set `strict: true`. */
+	strict?: boolean;
 }
 
 /** Convert a framework ToolDefinition to OpenAI function tool format. */
@@ -67,7 +90,24 @@ function toolToOpenAIFunction(tool: ToolDefinition): Record<string, unknown> {
  * - Explicit `response.create` required after tool results
  */
 export class OpenAIRealtimeTransport implements LLMTransport {
-	readonly capabilities: TransportCapabilities = {
+	/** Construction-time snapshot. Re-resolved at end of `connect()` after
+	 *  `applyTransportConfig()` may have changed the model. Once `connect()`
+	 *  resolves, immutable for the lifetime of the connection. */
+	private _capabilities: TransportCapabilities;
+
+	get capabilities(): TransportCapabilities {
+		return this._capabilities;
+	}
+
+	/** Construction-time snapshot. Re-resolved alongside `_capabilities` when
+	 *  `applyTransportConfig()` finalises the audio format. */
+	private _audioFormat: AudioFormatSpec;
+
+	get audioFormat(): AudioFormatSpec {
+		return this._audioFormat;
+	}
+
+	private staticCapabilities: TransportCapabilities = {
 		messageTruncation: true,
 		turnDetection: true,
 		userTranscription: true,
@@ -76,14 +116,6 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		contextCompression: false,
 		groundingMetadata: false,
 		textResponseModality: true,
-	};
-
-	readonly audioFormat: AudioFormatSpec = {
-		inputSampleRate: 24000,
-		outputSampleRate: 24000,
-		channels: 1,
-		bitDepth: 16,
-		encoding: 'pcm',
 	};
 
 	// --- LLMTransport callback properties ---
@@ -138,6 +170,45 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		this.config = config;
 		this.client = new OpenAI({ apiKey: config.apiKey });
 		this.voice = config.voice ?? 'coral';
+		this._capabilities = this.resolveCapabilities();
+		this._audioFormat = this.resolveAudioFormat();
+	}
+
+	/** Compute capability flags from the configured model. */
+	private resolveCapabilities(): TransportCapabilities {
+		const model = this.config.model ?? 'gpt-realtime-2';
+		return {
+			...this.staticCapabilities,
+			parallelToolCalls: supports(model, 'parallelToolCalls'),
+			reasoningEffort: supports(model, 'reasoning'),
+			// gpt-realtime-2 emits automatic preambles; gating on reasoning is the
+			// proxy because the two ship together on the same model line.
+			automaticPreambles: supports(model, 'reasoning'),
+			quiescible: true,
+		};
+	}
+
+	/** Compute the wire audio format from `audioInputFormat` / `audioOutputFormat`. */
+	private resolveAudioFormat(): AudioFormatSpec {
+		const inFmt = this.config.audioInputFormat ?? { type: 'audio/pcm', rate: 24000 };
+		const outFmt = this.config.audioOutputFormat ?? { type: 'audio/pcm', rate: 24000 };
+		const inEnc: 'pcm' | 'pcmu' = inFmt.type === 'audio/pcmu' ? 'pcmu' : 'pcm';
+		const outEnc: 'pcm' | 'pcmu' = outFmt.type === 'audio/pcmu' ? 'pcmu' : 'pcm';
+		const inRate = inEnc === 'pcmu' ? 8000 : (inFmt.rate ?? 24000);
+		const outRate = outEnc === 'pcmu' ? 8000 : (outFmt.rate ?? 24000);
+		// Input and output may differ in rate but for OpenAI Realtime today they
+		// match. We carry both because AudioFormatSpec requires it.
+		return {
+			inputSampleRate: inRate,
+			outputSampleRate: outRate,
+			channels: 1,
+			bitDepth: inEnc === 'pcmu' ? 8 : 16,
+			// AudioFormatSpec.encoding is single-valued; we expose the input encoding
+			// because that's what consumers (telephony bridge, STT providers) drive
+			// off. Output encoding for transport-emitted audio is decoded by the
+			// telephony bridge using audioOutputFormat directly if needed.
+			encoding: inEnc,
+		};
 	}
 
 	get isConnected(): boolean {
@@ -151,7 +222,12 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			this.applyTransportConfig(transportConfig);
 		}
 
-		const model = this.config.model ?? 'gpt-realtime';
+		// Finalise capability + audio-format snapshots after any connect-time
+		// model/audio overrides have landed. Immutable from here onward.
+		this._capabilities = this.resolveCapabilities();
+		this._audioFormat = this.resolveAudioFormat();
+
+		const model = this.config.model ?? 'gpt-realtime-2';
 
 		// Create WebSocket connection using the openai SDK.
 		// NOTE: OpenAIRealtimeWS.create() returns immediately after resolving the
@@ -463,13 +539,48 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		}
 	}
 
+	/** Validate and normalise an OpenAI audio format. Rejects non-24kHz PCM and
+	 *  ignores `rate` for G.711 (always 8000). */
+	private normaliseAudioFormat(fmt: OpenAIRealtimeAudioFormat): { type: string; rate?: number } {
+		if (fmt.type === 'audio/pcm') {
+			const rate = fmt.rate ?? 24000;
+			if (rate !== 24000) {
+				throw new Error(
+					`UNSUPPORTED_SAMPLE_RATE: OpenAI Realtime 'audio/pcm' only accepts 24000 Hz, got ${rate}`,
+				);
+			}
+			return { type: 'audio/pcm', rate: 24000 };
+		}
+		// G.711 μ-law — rate is fixed at 8 kHz; the SDK doesn't take a rate field.
+		return { type: 'audio/pcmu' };
+	}
+
+	/** Drop or throw on a gated config field unsupported for the active model. */
+	private gateField(field: string, model: string): void {
+		const msg = `OpenAIRealtimeTransport: field '${field}' is not supported by model '${model}'; dropping.`;
+		if (this.config.strict) {
+			throw new Error(`UNSUPPORTED_FEATURE: ${msg}`);
+		}
+		// Intentional warn-on-drop in non-strict mode — surfaces the silent
+		// feature drop to ops without crashing user code.
+		console.warn(msg);
+	}
+
 	private buildSessionConfig(): RealtimeSessionCreateRequest {
+		const inFmt = this.normaliseAudioFormat(
+			this.config.audioInputFormat ?? { type: 'audio/pcm', rate: 24000 },
+		);
+		const outFmt = this.normaliseAudioFormat(
+			this.config.audioOutputFormat ?? { type: 'audio/pcm', rate: 24000 },
+		);
+
 		const session: RealtimeSessionCreateRequest = {
 			type: 'realtime',
 			output_modalities: this._textMode ? ['text'] : ['audio'],
 			audio: {
 				input: {
-					format: { type: 'audio/pcm', rate: 24000 },
+					// biome-ignore lint/suspicious/noExplicitAny: SDK format type is a strict union; G.711 string is valid at runtime
+					format: inFmt as any,
 					...(this.config.transcriptionModel !== null
 						? {
 								transcription: {
@@ -492,13 +603,32 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 				...(!this._textMode
 					? {
 							output: {
-								format: { type: 'audio/pcm', rate: 24000 },
+								// biome-ignore lint/suspicious/noExplicitAny: SDK format type is a strict union; G.711 string is valid at runtime
+								format: outFmt as any,
 								voice: this.voice,
 							},
 						}
 					: {}),
 			},
 		};
+
+		// gpt-realtime-2 feature gating.
+		const model = this.config.model ?? 'gpt-realtime-2';
+		if (this.config.reasoning) {
+			if (supports(model, 'reasoning')) {
+				// biome-ignore lint/suspicious/noExplicitAny: SDK reasoning field may not be in current types
+				(session as any).reasoning = {
+					...(this.config.reasoning.effort !== undefined
+						? { effort: this.config.reasoning.effort }
+						: {}),
+					...(this.config.reasoning.summary !== undefined
+						? { summary: this.config.reasoning.summary }
+						: {}),
+				};
+			} else {
+				this.gateField('reasoning', model);
+			}
+		}
 
 		if (this.instructions) {
 			session.instructions = this.instructions;
