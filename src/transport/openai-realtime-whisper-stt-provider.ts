@@ -38,7 +38,7 @@ export interface OpenAIRealtimeWhisperConfig {
 	turnDetection?: Record<string, unknown>;
 }
 
-const WS_URL = 'wss://api.openai.com/v1/realtime/transcription_sessions';
+const WS_URL = 'wss://api.openai.com/v1/realtime?intent=transcription';
 
 /** ~2 seconds of audio at 24 kHz 16-bit mono (48 000 B/s × 2). */
 const MAX_RECONNECT_BUFFER_BYTES = 96_000;
@@ -203,28 +203,23 @@ export class OpenAIRealtimeWhisperSTTProvider implements STTProvider {
 			this._ws = new WebSocket(WS_URL, {
 				headers: {
 					Authorization: `Bearer ${this._apiKey}`,
-					'OpenAI-Beta': 'realtime=v1',
 				},
 			});
 
 			this._ws.on('open', () => {
-				// Send the transcription-session config immediately. The session
-				// becomes usable once we receive the server's session.updated
-				// (or session.created — we accept either).
+				// Send the transcription-session config immediately. Uses the
+				// transcription_session.update event shape (flat at session level,
+				// `input_audio_format: 'pcm16'` not the nested audio.input.format
+				// object used by the voice-agent session.update).
 				if (!this._ws || this._ws.readyState !== WebSocket.OPEN) return;
 				this._send({
-					type: 'session.update',
+					type: 'transcription_session.update',
 					session: {
-						type: 'transcription',
-						audio: {
-							input: {
-								format: { type: 'audio/pcm', rate: 24000 },
-								turn_detection: this._turnDetection,
-								transcription: {
-									model: this._model,
-									...(this._language ? { language: this._language } : {}),
-								},
-							},
+						input_audio_format: 'pcm16',
+						turn_detection: this._turnDetection,
+						input_audio_transcription: {
+							model: this._model,
+							...(this._language ? { language: this._language } : {}),
 						},
 					},
 				});
@@ -264,6 +259,11 @@ export class OpenAIRealtimeWhisperSTTProvider implements STTProvider {
 
 		const type = msg.type as string | undefined;
 		switch (type) {
+			// `transcription_session.*` is the transcription-session shape; the
+			// regular `session.*` variants are accepted as fallback in case the
+			// server changes the naming.
+			case 'transcription_session.created':
+			case 'transcription_session.updated':
 			case 'session.created':
 			case 'session.updated':
 				if (this._state === 'connecting' || this._state === 'reconnecting') {

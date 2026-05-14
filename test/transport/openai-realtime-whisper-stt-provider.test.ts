@@ -72,10 +72,10 @@ function lastInstance(): MockWebSocket {
 	return MockWebSocket.instances[MockWebSocket.instances.length - 1];
 }
 
-/** Open + send session.updated so start() resolves. */
+/** Open + send transcription_session.updated so start() resolves. */
 function bringUp(ws: MockWebSocket): void {
 	ws.triggerOpen();
-	ws.triggerMessage({ type: 'session.updated' });
+	ws.triggerMessage({ type: 'transcription_session.updated' });
 }
 
 function createConfigured(): OpenAIRealtimeWhisperSTTProvider {
@@ -128,26 +128,27 @@ describe('OpenAIRealtimeWhisperSTTProvider', () => {
 	});
 
 	describe('start() / stop() lifecycle', () => {
-		it('opens WS to /v1/realtime/transcription_sessions and sends a transcription session.update', async () => {
+		it('opens WS to /v1/realtime?intent=transcription and sends a transcription_session.update', async () => {
 			const p = createConfigured();
 			const startPromise = p.start();
 			const ws = lastInstance();
-			expect(ws.url).toBe('wss://api.openai.com/v1/realtime/transcription_sessions');
+			expect(ws.url).toBe('wss://api.openai.com/v1/realtime?intent=transcription');
 			expect((ws.options?.headers as Record<string, string>).Authorization).toBe('Bearer sk-test');
 
 			bringUp(ws);
 			await startPromise;
 
-			const update = ws.sentEvents().find((e) => e.type === 'session.update') as
-				| { session?: Record<string, unknown> }
+			const update = ws.sentEvents().find((e) => e.type === 'transcription_session.update') as
+				| {
+						session?: {
+							input_audio_format?: string;
+							input_audio_transcription?: { model?: string };
+						};
+				  }
 				| undefined;
 			expect(update).toBeDefined();
-			const session = update?.session as {
-				type?: string;
-				audio?: { input?: { transcription?: { model?: string } } };
-			};
-			expect(session.type).toBe('transcription');
-			expect(session.audio?.input?.transcription?.model).toBe('gpt-realtime-whisper');
+			expect(update?.session?.input_audio_format).toBe('pcm16');
+			expect(update?.session?.input_audio_transcription?.model).toBe('gpt-realtime-whisper');
 		});
 
 		it('start() is idempotent — second call returns without re-connecting', async () => {
@@ -287,7 +288,7 @@ describe('OpenAIRealtimeWhisperSTTProvider', () => {
 			expect(append).toEqual({ type: 'input_audio_buffer.append', audio: 'dGVzdA==' });
 		});
 
-		it('buffers audio during connecting and flushes after session.updated', async () => {
+		it('buffers audio during connecting and flushes after transcription_session.updated', async () => {
 			const p = createConfigured();
 			const startPromise = p.start();
 			const ws = lastInstance();
