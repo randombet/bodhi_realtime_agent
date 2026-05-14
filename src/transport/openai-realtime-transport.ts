@@ -137,6 +137,10 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	onTextDone?: () => void;
 	onSpeechStarted?: () => void;
 	onRealtimeLLMUsage?: (usage: RealtimeLLMUsageEvent) => void;
+	onReasoningStart?: () => void;
+	onReasoningDone?: (info: { durationMs: number; reasoningTokens?: number }) => void;
+	onReasoningSummary?: (text: string) => void;
+	onCacheBust?: (reason: 'instructions_changed' | 'tools_changed') => void;
 
 	// --- Private state ---
 	private client: OpenAI;
@@ -155,6 +159,16 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 
 	// Tool call argument accumulation (OpenAI streams args incrementally)
 	private pendingFunctionCalls = new Map<string, string>();
+
+	// Batched tool-call dispatch: completed function_call items from the
+	// current response, flushed in one onToolCall(calls[]) on response.done.
+	// Required for gpt-realtime-2's parallel tool calls; a no-op when only
+	// one call lands per response.
+	private completedToolCallsThisResponse: TransportToolCall[] = [];
+
+	// Reasoning lifecycle: track start time + token count for the current response.
+	private _reasoningStartedAt: number | null = null;
+	private _reasoningTokensThisResponse: number | undefined = undefined;
 
 	// when_idle scheduling: buffer tool results while model is generating
 	private _isModelGenerating = false;
@@ -494,13 +508,33 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 
 	// --- Generation control ---
 
-	triggerGeneration(instructions?: string): void {
+	triggerGeneration(
+		instructions?: string,
+		overrides?: { reasoning?: { effort: ReasoningEffort } },
+	): void {
 		if (!this.rt || !this._isConnected) return;
 
-		if (instructions) {
+		// Build response.create payload. Per-response instructions and reasoning
+		// overrides do NOT mutate the session prefix, so they are cache-safe for
+		// subsequent turns (the current Response itself may see a slightly reduced
+		// cache hit because its prefix differs).
+		const response: Record<string, unknown> = {};
+		if (instructions) response.instructions = instructions;
+		if (overrides?.reasoning) {
+			// Gate per-response reasoning on model capability — if the model
+			// doesn't support reasoning, drop the override silently. Strict mode
+			// is for session-level gating only; per-response is best-effort.
+			const model = this.config.model ?? 'gpt-realtime-2';
+			if (supports(model, 'reasoning')) {
+				response.reasoning = { effort: overrides.reasoning.effort };
+			}
+		}
+
+		if (Object.keys(response).length > 0) {
 			this.rt.send({
 				type: 'response.create',
-				response: { instructions },
+				// biome-ignore lint/suspicious/noExplicitAny: SDK type for response.create.response is strict
+				response: response as any,
 			});
 		} else {
 			this.rt.send({ type: 'response.create' });
@@ -650,10 +684,13 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			if (this._suppressAudio) return;
 			if (this.onAudioOutput) this.onAudioOutput(event.delta);
 
-			// Track audio duration for interruption handling
+			// Track audio duration for interruption handling. Uses the resolved
+			// audioFormat so G.711 telephony (1 byte/sample, 8 kHz) computes
+			// the right `audio_end_ms` for conversation.item.truncate.
 			const bytes = Buffer.from(event.delta, 'base64').length;
-			const samples = bytes / 2; // 16-bit = 2 bytes per sample
-			this.audioOutputMs += (samples / 24000) * 1000;
+			const bps = this._audioFormat.bitDepth === 8 ? 1 : 2;
+			const samples = bytes / bps;
+			this.audioOutputMs += (samples / this._audioFormat.outputSampleRate) * 1000;
 		});
 
 		// --- Text output (text mode — for TTS) ---
@@ -670,17 +707,34 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		rt.on('response.created', () => {
 			this._isModelGenerating = true;
 			this._suppressAudio = false;
+			// Reset per-response state.
+			this.completedToolCallsThisResponse = [];
+			this._reasoningStartedAt = null;
+			this._reasoningTokensThisResponse = undefined;
 			if (this.onModelTurnStart) this.onModelTurnStart();
 		});
 
-		// --- Track assistant output items for interruption ---
+		// --- Track assistant output items for interruption + reasoning lifecycle ---
 		rt.on('response.output_item.added', (event) => {
-			// ConversationItem is a union; only messages have role
 			const item = event.item;
+			// ConversationItem is a union; only messages have role.
 			if ('role' in item && item.role === 'assistant' && item.id) {
 				this.lastAssistantItemId = item.id;
 				this.audioOutputMs = 0;
 			}
+			// Reasoning items signal model thinking has started. SDK union does
+			// not yet enumerate 'reasoning' as an item.type, so cast through any.
+			// biome-ignore lint/suspicious/noExplicitAny: SDK item.type union missing 'reasoning'
+			if ((item as any).type === 'reasoning') {
+				this._reasoningStartedAt = Date.now();
+				if (this.onReasoningStart) this.onReasoningStart();
+			}
+		});
+
+		// --- Reasoning summary streaming (only when summary is requested) ---
+		// biome-ignore lint/suspicious/noExplicitAny: event name not in SDK types
+		(rt as any).on('response.reasoning_summary_text.delta', (event: { delta?: string }) => {
+			if (this.onReasoningSummary && event.delta) this.onReasoningSummary(event.delta);
 		});
 
 		// --- Tool call argument streaming (accumulate per item_id) ---
@@ -689,12 +743,13 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			this.pendingFunctionCalls.set(event.item_id, buffer + event.delta);
 		});
 
-		// --- Tool call complete (fires onToolCall) ---
+		// --- Output-item complete: buffer tool calls; close out reasoning items ---
+		// Tool calls are batched per response and dispatched together on
+		// response.done so parallel calls reach the router as one onToolCall(calls[]).
+		// Reasoning items emit onReasoningDone with duration + token count.
 		rt.on('response.output_item.done', (event) => {
 			const item = event.item;
 			if (item.type === 'function_call') {
-				// Prefer accumulated buffer (built from streamed deltas).
-				// Fall back to item.arguments from the done event.
 				const rawArgs = (item.id && this.pendingFunctionCalls.get(item.id)) || item.arguments;
 				if (item.id) this.pendingFunctionCalls.delete(item.id);
 
@@ -714,23 +769,50 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 						return;
 					}
 				}
-				if (this.onToolCall) {
-					this.onToolCall([
-						{
-							id: item.call_id ?? item.id ?? '',
-							name: item.name ?? '',
-							args,
-						},
-					]);
+				this.completedToolCallsThisResponse.push({
+					id: item.call_id ?? item.id ?? '',
+					name: item.name ?? '',
+					args,
+				});
+				// biome-ignore lint/suspicious/noExplicitAny: SDK item.type union missing 'reasoning'
+			} else if ((item as any).type === 'reasoning') {
+				// Reasoning step closed — fire onReasoningDone with duration.
+				// reasoningTokens lands later via response.done.usage; we capture
+				// it after the usage event and re-emit if needed. For now, fire
+				// duration only; tokens flow through onRealtimeLLMUsage.
+				if (this.onReasoningDone && this._reasoningStartedAt !== null) {
+					this.onReasoningDone({
+						durationMs: Date.now() - this._reasoningStartedAt,
+						reasoningTokens: this._reasoningTokensThisResponse,
+					});
 				}
+				this._reasoningStartedAt = null;
 			}
 		});
 
-		// --- Turn complete: clear generating state, flush when_idle queue ---
+		// --- Turn complete: dispatch batched tool calls, normalise usage,
+		//                     flush when_idle queue, signal turn done. ---
 		rt.on('response.done', (event: unknown) => {
 			const e = event as { response?: { id?: string; usage?: unknown } };
 			const normalized = normalizeOpenAIResponseUsage(e?.response?.usage, e?.response?.id);
-			if (normalized && this.onRealtimeLLMUsage) this.onRealtimeLLMUsage(normalized);
+			if (normalized) {
+				// Capture reasoning-token count if exposed; useful for the
+				// next onReasoningDone call if the model fires another reasoning
+				// item in a subsequent response.
+				this._reasoningTokensThisResponse = normalized.modalityBreakdown?.reasoningTokens;
+				if (this.onRealtimeLLMUsage) this.onRealtimeLLMUsage(normalized);
+			}
+
+			// Dispatch all parallel function_call items collected during this
+			// response in a single onToolCall batch. ToolCallRouter then has
+			// the opportunity to dispatch them in parallel.
+			if (this.completedToolCallsThisResponse.length > 0 && this.onToolCall) {
+				const calls = this.completedToolCallsThisResponse;
+				this.completedToolCallsThisResponse = [];
+				this.onToolCall(calls);
+			} else {
+				this.completedToolCallsThisResponse = [];
+			}
 
 			this._isModelGenerating = false;
 			this.lastAssistantItemId = null;

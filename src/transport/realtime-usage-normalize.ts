@@ -134,8 +134,10 @@ function openAIModalityFromOutputDetails(
 	const breakdown: RealtimeUsageModalityBreakdown = {};
 	const text = readNumber(d, ['text_tokens']);
 	const audio = readNumber(d, ['audio_tokens']);
+	const reasoning = readNumber(d, ['reasoning_tokens']);
 	if (text !== undefined) breakdown.outputTextTokens = text;
 	if (audio !== undefined) breakdown.outputAudioTokens = audio;
+	if (reasoning !== undefined) breakdown.reasoningTokens = reasoning;
 	return breakdown;
 }
 

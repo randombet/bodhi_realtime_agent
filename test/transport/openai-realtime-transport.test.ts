@@ -176,6 +176,8 @@ describe('OpenAIRealtimeTransport', () => {
 					arguments: '{"input":"from_done_event"}',
 				},
 			});
+			// Phase 1.3: tool-call dispatch is batched on response.done.
+			mockRt.emit('response.done', { response: { id: 'resp_1' } });
 
 			expect(calls).toHaveLength(1);
 			expect(calls[0]).toEqual({
@@ -199,6 +201,7 @@ describe('OpenAIRealtimeTransport', () => {
 					arguments: '{"input":"fallback"}',
 				},
 			});
+			mockRt.emit('response.done', { response: { id: 'resp_2' } });
 
 			expect(calls).toHaveLength(1);
 			expect(calls[0]).toEqual({
@@ -208,9 +211,11 @@ describe('OpenAIRealtimeTransport', () => {
 			});
 		});
 
-		it('handles interleaved tool calls independently', () => {
-			const calls: unknown[] = [];
-			transport.onToolCall = (c) => calls.push(...c);
+		it('handles interleaved tool calls independently and batches dispatch', () => {
+			// Phase 1.3: two parallel function_call items arrive in one response;
+			// the transport batches them and dispatches via a single onToolCall(calls[]).
+			const dispatches: unknown[][] = [];
+			transport.onToolCall = (c) => dispatches.push(c);
 
 			// Two interleaved streams
 			mockRt.emit('response.function_call_arguments.delta', {
@@ -248,10 +253,13 @@ describe('OpenAIRealtimeTransport', () => {
 					arguments: '{}',
 				},
 			});
+			mockRt.emit('response.done', { response: { id: 'resp_parallel' } });
 
-			expect(calls).toHaveLength(2);
-			expect(calls[0]).toEqual({ id: 'ca', name: 'toolA', args: { x: 1 } });
-			expect(calls[1]).toEqual({ id: 'cb', name: 'toolB', args: { y: 2 } });
+			// Single dispatch with both calls — not two separate dispatches.
+			expect(dispatches).toHaveLength(1);
+			expect(dispatches[0]).toHaveLength(2);
+			expect(dispatches[0][0]).toEqual({ id: 'ca', name: 'toolA', args: { x: 1 } });
+			expect(dispatches[0][1]).toEqual({ id: 'cb', name: 'toolB', args: { y: 2 } });
 		});
 
 		it('fires onError and skips dispatch on malformed JSON args', () => {
