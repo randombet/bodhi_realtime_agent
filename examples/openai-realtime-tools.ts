@@ -77,9 +77,9 @@ const transport = new OpenAIRealtimeTransport({
 	model: 'gpt-realtime-2',
 	voice: 'coral',
 	turnDetection: { type: 'semantic_vad', eagerness: 'medium' },
-	// gpt-realtime-2 supports configurable reasoning. 'low' is the
+	// gpt-realtime-2 supports configurable reasoning (low, medium, high, and xhigh). 'low' is the
 	// documented production default — balances latency vs accuracy.
-	reasoning: { effort: 'low' },
+	reasoning: { effort: 'xhigh' },
 });
 
 // =============================================================================
