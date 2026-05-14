@@ -56,6 +56,11 @@ export interface EventPayloadMap {
 	};
 	'session.resume': { sessionId: string; handle: string };
 	'session.goaway': { sessionId: string; timeLeft: string };
+	'session.transcription_mode_changed': {
+		sessionId: string;
+		/** Public, stable mode — 'agent' | 'transcription'. */
+		mode: 'agent' | 'transcription';
+	};
 	'context.compact': { sessionId: string; removedItems: number };
 
 	// Subagent interaction events (Patterns 2 & 3)

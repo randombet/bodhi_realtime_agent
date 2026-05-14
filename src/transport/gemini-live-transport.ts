@@ -178,7 +178,23 @@ export class GeminiLiveTransport implements LLMTransport {
 		contextCompression: true,
 		groundingMetadata: true,
 		textResponseModality: true,
+		// Gemini has no client-issued response.cancel — quiesce() works at the
+		// framework layer (suppress onAudioOutput until unquiesce()). The
+		// transport keeps the WS open and lets server-VAD handle pre-emption
+		// when the user starts dictating into Whisper.
+		quiescible: true,
 	};
+
+	// --- Quiesce / unquiesce (cross-provider transcription-mode contract) ---
+	private _quiesced = false;
+
+	async quiesce(): Promise<void> {
+		this._quiesced = true;
+	}
+
+	async unquiesce(): Promise<void> {
+		this._quiesced = false;
+	}
 
 	readonly audioFormat: AudioFormatSpec = {
 		inputSampleRate: 16000,
@@ -661,7 +677,9 @@ export class GeminiLiveTransport implements LLMTransport {
 				for (const part of content.modelTurn.parts) {
 					if (part.inlineData?.data) {
 						// In text-mode pipelines (external TTS), Gemini audio is intentionally ignored.
-						if (!this._textMode) {
+						// In _quiesced mode (cross-provider transcription mode), Gemini audio is
+						// suppressed at this seam — VoiceSession owns the routing decision.
+						if (!this._textMode && !this._quiesced) {
 							this.callbacks.onAudioOutput?.(part.inlineData.data);
 							if (this.onAudioOutput) this.onAudioOutput(part.inlineData.data);
 						}

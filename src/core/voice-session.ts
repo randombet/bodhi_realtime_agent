@@ -54,6 +54,42 @@ import { ToolCallRouter } from './tool-call-router.js';
 import { TranscriptManager } from './transcript-manager.js';
 
 /**
+ * Public, stable transcription mode exposed to callers. The internal routing
+ * switch may have additional transient states (starting_transcription,
+ * stopping_transcription) — those are collapsed to the closest stable state
+ * when read via `getTranscriptionMode()`.
+ */
+export type TranscriptionMode = 'agent' | 'transcription';
+
+/** Internal mode used by the audio routing switch. */
+type InternalTranscriptionMode =
+	| 'agent'
+	| 'starting_transcription'
+	| 'transcription'
+	| 'stopping_transcription';
+
+/** Bounded buffer cap for mic audio held during a mode transition.
+ *  Roughly 2 seconds of 24 kHz PCM16 mono (48 000 B/s × 2). */
+const MAX_TRANSITION_BUFFER_BYTES = 96_000;
+
+/**
+ * Single-writer FIFO over async session mutations. Both `transferSession()`
+ * and `setTranscriptionMode()` mutate session-level state and must serialise
+ * so they never collide on the wire. Rejections do not poison the queue.
+ */
+class SessionMutationQueue {
+	private chain: Promise<unknown> = Promise.resolve();
+	enqueue<T>(fn: () => Promise<T>): Promise<T> {
+		const next = this.chain.then(
+			() => fn(),
+			() => fn(),
+		);
+		this.chain = next.catch(() => undefined);
+		return next;
+	}
+}
+
+/**
  * Configuration for creating a VoiceSession.
  */
 export interface VoiceSessionConfig {
@@ -113,6 +149,19 @@ export interface VoiceSessionConfig {
 	 *  When set, transport built-in transcription is automatically disabled.
 	 *  When omitted, the transport's built-in transcription is used. */
 	sttProvider?: STTProvider;
+	/** Initial transcription mode for the session. Default `'agent'`.
+	 *  - `'agent'` (default): mic audio flows to `transport`; the agent
+	 *    responds. Existing behaviour.
+	 *  - `'transcription'`: mic audio flows to `whisperProvider` and the
+	 *    agent transport is quiesced. Transcripts accumulate in the
+	 *    dictation buffer; injection back into the agent is explicit
+	 *    (see `injectDictationBuffer` and the built-in `inject_dictation`
+	 *    tool — design §3.5). */
+	transcriptionMode?: TranscriptionMode;
+	/** STT provider used in `'transcription'` mode. Must be a distinct instance
+	 *  from `sttProvider` — sharing entangles the two lifecycles. Typically an
+	 *  `OpenAIRealtimeWhisperSTTProvider`. */
+	whisperProvider?: STTProvider;
 	/** Behavior categories for dynamic runtime tuning (speech speed, verbosity, etc.). */
 	behaviors?: BehaviorCategory[];
 	/** Enable memory distillation. Extracts durable user facts from conversation and persists them. */
@@ -217,6 +266,18 @@ export class VoiceSession {
 	private processedKnowledgeBase: ProcessedKnowledgeBase | null = null;
 	private turnId = 0;
 	private sttProvider?: STTProvider;
+	// --- Phase 3: transcription-mode state ---
+	private whisperProvider?: STTProvider;
+	private internalMode: InternalTranscriptionMode = 'agent';
+	private dictationBuffer: string[] = [];
+	private transitionBuffer: Buffer[] = [];
+	private transitionBufferBytes = 0;
+	private mutationQueue = new SessionMutationQueue();
+	/** Tool results that arrived while not in 'agent' mode. Flushed in order on
+	 *  re-entry. Prevents response.create from leaking during transcription mode. */
+	private pendingToolResultsAwaitingAgentMode: Array<
+		Parameters<LLMTransport['sendToolResult']>[0]
+	> = [];
 	private _commitFiredForTurn = false;
 	/** True when the current turn was interrupted — skips Gemini transcript correction. */
 	private _turnWasInterrupted = false;
@@ -525,6 +586,40 @@ export class VoiceSession {
 				this.logInputTranscriptionLatency(text, 'gemini');
 				this.transcriptManager.handleInput(text);
 			};
+		}
+
+		// Wire the transcription-mode Whisper provider (§Phase 3). Independent
+		// from sttProvider — must be a distinct instance.
+		if (config.whisperProvider) {
+			if (config.whisperProvider === config.sttProvider) {
+				throw new Error(
+					'VoiceSession: whisperProvider must be a distinct instance from sttProvider. ' +
+						'Sharing one instance entangles their lifecycles and causes double-start/premature-stop.',
+				);
+			}
+			this.whisperProvider = config.whisperProvider;
+			// Configure with the transport's audio format. The provider may
+			// reject non-PCM or non-24kHz; that's a user error, surface it.
+			this.whisperProvider.configure({
+				sampleRate: this.transport.audioFormat.inputSampleRate,
+				bitDepth: this.transport.audioFormat.bitDepth,
+				channels: this.transport.audioFormat.channels,
+				encoding: this.transport.audioFormat.encoding,
+			});
+			// Whisper transcripts feed the dictation buffer ONLY — never the
+			// TranscriptManager / ConversationContext path (that would
+			// auto-inject and violate the "never auto-inject" guarantee).
+			this.whisperProvider.onTranscript = (text) => {
+				if (text) this.dictationBuffer.push(text);
+			};
+			// Partials are not surfaced here today; subscribers wanting live
+			// dictation preview can wire onPartialTranscript directly.
+		}
+		// Honour an initial transcriptionMode='transcription' by setting the
+		// internal mode now. The actual whisper.start() happens lazily on
+		// session start so it lines up with sttProvider's existing pattern.
+		if (config.transcriptionMode === 'transcription') {
+			this.internalMode = 'transcription';
 		}
 
 		// Wire onModelTurnStart for STT commit trigger
@@ -1129,43 +1224,84 @@ export class VoiceSession {
 		if (source === 'websocket' && this.directRtcChannel?.isRtcAudioReady) {
 			return;
 		}
-		if (this.sessionManager.isActive) {
-			this.updateClientAudioVad(data);
-			// When active agent uses external audio, don't forward to LLM transport.
-			// Route mic frames to the active external audio handler (e.g., TwilioBridge).
-			if (this.agentRouter.activeAgent.audioMode === 'external') {
-				if (this.externalAudioHandler) {
-					try {
-						this.externalAudioHandler(data);
-					} catch (err) {
-						this.reportError('external-audio', err instanceof Error ? err : new Error(String(err)));
-					}
-				}
-				return;
-			}
-			// PCM is the source of truth at this layer. Two consumers fork off:
-			// (a) the transport, which may want G.711 μ-law (telephony); we
-			//     encode on the way to it when audioFormat.encoding === 'pcmu'.
-			// (b) the STT provider, which advertises supportedEncodings; we
-			//     pass PCM unchanged unless the provider only accepts μ-law.
-			const pcmBase64 = data.toString('base64');
-			const transportAudio =
-				this.transport.audioFormat.encoding === 'pcmu'
-					? this.encodePcmToMulawBase64(data)
-					: pcmBase64;
-			this.transport.sendAudio(transportAudio);
+		if (!this.sessionManager.isActive) return;
 
-			if (this.sttProvider) {
-				const sttSupportsPcmu = this.sttProvider.supportedEncodings?.includes('pcmu');
-				const sttSupportsPcm = (this.sttProvider.supportedEncodings ?? ['pcm']).includes('pcm');
-				if (sttSupportsPcm) {
-					this.sttProvider.feedAudio(pcmBase64);
-				} else if (sttSupportsPcmu) {
-					this.sttProvider.feedAudio(this.encodePcmToMulawBase64(data));
+		this.updateClientAudioVad(data);
+
+		// When active agent uses external audio, don't forward to LLM transport.
+		// Route mic frames to the active external audio handler (e.g., TwilioBridge).
+		if (this.agentRouter.activeAgent.audioMode === 'external') {
+			if (this.externalAudioHandler) {
+				try {
+					this.externalAudioHandler(data);
+				} catch (err) {
+					this.reportError('external-audio', err instanceof Error ? err : new Error(String(err)));
 				}
-				// Else: provider declares no PCM and no μ-law support — drop (unreachable today).
+			}
+			return;
+		}
+
+		// Phase 3: route by transcription mode.
+		switch (this.internalMode) {
+			case 'agent':
+				this.routeAudioToAgent(data);
+				break;
+			case 'starting_transcription':
+				// Whisper not ready yet — buffer (bounded, oldest evicted on overflow).
+				this.transitionBuffer.push(data);
+				this.transitionBufferBytes += data.length;
+				while (
+					this.transitionBufferBytes > MAX_TRANSITION_BUFFER_BYTES &&
+					this.transitionBuffer.length > 1
+				) {
+					const dropped = this.transitionBuffer.shift();
+					if (dropped) this.transitionBufferBytes -= dropped.length;
+				}
+				break;
+			case 'transcription':
+				this.routeAudioToWhisper(data);
+				break;
+			case 'stopping_transcription':
+				// Transport already authoritative; route to it immediately so the
+				// user is never silent. Whisper stop is still in flight on the
+				// public promise but the audio path is restored.
+				this.routeAudioToAgent(data);
+				break;
+		}
+	}
+
+	/** Forward PCM frame to the agent transport + optional sttProvider. */
+	private routeAudioToAgent(data: Buffer): void {
+		// PCM is the source of truth at this layer. Two consumers fork off:
+		// (a) the transport, which may want G.711 μ-law (telephony).
+		// (b) the STT provider, which advertises supportedEncodings.
+		const pcmBase64 = data.toString('base64');
+		const transportAudio =
+			this.transport.audioFormat.encoding === 'pcmu'
+				? this.encodePcmToMulawBase64(data)
+				: pcmBase64;
+		this.transport.sendAudio(transportAudio);
+
+		if (this.sttProvider) {
+			const sttSupportsPcmu = this.sttProvider.supportedEncodings?.includes('pcmu');
+			const sttSupportsPcm = (this.sttProvider.supportedEncodings ?? ['pcm']).includes('pcm');
+			if (sttSupportsPcm) {
+				this.sttProvider.feedAudio(pcmBase64);
+			} else if (sttSupportsPcmu) {
+				this.sttProvider.feedAudio(this.encodePcmToMulawBase64(data));
 			}
 		}
+	}
+
+	/** Forward PCM frame to the whisperProvider. Whisper accepts only PCM @ 24 kHz;
+	 *  VoiceSession resamples here if the transport rate differs. */
+	private routeAudioToWhisper(data: Buffer): void {
+		if (!this.whisperProvider) return;
+		// Cross-provider mode: e.g. Gemini Live transport (16 kHz) + Whisper (24 kHz).
+		// One resample at this seam keeps Whisper single-rate.
+		const transportRate = this.transport.audioFormat.inputSampleRate;
+		const pcm = transportRate === 24000 ? data : resamplePcm(data, transportRate, 24000, 16);
+		this.whisperProvider.feedAudio(pcm.toString('base64'));
 	}
 
 	/** Encode a PCM16 Buffer to G.711 μ-law and return as base64. */
@@ -1267,6 +1403,12 @@ export class VoiceSession {
 	}
 
 	private handleAudioOutput(data: string): void {
+		// Phase 3 framework-layer guard: when not in agent mode, drop transport
+		// audio at this seam. Belt-and-braces backup for transports that don't
+		// implement quiesce(); guarantees no model audio leaks into dictation
+		// mode even if a quiesce race occurs.
+		if (this.internalMode !== 'agent') return;
+
 		this.signalAudioStarted();
 		const raw = Buffer.from(data, 'base64');
 		// Telephony mode: transport emits G.711 μ-law on the wire; client
@@ -1933,5 +2075,187 @@ export class VoiceSession {
 	private log(msg: string): void {
 		const t = new Date().toISOString().slice(11, 23);
 		console.log(`${t} [VoiceSession] ${msg}`);
+	}
+
+	// ───────────────────────────────────────────────────────────────────────
+	// Phase 3: transcription mode + dictation buffer + cross-provider quiesce
+	// See design-openai-realtime-transport-v2.md §3.
+	// ───────────────────────────────────────────────────────────────────────
+
+	/** Public stable mode. Transient `starting_*` / `stopping_*` states are
+	 *  collapsed to the closest stable mode so callers never observe them. */
+	getTranscriptionMode(): TranscriptionMode {
+		switch (this.internalMode) {
+			case 'agent':
+			case 'stopping_transcription':
+				return 'agent';
+			case 'starting_transcription':
+			case 'transcription':
+				return 'transcription';
+		}
+	}
+
+	/** Snapshot of dictated text since the last clear, joined with spaces.
+	 *  Useful for built-in tools (e.g. `inject_dictation_as_user_message`)
+	 *  and for ops surfaces that want to preview the buffer. */
+	getDictationBuffer(): string {
+		return this.dictationBuffer.join(' ').trim();
+	}
+
+	/** Discard buffered dictation without injecting it. */
+	clearDictationBuffer(): void {
+		this.dictationBuffer = [];
+	}
+
+	/** Inject the dictation buffer as a user message into the agent's
+	 *  conversation, then clear it. No-ops if the buffer is empty or the
+	 *  current mode is not `'agent'`. Mirrors the existing text-input path:
+	 *  writes to the transport AND records the user turn in
+	 *  ConversationContext (so history/memory/subagent context see it). */
+	injectDictationBuffer(): void {
+		if (this.internalMode !== 'agent') return;
+		const text = this.getDictationBuffer();
+		if (!text) return;
+		this.injectTranscript(text);
+		this.dictationBuffer = [];
+	}
+
+	/** Lower-level: inject an arbitrary user message. */
+	injectTranscript(text: string): void {
+		if (!text) return;
+		this.transport.sendContent([{ role: 'user', text }], /* turnComplete */ true);
+		// Mirror the existing text-input path: persist into ConversationContext
+		// so the user turn shows up in history / memory / subagent context.
+		this.conversationContext.addUserMessage(text);
+	}
+
+	/** Pre-start the whisper session without flipping audio routing. Useful
+	 *  for masking the ~150–500 ms whisper-start latency on the first flip. */
+	async prewarmTranscriptionMode(): Promise<void> {
+		if (!this.whisperProvider) return;
+		await this.whisperProvider.start();
+	}
+
+	/** Switch between `'agent'` and `'transcription'`. Idempotent. Serialised
+	 *  with `transferSession()` via the SessionMutationQueue — concurrent
+	 *  callers queue rather than race. */
+	async setTranscriptionMode(mode: TranscriptionMode): Promise<void> {
+		return this.mutationQueue.enqueue(async () => {
+			if (mode === this.getTranscriptionMode()) return;
+			if (mode === 'transcription') {
+				if (!this.whisperProvider) {
+					throw new Error('setTranscriptionMode: no whisperProvider configured on VoiceSession');
+				}
+				await this.enterTranscriptionMode();
+			} else {
+				await this.exitTranscriptionMode();
+			}
+		});
+	}
+
+	/** Agent → transcription transition. */
+	private async enterTranscriptionMode(): Promise<void> {
+		this.internalMode = 'starting_transcription';
+		// Quiesce the transport so any in-flight response stops emitting.
+		// Optional method — fall back to the framework-layer guard.
+		if (this.transport.capabilities.quiescible && this.transport.quiesce) {
+			try {
+				await this.transport.quiesce();
+			} catch (err) {
+				this.reportError('transport-quiesce', err instanceof Error ? err : new Error(String(err)));
+			}
+		}
+		// Clear unprocessed input audio server-side (mandatory — see design §3.4).
+		// Some transports auto-trigger responses via VAD's create_response:true;
+		// without clearAudio() that response can fire after the mode flip.
+		try {
+			this.transport.clearAudio();
+		} catch {
+			// Best-effort: clearAudio is a no-op when disconnected.
+		}
+		// Bring up whisper. Idempotent — no-op if prewarm already ran.
+		try {
+			await this.whisperProvider!.start();
+		} catch (err) {
+			// Rollback on failure.
+			this.internalMode = 'agent';
+			if (this.transport.capabilities.quiescible && this.transport.unquiesce) {
+				try {
+					await this.transport.unquiesce();
+				} catch {
+					// Best-effort rollback.
+				}
+			}
+			throw err;
+		}
+		// Flush buffered transition frames in FIFO order through the normal
+		// whisper routing (which handles resampling).
+		const buffered = this.transitionBuffer;
+		this.transitionBuffer = [];
+		this.transitionBufferBytes = 0;
+		for (const chunk of buffered) {
+			this.routeAudioToWhisper(chunk);
+		}
+		this.internalMode = 'transcription';
+		this.eventBus.publish('session.transcription_mode_changed', {
+			mode: 'transcription',
+			sessionId: this.config.sessionId,
+		});
+	}
+
+	/** Transcription → agent transition. Asymmetric — audio routing is
+	 *  restored synchronously; the public promise awaits whisper.stop(). */
+	private async exitTranscriptionMode(): Promise<void> {
+		// Restore audio routing immediately so the user is never silent.
+		this.internalMode = 'stopping_transcription';
+		// Unquiesce the transport so onAudioOutput resumes.
+		if (this.transport.capabilities.quiescible && this.transport.unquiesce) {
+			try {
+				await this.transport.unquiesce();
+			} catch (err) {
+				this.reportError(
+					'transport-unquiesce',
+					err instanceof Error ? err : new Error(String(err)),
+				);
+			}
+		}
+		// Tear down whisper. Idempotent.
+		try {
+			await this.whisperProvider?.stop();
+		} catch (err) {
+			this.reportError('whisper-stop', err instanceof Error ? err : new Error(String(err)));
+		}
+		this.internalMode = 'agent';
+		// Drain any tool results that arrived during transcription mode.
+		this.flushPendingToolResults();
+		this.eventBus.publish('session.transcription_mode_changed', {
+			mode: 'agent',
+			sessionId: this.config.sessionId,
+		});
+	}
+
+	/** Defensive wrapper around triggerGeneration. Throws if invoked while
+	 *  not in agent mode — surfaces preset bugs loudly in tests rather than
+	 *  silently leaking audio into a dictation flow. */
+	guardedTriggerGeneration(
+		instructions?: string,
+		overrides?: Parameters<LLMTransport['triggerGeneration']>[1],
+	): void {
+		if (this.internalMode !== 'agent') {
+			throw new Error(
+				`TRANSCRIPTION_MODE_LOCKED: triggerGeneration is blocked while transcription mode is '${this.internalMode}'`,
+			);
+		}
+		this.transport.triggerGeneration(instructions, overrides);
+	}
+
+	/** Flush tool results that arrived during transcription mode. */
+	private flushPendingToolResults(): void {
+		if (this.pendingToolResultsAwaitingAgentMode.length === 0) return;
+		const queued = this.pendingToolResultsAwaitingAgentMode;
+		this.pendingToolResultsAwaitingAgentMode = [];
+		for (const result of queued) {
+			this.transport.sendToolResult(result);
+		}
 	}
 }
