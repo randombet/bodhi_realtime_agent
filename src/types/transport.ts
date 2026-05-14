@@ -2,6 +2,11 @@
 
 import type { ToolDefinition } from './tool.js';
 
+/** Reasoning effort dial for reasoning-capable realtime models
+ *  (e.g. `gpt-realtime-2`). Trades time-to-first-audio for instruction
+ *  following / accuracy. `low` is the documented production default. */
+export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+
 /** Static capabilities — orchestrator branches on these, never on provider names. */
 export interface TransportCapabilities {
 	/** Can truncate server-side message at audio playback position (OpenAI: yes, Gemini: no). */
@@ -22,16 +27,54 @@ export interface TransportCapabilities {
 	 *  Optional — defaults to false. Existing custom transport implementations
 	 *  are unaffected until they want to support TTS. */
 	textResponseModality?: boolean;
+	/** Model can emit multiple `function_call` items in a single response.
+	 *  Optional — `undefined` means `false`. Doc-only signal; the transport's
+	 *  batched-tool-call dispatch is on for everyone (no-op if only one call). */
+	parallelToolCalls?: boolean;
+	/** Model exposes a configurable reasoning-effort dial (e.g. `gpt-realtime-2`).
+	 *  Optional — `undefined` means `false`. */
+	reasoningEffort?: boolean;
+	/** Model emits short spoken preambles automatically before tool calls / during
+	 *  reasoning. Doc-only signal for behaviour gating (suppress duplicate
+	 *  app-side announcements). Optional — `undefined` means `false`. */
+	automaticPreambles?: boolean;
+	/** Transport implements `quiesce()` / `unquiesce()` for cross-provider
+	 *  transcription mode (pause without disconnecting). When `undefined` or
+	 *  `false`, VoiceSession falls back to a framework-layer audio-output guard
+	 *  during mode flips. */
+	quiescible?: boolean;
 }
+
+/** Explicit defaults for every flag. Downstream `LLMTransport` implementations
+ *  can spread this and override only what they actually support, so adding new
+ *  flags to the union doesn't break compilation. */
+export const DEFAULT_TRANSPORT_CAPABILITIES: Required<TransportCapabilities> = {
+	messageTruncation: false,
+	turnDetection: false,
+	userTranscription: false,
+	inPlaceSessionUpdate: false,
+	sessionResumption: false,
+	contextCompression: false,
+	groundingMetadata: false,
+	textResponseModality: false,
+	parallelToolCalls: false,
+	reasoningEffort: false,
+	automaticPreambles: false,
+	quiescible: false,
+};
 
 /** Audio format descriptor passed to an STT provider at configuration time. */
 export interface STTAudioConfig {
 	/** Sample rate in Hz (e.g. 16000 for Gemini, 24000 for OpenAI). */
 	sampleRate: number;
-	/** Bits per sample (16). */
+	/** Bits per sample (16 for PCM, 8 for G.711 μ-law). */
 	bitDepth: number;
 	/** Number of channels (1 = mono). */
 	channels: number;
+	/** Encoding the consumer will deliver. Default `'pcm'` — every existing
+	 *  STT provider expects PCM16. A G.711-only provider declares
+	 *  `supportedEncodings: ['pcmu']` and `VoiceSession` encodes before feeding. */
+	encoding?: 'pcm' | 'pcmu';
 }
 
 /**
@@ -43,6 +86,12 @@ export interface STTAudioConfig {
  * onTranscript/onPartialTranscript callbacks.
  */
 export interface STTProvider {
+	/** Optional static declaration of which audio encodings the provider can
+	 *  consume. When omitted, defaults to `['pcm']` (today's behaviour).
+	 *  VoiceSession reads this at configure time and decides whether to feed
+	 *  raw PCM or encode to G.711 before calling `feedAudio()`. */
+	readonly supportedEncodings?: ReadonlyArray<'pcm' | 'pcmu'>;
+
 	/** Configure the audio format that feedAudio() will deliver.
 	 *  Called once before start(). The provider MUST resample or reject
 	 *  if it cannot handle the given format. */
@@ -108,8 +157,23 @@ export interface AudioFormatSpec {
 	inputSampleRate: number;
 	outputSampleRate: number;
 	channels: number;
+	/** Bits per sample. 16 for PCM, 8 for G.711 μ-law. */
 	bitDepth: number;
-	encoding: 'pcm';
+	/** Wire encoding. `'pcm'` is signed 16-bit linear; `'pcmu'` is G.711 μ-law
+	 *  for telephony bridges. A-law (`'pcma'`) is future work — `audio-codec.ts`
+	 *  ships only μ-law today. */
+	encoding: 'pcm' | 'pcmu';
+}
+
+/** Bytes per audio sample for a given encoding. PCM16 is 2; G.711 μ-law is 1. */
+export function bytesPerSample(encoding: AudioFormatSpec['encoding']): number {
+	return encoding === 'pcm' ? 2 : 1;
+}
+
+/** Default sample rate for a given encoding. PCM is 24 kHz (OpenAI Realtime
+ *  default); G.711 μ-law is always 8 kHz (telephony). */
+export function defaultRate(encoding: AudioFormatSpec['encoding']): number {
+	return encoding === 'pcm' ? 24000 : 8000;
 }
 
 /** Configuration for establishing a transport connection. */
@@ -227,6 +291,11 @@ export interface RealtimeUsageModalityBreakdown {
 	cachedImageTokens?: number;
 	outputTextTokens?: number;
 	outputAudioTokens?: number;
+	/** Reasoning tokens generated internally by reasoning-capable models
+	 *  (e.g. `gpt-realtime-2`). Hidden from the API — only the count is
+	 *  exposed via `response.usage.output_tokens_details.reasoning_tokens`.
+	 *  Billed as output tokens at the chosen modality rate. */
+	reasoningTokens?: number;
 }
 
 /**
@@ -274,6 +343,21 @@ export interface LLMTransport {
 	commitAudio(): void;
 	clearAudio(): void;
 
+	// --- Quiesce / unquiesce (optional; advertised via capabilities.quiescible) ---
+	/** Pause the transport without disconnecting:
+	 *   1. Cancel any in-flight model response (provider chooses how).
+	 *   2. Suppress onAudioOutput deltas until unquiesce() is called.
+	 *   3. Leave the WebSocket open and conversation state intact.
+	 *
+	 *  Idempotent. Used by VoiceSession to transition into transcription mode
+	 *  without tearing the transport down. When omitted, VoiceSession falls
+	 *  back to its framework-layer audio-output guard. */
+	quiesce?(): Promise<void>;
+
+	/** Resume normal operation after quiesce(). After this resolves,
+	 *  onAudioOutput fires again on the next response. Idempotent. */
+	unquiesce?(): Promise<void>;
+
 	// --- Session configuration ---
 	updateSession(config: SessionUpdate): void;
 
@@ -290,7 +374,18 @@ export interface LLMTransport {
 	sendToolResult(result: TransportToolResult): void;
 
 	// --- Generation control (non-tool-result generation) ---
-	triggerGeneration(instructions?: string): void;
+	/** Trigger a model response.
+	 *  @param instructions Optional one-off instruction (passed as
+	 *    `response.create.response.instructions` on OpenAI — does not mutate
+	 *    the session prefix, so it is cache-safe for subsequent turns).
+	 *  @param overrides Optional per-response overrides. `reasoning.effort`
+	 *    bumps the dial for this Response only (resets to session default
+	 *    on the next turn). Only honored by transports advertising
+	 *    `capabilities.reasoningEffort`. */
+	triggerGeneration(
+		instructions?: string,
+		overrides?: { reasoning?: { effort: ReasoningEffort } },
+	): void;
 
 	// --- Core callbacks (all providers must support) ---
 	onAudioOutput?: (base64Data: string) => void;
@@ -333,4 +428,26 @@ export interface LLMTransport {
 
 	/** Optional: fires when the provider reports token or duration usage for billing/observability. */
 	onRealtimeLLMUsage?: (usage: RealtimeLLMUsageEvent) => void;
+
+	// --- Reasoning lifecycle (reasoning-capable models only) ---
+	/** Fires when the model begins emitting its hidden reasoning trace
+	 *  for the current response. Useful for latency observability. */
+	onReasoningStart?: () => void;
+
+	/** Fires when the model's reasoning step completes for the current
+	 *  response, before any audio/text answer is emitted. `durationMs`
+	 *  is the wall-clock time the reasoning step took; `reasoningTokens`
+	 *  is the count if the provider exposes it (otherwise undefined). */
+	onReasoningDone?: (info: { durationMs: number; reasoningTokens?: number }) => void;
+
+	/** Fires with a streamed chunk of the optional reasoning summary text
+	 *  (when the model was configured to emit one). Surface this to ops
+	 *  telemetry only — never to end users. */
+	onReasoningSummary?: (text: string) => void;
+
+	// --- Prompt-cache observability ---
+	/** Fires immediately before the framework emits a `session.update` that
+	 *  changes `instructions` or `tools` — i.e. before a guaranteed full
+	 *  prompt-cache bust on the next response. Pure telemetry. */
+	onCacheBust?: (reason: 'instructions_changed' | 'tools_changed') => void;
 }
