@@ -93,7 +93,7 @@ export class ToolCallRouter {
 			if (toolDef?.execution === 'background') {
 				this.handleBackgroundToolCall(toolCall, toolDef);
 			} else {
-				this.handleInlineToolCall(toolCall);
+				this.handleInlineToolCall(toolCall, toolDef);
 			}
 		}
 	}
@@ -106,11 +106,18 @@ export class ToolCallRouter {
 		}
 	}
 
-	private handleInlineToolCall(call: {
-		toolCallId: string;
-		toolName: string;
-		args: Record<string, unknown>;
-	}): void {
+	private handleInlineToolCall(
+		call: {
+			toolCallId: string;
+			toolName: string;
+			args: Record<string, unknown>;
+		},
+		toolDef: ToolDefinition | undefined,
+	): void {
+		// Respect the tool definition's scheduling hint (e.g. 'silent' for
+		// purely informational tools like `set_transcription_mode`). Default
+		// 'immediate' preserves existing behaviour.
+		const scheduling = toolDef?.scheduling ?? 'immediate';
 		this.deps.toolExecutor
 			.handleToolCall(call)
 			.then((result) => {
@@ -121,12 +128,14 @@ export class ToolCallRouter {
 					id: result.toolCallId,
 					name: result.toolName,
 					result: result.error ? { error: result.error } : result.result,
-					scheduling: 'immediate',
+					scheduling,
 				});
 			})
 			.catch((err) => {
 				this.deps.reportError('tool-executor', err);
-				// Always send a response so the LLM doesn't hang
+				// Always send a response so the LLM doesn't hang. Errors use
+				// 'immediate' regardless of the tool's default scheduling —
+				// the model should react to failures.
 				this.deps.sendToolResult({
 					id: call.toolCallId,
 					name: call.toolName,

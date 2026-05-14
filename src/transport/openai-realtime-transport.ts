@@ -6,6 +6,7 @@ import type {
 	RealtimeClientEvent,
 	RealtimeSessionCreateRequest,
 } from 'openai/resources/realtime/realtime';
+import { TransportError } from '../core/errors.js';
 import type { ToolDefinition } from '../types/tool.js';
 import type {
 	AudioFormatSpec,
@@ -14,6 +15,7 @@ import type {
 	LLMTransportConfig,
 	LLMTransportError,
 	RealtimeLLMUsageEvent,
+	ReasoningEffort,
 	ReconnectState,
 	ReplayItem,
 	SessionUpdate,
@@ -21,6 +23,12 @@ import type {
 	TransportToolCall,
 	TransportToolResult,
 } from '../types/transport.js';
+import {
+	type OpenAIRealtimeAudioFormat,
+	type OpenAIRealtimeModel,
+	type ReasoningSummary,
+	supports,
+} from './openai-realtime-models.js';
 import {
 	normalizeOpenAIResponseUsage,
 	normalizeOpenAITranscriptionUsage,
@@ -31,8 +39,8 @@ import { zodToJsonSchema } from './zod-to-schema.js';
 export interface OpenAIRealtimeConfig {
 	/** OpenAI API key. */
 	apiKey: string;
-	/** Model identifier (default: 'gpt-realtime'). */
-	model?: string;
+	/** Model identifier (default: 'gpt-realtime-2'). */
+	model?: OpenAIRealtimeModel;
 	/** Voice name (default: 'coral'). */
 	voice?: string;
 	/** Transcription model (default: 'gpt-4o-mini-transcribe'). Set to null to disable input transcription. */
@@ -41,6 +49,22 @@ export interface OpenAIRealtimeConfig {
 	turnDetection?: Record<string, unknown>;
 	/** Noise reduction configuration. */
 	noiseReduction?: Record<string, unknown>;
+	/** Reasoning effort + optional summary verbosity. Only honoured when the
+	 *  active model supports reasoning (gated via the FEATURES table). Dropped
+	 *  with a warn — or thrown under `strict: true` — on older models. */
+	reasoning?: { effort?: ReasoningEffort; summary?: ReasoningSummary };
+	/** Wire-level input audio format. Default `{ type: 'audio/pcm', rate: 24000 }`.
+	 *  Telephony bridges set this to `{ type: 'audio/pcmu' }` (rate is always 8000
+	 *  for G.711). PCM rates other than 24000 are rejected at build-config time. */
+	audioInputFormat?: OpenAIRealtimeAudioFormat;
+	/** Wire-level output audio format. Default `{ type: 'audio/pcm', rate: 24000 }`.
+	 *  Same constraints as `audioInputFormat`. */
+	audioOutputFormat?: OpenAIRealtimeAudioFormat;
+	/** When `true`, supplying a feature unsupported for the active model throws
+	 *  `FrameworkError('UNSUPPORTED_FEATURE')` from `buildSessionConfig()`.
+	 *  When `false`/omitted (production default), the feature is dropped and a
+	 *  `warn` is logged. Framework Vitest suites set `strict: true`. */
+	strict?: boolean;
 }
 
 /** Convert a framework ToolDefinition to OpenAI function tool format. */
@@ -67,7 +91,24 @@ function toolToOpenAIFunction(tool: ToolDefinition): Record<string, unknown> {
  * - Explicit `response.create` required after tool results
  */
 export class OpenAIRealtimeTransport implements LLMTransport {
-	readonly capabilities: TransportCapabilities = {
+	/** Construction-time snapshot. Re-resolved at end of `connect()` after
+	 *  `applyTransportConfig()` may have changed the model. Once `connect()`
+	 *  resolves, immutable for the lifetime of the connection. */
+	private _capabilities: TransportCapabilities;
+
+	get capabilities(): TransportCapabilities {
+		return this._capabilities;
+	}
+
+	/** Construction-time snapshot. Re-resolved alongside `_capabilities` when
+	 *  `applyTransportConfig()` finalises the audio format. */
+	private _audioFormat: AudioFormatSpec;
+
+	get audioFormat(): AudioFormatSpec {
+		return this._audioFormat;
+	}
+
+	private staticCapabilities: TransportCapabilities = {
 		messageTruncation: true,
 		turnDetection: true,
 		userTranscription: true,
@@ -76,14 +117,6 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		contextCompression: false,
 		groundingMetadata: false,
 		textResponseModality: true,
-	};
-
-	readonly audioFormat: AudioFormatSpec = {
-		inputSampleRate: 24000,
-		outputSampleRate: 24000,
-		channels: 1,
-		bitDepth: 16,
-		encoding: 'pcm',
 	};
 
 	// --- LLMTransport callback properties ---
@@ -105,6 +138,10 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	onTextDone?: () => void;
 	onSpeechStarted?: () => void;
 	onRealtimeLLMUsage?: (usage: RealtimeLLMUsageEvent) => void;
+	onReasoningStart?: () => void;
+	onReasoningDone?: (info: { durationMs: number; reasoningTokens?: number }) => void;
+	onReasoningSummary?: (text: string) => void;
+	onCacheBust?: (reason: 'instructions_changed' | 'tools_changed') => void;
 
 	// --- Private state ---
 	private client: OpenAI;
@@ -124,6 +161,16 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	// Tool call argument accumulation (OpenAI streams args incrementally)
 	private pendingFunctionCalls = new Map<string, string>();
 
+	// Batched tool-call dispatch: completed function_call items from the
+	// current response, flushed in one onToolCall(calls[]) on response.done.
+	// Required for gpt-realtime-2's parallel tool calls; a no-op when only
+	// one call lands per response.
+	private completedToolCallsThisResponse: TransportToolCall[] = [];
+
+	// Reasoning lifecycle: track start time + token count for the current response.
+	private _reasoningStartedAt: number | null = null;
+	private _reasoningTokensThisResponse: number | undefined = undefined;
+
 	// when_idle scheduling: buffer tool results while model is generating
 	private _isModelGenerating = false;
 	private _pendingWhenIdle: TransportToolResult[] = [];
@@ -131,13 +178,57 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	// Text mode: whether the transport is configured for text-mode responses (for TTS)
 	private _textMode = false;
 
-	// Audio suppression: stop forwarding audio deltas after interruption
+	// Audio suppression: stop forwarding audio deltas after interruption.
+	// Cleared on response.created. Distinct from _quiesced (which persists
+	// across responses until unquiesce()).
 	private _suppressAudio = false;
+	// Durable suppression: set by quiesce(), cleared by unquiesce(). Audio
+	// is dropped at the wire-event handlers while this is true regardless of
+	// response lifecycle.
+	private _quiesced = false;
 
 	constructor(config: OpenAIRealtimeConfig) {
 		this.config = config;
 		this.client = new OpenAI({ apiKey: config.apiKey });
 		this.voice = config.voice ?? 'coral';
+		this._capabilities = this.resolveCapabilities();
+		this._audioFormat = this.resolveAudioFormat();
+	}
+
+	/** Compute capability flags from the configured model. */
+	private resolveCapabilities(): TransportCapabilities {
+		const model = this.config.model ?? 'gpt-realtime-2';
+		return {
+			...this.staticCapabilities,
+			parallelToolCalls: supports(model, 'parallelToolCalls'),
+			reasoningEffort: supports(model, 'reasoning'),
+			// gpt-realtime-2 emits automatic preambles; gating on reasoning is the
+			// proxy because the two ship together on the same model line.
+			automaticPreambles: supports(model, 'reasoning'),
+			quiescible: true,
+		};
+	}
+
+	/** Compute the wire audio format from `audioInputFormat` / `audioOutputFormat`.
+	 *  Carries both input and output encodings / bit-depths so consumers that
+	 *  decode output audio (handleAudioOutput) and compute interruption ms
+	 *  (audioOutputMs) use the right side. */
+	private resolveAudioFormat(): AudioFormatSpec {
+		const inFmt = this.config.audioInputFormat ?? { type: 'audio/pcm', rate: 24000 };
+		const outFmt = this.config.audioOutputFormat ?? { type: 'audio/pcm', rate: 24000 };
+		const inEnc: 'pcm' | 'pcmu' = inFmt.type === 'audio/pcmu' ? 'pcmu' : 'pcm';
+		const outEnc: 'pcm' | 'pcmu' = outFmt.type === 'audio/pcmu' ? 'pcmu' : 'pcm';
+		const inRate = inEnc === 'pcmu' ? 8000 : (inFmt.rate ?? 24000);
+		const outRate = outEnc === 'pcmu' ? 8000 : (outFmt.rate ?? 24000);
+		return {
+			inputSampleRate: inRate,
+			outputSampleRate: outRate,
+			channels: 1,
+			bitDepth: inEnc === 'pcmu' ? 8 : 16,
+			encoding: inEnc,
+			outputBitDepth: outEnc === 'pcmu' ? 8 : 16,
+			outputEncoding: outEnc,
+		};
 	}
 
 	get isConnected(): boolean {
@@ -151,7 +242,12 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			this.applyTransportConfig(transportConfig);
 		}
 
-		const model = this.config.model ?? 'gpt-realtime';
+		// Finalise capability + audio-format snapshots after any connect-time
+		// model/audio overrides have landed. Immutable from here onward.
+		this._capabilities = this.resolveCapabilities();
+		this._audioFormat = this.resolveAudioFormat();
+
+		const model = this.config.model ?? 'gpt-realtime-2';
 
 		// Create WebSocket connection using the openai SDK.
 		// NOTE: OpenAIRealtimeWS.create() returns immediately after resolving the
@@ -262,6 +358,44 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		this.rt.send({ type: 'input_audio_buffer.clear' });
 	}
 
+	// --- Quiesce / unquiesce (cross-provider transcription-mode contract) ---
+
+	/** Pause the transport without disconnecting. Used by VoiceSession to
+	 *  enter transcription mode without tearing the WS down.
+	 *
+	 *  Implementation:
+	 *   1. If a response is in flight, send response.cancel so the model stops
+	 *      generating.
+	 *   2. Set _suppressAudio so any onAudioOutput deltas already in flight
+	 *      are dropped (existing flag re-used).
+	 *
+	 *  Idempotent: calling quiesce() while already quiesced is a no-op. */
+	async quiesce(): Promise<void> {
+		this._quiesced = true;
+		if (!this.rt || !this._isConnected) return;
+		this._suppressAudio = true;
+		if (this._isModelGenerating) {
+			try {
+				this.rt.send({ type: 'response.cancel' });
+			} catch {
+				// Ignore — server-VAD may have already cancelled, in which case
+				// response.cancel races and produces a benign "no active response"
+				// error. We don't surface it.
+			}
+			this._isModelGenerating = false;
+		}
+	}
+
+	/** Resume normal operation. Idempotent. Drains any when_idle tool
+	 *  results that accumulated while quiesced — those were deferred so
+	 *  flushPendingWhenIdle wouldn't fire `response.create` during
+	 *  dictation mode. */
+	async unquiesce(): Promise<void> {
+		this._quiesced = false;
+		this._suppressAudio = false;
+		this.flushPendingWhenIdle();
+	}
+
 	// --- Session configuration ---
 
 	updateSession(config: SessionUpdate): void {
@@ -276,6 +410,16 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		}
 
 		if (!this.rt || !this._isConnected) return;
+
+		// Cache-bust telemetry. instructions / tools mutations always bust the
+		// session prefix; responseModality changes do not (they don't enter the
+		// cached input prefix). Fire once per actual mutation; prefer
+		// 'instructions_changed' when both change in one call so the metric
+		// stays sane.
+		if (this.onCacheBust) {
+			if (config.instructions !== undefined) this.onCacheBust('instructions_changed');
+			else if (config.tools !== undefined) this.onCacheBust('tools_changed');
+		}
 
 		const update: Partial<RealtimeSessionCreateRequest> = {};
 		if (config.instructions !== undefined) {
@@ -312,6 +456,12 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		}
 
 		if (!this.rt || !this._isConnected) return;
+
+		// Cache-bust telemetry — see updateSession for rationale.
+		if (this.onCacheBust) {
+			if (config.instructions !== undefined) this.onCacheBust('instructions_changed');
+			else if (config.tools !== undefined) this.onCacheBust('tools_changed');
+		}
 
 		// Wait for session.updated confirmation
 		const updatedPromise = new Promise<void>((resolve, reject) => {
@@ -418,13 +568,33 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 
 	// --- Generation control ---
 
-	triggerGeneration(instructions?: string): void {
+	triggerGeneration(
+		instructions?: string,
+		overrides?: { reasoning?: { effort: ReasoningEffort } },
+	): void {
 		if (!this.rt || !this._isConnected) return;
 
-		if (instructions) {
+		// Build response.create payload. Per-response instructions and reasoning
+		// overrides do NOT mutate the session prefix, so they are cache-safe for
+		// subsequent turns (the current Response itself may see a slightly reduced
+		// cache hit because its prefix differs).
+		const response: Record<string, unknown> = {};
+		if (instructions) response.instructions = instructions;
+		if (overrides?.reasoning) {
+			// Gate per-response reasoning on model capability — if the model
+			// doesn't support reasoning, drop the override silently. Strict mode
+			// is for session-level gating only; per-response is best-effort.
+			const model = this.config.model ?? 'gpt-realtime-2';
+			if (supports(model, 'reasoning')) {
+				response.reasoning = { effort: overrides.reasoning.effort };
+			}
+		}
+
+		if (Object.keys(response).length > 0) {
 			this.rt.send({
 				type: 'response.create',
-				response: { instructions },
+				// biome-ignore lint/suspicious/noExplicitAny: SDK type for response.create.response is strict
+				response: response as any,
 			});
 		} else {
 			this.rt.send({ type: 'response.create' });
@@ -463,13 +633,48 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		}
 	}
 
+	/** Validate and normalise an OpenAI audio format. Rejects non-24kHz PCM and
+	 *  ignores `rate` for G.711 (always 8000). */
+	private normaliseAudioFormat(fmt: OpenAIRealtimeAudioFormat): { type: string; rate?: number } {
+		if (fmt.type === 'audio/pcm') {
+			const rate = fmt.rate ?? 24000;
+			if (rate !== 24000) {
+				throw new TransportError(
+					`UNSUPPORTED_SAMPLE_RATE: OpenAI Realtime 'audio/pcm' only accepts 24000 Hz, got ${rate}`,
+				);
+			}
+			return { type: 'audio/pcm', rate: 24000 };
+		}
+		// G.711 μ-law — rate is fixed at 8 kHz; the SDK doesn't take a rate field.
+		return { type: 'audio/pcmu' };
+	}
+
+	/** Drop or throw on a gated config field unsupported for the active model. */
+	private gateField(field: string, model: string): void {
+		const msg = `OpenAIRealtimeTransport: field '${field}' is not supported by model '${model}'; dropping.`;
+		if (this.config.strict) {
+			throw new TransportError(`UNSUPPORTED_FEATURE: ${msg}`);
+		}
+		// Intentional warn-on-drop in non-strict mode — surfaces the silent
+		// feature drop to ops without crashing user code.
+		console.warn(msg);
+	}
+
 	private buildSessionConfig(): RealtimeSessionCreateRequest {
+		const inFmt = this.normaliseAudioFormat(
+			this.config.audioInputFormat ?? { type: 'audio/pcm', rate: 24000 },
+		);
+		const outFmt = this.normaliseAudioFormat(
+			this.config.audioOutputFormat ?? { type: 'audio/pcm', rate: 24000 },
+		);
+
 		const session: RealtimeSessionCreateRequest = {
 			type: 'realtime',
 			output_modalities: this._textMode ? ['text'] : ['audio'],
 			audio: {
 				input: {
-					format: { type: 'audio/pcm', rate: 24000 },
+					// biome-ignore lint/suspicious/noExplicitAny: SDK format type is a strict union; G.711 string is valid at runtime
+					format: inFmt as any,
 					...(this.config.transcriptionModel !== null
 						? {
 								transcription: {
@@ -492,13 +697,32 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 				...(!this._textMode
 					? {
 							output: {
-								format: { type: 'audio/pcm', rate: 24000 },
+								// biome-ignore lint/suspicious/noExplicitAny: SDK format type is a strict union; G.711 string is valid at runtime
+								format: outFmt as any,
 								voice: this.voice,
 							},
 						}
 					: {}),
 			},
 		};
+
+		// gpt-realtime-2 feature gating.
+		const model = this.config.model ?? 'gpt-realtime-2';
+		if (this.config.reasoning) {
+			if (supports(model, 'reasoning')) {
+				// biome-ignore lint/suspicious/noExplicitAny: SDK reasoning field may not be in current types
+				(session as any).reasoning = {
+					...(this.config.reasoning.effort !== undefined
+						? { effort: this.config.reasoning.effort }
+						: {}),
+					...(this.config.reasoning.summary !== undefined
+						? { summary: this.config.reasoning.summary }
+						: {}),
+				};
+			} else {
+				this.gateField('reasoning', model);
+			}
+		}
 
 		if (this.instructions) {
 			session.instructions = this.instructions;
@@ -517,13 +741,21 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 
 		// --- Audio output ---
 		rt.on('response.output_audio.delta', (event) => {
-			if (this._suppressAudio) return;
+			// _quiesced is the durable, cross-response suppression flag set by
+			// quiesce(); _suppressAudio is the per-turn interruption flag set
+			// by barge-in. Either dropping the audio is correct.
+			if (this._quiesced || this._suppressAudio) return;
 			if (this.onAudioOutput) this.onAudioOutput(event.delta);
 
-			// Track audio duration for interruption handling
+			// Track audio duration for interruption handling. Uses the resolved
+			// OUTPUT-side audioFormat so G.711 telephony (1 byte/sample, 8 kHz)
+			// computes the right `audio_end_ms` for conversation.item.truncate
+			// regardless of input encoding.
 			const bytes = Buffer.from(event.delta, 'base64').length;
-			const samples = bytes / 2; // 16-bit = 2 bytes per sample
-			this.audioOutputMs += (samples / 24000) * 1000;
+			const outBitDepth = this._audioFormat.outputBitDepth ?? this._audioFormat.bitDepth;
+			const bps = outBitDepth === 8 ? 1 : 2;
+			const samples = bytes / bps;
+			this.audioOutputMs += (samples / this._audioFormat.outputSampleRate) * 1000;
 		});
 
 		// --- Text output (text mode — for TTS) ---
@@ -539,18 +771,38 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		// --- Response lifecycle: track when a response is active ---
 		rt.on('response.created', () => {
 			this._isModelGenerating = true;
-			this._suppressAudio = false;
+			// Only clear per-turn barge-in suppression. The durable _quiesced
+			// flag stays set until unquiesce() — preserves the transcription-mode
+			// dictation-only guarantee even if a response sneaks in.
+			if (!this._quiesced) this._suppressAudio = false;
+			// Reset per-response state.
+			this.completedToolCallsThisResponse = [];
+			this._reasoningStartedAt = null;
+			this._reasoningTokensThisResponse = undefined;
 			if (this.onModelTurnStart) this.onModelTurnStart();
 		});
 
-		// --- Track assistant output items for interruption ---
+		// --- Track assistant output items for interruption + reasoning lifecycle ---
 		rt.on('response.output_item.added', (event) => {
-			// ConversationItem is a union; only messages have role
 			const item = event.item;
+			// ConversationItem is a union; only messages have role.
 			if ('role' in item && item.role === 'assistant' && item.id) {
 				this.lastAssistantItemId = item.id;
 				this.audioOutputMs = 0;
 			}
+			// Reasoning items signal model thinking has started. SDK union does
+			// not yet enumerate 'reasoning' as an item.type, so cast through any.
+			// biome-ignore lint/suspicious/noExplicitAny: SDK item.type union missing 'reasoning'
+			if ((item as any).type === 'reasoning') {
+				this._reasoningStartedAt = Date.now();
+				if (this.onReasoningStart) this.onReasoningStart();
+			}
+		});
+
+		// --- Reasoning summary streaming (only when summary is requested) ---
+		// biome-ignore lint/suspicious/noExplicitAny: event name not in SDK types
+		(rt as any).on('response.reasoning_summary_text.delta', (event: { delta?: string }) => {
+			if (this.onReasoningSummary && event.delta) this.onReasoningSummary(event.delta);
 		});
 
 		// --- Tool call argument streaming (accumulate per item_id) ---
@@ -559,12 +811,13 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			this.pendingFunctionCalls.set(event.item_id, buffer + event.delta);
 		});
 
-		// --- Tool call complete (fires onToolCall) ---
+		// --- Output-item complete: buffer tool calls; close out reasoning items ---
+		// Tool calls are batched per response and dispatched together on
+		// response.done so parallel calls reach the router as one onToolCall(calls[]).
+		// Reasoning items emit onReasoningDone with duration + token count.
 		rt.on('response.output_item.done', (event) => {
 			const item = event.item;
 			if (item.type === 'function_call') {
-				// Prefer accumulated buffer (built from streamed deltas).
-				// Fall back to item.arguments from the done event.
 				const rawArgs = (item.id && this.pendingFunctionCalls.get(item.id)) || item.arguments;
 				if (item.id) this.pendingFunctionCalls.delete(item.id);
 
@@ -584,23 +837,50 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 						return;
 					}
 				}
-				if (this.onToolCall) {
-					this.onToolCall([
-						{
-							id: item.call_id ?? item.id ?? '',
-							name: item.name ?? '',
-							args,
-						},
-					]);
+				this.completedToolCallsThisResponse.push({
+					id: item.call_id ?? item.id ?? '',
+					name: item.name ?? '',
+					args,
+				});
+				// biome-ignore lint/suspicious/noExplicitAny: SDK item.type union missing 'reasoning'
+			} else if ((item as any).type === 'reasoning') {
+				// Reasoning step closed — fire onReasoningDone with duration.
+				// reasoningTokens lands later via response.done.usage; we capture
+				// it after the usage event and re-emit if needed. For now, fire
+				// duration only; tokens flow through onRealtimeLLMUsage.
+				if (this.onReasoningDone && this._reasoningStartedAt !== null) {
+					this.onReasoningDone({
+						durationMs: Date.now() - this._reasoningStartedAt,
+						reasoningTokens: this._reasoningTokensThisResponse,
+					});
 				}
+				this._reasoningStartedAt = null;
 			}
 		});
 
-		// --- Turn complete: clear generating state, flush when_idle queue ---
+		// --- Turn complete: dispatch batched tool calls, normalise usage,
+		//                     flush when_idle queue, signal turn done. ---
 		rt.on('response.done', (event: unknown) => {
 			const e = event as { response?: { id?: string; usage?: unknown } };
 			const normalized = normalizeOpenAIResponseUsage(e?.response?.usage, e?.response?.id);
-			if (normalized && this.onRealtimeLLMUsage) this.onRealtimeLLMUsage(normalized);
+			if (normalized) {
+				// Capture reasoning-token count if exposed; useful for the
+				// next onReasoningDone call if the model fires another reasoning
+				// item in a subsequent response.
+				this._reasoningTokensThisResponse = normalized.modalityBreakdown?.reasoningTokens;
+				if (this.onRealtimeLLMUsage) this.onRealtimeLLMUsage(normalized);
+			}
+
+			// Dispatch all parallel function_call items collected during this
+			// response in a single onToolCall batch. ToolCallRouter then has
+			// the opportunity to dispatch them in parallel.
+			if (this.completedToolCallsThisResponse.length > 0 && this.onToolCall) {
+				const calls = this.completedToolCallsThisResponse;
+				this.completedToolCallsThisResponse = [];
+				this.onToolCall(calls);
+			} else {
+				this.completedToolCallsThisResponse = [];
+			}
 
 			this._isModelGenerating = false;
 			this.lastAssistantItemId = null;
@@ -670,9 +950,14 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		});
 	}
 
-	/** Flush any tool results queued with 'when_idle' scheduling. */
+	/** Flush any tool results queued with 'when_idle' scheduling. While
+	 *  `_quiesced` (cross-provider transcription mode), leaves the queue
+	 *  intact and returns early — `response.create` must not fire during
+	 *  dictation. `unquiesce()` re-runs this flush to drain whatever
+	 *  accumulated. */
 	private flushPendingWhenIdle(): void {
 		if (!this.rt || this._pendingWhenIdle.length === 0) return;
+		if (this._quiesced) return;
 		const queued = this._pendingWhenIdle.splice(0);
 		for (const result of queued) {
 			this.rt.send({

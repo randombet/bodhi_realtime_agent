@@ -26,4 +26,17 @@ export { MultiClientTransport } from './multi-client-transport.js';
 export type { ConnectionContext, MultiClientTransportCallbacks } from './multi-client-transport.js';
 export { OpenAIRealtimeTransport } from './openai-realtime-transport.js';
 export type { OpenAIRealtimeConfig } from './openai-realtime-transport.js';
+export { OpenAIRealtimeWhisperSTTProvider } from './openai-realtime-whisper-stt-provider.js';
+export type { OpenAIRealtimeWhisperConfig } from './openai-realtime-whisper-stt-provider.js';
+export {
+	FEATURES as OPENAI_REALTIME_FEATURES,
+	supports as openaiRealtimeSupports,
+} from './openai-realtime-models.js';
+export type {
+	OpenAIRealtimeAudioFormat,
+	OpenAIRealtimeFeature,
+	OpenAIRealtimeModel,
+	ReasoningSummary,
+} from './openai-realtime-models.js';
+export type { ReasoningEffort } from '../types/transport.js';
 export { zodToJsonSchema } from './zod-to-schema.js';

@@ -472,6 +472,7 @@ describe('GeminiLiveTransport', () => {
 				contextCompression: true,
 				groundingMetadata: true,
 				textResponseModality: true,
+				quiescible: true,
 			});
 		});
 

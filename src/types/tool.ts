@@ -23,6 +23,15 @@ export interface ToolDefinition {
 	parameters: z.ZodSchema;
 	/** Whether this tool runs inline (blocking) or in the background (non-blocking). */
 	execution: ToolExecution;
+	/** Tool-result delivery scheduling hint. Default `'immediate'` for inline tools.
+	 *  - `'immediate'`: send result and trigger a model response (default).
+	 *  - `'silent'`: send the result item to the conversation but do NOT trigger
+	 *    a model response. Useful for tools that are purely informational (e.g.
+	 *    `set_transcription_mode` whose result the user doesn't need spoken back).
+	 *  - `'when_idle'` / `'interrupt'`: less common, see `TransportToolResult.scheduling`.
+	 *  Set on the tool definition so the model never sees the scheduling — it's a
+	 *  framework-side delivery hint. */
+	scheduling?: 'immediate' | 'when_idle' | 'silent' | 'interrupt';
 	/** For background tools: message sent to Gemini immediately so it can acknowledge the request. */
 	pendingMessage?: string;
 	/** Execution timeout in milliseconds (default 30 000). */
