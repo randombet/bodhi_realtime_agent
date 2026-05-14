@@ -20,6 +20,11 @@
  *        "What is 25 times 17?"
  *        "I need help with harder math" (transfers to math helper)
  *        "Goodbye" (ends session gracefully)
+ *        "I want to dictate a long passage" → agent calls set_transcription_mode
+ *        "end dictation" → exit-phrase watcher flips back to agent mode
+ *        "please send what I dictated" → agent calls inject_dictation_as_user_message
+ *   5. (Optional) Send `{"type":"set_transcription_mode","mode":"agent"}` over the
+ *      client WS at any time to flip back to agent mode from a UI button.
  */
 
 import 'dotenv/config';
@@ -32,7 +37,13 @@ import { tool } from 'ai';
 import { z } from 'zod';
 import { VoiceSession } from '../src/core/voice-session.js';
 
+import {
+	discardDictationTool,
+	injectDictationTool,
+	readDictationBufferTool,
+} from '../src/tools/built-in-dictation-tools.js';
 import { OpenAIRealtimeTransport } from '../src/transport/openai-realtime-transport.js';
+import { OpenAIRealtimeWhisperSTTProvider } from '../src/transport/openai-realtime-whisper-stt-provider.js';
 import type { MainAgent, SubagentConfig } from '../src/types/agent.js';
 import type { ToolContext, ToolDefinition } from '../src/types/tool.js';
 
@@ -80,6 +91,50 @@ const transport = new OpenAIRealtimeTransport({
 	// gpt-realtime-2 supports configurable reasoning (low, medium, high, and xhigh). 'low' is the
 	// documented production default — balances latency vs accuracy.
 	reasoning: { effort: 'xhigh' },
+});
+
+// =============================================================================
+// Whisper STT Provider (for transcription mode)
+// =============================================================================
+
+/**
+ * `gpt-realtime-whisper` is used in transcription mode. While in this mode,
+ * the OpenAI Realtime transport is quiesced (no audio output, no
+ * `response.create`) and mic audio is fed to Whisper instead. Whisper
+ * transcripts accumulate in `voiceSession.getDictationBuffer()`; the user
+ * exits dictation mode either by saying "end dictation" / "stop dictation"
+ * (handled by the transcript watcher below) or by sending a JSON command
+ * over the client WS (also handled below).
+ */
+const whisperProvider = new OpenAIRealtimeWhisperSTTProvider({
+	apiKey: OPENAI_API_KEY,
+});
+
+// =============================================================================
+// Lazy session proxy
+// =============================================================================
+
+/**
+ * The built-in dictation tools and `set_transcription_mode` need a live
+ * `VoiceSession` reference, but the agent's tools array must exist before
+ * VoiceSession is constructed (the agent is passed into the constructor).
+ *
+ * Solution: a Proxy that forwards to `sessionRef.current` at call time.
+ * The dictation tools never touch the session at factory time — they only
+ * capture it for use inside `execute()`. By the time the model calls any
+ * of them, `sessionRef.current` is populated.
+ */
+const sessionProxy = new Proxy({} as VoiceSession, {
+	get(_target, prop, receiver) {
+		const live = sessionRef;
+		if (!live) {
+			throw new Error(
+				`sessionProxy: VoiceSession not constructed yet (accessed ${String(prop)})`,
+			);
+		}
+		const value = Reflect.get(live, prop, receiver);
+		return typeof value === 'function' ? value.bind(live) : value;
+	},
 });
 
 // =============================================================================
@@ -407,6 +462,57 @@ and the user wants general assistance again.`,
 	execute: async () => ({ status: 'transferred' }),
 };
 
+/**
+ * Switch the session between agent and transcription mode at the LLM's
+ * request. Typical use: the user says "I want to dictate a long passage"
+ * and the agent calls this tool with mode='transcription'. The
+ * transport quiesces (the agent stops mid-response if needed), audio is
+ * routed to Whisper, and transcripts accumulate in the dictation buffer.
+ *
+ * The agent CANNOT call this tool with mode='agent' while already in
+ * transcription mode — once in dictation, the agent is silenced and tool
+ * calls won't fire. Exits are user-driven: either say "end dictation"
+ * (the transcript watcher in main() flips back) or send a JSON command
+ * over the client WS (also handled in main()).
+ */
+const setTranscriptionMode: ToolDefinition = {
+	name: 'set_transcription_mode',
+	description:
+		'Switch between "agent" mode (assistant is listening and replies) and "transcription" mode ' +
+		'(user dictates a longer passage; assistant goes silent until the user says "end dictation"). ' +
+		'Call ONLY when the user explicitly asks to dictate, take a memo, or compose a longer message. ' +
+		'Once in transcription mode this tool CANNOT switch back — the user exits by saying "end dictation".',
+	parameters: z.object({
+		mode: z
+			.enum(['agent', 'transcription'])
+			.describe('Target mode. Typically "transcription"; reverse is user-driven.'),
+	}),
+	execution: 'inline',
+	execute: async (args) => {
+		const { mode } = args as { mode: 'agent' | 'transcription' };
+		if (!sessionRef) return { error: 'session_not_ready' };
+		await sessionRef.setTranscriptionMode(mode);
+		console.log(`${ts()} [Tool] set_transcription_mode → ${mode}`);
+		return { mode };
+	},
+};
+
+// =============================================================================
+// Dictation-buffer tools (factories from the framework; closed over sessionProxy)
+// =============================================================================
+
+/**
+ * Three built-in factory tools that operate on the dictation buffer.
+ * Each factory closes over `sessionProxy`, which forwards to the live
+ * `VoiceSession` once it's constructed (lazy-Proxy pattern from above).
+ *
+ * The agent uses these AFTER the user has exited transcription mode and
+ * asks the agent to do something with what they dictated.
+ */
+const injectDictation = injectDictationTool(sessionProxy);
+const readDictation = readDictationBufferTool(sessionProxy);
+const discardDictation = discardDictationTool(sessionProxy);
+
 // =============================================================================
 // Agent Definitions
 // =============================================================================
@@ -449,6 +555,10 @@ TOOLS YOU CAN USE:
 - Video Generation: Create a short video from a description. Warn the user it takes a minute or two.
 - Math Expert: For harder math questions, you can hand off to a math specialist.
 - End Session: When the user says goodbye or is done, call end_session.
+- Set Transcription Mode: When the user wants to dictate a longer message or memo, call set_transcription_mode with mode "transcription". You go silent; the user dictates; they say "end dictation" to come back to you.
+- Inject Dictation: After the user finishes dictating and tells you to "send it" or "use that", call inject_dictation_as_user_message — it adds their dictation to the conversation as their next message.
+- Read Dictation Buffer: If you want to confirm with the user what they dictated before injecting, call read_dictation_buffer first.
+- Discard Dictation: If the user says "scratch that" or "never mind" about a dictation, call discard_dictation.
 
 TOOL GUIDELINES:
 - Use the calculator for simple math.
@@ -456,6 +566,7 @@ TOOL GUIDELINES:
 - When the user asks for any picture, image, card, or illustration, you MUST call generate_image immediately. Do not describe an image verbally — always call the tool so the user can see it.
 - When the user asks for a video, animation, or movie clip, you MUST call generate_video immediately. Warn them it takes a minute or two. Do not describe the video verbally — always call the tool.
 - When the user says goodbye, says they are done, or wants to hang up, say a warm goodbye and call end_session.
+- When the user asks to dictate, take a memo, or compose a longer passage, briefly acknowledge and call set_transcription_mode with mode "transcription". Do NOT call set_transcription_mode with mode "agent" — the user does that by saying "end dictation".
 
 THINGS TO AVOID:
 - Never say "As an AI" or "As a language model".
@@ -463,7 +574,19 @@ THINGS TO AVOID:
 - Never assume the user knows how to do something. Offer to walk them through it.
 - Never interrupt. Always wait for the user to finish speaking.
 - Never use filler like "Great question!" — just answer directly and warmly.`,
-	tools: [calculate, getCurrentTime, slowWebSearch, generateImage, generateVideo, endSession, transferFromMain],
+	tools: [
+		calculate,
+		getCurrentTime,
+		slowWebSearch,
+		generateImage,
+		generateVideo,
+		endSession,
+		transferFromMain,
+		setTranscriptionMode,
+		injectDictation,
+		readDictation,
+		discardDictation,
+	],
 	onEnter: async () => {
 		console.log(`${ts()} [Agent] Main agent entered`);
 	},
@@ -516,6 +639,7 @@ async function main() {
 		model: google('gemini-2.5-flash'),
 		subagentConfigs: { generate_image: imageSubagent, generate_video: videoSubagent },
 		transport, // Inject OpenAI Realtime transport
+		whisperProvider, // Powers transcription mode (gpt-realtime-whisper)
 		hooks: {
 			onSessionStart: (event) => {
 				console.log(`${ts()} [Session] Started: ${event.sessionId} (agent: ${event.agentName})`);
@@ -541,6 +665,52 @@ async function main() {
 	});
 
 	sessionRef = session;
+
+	// =========================================================================
+	// Transcription-mode exit mechanisms (two paths)
+	// =========================================================================
+
+	// (1) Voice exit: watch Whisper transcripts for "end dictation" /
+	//     "stop dictation". VoiceSession already wired whisperProvider.onTranscript
+	//     to populate its dictation buffer; we wrap that listener so our exit
+	//     phrase check runs in addition (not instead).
+	const wiredOnTranscript = whisperProvider.onTranscript;
+	whisperProvider.onTranscript = (text, turnId) => {
+		wiredOnTranscript?.(text, turnId);
+		if (/\b(end|stop)\s+dictation\b/i.test(text)) {
+			console.log(`${ts()} [Watcher] Exit phrase heard — flipping to agent mode`);
+			void session.setTranscriptionMode('agent').catch((err) => {
+				console.error(`${ts()} [Watcher] setTranscriptionMode failed`, err);
+			});
+		}
+	};
+
+	// (2) JSON-over-WS exit: a UI client (or test harness) can send
+	//     { "type": "set_transcription_mode", "mode": "agent" | "transcription" }
+	//     over the client WebSocket. The framework routes JSON messages to
+	//     session.feedJsonFromClient, which fires onJsonMessage hook if wired.
+	//     For demos we monkey-patch the session's internal handleJsonFromClient
+	//     to also recognise our custom message type. In a production app you'd
+	//     wire this through the hosted-service layer instead.
+	const sessionWithJsonHook = session as unknown as {
+		handleJsonFromClient: (msg: Record<string, unknown>) => void;
+	};
+	const originalHandleJson = sessionWithJsonHook.handleJsonFromClient.bind(session);
+	sessionWithJsonHook.handleJsonFromClient = (msg: Record<string, unknown>) => {
+		if (msg.type === 'set_transcription_mode') {
+			const mode = msg.mode;
+			if (mode === 'agent' || mode === 'transcription') {
+				console.log(`${ts()} [JSON] set_transcription_mode → ${mode}`);
+				void session.setTranscriptionMode(mode).catch((err) => {
+					console.error(`${ts()} [JSON] setTranscriptionMode failed`, err);
+				});
+				return;
+			}
+			console.warn(`${ts()} [JSON] set_transcription_mode: invalid mode "${String(mode)}"`);
+			return;
+		}
+		originalHandleJson(msg);
+	};
 
 	// Subscribe to events for logging — track item index to print only new items per turn
 	let lastLoggedIndex = 0;

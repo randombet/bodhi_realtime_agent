@@ -2288,8 +2288,15 @@ export class VoiceSession {
 			// Best-effort: clearAudio is a no-op when disconnected.
 		}
 		// Bring up whisper. Idempotent — no-op if prewarm already ran.
+		// setTranscriptionMode('transcription') above already verified that
+		// whisperProvider is set, so this is safe.
+		const whisper = this.whisperProvider;
+		if (!whisper) {
+			this.internalMode = 'agent';
+			throw new Error('enterTranscriptionMode: whisperProvider missing');
+		}
 		try {
-			await this.whisperProvider!.start();
+			await whisper.start();
 		} catch (err) {
 			// Rollback on failure.
 			this.internalMode = 'agent';
