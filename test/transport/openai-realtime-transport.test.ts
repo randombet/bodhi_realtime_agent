@@ -843,3 +843,306 @@ describe('OpenAIRealtimeTransport', () => {
 		});
 	});
 });
+
+// ---------------------------------------------------------------------------
+// Phase 1 features: gpt-realtime-2 reasoning, parallel tools (covered above
+// under "tool call handling"), audio format, quiesce/unquiesce, onCacheBust.
+// ---------------------------------------------------------------------------
+
+describe('OpenAIRealtimeTransport — Phase 1 features (gpt-realtime-2)', () => {
+	let transport: OpenAIRealtimeTransport;
+	let mockRt: ReturnType<typeof createMockRt>;
+
+	function setup(config: Parameters<typeof OpenAIRealtimeTransport.prototype.constructor>[0]) {
+		transport = new OpenAIRealtimeTransport(config);
+		mockRt = createMockRt();
+		// biome-ignore lint/suspicious/noExplicitAny: test mock injection
+		(transport as any).rt = mockRt;
+		// biome-ignore lint/suspicious/noExplicitAny: test mock injection
+		(transport as any)._isConnected = true;
+		// biome-ignore lint/suspicious/noExplicitAny: test mock injection
+		(transport as any).wireEventListeners();
+	}
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	describe('capabilities resolve from model', () => {
+		it('gpt-realtime-2 enables reasoningEffort, parallelToolCalls, automaticPreambles', () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+			expect(transport.capabilities.reasoningEffort).toBe(true);
+			expect(transport.capabilities.parallelToolCalls).toBe(true);
+			expect(transport.capabilities.automaticPreambles).toBe(true);
+			expect(transport.capabilities.quiescible).toBe(true);
+		});
+
+		it('gpt-realtime (legacy) disables reasoning + parallel tools + preambles', () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime' });
+			expect(transport.capabilities.reasoningEffort).toBe(false);
+			expect(transport.capabilities.parallelToolCalls).toBe(false);
+			expect(transport.capabilities.automaticPreambles).toBe(false);
+		});
+
+		it('unknown model defaults to all-false on gated flags', () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-future' });
+			expect(transport.capabilities.reasoningEffort).toBe(false);
+			expect(transport.capabilities.parallelToolCalls).toBe(false);
+		});
+	});
+
+	describe('reasoning serialisation gating', () => {
+		it('serialises reasoning into session config for gpt-realtime-2', () => {
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				reasoning: { effort: 'low', summary: 'auto' },
+			});
+			// biome-ignore lint/suspicious/noExplicitAny: probing build-config output
+			const session = (transport as any).buildSessionConfig();
+			expect(session.reasoning).toEqual({ effort: 'low', summary: 'auto' });
+		});
+
+		it('drops reasoning silently with warn on older model (strict=false)', () => {
+			const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime',
+				reasoning: { effort: 'low' },
+			});
+			// biome-ignore lint/suspicious/noExplicitAny: probing build-config output
+			const session = (transport as any).buildSessionConfig();
+			expect(session.reasoning).toBeUndefined();
+			expect(warn).toHaveBeenCalled();
+			expect((warn.mock.calls[0]?.[0] as string) ?? '').toContain('reasoning');
+		});
+
+		it('throws UNSUPPORTED_FEATURE on older model when strict=true', () => {
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime',
+				reasoning: { effort: 'low' },
+				strict: true,
+			});
+			// biome-ignore lint/suspicious/noExplicitAny: probing build-config output
+			expect(() => (transport as any).buildSessionConfig()).toThrow(/UNSUPPORTED_FEATURE/);
+		});
+	});
+
+	describe('reasoning lifecycle callbacks', () => {
+		it('fires onReasoningStart/Done with durationMs', async () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+			const started = vi.fn();
+			const done = vi.fn();
+			transport.onReasoningStart = started;
+			transport.onReasoningDone = done;
+
+			mockRt.emit('response.created', { response: { id: 'r1' } });
+			// biome-ignore lint/suspicious/noExplicitAny: SDK union missing 'reasoning'
+			mockRt.emit('response.output_item.added', {
+				item: { id: 'r_item', type: 'reasoning' } as any,
+			});
+			expect(started).toHaveBeenCalledOnce();
+
+			await new Promise((r) => setTimeout(r, 5));
+
+			// biome-ignore lint/suspicious/noExplicitAny: SDK union missing 'reasoning'
+			mockRt.emit('response.output_item.done', {
+				item: { id: 'r_item', type: 'reasoning' } as any,
+			});
+			expect(done).toHaveBeenCalledOnce();
+			const info = done.mock.calls[0]?.[0] as { durationMs: number };
+			expect(info.durationMs).toBeGreaterThanOrEqual(0);
+		});
+
+		it('streams reasoning summary text to onReasoningSummary', () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+			const chunks: string[] = [];
+			transport.onReasoningSummary = (t) => chunks.push(t);
+
+			mockRt.emit('response.reasoning_summary_text.delta', { delta: 'Thinking ' });
+			mockRt.emit('response.reasoning_summary_text.delta', { delta: 'about it.' });
+
+			expect(chunks).toEqual(['Thinking ', 'about it.']);
+		});
+	});
+
+	describe('audio format propagation', () => {
+		it('PCM 24 kHz is the default; bytesPerSample = 2', () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+			expect(transport.audioFormat).toEqual({
+				inputSampleRate: 24000,
+				outputSampleRate: 24000,
+				channels: 1,
+				bitDepth: 16,
+				encoding: 'pcm',
+			});
+		});
+
+		it('G.711 mu-law: input rate = 8000, bitDepth = 8, encoding = pcmu', () => {
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				audioInputFormat: { type: 'audio/pcmu' },
+				audioOutputFormat: { type: 'audio/pcmu' },
+			});
+			expect(transport.audioFormat.encoding).toBe('pcmu');
+			expect(transport.audioFormat.bitDepth).toBe(8);
+			expect(transport.audioFormat.inputSampleRate).toBe(8000);
+			expect(transport.audioFormat.outputSampleRate).toBe(8000);
+		});
+
+		it('rejects non-24 kHz PCM rate at build-session-config time', () => {
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				audioInputFormat: { type: 'audio/pcm', rate: 16000 },
+			});
+			// biome-ignore lint/suspicious/noExplicitAny: probing build-config output
+			expect(() => (transport as any).buildSessionConfig()).toThrow(/UNSUPPORTED_SAMPLE_RATE/);
+		});
+
+		it('interruption math uses output rate + bytes-per-sample from format', () => {
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				audioInputFormat: { type: 'audio/pcmu' },
+				audioOutputFormat: { type: 'audio/pcmu' },
+			});
+			// Feed 1 second of G.711 audio: 8000 samples × 1 byte = 8000 bytes.
+			const oneSecMuLaw = Buffer.alloc(8000).toString('base64');
+			mockRt.emit('response.output_audio.delta', { delta: oneSecMuLaw });
+
+			// biome-ignore lint/suspicious/noExplicitAny: probing internal state
+			const ms = (transport as any).audioOutputMs as number;
+			expect(ms).toBeCloseTo(1000, -1);
+		});
+	});
+
+	describe('triggerGeneration with reasoning override', () => {
+		it('emits response.create with response.reasoning when overrides supplied', () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+			transport.triggerGeneration('clarify', { reasoning: { effort: 'medium' } });
+			const last = mockRt.sent[mockRt.sent.length - 1] as {
+				type: string;
+				response?: { instructions?: string; reasoning?: { effort?: string } };
+			};
+			expect(last.type).toBe('response.create');
+			expect(last.response?.instructions).toBe('clarify');
+			expect(last.response?.reasoning?.effort).toBe('medium');
+		});
+
+		it('drops reasoning override silently for models that do not support it', () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime' });
+			transport.triggerGeneration(undefined, { reasoning: { effort: 'medium' } });
+			const last = mockRt.sent[mockRt.sent.length - 1] as {
+				type: string;
+				response?: { reasoning?: unknown };
+			};
+			// No response.reasoning landed in the payload.
+			expect(last.response?.reasoning).toBeUndefined();
+		});
+
+		it('preserves existing behaviour when no overrides are supplied', () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+			transport.triggerGeneration();
+			const last = mockRt.sent[mockRt.sent.length - 1] as { type: string; response?: unknown };
+			expect(last.type).toBe('response.create');
+			expect(last.response).toBeUndefined();
+		});
+	});
+
+	describe('quiesce / unquiesce', () => {
+		it('quiesce sends response.cancel when a response is in flight and suppresses audio', async () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+			const audio: string[] = [];
+			transport.onAudioOutput = (d) => audio.push(d);
+
+			mockRt.emit('response.created', { response: { id: 'r1' } });
+			mockRt.emit('response.output_audio.delta', { delta: Buffer.alloc(4).toString('base64') });
+			expect(audio).toHaveLength(1);
+
+			await transport.quiesce?.();
+
+			const cancel = mockRt.sent.find((m) => m.type === 'response.cancel');
+			expect(cancel).toBeDefined();
+
+			// Subsequent audio is suppressed.
+			mockRt.emit('response.output_audio.delta', { delta: Buffer.alloc(4).toString('base64') });
+			expect(audio).toHaveLength(1);
+
+			// Unquiesce — audio flows again.
+			await transport.unquiesce?.();
+			mockRt.emit('response.output_audio.delta', { delta: Buffer.alloc(4).toString('base64') });
+			expect(audio).toHaveLength(2);
+		});
+
+		it('quiesce is a no-op (no response.cancel) when nothing is generating', async () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+			await transport.quiesce?.();
+			expect(mockRt.sent.find((m) => m.type === 'response.cancel')).toBeUndefined();
+		});
+
+		it('quiesce / unquiesce are idempotent', async () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+			mockRt.emit('response.created', { response: { id: 'r1' } });
+			await transport.quiesce?.();
+			await transport.quiesce?.();
+			// Only one response.cancel because second call sees _isModelGenerating=false.
+			const cancels = mockRt.sent.filter((m) => m.type === 'response.cancel');
+			expect(cancels).toHaveLength(1);
+
+			await transport.unquiesce?.();
+			await transport.unquiesce?.();
+			// No-op pair; nothing extra sent.
+			expect(mockRt.sent.filter((m) => m.type === 'response.cancel')).toHaveLength(1);
+		});
+	});
+
+	describe('onCacheBust telemetry', () => {
+		it('fires instructions_changed on updateSession({ instructions })', () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+			const reasons: string[] = [];
+			transport.onCacheBust = (r) => reasons.push(r);
+
+			transport.updateSession({ instructions: 'be helpful' });
+			expect(reasons).toEqual(['instructions_changed']);
+		});
+
+		it('fires tools_changed on updateSession({ tools })', () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+			const reasons: string[] = [];
+			transport.onCacheBust = (r) => reasons.push(r);
+
+			transport.updateSession({ tools: [makeTool('a')] });
+			expect(reasons).toEqual(['tools_changed']);
+		});
+
+		it('prefers instructions_changed when both fields change in one call', () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+			const reasons: string[] = [];
+			transport.onCacheBust = (r) => reasons.push(r);
+
+			transport.updateSession({ instructions: 'x', tools: [makeTool('a')] });
+			expect(reasons).toEqual(['instructions_changed']);
+		});
+
+		it('does not fire on sendContent (tail append, no prefix mutation)', () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+			const reasons: string[] = [];
+			transport.onCacheBust = (r) => reasons.push(r);
+
+			transport.sendContent([{ role: 'user', text: 'hi' }], true);
+			expect(reasons).toEqual([]);
+		});
+
+		it('does not fire on responseModality-only updates', () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+			const reasons: string[] = [];
+			transport.onCacheBust = (r) => reasons.push(r);
+
+			transport.updateSession({ responseModality: 'text' });
+			expect(reasons).toEqual([]);
+		});
+	});
+});
