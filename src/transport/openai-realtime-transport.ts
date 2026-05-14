@@ -386,10 +386,14 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		}
 	}
 
-	/** Resume normal operation. Idempotent. */
+	/** Resume normal operation. Idempotent. Drains any when_idle tool
+	 *  results that accumulated while quiesced — those were deferred so
+	 *  flushPendingWhenIdle wouldn't fire `response.create` during
+	 *  dictation mode. */
 	async unquiesce(): Promise<void> {
 		this._quiesced = false;
 		this._suppressAudio = false;
+		this.flushPendingWhenIdle();
 	}
 
 	// --- Session configuration ---
@@ -946,9 +950,14 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		});
 	}
 
-	/** Flush any tool results queued with 'when_idle' scheduling. */
+	/** Flush any tool results queued with 'when_idle' scheduling. While
+	 *  `_quiesced` (cross-provider transcription mode), leaves the queue
+	 *  intact and returns early — `response.create` must not fire during
+	 *  dictation. `unquiesce()` re-runs this flush to drain whatever
+	 *  accumulated. */
 	private flushPendingWhenIdle(): void {
 		if (!this.rt || this._pendingWhenIdle.length === 0) return;
+		if (this._quiesced) return;
 		const queued = this._pendingWhenIdle.splice(0);
 		for (const result of queued) {
 			this.rt.send({

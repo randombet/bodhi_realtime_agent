@@ -74,9 +74,12 @@ const google = createGoogleGenerativeAI({ apiKey: GEMINI_API_KEY });
 
 const transport = new OpenAIRealtimeTransport({
 	apiKey: OPENAI_API_KEY,
-	model: 'gpt-realtime',
+	model: 'gpt-realtime-2',
 	voice: 'coral',
 	turnDetection: { type: 'semantic_vad', eagerness: 'medium' },
+	// gpt-realtime-2 supports configurable reasoning. 'low' is the
+	// documented production default — balances latency vs accuracy.
+	reasoning: { effort: 'low' },
 });
 
 // =============================================================================

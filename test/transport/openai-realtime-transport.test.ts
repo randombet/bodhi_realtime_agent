@@ -1099,6 +1099,35 @@ describe('OpenAIRealtimeTransport — Phase 1 features (gpt-realtime-2)', () => 
 			// No-op pair; nothing extra sent.
 			expect(mockRt.sent.filter((m) => m.type === 'response.cancel')).toHaveLength(1);
 		});
+
+		it('defers when_idle response.create until unquiesce (no leak during dictation mode)', async () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+
+			// Simulate: model is generating in agent mode → a when_idle tool result
+			// arrives → it's buffered in _pendingWhenIdle.
+			mockRt.emit('response.created', { response: { id: 'r1' } });
+			transport.sendToolResult({
+				id: 'call_bg',
+				name: 'background_task',
+				result: { ok: true },
+				scheduling: 'when_idle',
+			});
+			// Nothing flushed yet — model is still generating.
+			expect(mockRt.sent.filter((m) => m.type === 'conversation.item.create')).toHaveLength(0);
+
+			// Session flips to transcription mode (e.g., via VoiceSession).
+			await transport.quiesce?.();
+
+			// While quiesced, response.done arrives — flush MUST NOT fire response.create.
+			mockRt.emit('response.done', { response: { id: 'r1' } });
+			expect(mockRt.sent.filter((m) => m.type === 'response.create')).toHaveLength(0);
+			expect(mockRt.sent.filter((m) => m.type === 'conversation.item.create')).toHaveLength(0);
+
+			// Unquiesce drains the deferred queue: one item.create + one response.create.
+			await transport.unquiesce?.();
+			expect(mockRt.sent.filter((m) => m.type === 'conversation.item.create')).toHaveLength(1);
+			expect(mockRt.sent.filter((m) => m.type === 'response.create')).toHaveLength(1);
+		});
 	});
 
 	describe('onCacheBust telemetry', () => {
