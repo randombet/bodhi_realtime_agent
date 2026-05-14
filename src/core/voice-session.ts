@@ -149,6 +149,11 @@ export interface VoiceSessionConfig {
 	 *  When set, transport built-in transcription is automatically disabled.
 	 *  When omitted, the transport's built-in transcription is used. */
 	sttProvider?: STTProvider;
+	/** Sample rate of inbound client PCM (what `handleAudioFromClient` receives).
+	 *  Default 16000. The framework resamples to whatever the transport / STT
+	 *  / Whisper provider expects. Common values: 16000 (TwilioBridge after
+	 *  G.711 decode, most browser RTC), 24000 (some browser flows). */
+	clientAudioInputRate?: number;
 	/** Initial transcription mode for the session. Default `'agent'`.
 	 *  - `'agent'` (default): mic audio flows to `transport`; the agent
 	 *    responds. Existing behaviour.
@@ -266,6 +271,8 @@ export class VoiceSession {
 	private processedKnowledgeBase: ProcessedKnowledgeBase | null = null;
 	private turnId = 0;
 	private sttProvider?: STTProvider;
+	/** Resolved at construction from config.clientAudioInputRate (default 16000). */
+	private clientAudioInputRate = 16000;
 	// --- Phase 3: transcription-mode state ---
 	private whisperProvider?: STTProvider;
 	private internalMode: InternalTranscriptionMode = 'agent';
@@ -339,6 +346,7 @@ export class VoiceSession {
 
 	constructor(config: VoiceSessionConfig) {
 		this.config = config;
+		this.clientAudioInputRate = config.clientAudioInputRate ?? 16000;
 		this.ownsClientTransport = !config.clientSender;
 		this.eventBus = new EventBus();
 		this.hooks = new HooksManager();
@@ -551,12 +559,31 @@ export class VoiceSession {
 		if (config.sttProvider) {
 			this.sttProvider = config.sttProvider;
 
-			// Configure with the transport's actual audio format
-			this.sttProvider.configure({
-				sampleRate: this.transport.audioFormat.inputSampleRate,
-				bitDepth: this.transport.audioFormat.bitDepth,
-				channels: this.transport.audioFormat.channels,
-			});
+			// Configure with the format VoiceSession actually FEEDS — not the
+			// transport's wire format. routeAudioToAgent feeds raw client PCM
+			// (16-bit, native rate) when the provider supports PCM; only the
+			// rare μ-law-only provider gets the 8 kHz 8-bit path.
+			const sttSupportsPcmu = this.sttProvider.supportedEncodings?.includes('pcmu');
+			const sttSupportsPcm = (this.sttProvider.supportedEncodings ?? ['pcm']).includes('pcm');
+			if (sttSupportsPcm) {
+				this.sttProvider.configure({
+					sampleRate: this.clientAudioInputRate,
+					bitDepth: 16,
+					channels: 1,
+					encoding: 'pcm',
+				});
+			} else if (sttSupportsPcmu) {
+				this.sttProvider.configure({
+					sampleRate: 8000,
+					bitDepth: 8,
+					channels: 1,
+					encoding: 'pcmu',
+				});
+			} else {
+				throw new Error(
+					'VoiceSession: sttProvider declares supportedEncodings that does not include pcm or pcmu',
+				);
+			}
 
 			// Wire callbacks — turn-aware ordering protection.
 			// Accept results from the current turn or the immediately preceding turn.
@@ -598,13 +625,15 @@ export class VoiceSession {
 				);
 			}
 			this.whisperProvider = config.whisperProvider;
-			// Configure with the transport's audio format. The provider may
-			// reject non-PCM or non-24kHz; that's a user error, surface it.
+			// Configure with the format VoiceSession actually FEEDS — Whisper
+			// gets PCM16 @ 24 kHz mono after routeAudioToWhisper resamples.
+			// Not the transport's wire format (which may be 16 kHz Gemini or
+			// 8 kHz pcmu OpenAI telephony).
 			this.whisperProvider.configure({
-				sampleRate: this.transport.audioFormat.inputSampleRate,
-				bitDepth: this.transport.audioFormat.bitDepth,
-				channels: this.transport.audioFormat.channels,
-				encoding: this.transport.audioFormat.encoding,
+				sampleRate: 24000,
+				bitDepth: 16,
+				channels: 1,
+				encoding: 'pcm',
 			});
 			// Whisper transcripts feed the dictation buffer ONLY — never the
 			// TranscriptManager / ConversationContext path (that would
@@ -1273,34 +1302,44 @@ export class VoiceSession {
 	/** Forward PCM frame to the agent transport + optional sttProvider. */
 	private routeAudioToAgent(data: Buffer): void {
 		// PCM is the source of truth at this layer. Two consumers fork off:
-		// (a) the transport, which may want G.711 μ-law (telephony).
-		// (b) the STT provider, which advertises supportedEncodings.
-		const pcmBase64 = data.toString('base64');
+		// (a) the transport: G.711 μ-law (telephony) requires resample to
+		//     8 kHz THEN encode. PCM transports just need rate-matching to
+		//     transport.audioFormat.inputSampleRate.
+		// (b) the STT provider: pass raw client PCM at its native rate
+		//     (the rate the provider was configured with).
+		const clientRate = this.clientAudioInputRate;
+		const transportRate = this.transport.audioFormat.inputSampleRate;
+		const transportPcm =
+			clientRate === transportRate ? data : resamplePcm(data, clientRate, transportRate, 16);
 		const transportAudio =
 			this.transport.audioFormat.encoding === 'pcmu'
-				? this.encodePcmToMulawBase64(data)
-				: pcmBase64;
+				? this.encodePcmToMulawBase64(transportPcm) // already at 8 kHz from resample above
+				: transportPcm.toString('base64');
 		this.transport.sendAudio(transportAudio);
 
 		if (this.sttProvider) {
 			const sttSupportsPcmu = this.sttProvider.supportedEncodings?.includes('pcmu');
 			const sttSupportsPcm = (this.sttProvider.supportedEncodings ?? ['pcm']).includes('pcm');
 			if (sttSupportsPcm) {
-				this.sttProvider.feedAudio(pcmBase64);
+				// Pass PCM at the client's native rate — that's what STT was
+				// configured for in the constructor.
+				this.sttProvider.feedAudio(data.toString('base64'));
 			} else if (sttSupportsPcmu) {
-				this.sttProvider.feedAudio(this.encodePcmToMulawBase64(data));
+				// μ-law-only STT: same path as the transport above.
+				const stt8k = clientRate === 8000 ? data : resamplePcm(data, clientRate, 8000, 16);
+				this.sttProvider.feedAudio(this.encodePcmToMulawBase64(stt8k));
 			}
 		}
 	}
 
 	/** Forward PCM frame to the whisperProvider. Whisper accepts only PCM @ 24 kHz;
-	 *  VoiceSession resamples here if the transport rate differs. */
+	 *  VoiceSession resamples here. */
 	private routeAudioToWhisper(data: Buffer): void {
 		if (!this.whisperProvider) return;
-		// Cross-provider mode: e.g. Gemini Live transport (16 kHz) + Whisper (24 kHz).
-		// One resample at this seam keeps Whisper single-rate.
-		const transportRate = this.transport.audioFormat.inputSampleRate;
-		const pcm = transportRate === 24000 ? data : resamplePcm(data, transportRate, 24000, 16);
+		// Cross-provider mode: e.g. Gemini Live transport (16 kHz client PCM) +
+		// Whisper (24 kHz). One resample at this seam keeps Whisper single-rate.
+		const clientRate = this.clientAudioInputRate;
+		const pcm = clientRate === 24000 ? data : resamplePcm(data, clientRate, 24000, 16);
 		this.whisperProvider.feedAudio(pcm.toString('base64'));
 	}
 
@@ -1412,11 +1451,12 @@ export class VoiceSession {
 		this.signalAudioStarted();
 		const raw = Buffer.from(data, 'base64');
 		// Telephony mode: transport emits G.711 μ-law on the wire; client
-		// transports (web RTC, mic playback) expect PCM. Decode at this seam.
-		// The TwilioBridge code path bypasses this fork; it consumes the
-		// transport's audioFormat directly via its own bridge.
-		const buffer: Buffer =
-			this.transport.audioFormat.encoding === 'pcmu' ? this.decodeMulawToPcm(raw) : raw;
+		// transports (web RTC, mic playback) expect PCM. Decode at this seam
+		// using the OUTPUT-side encoding (input encoding may differ on mixed
+		// telephony configs). The TwilioBridge code path bypasses this fork;
+		// it consumes the transport's audioFormat directly via its own bridge.
+		const outEnc = this.transport.audioFormat.outputEncoding ?? this.transport.audioFormat.encoding;
+		const buffer: Buffer = outEnc === 'pcmu' ? this.decodeMulawToPcm(raw) : raw;
 		this.clientTransport.sendAudioToClient(buffer);
 	}
 

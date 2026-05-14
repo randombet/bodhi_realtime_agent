@@ -126,7 +126,22 @@ export class OpenAIRealtimeWhisperSTTProvider implements STTProvider {
 		if (this._state === 'connected' || this._state === 'connecting') return;
 		if (this._state === 'stopped' || this._state === 'idle') {
 			this._state = 'connecting';
-			return this._connect();
+			try {
+				await this._connect();
+			} catch (err) {
+				// Reset to idle so a subsequent start() can retry instead of
+				// silently returning because state is stuck at 'connecting'.
+				this._state = 'idle';
+				if (this._ws) {
+					try {
+						this._ws.close();
+					} catch {
+						/* best-effort */
+					}
+					this._ws = null;
+				}
+				throw err;
+			}
 		}
 	}
 

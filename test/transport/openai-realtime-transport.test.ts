@@ -118,6 +118,8 @@ describe('OpenAIRealtimeTransport', () => {
 				channels: 1,
 				bitDepth: 16,
 				encoding: 'pcm',
+				outputBitDepth: 16,
+				outputEncoding: 'pcm',
 			});
 		});
 	});
@@ -974,6 +976,8 @@ describe('OpenAIRealtimeTransport — Phase 1 features (gpt-realtime-2)', () => 
 				channels: 1,
 				bitDepth: 16,
 				encoding: 'pcm',
+				outputBitDepth: 16,
+				outputEncoding: 'pcm',
 			});
 		});
 

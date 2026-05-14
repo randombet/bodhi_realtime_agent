@@ -1667,6 +1667,7 @@ describe('VoiceSession', () => {
 				sampleRate: 16000,
 				bitDepth: 16,
 				channels: 1,
+				encoding: 'pcm',
 			});
 		});
 

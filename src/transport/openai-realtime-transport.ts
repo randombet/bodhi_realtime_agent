@@ -178,8 +178,14 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	// Text mode: whether the transport is configured for text-mode responses (for TTS)
 	private _textMode = false;
 
-	// Audio suppression: stop forwarding audio deltas after interruption
+	// Audio suppression: stop forwarding audio deltas after interruption.
+	// Cleared on response.created. Distinct from _quiesced (which persists
+	// across responses until unquiesce()).
 	private _suppressAudio = false;
+	// Durable suppression: set by quiesce(), cleared by unquiesce(). Audio
+	// is dropped at the wire-event handlers while this is true regardless of
+	// response lifecycle.
+	private _quiesced = false;
 
 	constructor(config: OpenAIRealtimeConfig) {
 		this.config = config;
@@ -203,7 +209,10 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		};
 	}
 
-	/** Compute the wire audio format from `audioInputFormat` / `audioOutputFormat`. */
+	/** Compute the wire audio format from `audioInputFormat` / `audioOutputFormat`.
+	 *  Carries both input and output encodings / bit-depths so consumers that
+	 *  decode output audio (handleAudioOutput) and compute interruption ms
+	 *  (audioOutputMs) use the right side. */
 	private resolveAudioFormat(): AudioFormatSpec {
 		const inFmt = this.config.audioInputFormat ?? { type: 'audio/pcm', rate: 24000 };
 		const outFmt = this.config.audioOutputFormat ?? { type: 'audio/pcm', rate: 24000 };
@@ -211,18 +220,14 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		const outEnc: 'pcm' | 'pcmu' = outFmt.type === 'audio/pcmu' ? 'pcmu' : 'pcm';
 		const inRate = inEnc === 'pcmu' ? 8000 : (inFmt.rate ?? 24000);
 		const outRate = outEnc === 'pcmu' ? 8000 : (outFmt.rate ?? 24000);
-		// Input and output may differ in rate but for OpenAI Realtime today they
-		// match. We carry both because AudioFormatSpec requires it.
 		return {
 			inputSampleRate: inRate,
 			outputSampleRate: outRate,
 			channels: 1,
 			bitDepth: inEnc === 'pcmu' ? 8 : 16,
-			// AudioFormatSpec.encoding is single-valued; we expose the input encoding
-			// because that's what consumers (telephony bridge, STT providers) drive
-			// off. Output encoding for transport-emitted audio is decoded by the
-			// telephony bridge using audioOutputFormat directly if needed.
 			encoding: inEnc,
+			outputBitDepth: outEnc === 'pcmu' ? 8 : 16,
+			outputEncoding: outEnc,
 		};
 	}
 
@@ -366,6 +371,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	 *
 	 *  Idempotent: calling quiesce() while already quiesced is a no-op. */
 	async quiesce(): Promise<void> {
+		this._quiesced = true;
 		if (!this.rt || !this._isConnected) return;
 		this._suppressAudio = true;
 		if (this._isModelGenerating) {
@@ -382,6 +388,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 
 	/** Resume normal operation. Idempotent. */
 	async unquiesce(): Promise<void> {
+		this._quiesced = false;
 		this._suppressAudio = false;
 	}
 
@@ -730,14 +737,19 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 
 		// --- Audio output ---
 		rt.on('response.output_audio.delta', (event) => {
-			if (this._suppressAudio) return;
+			// _quiesced is the durable, cross-response suppression flag set by
+			// quiesce(); _suppressAudio is the per-turn interruption flag set
+			// by barge-in. Either dropping the audio is correct.
+			if (this._quiesced || this._suppressAudio) return;
 			if (this.onAudioOutput) this.onAudioOutput(event.delta);
 
 			// Track audio duration for interruption handling. Uses the resolved
-			// audioFormat so G.711 telephony (1 byte/sample, 8 kHz) computes
-			// the right `audio_end_ms` for conversation.item.truncate.
+			// OUTPUT-side audioFormat so G.711 telephony (1 byte/sample, 8 kHz)
+			// computes the right `audio_end_ms` for conversation.item.truncate
+			// regardless of input encoding.
 			const bytes = Buffer.from(event.delta, 'base64').length;
-			const bps = this._audioFormat.bitDepth === 8 ? 1 : 2;
+			const outBitDepth = this._audioFormat.outputBitDepth ?? this._audioFormat.bitDepth;
+			const bps = outBitDepth === 8 ? 1 : 2;
 			const samples = bytes / bps;
 			this.audioOutputMs += (samples / this._audioFormat.outputSampleRate) * 1000;
 		});
@@ -755,7 +767,10 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		// --- Response lifecycle: track when a response is active ---
 		rt.on('response.created', () => {
 			this._isModelGenerating = true;
-			this._suppressAudio = false;
+			// Only clear per-turn barge-in suppression. The durable _quiesced
+			// flag stays set until unquiesce() — preserves the transcription-mode
+			// dictation-only guarantee even if a response sneaks in.
+			if (!this._quiesced) this._suppressAudio = false;
 			// Reset per-response state.
 			this.completedToolCallsThisResponse = [];
 			this._reasoningStartedAt = null;
