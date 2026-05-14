@@ -7,9 +7,9 @@ import type { STTAudioConfig, STTProvider } from '../types/transport.js';
 /**
  * Streaming STT provider backed by OpenAI's `gpt-realtime-whisper` model.
  *
- * Opens a WebSocket to `/v1/realtime/transcription_sessions` and runs a
+ * Opens a WebSocket to `/v1/realtime?intent=transcription` and runs a
  * transcription-only session (`session.type = 'transcription'`) — distinct
- * from the voice-agent session shape used by `OpenAIRealtimeTransport`.
+ * from the voice-agent session used by `OpenAIRealtimeTransport`.
  * Useful as:
  *
  *  1. A drop-in `sttProvider` in agent mode (alongside any LLM transport).
@@ -35,7 +35,7 @@ export interface OpenAIRealtimeWhisperConfig {
 	language?: string;
 	/** Server VAD config passed through to `session.audio.input.turn_detection`.
 	 *  Default `{ type: 'server_vad' }`. */
-	turnDetection?: Record<string, unknown>;
+	turnDetection?: Record<string, unknown> | null;
 }
 
 const WS_URL = 'wss://api.openai.com/v1/realtime?intent=transcription';
@@ -57,7 +57,7 @@ export class OpenAIRealtimeWhisperSTTProvider implements STTProvider {
 	private readonly _apiKey: string;
 	private readonly _model: string;
 	private readonly _language?: string;
-	private readonly _turnDetection: Record<string, unknown>;
+	private readonly _turnDetection: Record<string, unknown> | null;
 
 	// --- Connection state ---
 	private _state: ProviderState = 'idle';
@@ -78,6 +78,7 @@ export class OpenAIRealtimeWhisperSTTProvider implements STTProvider {
 
 	// --- Start promise resolution ---
 	private _sessionStartedResolve: (() => void) | null = null;
+	private _sessionStartedReject: ((err: Error) => void) | null = null;
 
 	// --- Callbacks (wired by VoiceSession) ---
 	onTranscript?: (text: string, turnId: number | undefined) => void;
@@ -199,6 +200,7 @@ export class OpenAIRealtimeWhisperSTTProvider implements STTProvider {
 	private _connect(): Promise<void> {
 		return new Promise<void>((resolve, reject) => {
 			this._sessionStartedResolve = resolve;
+			this._sessionStartedReject = reject;
 
 			this._ws = new WebSocket(WS_URL, {
 				headers: {
@@ -207,19 +209,27 @@ export class OpenAIRealtimeWhisperSTTProvider implements STTProvider {
 			});
 
 			this._ws.on('open', () => {
-				// Send the transcription-session config immediately. Uses the
-				// transcription_session.update event shape (flat at session level,
-				// `input_audio_format: 'pcm16'` not the nested audio.input.format
-				// object used by the voice-agent session.update).
+				// Send the transcription-session config immediately. Realtime
+				// transcription sessions use `session.update` with
+				// `session.type='transcription'` and audio settings nested under
+				// `audio.input`.
 				if (!this._ws || this._ws.readyState !== WebSocket.OPEN) return;
 				this._send({
-					type: 'transcription_session.update',
+					type: 'session.update',
 					session: {
-						input_audio_format: 'pcm16',
-						turn_detection: this._turnDetection,
-						input_audio_transcription: {
-							model: this._model,
-							...(this._language ? { language: this._language } : {}),
+						type: 'transcription',
+						audio: {
+							input: {
+								format: {
+									type: 'audio/pcm',
+									rate: 24000,
+								},
+								turn_detection: this._turnDetection,
+								transcription: {
+									model: this._model,
+									...(this._language ? { language: this._language } : {}),
+								},
+							},
 						},
 					},
 				});
@@ -234,16 +244,15 @@ export class OpenAIRealtimeWhisperSTTProvider implements STTProvider {
 			});
 
 			this._ws.on('error', (err: Error) => {
-				if (this._sessionStartedResolve) {
-					this._sessionStartedResolve = null;
-					reject(err);
-				}
+				if (this._sessionStartedReject) this._rejectSessionStarted(err);
+				else this._log(`WebSocket error: ${err.message}`);
 			});
 
 			setTimeout(() => {
-				if (this._sessionStartedResolve) {
-					this._sessionStartedResolve = null;
-					reject(new Error('OpenAIRealtimeWhisperSTTProvider: connection timeout'));
+				if (this._sessionStartedReject) {
+					this._rejectSessionStarted(
+						new Error('OpenAIRealtimeWhisperSTTProvider: connection timeout'),
+					);
 				}
 			}, CONNECT_TIMEOUT_MS);
 		});
@@ -259,22 +268,16 @@ export class OpenAIRealtimeWhisperSTTProvider implements STTProvider {
 
 		const type = msg.type as string | undefined;
 		switch (type) {
-			// `transcription_session.*` is the transcription-session shape; the
-			// regular `session.*` variants are accepted as fallback in case the
-			// server changes the naming.
 			case 'transcription_session.created':
-			case 'transcription_session.updated':
 			case 'session.created':
+				// Creation only proves the socket is alive. Wait for the update
+				// acknowledgement before marking the provider connected; otherwise
+				// buffered mic frames can be flushed before transcription is enabled.
+				break;
+
+			case 'transcription_session.updated':
 			case 'session.updated':
-				if (this._state === 'connecting' || this._state === 'reconnecting') {
-					this._state = 'connected';
-					this._reconnectBackoff = INITIAL_BACKOFF_MS;
-					this._flushReconnectBuffer();
-				}
-				if (this._sessionStartedResolve) {
-					this._sessionStartedResolve();
-					this._sessionStartedResolve = null;
-				}
+				this._resolveSessionStarted();
 				break;
 
 			case 'input_audio_buffer.committed': {
@@ -312,16 +315,28 @@ export class OpenAIRealtimeWhisperSTTProvider implements STTProvider {
 				break;
 			}
 
+			case 'error':
+				this._handleServerError(msg);
+				break;
+
 			default:
-				// Including: input_audio_buffer.speech_started / .stopped, error.
+				// Including: input_audio_buffer.speech_started / .stopped.
 				// We don't need to surface these today.
 				break;
 		}
 	}
 
-	private _handleClose(_code: number, _reason: string): void {
+	private _handleClose(code: number, reason: string): void {
 		this._ws = null;
 		if (this._state === 'stopped') return;
+		if (this._sessionStartedReject) {
+			this._rejectSessionStarted(
+				new Error(
+					`OpenAIRealtimeWhisperSTTProvider: WebSocket closed before session update (code=${code}, reason="${reason}")`,
+				),
+			);
+			return;
+		}
 
 		this._state = 'reconnecting';
 		this._scheduleReconnect();
@@ -373,5 +388,46 @@ export class OpenAIRealtimeWhisperSTTProvider implements STTProvider {
 
 	private _send(message: Record<string, unknown>): void {
 		this._ws?.send(JSON.stringify(message));
+	}
+
+	private _resolveSessionStarted(): void {
+		if (this._state === 'connecting' || this._state === 'reconnecting') {
+			this._state = 'connected';
+			this._reconnectBackoff = INITIAL_BACKOFF_MS;
+			this._flushReconnectBuffer();
+		}
+		if (this._sessionStartedResolve) {
+			this._sessionStartedResolve();
+			this._sessionStartedResolve = null;
+			this._sessionStartedReject = null;
+		}
+	}
+
+	private _rejectSessionStarted(error: Error): void {
+		const reject = this._sessionStartedReject;
+		this._sessionStartedResolve = null;
+		this._sessionStartedReject = null;
+		if (reject) reject(error);
+	}
+
+	private _handleServerError(msg: Record<string, unknown>): void {
+		const error = msg.error;
+		let detail = 'unknown error';
+		if (error && typeof error === 'object') {
+			const err = error as Record<string, unknown>;
+			const message = typeof err.message === 'string' ? err.message : undefined;
+			const code = typeof err.code === 'string' ? err.code : undefined;
+			detail = [code, message].filter(Boolean).join(': ') || JSON.stringify(err);
+		} else if (typeof error === 'string') {
+			detail = error;
+		}
+		const serverError = new Error(`OpenAIRealtimeWhisperSTTProvider server error: ${detail}`);
+		this._log(serverError.message);
+		if (this._sessionStartedReject) this._rejectSessionStarted(serverError);
+	}
+
+	private _log(message: string): void {
+		const t = new Date().toISOString().slice(11, 23);
+		console.warn(`${t} [OpenAIRealtimeWhisperSTT] ${message}`);
 	}
 }

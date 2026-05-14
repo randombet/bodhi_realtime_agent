@@ -72,7 +72,7 @@ function lastInstance(): MockWebSocket {
 	return MockWebSocket.instances[MockWebSocket.instances.length - 1];
 }
 
-/** Open + send transcription_session.updated so start() resolves. */
+/** Open + send the update acknowledgement so start() resolves. */
 function bringUp(ws: MockWebSocket): void {
 	ws.triggerOpen();
 	ws.triggerMessage({ type: 'transcription_session.updated' });
@@ -128,7 +128,7 @@ describe('OpenAIRealtimeWhisperSTTProvider', () => {
 	});
 
 	describe('start() / stop() lifecycle', () => {
-		it('opens WS to /v1/realtime?intent=transcription and sends a transcription_session.update', async () => {
+		it('opens WS to /v1/realtime?intent=transcription and sends a transcription session.update', async () => {
 			const p = createConfigured();
 			const startPromise = p.start();
 			const ws = lastInstance();
@@ -138,17 +138,70 @@ describe('OpenAIRealtimeWhisperSTTProvider', () => {
 			bringUp(ws);
 			await startPromise;
 
-			const update = ws.sentEvents().find((e) => e.type === 'transcription_session.update') as
+			const update = ws.sentEvents().find((e) => e.type === 'session.update') as
 				| {
 						session?: {
-							input_audio_format?: string;
-							input_audio_transcription?: { model?: string };
+							type?: string;
+							audio?: {
+								input?: {
+									format?: { type?: string; rate?: number };
+									transcription?: { model?: string };
+									turn_detection?: { type?: string };
+								};
+							};
 						};
 				  }
 				| undefined;
 			expect(update).toBeDefined();
-			expect(update?.session?.input_audio_format).toBe('pcm16');
-			expect(update?.session?.input_audio_transcription?.model).toBe('gpt-realtime-whisper');
+			expect(update?.session?.type).toBe('transcription');
+			expect(update?.session?.audio?.input?.format).toEqual({ type: 'audio/pcm', rate: 24000 });
+			expect(update?.session?.audio?.input?.transcription?.model).toBe('gpt-realtime-whisper');
+			expect(update?.session?.audio?.input?.turn_detection?.type).toBe('server_vad');
+		});
+
+		it('waits for session.updated before resolving start() or flushing buffered audio', async () => {
+			const p = createConfigured();
+			let resolved = false;
+			const startPromise = p.start().then(() => {
+				resolved = true;
+			});
+			const ws = lastInstance();
+
+			p.feedAudio('AAAA');
+			ws.triggerOpen();
+			ws.triggerMessage({ type: 'session.created' });
+			await Promise.resolve();
+
+			expect(resolved).toBe(false);
+			expect(ws.sentEvents().filter((e) => e.type === 'input_audio_buffer.append')).toHaveLength(0);
+
+			ws.triggerMessage({ type: 'session.updated' });
+			await startPromise;
+
+			expect(resolved).toBe(true);
+			expect(
+				ws
+					.sentEvents()
+					.filter((e) => e.type === 'input_audio_buffer.append')
+					.map((e) => e.audio),
+			).toEqual(['AAAA']);
+		});
+
+		it('rejects start() when the server returns a setup error', async () => {
+			const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			const p = createConfigured();
+			const startPromise = p.start();
+			const ws = lastInstance();
+
+			ws.triggerOpen();
+			ws.triggerMessage({
+				type: 'error',
+				error: { code: 'invalid_request_error', message: 'bad transcription config' },
+			});
+
+			await expect(startPromise).rejects.toThrow(/bad transcription config/);
+			expect(warn).toHaveBeenCalled();
+			warn.mockRestore();
 		});
 
 		it('start() is idempotent — second call returns without re-connecting', async () => {
@@ -288,7 +341,7 @@ describe('OpenAIRealtimeWhisperSTTProvider', () => {
 			expect(append).toEqual({ type: 'input_audio_buffer.append', audio: 'dGVzdA==' });
 		});
 
-		it('buffers audio during connecting and flushes after transcription_session.updated', async () => {
+		it('buffers audio during connecting and flushes after the update acknowledgement', async () => {
 			const p = createConfigured();
 			const startPromise = p.start();
 			const ws = lastInstance();
