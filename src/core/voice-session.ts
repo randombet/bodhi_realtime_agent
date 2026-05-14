@@ -37,7 +37,12 @@ import { tryParseRtcClientSignaling } from '../types/rtc-signaling.js';
 import type { IClientChannel } from '../types/session-client.js';
 import type { SessionClientSender } from '../types/session-client.js';
 import type { ToolDefinition } from '../types/tool.js';
-import type { LLMTransport, LLMTransportError, STTProvider } from '../types/transport.js';
+import type {
+	LLMTransport,
+	LLMTransportError,
+	STTProvider,
+	TransportToolResult,
+} from '../types/transport.js';
 import type { TTSAudioConfig, TTSProvider } from '../types/tts.js';
 import type { ArtifactRef, ArtifactStore, SaveArtifactParams } from '../types/workspace.js';
 import { BackgroundNotificationQueue } from './background-notification-queue.js';
@@ -150,9 +155,12 @@ export interface VoiceSessionConfig {
 	 *  When omitted, the transport's built-in transcription is used. */
 	sttProvider?: STTProvider;
 	/** Sample rate of inbound client PCM (what `handleAudioFromClient` receives).
-	 *  Default 16000. The framework resamples to whatever the transport / STT
-	 *  / Whisper provider expects. Common values: 16000 (TwilioBridge after
-	 *  G.711 decode, most browser RTC), 24000 (some browser flows). */
+	 *  When omitted, defaults to `transport.audioFormat.inputSampleRate` — which
+	 *  matches what the framework instructs clients to send (browser RTC, voice
+	 *  WS clients are told to align to the transport's input rate, and Twilio's
+	 *  G.711 decode lands at the transport's rate too). Override only if your
+	 *  client genuinely sends a different rate and you've taken responsibility
+	 *  for the resample upstream. */
 	clientAudioInputRate?: number;
 	/** Initial transcription mode for the session. Default `'agent'`.
 	 *  - `'agent'` (default): mic audio flows to `transport`; the agent
@@ -271,8 +279,14 @@ export class VoiceSession {
 	private processedKnowledgeBase: ProcessedKnowledgeBase | null = null;
 	private turnId = 0;
 	private sttProvider?: STTProvider;
-	/** Resolved at construction from config.clientAudioInputRate (default 16000). */
+	/** Resolved post-transport-construction from config.clientAudioInputRate
+	 *  (default: transport.audioFormat.inputSampleRate — the rate the
+	 *  framework instructs clients to send). */
 	private clientAudioInputRate = 16000;
+	/** Reference to the transport's original sendToolResult, captured at
+	 *  construction. flushPendingToolResults calls through this to bypass
+	 *  the guard wrapper installed on the transport. */
+	private _rawSendToolResult: (result: TransportToolResult) => void = () => undefined;
 	// --- Phase 3: transcription-mode state ---
 	private whisperProvider?: STTProvider;
 	private internalMode: InternalTranscriptionMode = 'agent';
@@ -346,7 +360,6 @@ export class VoiceSession {
 
 	constructor(config: VoiceSessionConfig) {
 		this.config = config;
-		this.clientAudioInputRate = config.clientAudioInputRate ?? 16000;
 		this.ownsClientTransport = !config.clientSender;
 		this.eventBus = new EventBus();
 		this.hooks = new HooksManager();
@@ -521,6 +534,28 @@ export class VoiceSession {
 				{},
 			);
 		}
+
+		// Default the inbound client PCM rate to whatever the transport advertises —
+		// matches what the framework tells clients to send (line ~1994 in this file).
+		this.clientAudioInputRate =
+			config.clientAudioInputRate ?? this.transport.audioFormat.inputSampleRate;
+
+		// Intercept transport.sendToolResult so BOTH legacy and actor-mode
+		// dispatch paths go through the transcription-mode guard. The actor
+		// adapter calls `transport.sendToolResult(...)` directly (no
+		// VoiceSession reference), so the cleanest single-point fix is to
+		// wrap the method on the transport instance itself.
+		const originalSendToolResult = this.transport.sendToolResult.bind(this.transport);
+		this.transport.sendToolResult = (result: TransportToolResult) => {
+			if (this.internalMode !== 'agent') {
+				this.pendingToolResultsAwaitingAgentMode.push(result);
+				return;
+			}
+			originalSendToolResult(result);
+		};
+		// Keep a reference so flushPendingToolResults can bypass the guard and
+		// call the underlying method directly (draining INTO agent mode).
+		this._rawSendToolResult = originalSendToolResult;
 
 		// Wire LLMTransport property callbacks — works for both injected and default transports
 		this.transport.onAudioOutput = (data) => this.handleAudioOutput(data);
@@ -957,6 +992,9 @@ export class VoiceSession {
 				notificationQueue: this.notificationQueue!,
 				transcriptManager: this.transcriptManager,
 				subagentConfigs: this.subagentConfigs,
+				// transport.sendToolResult is wrapped at session-construction
+				// time to enforce the transcription-mode guard for both legacy
+				// and actor-mode paths.
 				sendToolResult: (result) => this.transport.sendToolResult(result),
 				transfer: (toAgent) => this.transfer(toAgent),
 				reportError: (component, error) => this.reportError(component, error),
@@ -1029,6 +1067,22 @@ export class VoiceSession {
 		}
 		await this.sttProvider?.start();
 		await this.ttsProvider?.start();
+		// Phase 3: when constructed with initial transcriptionMode='transcription',
+		// bring Whisper up and quiesce the agent transport before start() resolves.
+		// Audio dropped during these awaits is bounded by clientTransport buffering.
+		if (this.internalMode === 'transcription' && this.whisperProvider) {
+			await this.whisperProvider.start();
+			if (this.transport.capabilities.quiescible && this.transport.quiesce) {
+				try {
+					await this.transport.quiesce();
+				} catch (err) {
+					this.reportError(
+						'transport-quiesce',
+						err instanceof Error ? err : new Error(String(err)),
+					);
+				}
+			}
+		}
 		if (this.runtimeOrchestrator) {
 			await this.runtimeOrchestrator.start();
 		}
@@ -1133,6 +1187,9 @@ export class VoiceSession {
 		}
 
 		await this.sttProvider?.stop();
+		// Phase 3: stop the dictation-mode Whisper provider so prewarmed or
+		// active sockets don't survive session close. Idempotent.
+		await this.whisperProvider?.stop().catch(() => undefined);
 		this.ttsClearTimers();
 		await this.ttsProvider?.stop();
 		if (this.runtimeOrchestrator) {
@@ -1152,6 +1209,14 @@ export class VoiceSession {
 
 	/** Transfer the active session to a different agent (reconnects with new config). */
 	async transfer(toAgent: string): Promise<void> {
+		// Serialise with setTranscriptionMode() — both mutate session-level
+		// state and emit greetings / session.update on the wire; running them
+		// concurrently could leak agent content into dictation mode or
+		// produce out-of-order session.updated events.
+		return this.mutationQueue.enqueue(() => this._transferInner(toAgent));
+	}
+
+	private async _transferInner(toAgent: string): Promise<void> {
 		this.log(`Transferring to agent "${toAgent}"...`);
 		await this.agentRouter.transfer(toAgent);
 		this.log(`Transfer to "${toAgent}" complete`);
@@ -1497,6 +1562,10 @@ export class VoiceSession {
 		// Wire LLM text output → TTS provider + transcript
 		this.transport.onTextOutput = (text) => {
 			this.transcriptManager.handleOutput(text);
+			// Phase 3 dictation guard: when not in agent mode, drop model text
+			// before it reaches the TTS provider. Belt-and-braces backup for
+			// transports whose quiesce() can't stop already-in-flight responses.
+			if (this.internalMode !== 'agent') return;
 			// Skip empty/whitespace-only chunks for TTS to avoid invalid transcript
 			// errors from providers that require meaningful initial text.
 			if (!text || text.trim().length === 0) {
@@ -1524,6 +1593,11 @@ export class VoiceSession {
 		// Wire TTS audio output → client (fast-path, with stale filtering + resampling)
 		tts.onAudio = (base64Pcm, _durationMs, requestId) => {
 			if (requestId !== this._ttsCurrentRequestId) return; // stale
+			// Phase 3 dictation guard: silence the TTS path when not in agent
+			// mode. Queued synthesis can complete after a transcription-mode
+			// flip; without this guard the client would hear stale agent
+			// speech during dictation.
+			if (this.internalMode !== 'agent') return;
 			let buffer: Buffer = Buffer.from(base64Pcm, 'base64');
 			if (
 				this._ttsFormat &&
@@ -2289,13 +2363,14 @@ export class VoiceSession {
 		this.transport.triggerGeneration(instructions, overrides);
 	}
 
-	/** Flush tool results that arrived during transcription mode. */
+	/** Flush tool results that arrived during transcription mode. Calls the
+	 *  unguarded sender so we don't re-enter the queue. */
 	private flushPendingToolResults(): void {
 		if (this.pendingToolResultsAwaitingAgentMode.length === 0) return;
 		const queued = this.pendingToolResultsAwaitingAgentMode;
 		this.pendingToolResultsAwaitingAgentMode = [];
 		for (const result of queued) {
-			this.transport.sendToolResult(result);
+			this._rawSendToolResult(result);
 		}
 	}
 }
