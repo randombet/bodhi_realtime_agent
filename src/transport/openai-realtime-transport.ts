@@ -6,6 +6,7 @@ import type {
 	RealtimeClientEvent,
 	RealtimeSessionCreateRequest,
 } from 'openai/resources/realtime/realtime';
+import { TransportError } from '../core/errors.js';
 import type { ToolDefinition } from '../types/tool.js';
 import type {
 	AudioFormatSpec,
@@ -627,7 +628,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		if (fmt.type === 'audio/pcm') {
 			const rate = fmt.rate ?? 24000;
 			if (rate !== 24000) {
-				throw new Error(
+				throw new TransportError(
 					`UNSUPPORTED_SAMPLE_RATE: OpenAI Realtime 'audio/pcm' only accepts 24000 Hz, got ${rate}`,
 				);
 			}
@@ -641,7 +642,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	private gateField(field: string, model: string): void {
 		const msg = `OpenAIRealtimeTransport: field '${field}' is not supported by model '${model}'; dropping.`;
 		if (this.config.strict) {
-			throw new Error(`UNSUPPORTED_FEATURE: ${msg}`);
+			throw new TransportError(`UNSUPPORTED_FEATURE: ${msg}`);
 		}
 		// Intentional warn-on-drop in non-strict mode — surfaces the silent
 		// feature drop to ops without crashing user code.

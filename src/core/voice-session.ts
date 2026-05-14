@@ -13,6 +13,7 @@ import type { ToolRoutingInfo } from '../runtime/actors/tool-router-actor.js';
 import { GeminiTransportAdapter } from '../runtime/adapters/gemini-transport-adapter.js';
 import type { KnownNotificationLabel } from '../runtime/messages.js';
 import { RuntimeOrchestrator } from '../runtime/runtime-orchestrator.js';
+import { decodeMulawToPcm, encodePcmToMulaw } from '../telephony/audio-codec.js';
 import { ToolExecutor } from '../tools/tool-executor.js';
 import { createClientChannel } from '../transport/client-channel-factory.js';
 import { DirectRtcClientChannel } from '../transport/direct-rtc-client-channel.js';
@@ -1142,10 +1143,40 @@ export class VoiceSession {
 				}
 				return;
 			}
-			const base64 = data.toString('base64');
-			this.transport.sendAudio(base64);
-			this.sttProvider?.feedAudio(base64);
+			// PCM is the source of truth at this layer. Two consumers fork off:
+			// (a) the transport, which may want G.711 μ-law (telephony); we
+			//     encode on the way to it when audioFormat.encoding === 'pcmu'.
+			// (b) the STT provider, which advertises supportedEncodings; we
+			//     pass PCM unchanged unless the provider only accepts μ-law.
+			const pcmBase64 = data.toString('base64');
+			const transportAudio =
+				this.transport.audioFormat.encoding === 'pcmu'
+					? this.encodePcmToMulawBase64(data)
+					: pcmBase64;
+			this.transport.sendAudio(transportAudio);
+
+			if (this.sttProvider) {
+				const sttSupportsPcmu = this.sttProvider.supportedEncodings?.includes('pcmu');
+				const sttSupportsPcm = (this.sttProvider.supportedEncodings ?? ['pcm']).includes('pcm');
+				if (sttSupportsPcm) {
+					this.sttProvider.feedAudio(pcmBase64);
+				} else if (sttSupportsPcmu) {
+					this.sttProvider.feedAudio(this.encodePcmToMulawBase64(data));
+				}
+				// Else: provider declares no PCM and no μ-law support — drop (unreachable today).
+			}
 		}
+	}
+
+	/** Encode a PCM16 Buffer to G.711 μ-law and return as base64. */
+	private encodePcmToMulawBase64(pcm: Buffer): string {
+		return encodePcmToMulaw(pcm).toString('base64');
+	}
+
+	/** Decode a G.711 μ-law Buffer to PCM16. Used on transport-side audio output
+	 *  when the transport is in telephony mode and the client expects PCM. */
+	private decodeMulawToPcm(mulaw: Buffer): Buffer {
+		return decodeMulawToPcm(mulaw);
 	}
 
 	private updateClientAudioVad(data: Buffer): void {
@@ -1237,7 +1268,13 @@ export class VoiceSession {
 
 	private handleAudioOutput(data: string): void {
 		this.signalAudioStarted();
-		const buffer = Buffer.from(data, 'base64');
+		const raw = Buffer.from(data, 'base64');
+		// Telephony mode: transport emits G.711 μ-law on the wire; client
+		// transports (web RTC, mic playback) expect PCM. Decode at this seam.
+		// The TwilioBridge code path bypasses this fork; it consumes the
+		// transport's audioFormat directly via its own bridge.
+		const buffer: Buffer =
+			this.transport.audioFormat.encoding === 'pcmu' ? this.decodeMulawToPcm(raw) : raw;
 		this.clientTransport.sendAudioToClient(buffer);
 	}
 

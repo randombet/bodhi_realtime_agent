@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 import { WebSocket } from 'ws';
+import { TransportError } from '../core/errors.js';
 import type { STTAudioConfig, STTProvider } from '../types/transport.js';
 
 /**
@@ -97,7 +98,7 @@ export class OpenAIRealtimeWhisperSTTProvider implements STTProvider {
 	configure(audio: STTAudioConfig): void {
 		const encoding = audio.encoding ?? 'pcm';
 		if (encoding !== 'pcm') {
-			throw new Error(
+			throw new TransportError(
 				`OpenAIRealtimeWhisperSTTProvider: encoding '${encoding}' not supported; only 'pcm'. VoiceSession is the single resample/encode point — feed PCM16 here.`,
 			);
 		}
@@ -112,7 +113,7 @@ export class OpenAIRealtimeWhisperSTTProvider implements STTProvider {
 			);
 		}
 		if (audio.sampleRate !== 24000) {
-			throw new Error(
+			throw new TransportError(
 				`UNSUPPORTED_SAMPLE_RATE: OpenAIRealtimeWhisperSTTProvider only accepts 24000 Hz, got ${audio.sampleRate}. VoiceSession must resample before feedAudio().`,
 			);
 		}
