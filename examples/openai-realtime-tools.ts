@@ -21,10 +21,15 @@
  *        "I need help with harder math" (transfers to math helper)
  *        "Goodbye" (ends session gracefully)
  *        "I want to dictate a long passage" → agent calls set_transcription_mode
- *        "end dictation" → exit-phrase watcher flips back to agent mode
+ *        "end dictation" / "stop dictation" / "exit transcription mode" / "done dictating"
+ *           → exit-phrase watcher flips back to agent mode (and is NOT added to the buffer)
  *        "please send what I dictated" → agent calls inject_dictation_as_user_message
  *   5. (Optional) Send `{"type":"set_transcription_mode","mode":"agent"}` over the
  *      client WS at any time to flip back to agent mode from a UI button.
+ *   6. While in transcription mode, Whisper transcripts are streamed to the connected
+ *      client as `{"type":"dictation_transcript", text, partial?, exit?}` JSON messages
+ *      AND logged to the server console — so a web client (`pnpm web-client:dev`) can
+ *      render live dictation, and you can see it from the server logs too.
  */
 
 import 'dotenv/config';
@@ -488,6 +493,11 @@ const setTranscriptionMode: ToolDefinition = {
 			.describe('Target mode. Typically "transcription"; reverse is user-driven.'),
 	}),
 	execution: 'inline',
+	// scheduling: 'silent' — the result is informational only ("yes, I flipped").
+	// Without this, the framework would queue the result during transcription mode
+	// and fire `response.create` when we return to agent mode, causing the
+	// assistant to speak a stale "ready for dictation" line at the wrong time.
+	scheduling: 'silent',
 	execute: async (args) => {
 		const { mode } = args as { mode: 'agent' | 'transcription' };
 		if (!sessionRef) return { error: 'session_not_ready' };
@@ -670,18 +680,69 @@ async function main() {
 	// Transcription-mode exit mechanisms (two paths)
 	// =========================================================================
 
-	// (1) Voice exit: watch Whisper transcripts for "end dictation" /
-	//     "stop dictation". VoiceSession already wired whisperProvider.onTranscript
-	//     to populate its dictation buffer; we wrap that listener so our exit
-	//     phrase check runs in addition (not instead).
+	// (1) Voice exit: watch Whisper transcripts for an exit phrase. VoiceSession
+	//     wired whisperProvider.onTranscript to append every transcript to the
+	//     dictation buffer. We re-wrap it so:
+	//       (a) the exit phrase is detected BEFORE the buffer append (so the
+	//           phrase doesn't end up inside the buffer the agent later sees);
+	//       (b) every final transcript is also logged to the console AND pushed
+	//           to the connected web client as a JSON message, so dictation
+	//           progress is visible without inspecting server logs.
+	//
+	// Exit phrases accepted (case-insensitive, word-boundary):
+	//   "end dictation", "stop dictation", "exit dictation", "exit transcription",
+	//   "done dictating", "finish dictation"
+	const EXIT_PATTERN =
+		/\b(end|stop|exit|finish)\s+(dictation|transcription(\s+mode)?)\b|\bdone\s+dictating\b/i;
+
 	const wiredOnTranscript = whisperProvider.onTranscript;
 	whisperProvider.onTranscript = (text, turnId) => {
-		wiredOnTranscript?.(text, turnId);
-		if (/\b(end|stop)\s+dictation\b/i.test(text)) {
-			console.log(`${ts()} [Watcher] Exit phrase heard — flipping to agent mode`);
+		const isExit = EXIT_PATTERN.test(text);
+		if (isExit) {
+			console.log(`${ts()} [Watcher] Exit phrase heard ("${text}") — flipping to agent mode`);
+			// Surface the event to the client so a UI can update.
+			try {
+				session.sendJsonToClient({
+					type: 'dictation_transcript',
+					text,
+					exit: true,
+				});
+			} catch {
+				/* best-effort */
+			}
 			void session.setTranscriptionMode('agent').catch((err) => {
 				console.error(`${ts()} [Watcher] setTranscriptionMode failed`, err);
 			});
+			// IMPORTANT: do NOT call the wired buffer-append handler — the
+			// exit phrase isn't part of the user's dictation content.
+			return;
+		}
+
+		// Normal dictation transcript: append to buffer + log + forward to UI.
+		wiredOnTranscript?.(text, turnId);
+		console.log(`${ts()} [Dictation] final: "${text}"`);
+		try {
+			session.sendJsonToClient({
+				type: 'dictation_transcript',
+				text,
+				partial: false,
+			});
+		} catch {
+			/* best-effort */
+		}
+	};
+
+	// Live partial-transcript stream → web client. Lets the UI render the
+	// dictation as it's being recognised.
+	whisperProvider.onPartialTranscript = (text) => {
+		try {
+			session.sendJsonToClient({
+				type: 'dictation_transcript',
+				text,
+				partial: true,
+			});
+		} catch {
+			/* best-effort */
 		}
 	};
 

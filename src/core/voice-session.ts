@@ -38,6 +38,7 @@ import type { IClientChannel } from '../types/session-client.js';
 import type { SessionClientSender } from '../types/session-client.js';
 import type { ToolDefinition } from '../types/tool.js';
 import type {
+	ContentTurn,
 	LLMTransport,
 	LLMTransportError,
 	STTProvider,
@@ -287,6 +288,18 @@ export class VoiceSession {
 	 *  construction. flushPendingToolResults calls through this to bypass
 	 *  the guard wrapper installed on the transport. */
 	private _rawSendToolResult: (result: TransportToolResult) => void = () => undefined;
+	/** Same as `_rawSendToolResult` but for `sendContent`. Used to drain
+	 *  `pendingContentTurnsAwaitingAgentMode` on entry to agent mode without
+	 *  re-entering the guard wrapper. */
+	private _rawSendContent: (turns: ContentTurn[], turnComplete?: boolean) => void = () => undefined;
+	/** Queue of `transport.sendContent(turns, true)` calls that arrived while
+	 *  not in agent mode. Each `turnComplete:true` would trigger response.create
+	 *  on OpenAI, which violates the §3.5 dictation-only invariant. Drained
+	 *  on entry to 'agent'. */
+	private pendingContentTurnsAwaitingAgentMode: Array<{
+		turns: ContentTurn[];
+		turnComplete?: boolean;
+	}> = [];
 	// --- Phase 3: transcription-mode state ---
 	private whisperProvider?: STTProvider;
 	private internalMode: InternalTranscriptionMode = 'agent';
@@ -547,6 +560,15 @@ export class VoiceSession {
 		// wrap the method on the transport instance itself.
 		const originalSendToolResult = this.transport.sendToolResult.bind(this.transport);
 		this.transport.sendToolResult = (result: TransportToolResult) => {
+			// `scheduling: 'silent'` doesn't trigger response.create (the OpenAI
+			// transport just inserts the conversation item), so it doesn't
+			// violate the §3.5 invariant. Pass it through immediately even
+			// during transcription mode. Useful for tools whose result is
+			// informational only — e.g. set_transcription_mode itself.
+			if (result.scheduling === 'silent') {
+				originalSendToolResult(result);
+				return;
+			}
 			if (this.internalMode !== 'agent') {
 				this.pendingToolResultsAwaitingAgentMode.push(result);
 				return;
@@ -556,6 +578,22 @@ export class VoiceSession {
 		// Keep a reference so flushPendingToolResults can bypass the guard and
 		// call the underlying method directly (draining INTO agent mode).
 		this._rawSendToolResult = originalSendToolResult;
+
+		// Same pattern for sendContent — gate `turnComplete: true` (which fires
+		// response.create on OpenAI) when not in agent mode. `turnComplete: false`
+		// is a passive append (no response trigger) and passes through.
+		// Catches: directive reinforcement, greetings, memory injection, text
+		// input, legacy notifications, and the actor-mode notification path
+		// (transport-actor.ts) — all route through `this.transport.sendContent`.
+		const originalSendContent = this.transport.sendContent.bind(this.transport);
+		this.transport.sendContent = (turns: ContentTurn[], turnComplete?: boolean) => {
+			if (turnComplete === true && this.internalMode !== 'agent') {
+				this.pendingContentTurnsAwaitingAgentMode.push({ turns, turnComplete });
+				return;
+			}
+			originalSendContent(turns, turnComplete);
+		};
+		this._rawSendContent = originalSendContent;
 
 		// Wire LLMTransport property callbacks — works for both injected and default transports
 		this.transport.onAudioOutput = (data) => this.handleAudioOutput(data);
@@ -2234,6 +2272,16 @@ export class VoiceSession {
 		this.dictationBuffer = [];
 	}
 
+	/** Send an arbitrary JSON message to the connected client over the
+	 *  client transport (WebSocket / RTC data channel). Used by apps that
+	 *  want to surface custom progress or UI state — e.g. an example pushing
+	 *  Whisper transcript fragments to a web UI during transcription mode.
+	 *
+	 *  Safe to call any time after `start()`; no-op when no client is connected. */
+	sendJsonToClient(message: Record<string, unknown>): void {
+		this.clientTransport.sendJsonToClient(message);
+	}
+
 	/** Lower-level: inject an arbitrary user message. */
 	injectTranscript(text: string): void {
 		if (!text) return;
@@ -2325,11 +2373,33 @@ export class VoiceSession {
 	}
 
 	/** Transcription → agent transition. Asymmetric — audio routing is
-	 *  restored synchronously; the public promise awaits whisper.stop(). */
+	 *  restored synchronously; the public promise awaits whisper.stop().
+	 *
+	 *  Ordering matters: unquiesce() drains the OpenAI transport's
+	 *  _pendingWhenIdle queue which fires `response.create`. The §3.5
+	 *  invariant says no response.create while not in agent mode, so
+	 *  unquiesce() must run AFTER `internalMode = 'agent'`, not before.
+	 *  The brief `_quiesced` window costs a few ms of audio suppression
+	 *  during stop_transcription, traded for strict invariant compliance. */
 	private async exitTranscriptionMode(): Promise<void> {
-		// Restore audio routing immediately so the user is never silent.
+		// Restore audio ROUTING immediately so the user is never silent. The
+		// routing switch's stopping_transcription case (§3.3) feeds mic frames
+		// to the transport from the very next frame; suppression at the
+		// audio-output seam is still on for the brief window below.
 		this.internalMode = 'stopping_transcription';
-		// Unquiesce the transport so onAudioOutput resumes.
+		// Tear down whisper FIRST so any in-flight whisper transcripts that
+		// arrived just before "end dictation" finish landing in the buffer.
+		// Idempotent.
+		try {
+			await this.whisperProvider?.stop();
+		} catch (err) {
+			this.reportError('whisper-stop', err instanceof Error ? err : new Error(String(err)));
+		}
+		// Flip to agent BEFORE unquiesce — unquiesce() in OpenAI drains
+		// _pendingWhenIdle, which sends response.create. That has to happen
+		// when internalMode === 'agent' to honour §3.5.
+		this.internalMode = 'agent';
+		// Now unquiesce — drains any when_idle tool results that accumulated.
 		if (this.transport.capabilities.quiescible && this.transport.unquiesce) {
 			try {
 				await this.transport.unquiesce();
@@ -2340,15 +2410,10 @@ export class VoiceSession {
 				);
 			}
 		}
-		// Tear down whisper. Idempotent.
-		try {
-			await this.whisperProvider?.stop();
-		} catch (err) {
-			this.reportError('whisper-stop', err instanceof Error ? err : new Error(String(err)));
-		}
-		this.internalMode = 'agent';
-		// Drain any tool results that arrived during transcription mode.
+		// Drain framework-side queues: tool results AND content turns that
+		// arrived while not in agent mode.
 		this.flushPendingToolResults();
+		this.flushPendingContentTurns();
 		this.eventBus.publish('session.transcription_mode_changed', {
 			mode: 'agent',
 			sessionId: this.config.sessionId,
@@ -2378,6 +2443,18 @@ export class VoiceSession {
 		this.pendingToolResultsAwaitingAgentMode = [];
 		for (const result of queued) {
 			this._rawSendToolResult(result);
+		}
+	}
+
+	/** Flush content turns (sendContent calls) that arrived with
+	 *  turnComplete=true during transcription mode. Same idempotency story
+	 *  as flushPendingToolResults — drain through the raw sender. */
+	private flushPendingContentTurns(): void {
+		if (this.pendingContentTurnsAwaitingAgentMode.length === 0) return;
+		const queued = this.pendingContentTurnsAwaitingAgentMode;
+		this.pendingContentTurnsAwaitingAgentMode = [];
+		for (const { turns, turnComplete } of queued) {
+			this._rawSendContent(turns, turnComplete);
 		}
 	}
 }
