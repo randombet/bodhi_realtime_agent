@@ -103,7 +103,7 @@ wss://bodhiagent.live/ws/mobile?sessionIntentId=<id>&token=<token>
 
 Use the **`sessionIntentId`** and **`token`** from the response. Treat the token as an **opaque secret** until the first successful connection.
 
-**Optional profile context (same as browser `/ws`):** after the intent query params, you may append the same **registered** query keys the app server uses for built-in profile drafts (for example `recruitingContextToken` or `interviewContextToken` from the prior `POST /api/…-draft` endpoints). The server resolves them into `profileSessionInputs` and passes them into the same `createBodhiSessionConfig` path as every other voice connection.
+**Optional profile context (same as browser `/ws`):** if you previously called `POST /api/profile-session-context/draft` with `{ "kind": "structured_screening", "payload": { … } }` (or `structured_interview`), append the returned token as **`profileContextToken=<token>`** on the WebSocket URL. The server resolves it into `profileSessionInputs` and passes it into the same `createBodhiSessionConfig` path as every other voice connection. Legacy per-profile query keys (`recruitingContextToken`, `interviewContextToken`) are still accepted but new integrations should use the single `profileContextToken`.
 
 **Scaling caveat:** intents may be stored **in process** on the node that created them. Multi-node deployments usually require **sticky routing** to the same instance or a future **signed intent** format — your operator confirms what applies.
 

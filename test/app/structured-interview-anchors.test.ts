@@ -29,7 +29,11 @@ describe('structured interview anchors', () => {
 			jobDescriptionMd: '',
 			candidateResumeMd: '',
 		});
-		expect(list.map((a) => a.id)).toEqual(['walk_resume', 'company_interest', 'technical_challenge']);
+		expect(list.map((a) => a.id)).toEqual([
+			'walk_resume',
+			'company_interest',
+			'technical_challenge',
+		]);
 	});
 
 	it('normalizeInterviewAnchors uses custom anchors when valid', () => {
