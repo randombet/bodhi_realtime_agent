@@ -352,6 +352,38 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		this.rt.send({ type: 'input_audio_buffer.clear' });
 	}
 
+	// --- Quiesce / unquiesce (cross-provider transcription-mode contract) ---
+
+	/** Pause the transport without disconnecting. Used by VoiceSession to
+	 *  enter transcription mode without tearing the WS down.
+	 *
+	 *  Implementation:
+	 *   1. If a response is in flight, send response.cancel so the model stops
+	 *      generating.
+	 *   2. Set _suppressAudio so any onAudioOutput deltas already in flight
+	 *      are dropped (existing flag re-used).
+	 *
+	 *  Idempotent: calling quiesce() while already quiesced is a no-op. */
+	async quiesce(): Promise<void> {
+		if (!this.rt || !this._isConnected) return;
+		this._suppressAudio = true;
+		if (this._isModelGenerating) {
+			try {
+				this.rt.send({ type: 'response.cancel' });
+			} catch {
+				// Ignore — server-VAD may have already cancelled, in which case
+				// response.cancel races and produces a benign "no active response"
+				// error. We don't surface it.
+			}
+			this._isModelGenerating = false;
+		}
+	}
+
+	/** Resume normal operation. Idempotent. */
+	async unquiesce(): Promise<void> {
+		this._suppressAudio = false;
+	}
+
 	// --- Session configuration ---
 
 	updateSession(config: SessionUpdate): void {
@@ -366,6 +398,16 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		}
 
 		if (!this.rt || !this._isConnected) return;
+
+		// Cache-bust telemetry. instructions / tools mutations always bust the
+		// session prefix; responseModality changes do not (they don't enter the
+		// cached input prefix). Fire once per actual mutation; prefer
+		// 'instructions_changed' when both change in one call so the metric
+		// stays sane.
+		if (this.onCacheBust) {
+			if (config.instructions !== undefined) this.onCacheBust('instructions_changed');
+			else if (config.tools !== undefined) this.onCacheBust('tools_changed');
+		}
 
 		const update: Partial<RealtimeSessionCreateRequest> = {};
 		if (config.instructions !== undefined) {
@@ -402,6 +444,12 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		}
 
 		if (!this.rt || !this._isConnected) return;
+
+		// Cache-bust telemetry — see updateSession for rationale.
+		if (this.onCacheBust) {
+			if (config.instructions !== undefined) this.onCacheBust('instructions_changed');
+			else if (config.tools !== undefined) this.onCacheBust('tools_changed');
+		}
 
 		// Wait for session.updated confirmation
 		const updatedPromise = new Promise<void>((resolve, reject) => {
