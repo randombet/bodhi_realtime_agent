@@ -2,6 +2,7 @@
 
 export {
 	AgentError,
+	CachePrefixMutationError,
 	FrameworkError,
 	MemoryError,
 	SessionError,

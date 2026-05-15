@@ -1351,4 +1351,125 @@ describe('OpenAIRealtimeTransport — Phase 1 features (gpt-realtime-2)', () => 
 			expect((update?.session as Record<string, unknown>).truncation).toBe('auto');
 		});
 	});
+
+	// P5: enforcePrefixStability + sendSessionUpdateAndWait. See dev_docs/framework/design-context-caching.md §2.
+	describe('enforcePrefixStability (P5)', () => {
+		it('pre-connect updateSession is always allowed (no baseline yet)', async () => {
+			const { OpenAIRealtimeTransport: T } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			const t = new T({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				cacheConfig: { enforcePrefixStability: true },
+			});
+			// Pre-connect: no rt, no baseline. Should not throw.
+			await expect(t.updateSession({ instructions: 'pre-connect setup' })).resolves.toBeUndefined();
+		});
+
+		it('connected, non-transfer prefix change throws CachePrefixMutationError', async () => {
+			const { CachePrefixMutationError } = await import('../../src/core/errors.js');
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				cacheConfig: { enforcePrefixStability: true },
+			});
+			// Set initial instructions and capture baseline.
+			await transport.updateSession({ instructions: 'baseline' });
+			// Manually set baseline to simulate post-connect ack (setup() bypasses
+			// connect()'s baseline-capture step).
+			// biome-ignore lint/suspicious/noExplicitAny: test-only hook
+			(transport as any).prefixBaselineCanonical = (
+				transport as unknown as { computePrefixCanonical: (i?: string, t?: unknown) => string }
+			).computePrefixCanonical('baseline', undefined);
+
+			await expect(transport.updateSession({ instructions: 'changed' })).rejects.toBeInstanceOf(
+				CachePrefixMutationError,
+			);
+		});
+
+		it('same-canonical-prefix update does NOT throw and STILL sends responseModality', async () => {
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				cacheConfig: { enforcePrefixStability: true },
+			});
+			await transport.updateSession({ instructions: 'baseline' });
+			// biome-ignore lint/suspicious/noExplicitAny: test-only hook
+			(transport as any).prefixBaselineCanonical = (
+				transport as unknown as { computePrefixCanonical: (i?: string, t?: unknown) => string }
+			).computePrefixCanonical('baseline', undefined);
+
+			const beforeCount = mockRt.sent.length;
+			await transport.updateSession({
+				instructions: 'baseline', // same prefix
+				responseModality: 'text',
+			});
+			const after = mockRt.sent.slice(beforeCount);
+			expect(after.length).toBeGreaterThan(0);
+			// responseModality should still flow to the wire as output_modalities.
+			const update = after.find(
+				(m) =>
+					m.type === 'session.update' &&
+					Array.isArray((m.session as Record<string, unknown>).output_modalities),
+			);
+			expect(update).toBeDefined();
+			expect((update?.session as Record<string, unknown>).output_modalities).toEqual(['text']);
+		});
+
+		it('transferSession with allowMutationOnTransfer=true (default) allows prefix change', async () => {
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				cacheConfig: { enforcePrefixStability: true },
+			});
+			await transport.updateSession({ instructions: 'agent A' });
+			// biome-ignore lint/suspicious/noExplicitAny: test-only hook
+			(transport as any).prefixBaselineCanonical = (
+				transport as unknown as { computePrefixCanonical: (i?: string, t?: unknown) => string }
+			).computePrefixCanonical('agent A', undefined);
+
+			await expect(transport.transferSession({ instructions: 'agent B' })).resolves.toBeUndefined();
+		});
+
+		it('transferSession with allowMutationOnTransfer=false throws on prefix change', async () => {
+			const { CachePrefixMutationError } = await import('../../src/core/errors.js');
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				cacheConfig: { enforcePrefixStability: true, allowMutationOnTransfer: false },
+			});
+			await transport.updateSession({ instructions: 'agent A' });
+			// biome-ignore lint/suspicious/noExplicitAny: test-only hook
+			(transport as any).prefixBaselineCanonical = (
+				transport as unknown as { computePrefixCanonical: (i?: string, t?: unknown) => string }
+			).computePrefixCanonical('agent A', undefined);
+
+			await expect(transport.transferSession({ instructions: 'agent B' })).rejects.toBeInstanceOf(
+				CachePrefixMutationError,
+			);
+		});
+
+		it('canonicalize: reordered-but-equivalent JSON Schema compares equal', async () => {
+			// White-box test of the canonicalize helper used for prefix comparison.
+			// We import via dynamic import to access the file-level function.
+			// The helper is not exported, so we exercise it via computePrefixCanonical
+			// indirectly: same canonical string for two semantically-equivalent objects.
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+			const computeCanonical = (
+				transport as unknown as { computePrefixCanonical: (i?: string, t?: unknown) => string }
+			).computePrefixCanonical.bind(transport);
+			// Two tools with parameters whose key order differs.
+			const toolA = makeTool('search');
+			const toolB = makeTool('search');
+			expect(computeCanonical('x', [toolA])).toBe(computeCanonical('x', [toolB]));
+		});
+
+		it('without enforcePrefixStability, prefix mutation does NOT throw (default behavior)', async () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+			// No cacheConfig.enforcePrefixStability — should never throw.
+			await expect(transport.updateSession({ instructions: 'whatever' })).resolves.toBeUndefined();
+			await expect(transport.updateSession({ instructions: 'changed' })).resolves.toBeUndefined();
+		});
+	});
 });

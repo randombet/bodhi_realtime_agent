@@ -6,7 +6,7 @@ import type {
 	RealtimeClientEvent,
 	RealtimeSessionCreateRequest,
 } from 'openai/resources/realtime/realtime';
-import { TransportError, ValidationError } from '../core/errors.js';
+import { CachePrefixMutationError, TransportError, ValidationError } from '../core/errors.js';
 import type { ToolDefinition } from '../types/tool.js';
 import type {
 	AudioFormatSpec,
@@ -105,6 +105,20 @@ export interface OpenAIRealtimeConfig {
 	/** Cache control. Truncation lands in P3; enforcePrefixStability in P5;
 	 *  experimental.promptCacheKey in P6. See OpenAIRealtimeCacheConfig. */
 	cacheConfig?: OpenAIRealtimeCacheConfig;
+}
+
+/** Recursively sort object keys so structurally-identical payloads with
+ *  different key order produce identical JSON strings. Arrays preserve
+ *  declaration order. Used by P5 enforcePrefixStability to compare canonical
+ *  prefix snapshots ({ instructions, tools }). */
+function canonicalize(value: unknown): unknown {
+	if (value === null || typeof value !== 'object') return value;
+	if (Array.isArray(value)) return value.map(canonicalize);
+	const sorted: Record<string, unknown> = {};
+	for (const k of Object.keys(value as Record<string, unknown>).sort()) {
+		sorted[k] = canonicalize((value as Record<string, unknown>)[k]);
+	}
+	return sorted;
 }
 
 /** Probe state for the experimental prompt-cache-key path (wired in P6).
@@ -247,6 +261,14 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	private tools?: ToolDefinition[];
 	private voice: string;
 
+	/** P5: canonicalized snapshot of the prefix that the server has
+	 *  acknowledged ({ instructions, tools } as wire JSON). Captured after
+	 *  the initial connect-time session.update is acknowledged and updated
+	 *  after every successful prefix-mutating wire send. Compared against
+	 *  the canonicalization of incoming SessionUpdate.{instructions, tools}
+	 *  to decide whether enforcePrefixStability should throw. */
+	private prefixBaselineCanonical: string | null = null;
+
 	// Interruption tracking
 	private lastAssistantItemId: string | null = null;
 	private audioOutputMs = 0;
@@ -384,6 +406,11 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		this.rtSend({ type: 'session.update', session: sessionConfig });
 		await updatedPromise;
 
+		// P5: capture the prefix baseline AFTER the initial session.update is
+		// acknowledged. Subsequent prefix-mutating sends update this only on
+		// success; failed/blocked sends leave it unchanged.
+		this.prefixBaselineCanonical = this.computePrefixCanonical(this.instructions, this.tools);
+
 		// Session is fully ready — notify the framework
 		if (this.onSessionReady) this.onSessionReady(sessionId);
 	}
@@ -496,6 +523,11 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	// --- Session configuration ---
 
 	async updateSession(config: SessionUpdate): Promise<void> {
+		// P5: enforce prefix-stability BEFORE any state mutation or wire send,
+		// so a thrown CachePrefixMutationError leaves the transport unchanged.
+		// Pre-connect path is exempt (returns false).
+		const isSamePrefix = this.checkPrefixStability(config, /* isTransfer */ false);
+
 		// State mutation always happens (pre-connect coalescing relies on this).
 		if (config.instructions !== undefined) {
 			this.instructions = config.instructions;
@@ -525,8 +557,9 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		// session prefix; responseModality changes do not (they don't enter the
 		// cached input prefix). Fire once per actual mutation; prefer
 		// 'instructions_changed' when both change in one call so the metric
-		// stays sane.
-		if (this.onCacheBust) {
+		// stays sane. P5: skip the bust signal when the canonical prefix is
+		// unchanged — same-text/same-tools updates don't bust the cache.
+		if (this.onCacheBust && !isSamePrefix) {
 			if (config.instructions !== undefined) this.onCacheBust('instructions_changed');
 			else if (config.tools !== undefined) this.onCacheBust('tools_changed');
 		}
@@ -565,11 +598,27 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		);
 
 		this.rtSend({ type: 'session.update', session: update as RealtimeSessionCreateRequest });
+
+		// P5: update the prefix baseline AFTER a successful wire send. Only
+		// fires when prefix actually changed (isSamePrefix would have been true
+		// and we wouldn't be here). The fire-and-forget rtSend doesn't await
+		// the ack; baseline is updated optimistically — if the server
+		// subsequently rejects the update, the baseline will drift, but that's
+		// no worse than the current cache-bust telemetry which is also fire-
+		// and-forget. P6 plus a sendSessionUpdateAndWait helper can tighten
+		// this to "update only on ack".
+		if (!isSamePrefix && (config.instructions !== undefined || config.tools !== undefined)) {
+			this.prefixBaselineCanonical = this.computePrefixCanonical(this.instructions, this.tools);
+		}
 	}
 
 	// --- Agent transfer (in-place via session.update — no reconnect needed) ---
 
 	async transferSession(config: SessionUpdate, _state?: ReconnectState): Promise<void> {
+		// P5: enforce prefix-stability for transfers (transfers default to
+		// allowed; opt-out via cacheConfig.allowMutationOnTransfer === false).
+		const isSamePrefix = this.checkPrefixStability(config, /* isTransfer */ true);
+
 		const update: Partial<RealtimeSessionCreateRequest> = {};
 
 		if (config.instructions !== undefined) {
@@ -589,7 +638,8 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		if (!this.rt || !this._isConnected) return;
 
 		// Cache-bust telemetry — see updateSession for rationale.
-		if (this.onCacheBust) {
+		// P5: skip when canonical prefix unchanged.
+		if (this.onCacheBust && !isSamePrefix) {
 			if (config.instructions !== undefined) this.onCacheBust('instructions_changed');
 			else if (config.tools !== undefined) this.onCacheBust('tools_changed');
 		}
@@ -613,6 +663,12 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 
 		this.rtSend({ type: 'session.update', session: update as RealtimeSessionCreateRequest });
 		await updatedPromise;
+
+		// P5: update prefix baseline AFTER ack (transferSession actually awaits
+		// session.updated, unlike updateSession). Only on real prefix change.
+		if (!isSamePrefix && (config.instructions !== undefined || config.tools !== undefined)) {
+			this.prefixBaselineCanonical = this.computePrefixCanonical(this.instructions, this.tools);
+		}
 	}
 
 	// --- Content injection (greetings, directives, text input) ---
@@ -797,6 +853,60 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		// Intentional warn-on-drop in non-strict mode — surfaces the silent
 		// feature drop to ops without crashing user code.
 		console.warn(msg);
+	}
+
+	/** P5: compute the canonical prefix snapshot string for a given
+	 *  (instructions, tools) pair. Tools are normalized to the wire shape
+	 *  (toolToOpenAIFunction) before canonicalizing so that ToolDefinition
+	 *  objects with different function references but identical wire output
+	 *  compare equal. */
+	private computePrefixCanonical(
+		instructions: string | undefined,
+		tools: ToolDefinition[] | undefined,
+	): string {
+		const wireTools = tools?.map(toolToOpenAIFunction) ?? null;
+		return JSON.stringify(canonicalize({ instructions: instructions ?? null, tools: wireTools }));
+	}
+
+	/** P5: enforce prefix-stability if the caller opted in via
+	 *  cacheConfig.enforcePrefixStability. Returns true if the call should
+	 *  proceed AS A NO-OP for cache-bust purposes (same canonical prefix);
+	 *  returns false if the call should proceed normally; throws
+	 *  CachePrefixMutationError if the call must be rejected. Other
+	 *  SessionUpdate fields (responseModality, providerOptions) flow through
+	 *  regardless. */
+	private checkPrefixStability(config: SessionUpdate, isTransfer: boolean): boolean {
+		const cacheCfg = this.config.cacheConfig;
+		if (!cacheCfg?.enforcePrefixStability) return false;
+		// Pre-connect mutations are always allowed; baseline isn't captured
+		// until after the initial session.updated ack.
+		if (this.prefixBaselineCanonical === null) return false;
+
+		// Only consider a mutation if instructions or tools is being changed.
+		const prefixFieldsTouched = config.instructions !== undefined || config.tools !== undefined;
+		if (!prefixFieldsTouched) return false;
+
+		// Compute what the new canonical prefix WOULD be after this update.
+		const nextInstructions =
+			config.instructions !== undefined ? config.instructions : this.instructions;
+		const nextTools = config.tools !== undefined ? config.tools : this.tools;
+		const nextCanonical = this.computePrefixCanonical(nextInstructions, nextTools);
+
+		if (nextCanonical === this.prefixBaselineCanonical) {
+			// Same-prefix update — treat as no-op for the throw decision but
+			// let other fields in the same call still flow to the wire.
+			return true;
+		}
+
+		// Real prefix mutation. Transfers respect allowMutationOnTransfer (default true).
+		if (isTransfer && cacheCfg.allowMutationOnTransfer !== false) {
+			return false; // proceed; baseline updated post-success
+		}
+		throw new CachePrefixMutationError(
+			isTransfer
+				? 'enforcePrefixStability + allowMutationOnTransfer=false: transfer would mutate prefix'
+				: 'enforcePrefixStability: connected, non-transfer updateSession would mutate prefix',
+		);
 	}
 
 	private buildSessionConfig(): RealtimeSessionCreateRequest {
