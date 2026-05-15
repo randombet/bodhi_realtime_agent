@@ -24,8 +24,16 @@ export type { GeminiTransportCallbacks, GeminiTransportConfig } from './gemini-l
 export type { LLMTransport } from '../types/transport.js';
 export { MultiClientTransport } from './multi-client-transport.js';
 export type { ConnectionContext, MultiClientTransportCallbacks } from './multi-client-transport.js';
-export { OpenAIRealtimeTransport } from './openai-realtime-transport.js';
-export type { OpenAIRealtimeConfig } from './openai-realtime-transport.js';
+export {
+	applyOpenAICacheConfig,
+	OpenAIRealtimeTransport,
+	validateOpenAICacheConfig,
+} from './openai-realtime-transport.js';
+export type {
+	CacheKeyProbeState,
+	OpenAIRealtimeCacheConfig,
+	OpenAIRealtimeConfig,
+} from './openai-realtime-transport.js';
 export { OpenAIRealtimeWhisperSTTProvider } from './openai-realtime-whisper-stt-provider.js';
 export type { OpenAIRealtimeWhisperConfig } from './openai-realtime-whisper-stt-provider.js';
 export {

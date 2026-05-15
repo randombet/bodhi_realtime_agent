@@ -200,6 +200,34 @@ export interface LLMTransportConfig {
 	providerOptions?: Record<string, unknown>;
 }
 
+/**
+ * Provider-neutral cache configuration shared across cache-aware transports.
+ * Lives here for cross-transport visibility but is currently consumed only
+ * by `OpenAIRealtimeCacheConfig` — Gemini Live has no in-place session
+ * updates, so prefix-stability enforcement does not apply.
+ */
+export interface CacheConfigCommon {
+	/**
+	 * If true, the OpenAI transport rejects prefix-busting mutations
+	 * (instructions, tools) that occur AFTER `connect()` has completed and
+	 * are NOT part of a `transferSession()` call. Default: false.
+	 *
+	 * Pre-connect config is always allowed (initial setup never throws).
+	 * Same-canonical-prefix updates do not throw — other `SessionUpdate`
+	 * fields in the same call are still sent on the wire.
+	 *
+	 * Wired in P5 of the configurable context caching design.
+	 */
+	enforcePrefixStability?: boolean;
+
+	/**
+	 * Only consulted when `enforcePrefixStability` is true. Default: true
+	 * (multi-agent transfers continue to work). Set false only for hardened
+	 * single-agent demos that should never legitimately swap instructions.
+	 */
+	allowMutationOnTransfer?: boolean;
+}
+
 /** Authentication method for the transport. */
 export type TransportAuth =
 	| { type: 'api_key'; apiKey: string }

@@ -78,6 +78,7 @@ export type { ToolContext, ToolDefinition, ToolExecution } from './tool.js';
 
 export type {
 	AudioFormatSpec,
+	CacheConfigCommon,
 	ContentTurn,
 	LLMTransport,
 	LLMTransportConfig,

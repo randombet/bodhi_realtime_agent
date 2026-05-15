@@ -6,10 +6,11 @@ import type {
 	RealtimeClientEvent,
 	RealtimeSessionCreateRequest,
 } from 'openai/resources/realtime/realtime';
-import { TransportError } from '../core/errors.js';
+import { TransportError, ValidationError } from '../core/errors.js';
 import type { ToolDefinition } from '../types/tool.js';
 import type {
 	AudioFormatSpec,
+	CacheConfigCommon,
 	ContentTurn,
 	LLMTransport,
 	LLMTransportConfig,
@@ -36,6 +37,42 @@ import {
 import { zodToJsonSchema } from './zod-to-schema.js';
 
 /** Configuration for constructing an OpenAIRealtimeTransport. */
+/**
+ * OpenAI Realtime cache configuration. Lives on `OpenAIRealtimeConfig.cacheConfig`.
+ *
+ * P3 lands `truncation` (the documented cache-preservation lever); P5 wires
+ * `enforcePrefixStability`; P6 adds `experimental.promptCacheKey`. See
+ * dev_docs/framework/design-context-caching.md for the full design.
+ */
+export interface OpenAIRealtimeCacheConfig extends CacheConfigCommon {
+	/**
+	 * Maps to `RealtimeSessionCreateRequest.truncation`. Drives whether and
+	 * how the server truncates conversation history when the model input
+	 * limit fills. (Limits vary by model — `gpt-realtime` is 32k input,
+	 * `gpt-realtime-2` is 128k.) Use the `retention_ratio` object form to
+	 * preserve more of the cached prefix.
+	 *
+	 * Per the OpenAI SDK documentation: "Truncation will reduce the number
+	 * of cached tokens on the next turn (busting the cache), since messages
+	 * are dropped from the beginning of the context. However, clients can
+	 * also configure truncation to retain messages up to a fraction of the
+	 * maximum context size, which will reduce the need for future
+	 * truncations and thus improve the cache rate."
+	 *
+	 * Default: undefined (server default applies — currently 'auto').
+	 */
+	truncation?:
+		| 'auto'
+		| 'disabled'
+		| {
+				type: 'retention_ratio';
+				/** In [0, 1]. Validated at connect time before opening the WS. */
+				retentionRatio: number;
+				/** Optional fixed token-limit cap. */
+				tokenLimits?: { postInstructions?: number };
+		  };
+}
+
 export interface OpenAIRealtimeConfig {
 	/** OpenAI API key. */
 	apiKey: string;
@@ -65,6 +102,62 @@ export interface OpenAIRealtimeConfig {
 	 *  When `false`/omitted (production default), the feature is dropped and a
 	 *  `warn` is logged. Framework Vitest suites set `strict: true`. */
 	strict?: boolean;
+	/** Cache control. Truncation lands in P3; enforcePrefixStability in P5;
+	 *  experimental.promptCacheKey in P6. See OpenAIRealtimeCacheConfig. */
+	cacheConfig?: OpenAIRealtimeCacheConfig;
+}
+
+/** Probe state for the experimental prompt-cache-key path (wired in P6).
+ *  Defined in P3 so applyOpenAICacheConfig has the parameter from day one;
+ *  P3 callers always pass 'unknown' since the field they'd guard isn't
+ *  wired yet. */
+export type CacheKeyProbeState = 'unknown' | 'accepted' | 'rejected';
+
+/** Validate a cacheConfig payload BEFORE opening the WebSocket. Throws
+ *  `ValidationError` for invalid values; the caller (connect()) wraps the
+ *  whole pre-flight so no socket is leaked on failure. */
+export function validateOpenAICacheConfig(cfg: OpenAIRealtimeCacheConfig | undefined): void {
+	if (!cfg || cfg.truncation === undefined || typeof cfg.truncation === 'string') return;
+	const r = cfg.truncation.retentionRatio;
+	if (typeof r !== 'number' || r < 0 || r > 1 || Number.isNaN(r)) {
+		throw new ValidationError(
+			'cacheConfig.truncation.retentionRatio must be in [0, 1] (per OpenAI Realtime API)',
+		);
+	}
+	const post = cfg.truncation.tokenLimits?.postInstructions;
+	if (post !== undefined && (!Number.isInteger(post) || post < 0)) {
+		throw new ValidationError(
+			'cacheConfig.truncation.tokenLimits.postInstructions must be a non-negative integer',
+		);
+	}
+}
+
+/** Mutate a `session.update` payload in-place to add `truncation` and (P6)
+ *  `prompt_cache_key`. Single insertion point used by `buildSessionConfig()`,
+ *  `updateSession()`, and `transferSession()` so the field never gets dropped
+ *  on agent handoff. Validation must have run separately (validateOpenAICacheConfig).
+ */
+export function applyOpenAICacheConfig(
+	payload: Record<string, unknown>,
+	cfg: OpenAIRealtimeCacheConfig | undefined,
+	/** Probe state — consumed in P6 (experimental.promptCacheKey path). */
+	_probeState: CacheKeyProbeState,
+): void {
+	if (!cfg) return;
+	if (cfg.truncation !== undefined) {
+		if (typeof cfg.truncation === 'string') {
+			payload.truncation = cfg.truncation; // 'auto' | 'disabled'
+		} else {
+			const r = cfg.truncation.retentionRatio;
+			const post = cfg.truncation.tokenLimits?.postInstructions;
+			payload.truncation = {
+				type: 'retention_ratio',
+				retention_ratio: r,
+				...(post !== undefined ? { token_limits: { post_instructions: post } } : {}),
+			};
+		}
+	}
+	// P6 will add: if (cfg.experimental?.promptCacheKey && _probeState !== 'rejected') { ... }
 }
 
 /** Convert a framework ToolDefinition to OpenAI function tool format. */
@@ -241,6 +334,10 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		if (transportConfig) {
 			this.applyTransportConfig(transportConfig);
 		}
+
+		// Pre-flight: validate cacheConfig BEFORE opening the WebSocket so any
+		// invalid value throws a typed ValidationError without leaking a socket.
+		validateOpenAICacheConfig(this.config.cacheConfig);
 
 		// Finalise capability + audio-format snapshots after any connect-time
 		// model/audio overrides have landed. Immutable from here onward.
@@ -458,6 +555,15 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			};
 		}
 
+		// P3: re-apply cacheConfig.truncation on every session.update so the
+		// server retains the policy across mutations. transferSession does the
+		// same — both paths bypass buildSessionConfig().
+		applyOpenAICacheConfig(
+			update as Record<string, unknown>,
+			this.config.cacheConfig,
+			'unknown', // probe state wired in P6
+		);
+
 		this.rtSend({ type: 'session.update', session: update as RealtimeSessionCreateRequest });
 	}
 
@@ -496,6 +602,14 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 				resolve();
 			});
 		});
+
+		// P3: in-place transfers must also carry cacheConfig.truncation. Without
+		// this, the server would lose the policy on agent handoff.
+		applyOpenAICacheConfig(
+			update as Record<string, unknown>,
+			this.config.cacheConfig,
+			'unknown', // probe state wired in P6
+		);
 
 		this.rtSend({ type: 'session.update', session: update as RealtimeSessionCreateRequest });
 		await updatedPromise;
@@ -757,6 +871,16 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			session.tools = this.tools.map(toolToOpenAIFunction) as any;
 		}
 
+		// P3: cacheConfig.truncation. Single insertion point — same helper is
+		// also called from updateSession() and transferSession() so the field
+		// survives both reconnect (rebuilds via this method) and in-place
+		// transfers (which do NOT call this method).
+		applyOpenAICacheConfig(
+			session as unknown as Record<string, unknown>,
+			this.config.cacheConfig,
+			'unknown', // probe state wired in P6
+		);
+
 		return session;
 	}
 
@@ -998,9 +1122,32 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		this.rt.send({ type: 'response.create' });
 	}
 
+	/** P3: latch so the truncation+replayHistory warning fires at most once
+	 *  per transport instance. */
+	private _truncationReplayWarned = false;
+
 	private replayHistory(items: ReplayItem[]): void {
 		if (!this.rt) return;
 		const rt = this.rt;
+
+		// P3: warn when an explicit truncation policy could drop replayed items.
+		// Only fires when the caller set cacheConfig.truncation to something
+		// other than 'disabled' (server defaults are caller-implicit and don't
+		// trigger). One-shot per transport instance to avoid log spam.
+		if (
+			!this._truncationReplayWarned &&
+			items.length > 0 &&
+			this.config.cacheConfig?.truncation !== undefined &&
+			this.config.cacheConfig.truncation !== 'disabled'
+		) {
+			this._truncationReplayWarned = true;
+			console.warn(
+				'[openai-realtime-transport] cacheConfig.truncation is set; replayHistory()' +
+					' may have items dropped if the conversation exceeds the model context limit.' +
+					" Use cacheConfig.truncation: 'disabled' for sessions that depend on exact" +
+					' history replay.',
+			);
+		}
 
 		for (const item of items) {
 			switch (item.type) {

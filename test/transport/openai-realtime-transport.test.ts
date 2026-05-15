@@ -1176,4 +1176,179 @@ describe('OpenAIRealtimeTransport — Phase 1 features (gpt-realtime-2)', () => 
 			expect(reasons).toEqual([]);
 		});
 	});
+
+	// P3: OpenAI cacheConfig.truncation mapping. See dev_docs/framework/design-context-caching.md
+	describe('cacheConfig.truncation (P3)', () => {
+		it('validateOpenAICacheConfig accepts valid object form', async () => {
+			const { validateOpenAICacheConfig } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			expect(() =>
+				validateOpenAICacheConfig({
+					truncation: { type: 'retention_ratio', retentionRatio: 0.5 },
+				}),
+			).not.toThrow();
+			expect(() => validateOpenAICacheConfig({ truncation: 'auto' })).not.toThrow();
+			expect(() => validateOpenAICacheConfig({ truncation: 'disabled' })).not.toThrow();
+			expect(() => validateOpenAICacheConfig(undefined)).not.toThrow();
+		});
+
+		it('validateOpenAICacheConfig rejects retentionRatio outside [0, 1]', async () => {
+			const { validateOpenAICacheConfig } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			expect(() =>
+				validateOpenAICacheConfig({
+					truncation: { type: 'retention_ratio', retentionRatio: -0.1 },
+				}),
+			).toThrow(/retentionRatio/);
+			expect(() =>
+				validateOpenAICacheConfig({
+					truncation: { type: 'retention_ratio', retentionRatio: 1.1 },
+				}),
+			).toThrow(/retentionRatio/);
+			expect(() =>
+				validateOpenAICacheConfig({
+					truncation: { type: 'retention_ratio', retentionRatio: Number.NaN },
+				}),
+			).toThrow(/retentionRatio/);
+		});
+
+		it('validateOpenAICacheConfig accepts retentionRatio=0 and =1 as boundary values', async () => {
+			const { validateOpenAICacheConfig } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			expect(() =>
+				validateOpenAICacheConfig({
+					truncation: { type: 'retention_ratio', retentionRatio: 0 },
+				}),
+			).not.toThrow();
+			expect(() =>
+				validateOpenAICacheConfig({
+					truncation: { type: 'retention_ratio', retentionRatio: 1 },
+				}),
+			).not.toThrow();
+		});
+
+		it('validateOpenAICacheConfig rejects fractional / negative postInstructions', async () => {
+			const { validateOpenAICacheConfig } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			expect(() =>
+				validateOpenAICacheConfig({
+					truncation: {
+						type: 'retention_ratio',
+						retentionRatio: 0.8,
+						tokenLimits: { postInstructions: 1.5 },
+					},
+				}),
+			).toThrow(/postInstructions/);
+			expect(() =>
+				validateOpenAICacheConfig({
+					truncation: {
+						type: 'retention_ratio',
+						retentionRatio: 0.8,
+						tokenLimits: { postInstructions: -1 },
+					},
+				}),
+			).toThrow(/postInstructions/);
+		});
+
+		it('applyOpenAICacheConfig writes string truncation forms', async () => {
+			const { applyOpenAICacheConfig } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			const auto: Record<string, unknown> = {};
+			applyOpenAICacheConfig(auto, { truncation: 'auto' }, 'unknown');
+			expect(auto.truncation).toBe('auto');
+
+			const disabled: Record<string, unknown> = {};
+			applyOpenAICacheConfig(disabled, { truncation: 'disabled' }, 'unknown');
+			expect(disabled.truncation).toBe('disabled');
+		});
+
+		it('applyOpenAICacheConfig writes retention_ratio object form (snake_case wire shape)', async () => {
+			const { applyOpenAICacheConfig } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			const payload: Record<string, unknown> = {};
+			applyOpenAICacheConfig(
+				payload,
+				{
+					truncation: {
+						type: 'retention_ratio',
+						retentionRatio: 0.8,
+						tokenLimits: { postInstructions: 4096 },
+					},
+				},
+				'unknown',
+			);
+			expect(payload.truncation).toEqual({
+				type: 'retention_ratio',
+				retention_ratio: 0.8,
+				token_limits: { post_instructions: 4096 },
+			});
+		});
+
+		it('applyOpenAICacheConfig omits token_limits when postInstructions is undefined', async () => {
+			const { applyOpenAICacheConfig } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			const payload: Record<string, unknown> = {};
+			applyOpenAICacheConfig(
+				payload,
+				{ truncation: { type: 'retention_ratio', retentionRatio: 0.5 } },
+				'unknown',
+			);
+			expect(payload.truncation).toEqual({
+				type: 'retention_ratio',
+				retention_ratio: 0.5,
+			});
+			expect((payload.truncation as Record<string, unknown>).token_limits).toBeUndefined();
+		});
+
+		it('applyOpenAICacheConfig is a no-op when cfg is undefined', async () => {
+			const { applyOpenAICacheConfig } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			const payload: Record<string, unknown> = { existing: 'field' };
+			applyOpenAICacheConfig(payload, undefined, 'unknown');
+			expect(payload).toEqual({ existing: 'field' });
+		});
+
+		it('updateSession includes truncation in the session.update payload', () => {
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				cacheConfig: { truncation: { type: 'retention_ratio', retentionRatio: 0.8 } },
+			});
+			transport.updateSession({ instructions: 'be helpful' });
+			const update = mockRt.sent.find(
+				(m) =>
+					m.type === 'session.update' &&
+					(m.session as Record<string, unknown>).truncation !== undefined,
+			);
+			expect(update).toBeDefined();
+			expect((update?.session as Record<string, unknown>).truncation).toEqual({
+				type: 'retention_ratio',
+				retention_ratio: 0.8,
+			});
+		});
+
+		it('transferSession includes truncation in the session.update payload (in-place handoff)', async () => {
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				cacheConfig: { truncation: 'auto' },
+			});
+			await transport.transferSession({ instructions: 'You are agent B.' });
+			const update = mockRt.sent.find(
+				(m) =>
+					m.type === 'session.update' &&
+					(m.session as Record<string, unknown>).truncation !== undefined,
+			);
+			expect(update).toBeDefined();
+			expect((update?.session as Record<string, unknown>).truncation).toBe('auto');
+		});
+	});
 });
