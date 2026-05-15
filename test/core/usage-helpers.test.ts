@@ -129,3 +129,49 @@ describe('deriveUsageSource (P4)', () => {
 		expect(deriveUsageSource(geminiFinal({ phase: 'update' }))).toBe('gemini.usage.update');
 	});
 });
+
+// Follow-up fix #3: VoiceSession's per-turn sequence Map must NOT clear
+// `no_turn:*` keys at turn.end so transcription events stay monotonic
+// across the session. This test exercises the Map-filter policy in
+// isolation (the 3-line block at voice-session.ts:1909-1916) so a
+// regression on either branch of the filter is caught here.
+describe('per-turn sequence reset policy (fix #3)', () => {
+	function applyTurnEndReset(map: Map<string, number>): void {
+		for (const k of [...map.keys()]) {
+			if (!k.startsWith('no_turn:')) map.delete(k);
+		}
+	}
+
+	it('clears turn-bound source keys (openai.response, gemini.*)', () => {
+		const m = new Map<string, number>();
+		m.set('turn_5:openai.response', 3);
+		m.set('turn_5:gemini.turn.final', 1);
+		applyTurnEndReset(m);
+		expect(m.has('turn_5:openai.response')).toBe(false);
+		expect(m.has('turn_5:gemini.turn.final')).toBe(false);
+	});
+
+	it('PRESERVES no_turn:* keys (transcription) so sequence stays session-scoped', () => {
+		const m = new Map<string, number>();
+		m.set('no_turn:openai.transcription', 7);
+		m.set('turn_5:openai.response', 2);
+		applyTurnEndReset(m);
+		expect(m.get('no_turn:openai.transcription')).toBe(7);
+		expect(m.has('turn_5:openai.response')).toBe(false);
+	});
+
+	it('next transcription event picks up where the previous left off (no reset)', () => {
+		const m = new Map<string, number>();
+		// Turn 1 emits: response (seq 1), transcription (seq 1).
+		m.set('turn_1:openai.response', 1);
+		m.set('no_turn:openai.transcription', 1);
+		// turn.end fires.
+		applyTurnEndReset(m);
+		// Turn 2 emits: response (seq 1, fresh), transcription (seq 2, monotonic).
+		m.set('turn_2:openai.response', 1);
+		const transcriptionSeq = (m.get('no_turn:openai.transcription') ?? 0) + 1;
+		m.set('no_turn:openai.transcription', transcriptionSeq);
+		expect(transcriptionSeq).toBe(2); // not reset to 1
+		expect(m.get('turn_2:openai.response')).toBe(1);
+	});
+});

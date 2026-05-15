@@ -1908,7 +1908,13 @@ export class VoiceSession {
 		// will lazy-allocate via allocateCurrentModelTurn().
 		this.currentModelTurnId = null;
 		this.currentModelTurnAgentName = null;
-		this.currentTurnUsageSequence.clear();
+		// Follow-up fix #3: turn-bound sources (openai.response, gemini.*)
+		// reset per turn; non-turn-bound sources (openai.transcription, keyed
+		// `no_turn:*`) keep their counter session-scoped so the documented
+		// monotonic-per-(sessionId, source) guarantee holds for transcription.
+		for (const k of [...this.currentTurnUsageSequence.keys()]) {
+			if (!k.startsWith('no_turn:')) this.currentTurnUsageSequence.delete(k);
+		}
 
 		// Notify active agent
 		const agent = this.agentRouter.activeAgent;

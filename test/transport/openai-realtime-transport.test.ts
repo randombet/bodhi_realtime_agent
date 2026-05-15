@@ -450,18 +450,25 @@ describe('OpenAIRealtimeTransport', () => {
 	});
 
 	describe('updateSession', () => {
-		it('sends session.update with new instructions', () => {
-			transport.updateSession({ instructions: 'New instructions' });
+		// Follow-up fix #1: updateSession is now ack-correlated via the
+		// FIFO queue, so callers must await for the wire send to complete.
+		it('sends session.update with new instructions', async () => {
+			await transport.updateSession({ instructions: 'New instructions' });
 
-			expect(mockRt.sent).toContainEqual({
-				type: 'session.update',
-				session: { instructions: 'New instructions' },
-			});
+			// Wire payload carries an event_id (ack correlation); strip it for
+			// shape-only equality. The rest of the session payload is unchanged.
+			const sent = mockRt.sent.find(
+				(m) =>
+					m.type === 'session.update' &&
+					(m.session as Record<string, unknown>).instructions === 'New instructions',
+			);
+			expect(sent).toBeDefined();
+			expect(sent?.session).toEqual({ instructions: 'New instructions' });
 		});
 
-		it('sends session.update with new tools', () => {
+		it('sends session.update with new tools', async () => {
 			const tool = makeTool('calculator');
-			transport.updateSession({ tools: [tool] });
+			await transport.updateSession({ tools: [tool] });
 
 			const sessionUpdate = mockRt.sent.find(
 				(m) => m.type === 'session.update' && (m.session as Record<string, unknown>).tools,
@@ -474,13 +481,16 @@ describe('OpenAIRealtimeTransport', () => {
 			expect(tools[0]).toMatchObject({ type: 'function', name: 'calculator' });
 		});
 
-		it('sends session.update with output_modalities when responseModality is provided', () => {
-			transport.updateSession({ responseModality: 'text' });
+		it('sends session.update with output_modalities when responseModality is provided', async () => {
+			await transport.updateSession({ responseModality: 'text' });
 
-			expect(mockRt.sent).toContainEqual({
-				type: 'session.update',
-				session: { output_modalities: ['text'] },
-			});
+			const sent = mockRt.sent.find(
+				(m) =>
+					m.type === 'session.update' &&
+					Array.isArray((m.session as Record<string, unknown>).output_modalities),
+			);
+			expect(sent).toBeDefined();
+			expect(sent?.session).toEqual({ output_modalities: ['text'] });
 		});
 	});
 
@@ -506,10 +516,15 @@ describe('OpenAIRealtimeTransport', () => {
 		it('includes output_modalities in transfer session.update when responseModality is provided', async () => {
 			await transport.transferSession({ responseModality: 'text' });
 
-			expect(mockRt.sent).toContainEqual({
-				type: 'session.update',
-				session: { output_modalities: ['text'] },
-			});
+			// Wire payload includes a synthetic event_id (ack correlation);
+			// shape-only equality on the session body.
+			const sent = mockRt.sent.find(
+				(m) =>
+					m.type === 'session.update' &&
+					Array.isArray((m.session as Record<string, unknown>).output_modalities),
+			);
+			expect(sent).toBeDefined();
+			expect(sent?.session).toEqual({ output_modalities: ['text'] });
 		});
 	});
 
@@ -1316,13 +1331,13 @@ describe('OpenAIRealtimeTransport — Phase 1 features (gpt-realtime-2)', () => 
 			expect(payload).toEqual({ existing: 'field' });
 		});
 
-		it('updateSession includes truncation in the session.update payload', () => {
+		it('updateSession includes truncation in the session.update payload', async () => {
 			setup({
 				apiKey: 'test',
 				model: 'gpt-realtime-2',
 				cacheConfig: { truncation: { type: 'retention_ratio', retentionRatio: 0.8 } },
 			});
-			transport.updateSession({ instructions: 'be helpful' });
+			await transport.updateSession({ instructions: 'be helpful' });
 			const update = mockRt.sent.find(
 				(m) =>
 					m.type === 'session.update' &&
@@ -1605,6 +1620,149 @@ describe('OpenAIRealtimeTransport — Phase 1 features (gpt-realtime-2)', () => 
 				project: 'proj_y',
 			});
 			expect(t).toBeDefined();
+		});
+	});
+
+	// Follow-up review fixes — see commit message + design-context-caching.md
+	describe('follow-up fixes (post-P7 review)', () => {
+		// Fix #1: ack-correlated single-flight session.update queue.
+		describe('FIFO queue + sendSessionUpdateAndWait (fix #1)', () => {
+			it('updateSession resolves only after session.updated arrives (not fire-and-forget)', async () => {
+				setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+				// The mock auto-emits session.updated on every session.update,
+				// so a successful await means the wire→ack round-trip completed.
+				const promise = transport.updateSession({ instructions: 'X' });
+				// Promise is pending until the microtask queue drains.
+				expect(promise).toBeInstanceOf(Promise);
+				await promise;
+				const sent = mockRt.sent.find(
+					(m) =>
+						m.type === 'session.update' &&
+						(m.session as Record<string, unknown>).instructions === 'X',
+				);
+				expect(sent).toBeDefined();
+				// Outgoing payload carries an event_id for ack correlation.
+				expect((sent as Record<string, unknown>).event_id).toMatch(/^sess_upd_\d+$/);
+			});
+
+			it('concurrent updateSession calls serialize via the queue', async () => {
+				setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+				const a = transport.updateSession({ instructions: 'A' });
+				const b = transport.updateSession({ instructions: 'B' });
+				await Promise.all([a, b]);
+				const updates = mockRt.sent.filter((m) => m.type === 'session.update');
+				// Two ordered sends with monotonic event_ids.
+				const ids = updates
+					.map((m) => (m as Record<string, unknown>).event_id as string | undefined)
+					.filter((x): x is string => typeof x === 'string');
+				expect(ids.length).toBeGreaterThanOrEqual(2);
+				const counters = ids.map((id) => Number(id.replace('sess_upd_', '')));
+				for (let i = 1; i < counters.length; i++) {
+					expect(counters[i]).toBeGreaterThan(counters[i - 1] ?? 0);
+				}
+			});
+
+			it('prefix baseline does NOT update when the wire send rejects', async () => {
+				setup({
+					apiKey: 'test',
+					model: 'gpt-realtime-2',
+					cacheConfig: { enforcePrefixStability: true },
+				});
+				// Set initial baseline by simulating a successful first update.
+				await transport.updateSession({ instructions: 'baseline' });
+				// biome-ignore lint/suspicious/noExplicitAny: test-only hook
+				const beforeBaseline = (transport as any).prefixBaselineCanonical;
+				expect(beforeBaseline).toBeDefined();
+
+				// Replace the mock to make the next session.update reject by
+				// emitting an error event with a matching event_id instead of
+				// session.updated.
+				// biome-ignore lint/suspicious/noExplicitAny: deliberate mock override
+				const origSend = (mockRt as any).send.bind(mockRt);
+				// biome-ignore lint/suspicious/noExplicitAny: deliberate mock override
+				(mockRt as any).send = (m: Record<string, unknown>) => {
+					(mockRt as Record<string, unknown[]>).sent.push(m);
+					if (
+						m.type === 'session.update' &&
+						(m.session as Record<string, unknown>).instructions === 'rejected'
+					) {
+						queueMicrotask(() =>
+							mockRt.emit('error', {
+								event_id: m.event_id,
+								error: { message: 'simulated server rejection', type: 'invalid_request_error' },
+							}),
+						);
+						return;
+					}
+					origSend(m);
+				};
+
+				// Mutate prefix; transferSession path so enforcePrefixStability
+				// allows the change (default allowMutationOnTransfer=true), but
+				// the wire send is rejected by the mock.
+				await expect(transport.transferSession({ instructions: 'rejected' })).rejects.toThrow();
+
+				// biome-ignore lint/suspicious/noExplicitAny: test-only hook
+				const afterBaseline = (transport as any).prefixBaselineCanonical;
+				expect(afterBaseline).toBe(beforeBaseline);
+			});
+		});
+
+		// Fix #2: probe rejection suppressed from user-facing onError.
+		describe('probe rejection suppression (fix #2)', () => {
+			it('does NOT call user onError when error is a prompt_cache_key probe rejection', async () => {
+				const { _clearPromptCacheKeyProbeStateForTesting } = await import(
+					'../../src/transport/openai-realtime-transport.js'
+				);
+				_clearPromptCacheKeyProbeStateForTesting();
+				setup({
+					apiKey: 'test',
+					model: 'gpt-realtime-2',
+					cacheConfig: { experimental: { promptCacheKey: 'probe_test_key' } },
+				});
+				const errors: unknown[] = [];
+				transport.onError = (e) => errors.push(e);
+
+				// Mark probe as in-flight (mirrors what installPromptCacheKeyProbe does).
+				// biome-ignore lint/suspicious/noExplicitAny: test-only hook
+				(transport as any)._inFlightProbeScope = 'any';
+
+				// Emit an error matching the probe pattern.
+				mockRt.emit('error', {
+					error: { param: 'prompt_cache_key', message: 'unknown parameter' },
+				});
+
+				expect(errors).toEqual([]);
+			});
+
+			it('DOES call user onError for unrelated errors even with probe in flight', async () => {
+				setup({
+					apiKey: 'test',
+					model: 'gpt-realtime-2',
+					cacheConfig: { experimental: { promptCacheKey: 'probe_test_key' } },
+				});
+				const errors: unknown[] = [];
+				transport.onError = (e) => errors.push(e);
+				// biome-ignore lint/suspicious/noExplicitAny: test-only hook
+				(transport as any)._inFlightProbeScope = 'any';
+
+				mockRt.emit('error', {
+					error: { type: 'server_error', message: 'something else broke' },
+				});
+				expect(errors).toHaveLength(1);
+			});
+
+			it('DOES call user onError for probe-shaped errors when no probe is in flight', () => {
+				setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+				const errors: unknown[] = [];
+				transport.onError = (e) => errors.push(e);
+
+				// Probe scope cleared; same error pattern should NOT be suppressed.
+				mockRt.emit('error', {
+					error: { param: 'prompt_cache_key', message: 'unknown parameter' },
+				});
+				expect(errors).toHaveLength(1);
+			});
 		});
 	});
 });

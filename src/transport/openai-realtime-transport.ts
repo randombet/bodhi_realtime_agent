@@ -342,6 +342,23 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	 *  to decide whether enforcePrefixStability should throw. */
 	private prefixBaselineCanonical: string | null = null;
 
+	/** Follow-up fix #1: serial queue for post-connect session.update sends.
+	 *  Ensures sendSessionUpdateAndWait calls are single-flight (one wire
+	 *  send + one ack at a time), so session.updated events can be correlated
+	 *  to the call that produced them. */
+	private _sessionUpdateQueue: Promise<unknown> = Promise.resolve();
+
+	/** Follow-up fix #1: monotonic event_id counter for session.update payloads.
+	 *  OpenAI errors echo event_id; success acks (session.updated) do not, but
+	 *  single-flight queueing makes the next session.updated unambiguous. */
+	private _sessionUpdateEventIdCounter = 0;
+
+	/** Follow-up fix #2: scope of any prompt_cache_key probe currently in
+	 *  flight. The generic error listener consults this to suppress an
+	 *  expected probe rejection from `transport.onError` (the probe handler
+	 *  will surface it only if the retry-without-key also fails). */
+	private _inFlightProbeScope: string | null = null;
+
 	// Interruption tracking
 	private lastAssistantItemId: string | null = null;
 	private audioOutputMs = 0;
@@ -473,20 +490,17 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		// Build and send session configuration, wait for confirmation
 		const sessionConfig = this.buildSessionConfig();
 
-		const updatedPromise = new Promise<void>((resolve, reject) => {
-			const timeout = setTimeout(() => reject(new Error('session.update timeout')), 15_000);
-			this.rt?.once('session.updated', () => {
-				clearTimeout(timeout);
-				resolve();
-			});
-		});
-
 		// P6: install probe BEFORE the wait so the listener catches an
-		// early `error` event referencing prompt_cache_key.
+		// early `error` event referencing prompt_cache_key. The probe handler
+		// races session.updated vs error events.
 		this.installPromptCacheKeyProbe();
 
-		this.rtSend({ type: 'session.update', session: sessionConfig });
-		await updatedPromise;
+		// Follow-up fix #1: use the queued, ack-correlated helper instead of
+		// fire-and-forget rtSend. The connect-time send goes through the same
+		// queue subsequent updateSession()/transferSession() calls use, so
+		// they serialize correctly even if a caller invokes them
+		// before connect() has fully resolved.
+		await this.sendSessionUpdateAndWait(sessionConfig);
 
 		// P5: capture the prefix baseline AFTER the initial session.update is
 		// acknowledged. Subsequent prefix-mutating sends update this only on
@@ -679,16 +693,15 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			this.currentPromptCacheKeyProbeState(),
 		);
 
-		this.rtSend({ type: 'session.update', session: update as RealtimeSessionCreateRequest });
+		// Follow-up fix #1: send through the queued, ack-correlated helper.
+		// `await` guarantees the server acknowledged before the caller sees
+		// the resolved promise — concurrent callers serialize via the queue.
+		await this.sendSessionUpdateAndWait(update);
 
-		// P5: update the prefix baseline AFTER a successful wire send. Only
-		// fires when prefix actually changed (isSamePrefix would have been true
-		// and we wouldn't be here). The fire-and-forget rtSend doesn't await
-		// the ack; baseline is updated optimistically — if the server
-		// subsequently rejects the update, the baseline will drift, but that's
-		// no worse than the current cache-bust telemetry which is also fire-
-		// and-forget. P6 plus a sendSessionUpdateAndWait helper can tighten
-		// this to "update only on ack".
+		// P5: update the prefix baseline only AFTER a successful ack — if the
+		// helper rejects, control bypasses this line and the baseline is
+		// unchanged, so a subsequent retry isn't compared against a drifted
+		// baseline. Same lifecycle as transferSession() below.
 		if (!isSamePrefix && (config.instructions !== undefined || config.tools !== undefined)) {
 			this.prefixBaselineCanonical = this.computePrefixCanonical(this.instructions, this.tools);
 		}
@@ -726,15 +739,6 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			else if (config.tools !== undefined) this.onCacheBust('tools_changed');
 		}
 
-		// Wait for session.updated confirmation
-		const updatedPromise = new Promise<void>((resolve, reject) => {
-			const timeout = setTimeout(() => reject(new Error('transferSession timeout')), 10_000);
-			this.rt?.once('session.updated', () => {
-				clearTimeout(timeout);
-				resolve();
-			});
-		});
-
 		// P3: in-place transfers must also carry cacheConfig.truncation. Without
 		// this, the server would lose the policy on agent handoff.
 		applyOpenAICacheConfig(
@@ -743,11 +747,13 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			this.currentPromptCacheKeyProbeState(),
 		);
 
-		this.rtSend({ type: 'session.update', session: update as RealtimeSessionCreateRequest });
-		await updatedPromise;
+		// Follow-up fix #1: route through the queued helper so a transfer
+		// invoked while another session.update is in flight serializes
+		// correctly. Replaces the per-call ad-hoc session.updated listener
+		// (which would race with concurrent updates).
+		await this.sendSessionUpdateAndWait(update);
 
-		// P5: update prefix baseline AFTER ack (transferSession actually awaits
-		// session.updated, unlike updateSession). Only on real prefix change.
+		// P5: update prefix baseline AFTER ack — only on real prefix change.
 		if (!isSamePrefix && (config.instructions !== undefined || config.tools !== undefined)) {
 			this.prefixBaselineCanonical = this.computePrefixCanonical(this.instructions, this.tools);
 		}
@@ -946,6 +952,78 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		console.warn(msg);
 	}
 
+	/** Follow-up fix #1: serial, ack-correlated session.update send.
+	 *  - Tags the outgoing payload with a fresh event_id (OpenAI errors echo
+	 *    this; success acks do not, so the FIFO queue is what makes
+	 *    session.updated unambiguous).
+	 *  - Resolves on session.updated.
+	 *  - Rejects with the error (also returned to caller) when a matching
+	 *    `error` event arrives. Matching = `event_id` equals the outgoing
+	 *    one, OR (for general failures) the next error event before
+	 *    session.updated.
+	 *  - 15s timeout rejects with a Transport-style timeout error.
+	 *
+	 *  Used by connect() (initial), updateSession(), and transferSession()
+	 *  so concurrent callers serialize via the queue. */
+	private async sendSessionUpdateAndWait(
+		session: Partial<RealtimeSessionCreateRequest>,
+	): Promise<void> {
+		const rt = this.rt;
+		if (!rt) throw new TransportError('sendSessionUpdateAndWait called with no active socket');
+		this._sessionUpdateEventIdCounter += 1;
+		const eventId = `sess_upd_${this._sessionUpdateEventIdCounter}`;
+		const task = async () => {
+			return await new Promise<void>((resolve, reject) => {
+				const timeout = setTimeout(() => {
+					cleanup();
+					reject(new TransportError('session.update timeout'));
+				}, 15_000);
+				const onUpdated = () => {
+					cleanup();
+					resolve();
+				};
+				const onError = (event: unknown) => {
+					// biome-ignore lint/suspicious/noExplicitAny: SDK error event shape varies
+					const e = event as any;
+					const echoedId: string | undefined = e?.event_id ?? e?.error?.event_id;
+					// Match either by echoed event_id (preferred) or by being the
+					// next error before session.updated (fallback for SDKs that
+					// drop the echo).
+					if (echoedId !== undefined && echoedId !== eventId) return;
+					cleanup();
+					const err = e?.error ?? e;
+					reject(
+						err instanceof Error
+							? err
+							: new TransportError(
+									typeof err?.message === 'string' ? err.message : 'session.update error',
+									{ cause: err },
+								),
+					);
+				};
+				const cleanup = () => {
+					clearTimeout(timeout);
+					rt.off?.('session.updated', onUpdated);
+					rt.off?.('error', onError);
+				};
+				rt.once('session.updated', onUpdated);
+				rt.on('error', onError);
+				this.rtSend({
+					type: 'session.update',
+					session: session as RealtimeSessionCreateRequest,
+					// biome-ignore lint/suspicious/noExplicitAny: event_id is documented but not in the SDK request type
+					...({ event_id: eventId } as any),
+				});
+			});
+		};
+		// Single-flight: chain after any in-flight task; swallow upstream
+		// rejections in the chain itself so a failed prior task doesn't
+		// poison this one's promise (it still runs after the prior settles).
+		const next = this._sessionUpdateQueue.then(task, task);
+		this._sessionUpdateQueue = next.catch(() => undefined);
+		return next;
+	}
+
 	/** P6: derive the current promptCacheKey probe state for this transport.
 	 *  Returns 'unknown' when no key is configured (probe not applicable). */
 	private currentPromptCacheKeyProbeState(): CacheKeyProbeState {
@@ -982,11 +1060,20 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		if (getPromptCacheKeyProbeState(scope) !== 'unknown') return;
 		const rt = this.rt;
 		let settled = false;
+		// Follow-up fix #2: mark this scope as in-flight so the generic
+		// rt.on('error') handler suppresses the matching probe rejection
+		// from user-facing onError. Cleared in `finalize()` regardless of
+		// outcome.
+		this._inFlightProbeScope = scope;
+		const finalize = () => {
+			if (this._inFlightProbeScope === scope) this._inFlightProbeScope = null;
+		};
 		const onUpdated = () => {
 			if (settled) return;
 			settled = true;
 			setPromptCacheKeyProbeState(scope, 'accepted');
 			rt.off?.('error', onError);
+			finalize();
 		};
 		// biome-ignore lint/suspicious/noExplicitAny: SDK error event shape varies
 		const onError = (event: any) => {
@@ -1022,6 +1109,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 					});
 				}
 			}
+			finalize();
 		};
 		rt.once('session.updated', onUpdated);
 		rt.on('error', onError);
@@ -1031,6 +1119,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			settled = true;
 			rt.off?.('session.updated', onUpdated);
 			rt.off?.('error', onError);
+			finalize();
 		}, 15_000);
 	}
 
@@ -1372,6 +1461,22 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 
 		// --- Error handling (classify recoverability by error type) ---
 		rt.on('error', (error) => {
+			// Follow-up fix #2: suppress expected prompt_cache_key probe
+			// rejections from the user-facing onError handler. The probe
+			// listener (installPromptCacheKeyProbe) handles these by marking
+			// the scope rejected and retrying without the key on the same
+			// socket; surfacing the same error to the app would defeat the
+			// purpose of probing.
+			if (this._inFlightProbeScope !== null) {
+				// biome-ignore lint/suspicious/noExplicitAny: SDK error event shape varies
+				const e = error as any;
+				const inner = e?.error ?? e;
+				const isProbeError =
+					inner?.param === 'prompt_cache_key' ||
+					inner?.code === 'unknown_parameter' ||
+					(typeof inner?.message === 'string' && inner.message.includes('prompt_cache_key'));
+				if (isProbeError) return;
+			}
 			if (this.onError) {
 				const err = error instanceof Error ? error : new Error(String(error));
 				// OpenAIRealtimeError has .error.type for classification
