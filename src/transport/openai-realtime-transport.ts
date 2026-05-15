@@ -71,11 +71,42 @@ export interface OpenAIRealtimeCacheConfig extends CacheConfigCommon {
 				/** Optional fixed token-limit cap. */
 				tokenLimits?: { postInstructions?: number };
 		  };
+	/**
+	 * EXPERIMENTAL — sent on every `session.update` for a given probe scope
+	 * `(baseURL, organization, project, model, promptCacheKey)`. The first
+	 * send for a new scope races `session.updated` (success) against an
+	 * `error` event referencing `prompt_cache_key` or `unknown_parameter`
+	 * (rejection). On rejection: probe state for that scope flips to
+	 * `'rejected'`, the field is stripped from subsequent sends, and the
+	 * rejection error is suppressed from the user-facing `transport.onError`.
+	 *
+	 * Documented for Responses/Chat; community-reported but officially
+	 * undocumented for Realtime. Combines with the prefix hash for routing
+	 * affinity (~15 RPM per key per backend host before spillover); over-
+	 * sharing degrades hit rate. Scope per agent + region.
+	 *
+	 * Not present in the local OpenAI SDK type as of v6.x; emitted via narrow
+	 * cast in `applyOpenAICacheConfig`.
+	 */
+	experimental?: {
+		promptCacheKey?: string;
+	};
 }
 
 export interface OpenAIRealtimeConfig {
 	/** OpenAI API key. */
 	apiKey: string;
+	/** OpenAI organization ID. Pass-through to the SDK client constructor.
+	 *  Used by the P6 promptCacheKey probe to scope rejections per org. */
+	organization?: string;
+	/** OpenAI project ID. Pass-through to the SDK client constructor.
+	 *  Used by the P6 promptCacheKey probe to scope rejections per project. */
+	project?: string;
+	/** Override the OpenAI base URL (e.g. for compatible third-party gateways).
+	 *  Pass-through to the SDK client constructor; the P6 promptCacheKey probe
+	 *  also scopes rejections per baseURL so a 4xx on one deployment does not
+	 *  poison the probe state for another. */
+	baseURL?: string;
 	/** Model identifier (default: 'gpt-realtime-2'). */
 	model?: OpenAIRealtimeModel;
 	/** Voice name (default: 'coral'). */
@@ -121,11 +152,46 @@ function canonicalize(value: unknown): unknown {
 	return sorted;
 }
 
-/** Probe state for the experimental prompt-cache-key path (wired in P6).
- *  Defined in P3 so applyOpenAICacheConfig has the parameter from day one;
- *  P3 callers always pass 'unknown' since the field they'd guard isn't
- *  wired yet. */
+/** Probe state for the experimental prompt-cache-key path. */
 export type CacheKeyProbeState = 'unknown' | 'accepted' | 'rejected';
+
+/** P6: module-level probe state Map. Keyed by
+ *  `${baseURL}|${organization}|${project}|${model}|${promptCacheKey}` so a
+ *  rejection in one deployment/key does not poison the probe for others. */
+const promptCacheKeyProbeState: Map<string, CacheKeyProbeState> = new Map();
+
+/** P6: derive the probe scope key from a transport instance + cache key. */
+export function derivePromptCacheKeyProbeScope(
+	baseURL: string | undefined,
+	organization: string | undefined,
+	project: string | undefined,
+	model: string | undefined,
+	promptCacheKey: string,
+): string {
+	return [
+		baseURL ?? 'default',
+		organization ?? 'default',
+		project ?? 'default',
+		model ?? 'default',
+		promptCacheKey,
+	].join('|');
+}
+
+/** P6: consult the probe Map. Returns `'unknown'` if no entry exists. */
+export function getPromptCacheKeyProbeState(scope: string): CacheKeyProbeState {
+	return promptCacheKeyProbeState.get(scope) ?? 'unknown';
+}
+
+/** P6: set the probe state for a scope. Used by the in-transport probe
+ *  rejection handler. Exposed for testing. */
+export function setPromptCacheKeyProbeState(scope: string, state: CacheKeyProbeState): void {
+	promptCacheKeyProbeState.set(scope, state);
+}
+
+/** P6 (test only): clear all probe state. */
+export function _clearPromptCacheKeyProbeStateForTesting(): void {
+	promptCacheKeyProbeState.clear();
+}
 
 /** Validate a cacheConfig payload BEFORE opening the WebSocket. Throws
  *  `ValidationError` for invalid values; the caller (connect()) wraps the
@@ -150,12 +216,14 @@ export function validateOpenAICacheConfig(cfg: OpenAIRealtimeCacheConfig | undef
  *  `prompt_cache_key`. Single insertion point used by `buildSessionConfig()`,
  *  `updateSession()`, and `transferSession()` so the field never gets dropped
  *  on agent handoff. Validation must have run separately (validateOpenAICacheConfig).
+ *
+ *  @param probeState When `cfg.experimental?.promptCacheKey` is present:
+ *    `'rejected'` → omit the field; `'unknown'` or `'accepted'` → include.
  */
 export function applyOpenAICacheConfig(
 	payload: Record<string, unknown>,
 	cfg: OpenAIRealtimeCacheConfig | undefined,
-	/** Probe state — consumed in P6 (experimental.promptCacheKey path). */
-	_probeState: CacheKeyProbeState,
+	probeState: CacheKeyProbeState,
 ): void {
 	if (!cfg) return;
 	if (cfg.truncation !== undefined) {
@@ -171,7 +239,12 @@ export function applyOpenAICacheConfig(
 			};
 		}
 	}
-	// P6 will add: if (cfg.experimental?.promptCacheKey && _probeState !== 'rejected') { ... }
+	// P6: experimental.promptCacheKey. Field is not in the OpenAI SDK's
+	// RealtimeSessionCreateRequest type (as of v6.x); attach as a raw
+	// property. Omit when the probe has confirmed rejection for this scope.
+	if (cfg.experimental?.promptCacheKey && probeState !== 'rejected') {
+		(payload as { prompt_cache_key?: string }).prompt_cache_key = cfg.experimental.promptCacheKey;
+	}
 }
 
 /** Convert a framework ToolDefinition to OpenAI function tool format. */
@@ -304,7 +377,12 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 
 	constructor(config: OpenAIRealtimeConfig) {
 		this.config = config;
-		this.client = new OpenAI({ apiKey: config.apiKey });
+		this.client = new OpenAI({
+			apiKey: config.apiKey,
+			...(config.organization !== undefined ? { organization: config.organization } : {}),
+			...(config.project !== undefined ? { project: config.project } : {}),
+			...(config.baseURL !== undefined ? { baseURL: config.baseURL } : {}),
+		});
 		this.voice = config.voice ?? 'coral';
 		this._capabilities = this.resolveCapabilities();
 		this._audioFormat = this.resolveAudioFormat();
@@ -402,6 +480,10 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 				resolve();
 			});
 		});
+
+		// P6: install probe BEFORE the wait so the listener catches an
+		// early `error` event referencing prompt_cache_key.
+		this.installPromptCacheKeyProbe();
 
 		this.rtSend({ type: 'session.update', session: sessionConfig });
 		await updatedPromise;
@@ -594,7 +676,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		applyOpenAICacheConfig(
 			update as Record<string, unknown>,
 			this.config.cacheConfig,
-			'unknown', // probe state wired in P6
+			this.currentPromptCacheKeyProbeState(),
 		);
 
 		this.rtSend({ type: 'session.update', session: update as RealtimeSessionCreateRequest });
@@ -658,7 +740,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		applyOpenAICacheConfig(
 			update as Record<string, unknown>,
 			this.config.cacheConfig,
-			'unknown', // probe state wired in P6
+			this.currentPromptCacheKeyProbeState(),
 		);
 
 		this.rtSend({ type: 'session.update', session: update as RealtimeSessionCreateRequest });
@@ -806,7 +888,16 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 
 	private applyTransportConfig(config: LLMTransportConfig): void {
 		if (config.auth?.type === 'api_key') {
-			this.client = new OpenAI({ apiKey: config.auth.apiKey });
+			// Re-construct the SDK client preserving the existing organization/
+			// project/baseURL so the P6 probe scope keys stay stable.
+			this.client = new OpenAI({
+				apiKey: config.auth.apiKey,
+				...(this.config.organization !== undefined
+					? { organization: this.config.organization }
+					: {}),
+				...(this.config.project !== undefined ? { project: this.config.project } : {}),
+				...(this.config.baseURL !== undefined ? { baseURL: this.config.baseURL } : {}),
+			});
 		}
 		if (config.model !== undefined) {
 			this.config.model = config.model;
@@ -853,6 +944,94 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		// Intentional warn-on-drop in non-strict mode — surfaces the silent
 		// feature drop to ops without crashing user code.
 		console.warn(msg);
+	}
+
+	/** P6: derive the current promptCacheKey probe state for this transport.
+	 *  Returns 'unknown' when no key is configured (probe not applicable). */
+	private currentPromptCacheKeyProbeState(): CacheKeyProbeState {
+		const key = this.config.cacheConfig?.experimental?.promptCacheKey;
+		if (!key) return 'unknown';
+		const scope = derivePromptCacheKeyProbeScope(
+			this.client.baseURL,
+			this.client.organization ?? undefined,
+			this.client.project ?? undefined,
+			this.config.model,
+			key,
+		);
+		return getPromptCacheKeyProbeState(scope);
+	}
+
+	/** P6: install a one-shot listener that races `session.updated` against an
+	 *  `error` event referencing `prompt_cache_key`. Called from connect()
+	 *  after the initial session.update is sent, only when:
+	 *  (a) cacheConfig.experimental.promptCacheKey is set, AND
+	 *  (b) the probe state for that scope is currently 'unknown'.
+	 *  On rejection: marks scope rejected, suppresses the error from
+	 *  user-facing onError, and resends session.update without the key on
+	 *  the same socket (no full reconnect). */
+	private installPromptCacheKeyProbe(): void {
+		const cfg = this.config.cacheConfig?.experimental?.promptCacheKey;
+		if (!cfg || !this.rt) return;
+		const scope = derivePromptCacheKeyProbeScope(
+			this.client.baseURL,
+			this.client.organization ?? undefined,
+			this.client.project ?? undefined,
+			this.config.model,
+			cfg,
+		);
+		if (getPromptCacheKeyProbeState(scope) !== 'unknown') return;
+		const rt = this.rt;
+		let settled = false;
+		const onUpdated = () => {
+			if (settled) return;
+			settled = true;
+			setPromptCacheKeyProbeState(scope, 'accepted');
+			rt.off?.('error', onError);
+		};
+		// biome-ignore lint/suspicious/noExplicitAny: SDK error event shape varies
+		const onError = (event: any) => {
+			if (settled) return;
+			const err = (event?.error ?? event) as {
+				code?: string;
+				message?: string;
+				param?: string;
+			};
+			const isProbeError =
+				err?.param === 'prompt_cache_key' ||
+				err?.code === 'unknown_parameter' ||
+				(typeof err?.message === 'string' && err.message.includes('prompt_cache_key'));
+			if (!isProbeError) return;
+			settled = true;
+			setPromptCacheKeyProbeState(scope, 'rejected');
+			rt.off?.('session.updated', onUpdated);
+			console.warn(
+				`[openai-realtime-transport] prompt_cache_key rejected by server (scope=${scope}); stripping the field from subsequent session.update payloads. This rejection is suppressed from the user-facing onError handler.`,
+			);
+			// Retry the same session.update WITHOUT the key on the same socket.
+			// Build a fresh sessionConfig (which now consults the updated probe
+			// state and omits prompt_cache_key) and send it.
+			try {
+				const retry = this.buildSessionConfig();
+				this.rtSend({ type: 'session.update', session: retry });
+			} catch (retryErr) {
+				// If the retry itself fails, surface to user onError.
+				if (this.onError) {
+					this.onError({
+						error: retryErr instanceof Error ? retryErr : new Error(String(retryErr)),
+						recoverable: false,
+					});
+				}
+			}
+		};
+		rt.once('session.updated', onUpdated);
+		rt.on('error', onError);
+		// Auto-cleanup after 15s in case neither event arrives.
+		setTimeout(() => {
+			if (settled) return;
+			settled = true;
+			rt.off?.('session.updated', onUpdated);
+			rt.off?.('error', onError);
+		}, 15_000);
 	}
 
 	/** P5: compute the canonical prefix snapshot string for a given
@@ -988,7 +1167,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		applyOpenAICacheConfig(
 			session as unknown as Record<string, unknown>,
 			this.config.cacheConfig,
-			'unknown', // probe state wired in P6
+			this.currentPromptCacheKeyProbeState(),
 		);
 
 		return session;

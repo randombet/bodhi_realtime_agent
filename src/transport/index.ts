@@ -25,8 +25,12 @@ export type { LLMTransport } from '../types/transport.js';
 export { MultiClientTransport } from './multi-client-transport.js';
 export type { ConnectionContext, MultiClientTransportCallbacks } from './multi-client-transport.js';
 export {
+	_clearPromptCacheKeyProbeStateForTesting,
 	applyOpenAICacheConfig,
+	derivePromptCacheKeyProbeScope,
+	getPromptCacheKeyProbeState,
 	OpenAIRealtimeTransport,
+	setPromptCacheKeyProbeState,
 	validateOpenAICacheConfig,
 } from './openai-realtime-transport.js';
 export type {

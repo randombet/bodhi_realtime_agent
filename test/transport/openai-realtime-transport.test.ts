@@ -1472,4 +1472,139 @@ describe('OpenAIRealtimeTransport — Phase 1 features (gpt-realtime-2)', () => 
 			await expect(transport.updateSession({ instructions: 'changed' })).resolves.toBeUndefined();
 		});
 	});
+
+	// P6: experimental.promptCacheKey probe. See dev_docs/framework/design-context-caching.md §6.
+	describe('experimental.promptCacheKey probe (P6)', () => {
+		it('derivePromptCacheKeyProbeScope produces stable scope strings', async () => {
+			const { derivePromptCacheKeyProbeScope } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			expect(derivePromptCacheKeyProbeScope(undefined, undefined, undefined, 'm', 'k')).toBe(
+				'default|default|default|m|k',
+			);
+			expect(
+				derivePromptCacheKeyProbeScope(
+					'https://api.openai.com/v1',
+					'org_x',
+					'proj_y',
+					'gpt-realtime-2',
+					'k1',
+				),
+			).toBe('https://api.openai.com/v1|org_x|proj_y|gpt-realtime-2|k1');
+			// Different baseURL → different scope.
+			expect(
+				derivePromptCacheKeyProbeScope('https://other/', 'org_x', 'proj_y', 'gpt-realtime-2', 'k1'),
+			).not.toBe(
+				derivePromptCacheKeyProbeScope(
+					'https://api.openai.com/v1',
+					'org_x',
+					'proj_y',
+					'gpt-realtime-2',
+					'k1',
+				),
+			);
+		});
+
+		it('applyOpenAICacheConfig includes prompt_cache_key when probe state is unknown or accepted', async () => {
+			const { applyOpenAICacheConfig } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			const cfg = { experimental: { promptCacheKey: 'demo_key' } };
+
+			const u: Record<string, unknown> = {};
+			applyOpenAICacheConfig(u, cfg, 'unknown');
+			expect(u.prompt_cache_key).toBe('demo_key');
+
+			const a: Record<string, unknown> = {};
+			applyOpenAICacheConfig(a, cfg, 'accepted');
+			expect(a.prompt_cache_key).toBe('demo_key');
+		});
+
+		it('applyOpenAICacheConfig OMITS prompt_cache_key when probe state is rejected', async () => {
+			const { applyOpenAICacheConfig } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			const u: Record<string, unknown> = {};
+			applyOpenAICacheConfig(u, { experimental: { promptCacheKey: 'demo_key' } }, 'rejected');
+			expect(u.prompt_cache_key).toBeUndefined();
+		});
+
+		it('updateSession includes prompt_cache_key when key is configured', async () => {
+			const { _clearPromptCacheKeyProbeStateForTesting } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			_clearPromptCacheKeyProbeStateForTesting();
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				cacheConfig: { experimental: { promptCacheKey: 'agent_alpha' } },
+			});
+			await transport.updateSession({ instructions: 'be helpful' });
+			const update = mockRt.sent.find(
+				(m) =>
+					m.type === 'session.update' &&
+					(m.session as Record<string, unknown>).prompt_cache_key !== undefined,
+			);
+			expect(update).toBeDefined();
+			expect((update?.session as Record<string, unknown>).prompt_cache_key).toBe('agent_alpha');
+		});
+
+		it('transferSession also includes prompt_cache_key (in-place handoff)', async () => {
+			const { _clearPromptCacheKeyProbeStateForTesting } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			_clearPromptCacheKeyProbeStateForTesting();
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				cacheConfig: { experimental: { promptCacheKey: 'agent_alpha' } },
+			});
+			await transport.transferSession({ instructions: 'agent B' });
+			const update = mockRt.sent.find(
+				(m) =>
+					m.type === 'session.update' &&
+					(m.session as Record<string, unknown>).prompt_cache_key !== undefined,
+			);
+			expect(update).toBeDefined();
+		});
+
+		it('rejected scope does NOT poison a different scope (per-key isolation)', async () => {
+			const {
+				_clearPromptCacheKeyProbeStateForTesting,
+				derivePromptCacheKeyProbeScope,
+				setPromptCacheKeyProbeState,
+				getPromptCacheKeyProbeState,
+			} = await import('../../src/transport/openai-realtime-transport.js');
+			_clearPromptCacheKeyProbeStateForTesting();
+			const scope1 = derivePromptCacheKeyProbeScope(
+				undefined,
+				undefined,
+				undefined,
+				'gpt-realtime-2',
+				'key1',
+			);
+			const scope2 = derivePromptCacheKeyProbeScope(
+				undefined,
+				undefined,
+				undefined,
+				'gpt-realtime-2',
+				'key2',
+			);
+			setPromptCacheKeyProbeState(scope1, 'rejected');
+			expect(getPromptCacheKeyProbeState(scope1)).toBe('rejected');
+			expect(getPromptCacheKeyProbeState(scope2)).toBe('unknown');
+		});
+
+		it('OpenAIRealtimeConfig accepts baseURL/organization/project', () => {
+			// Smoke test: type-check + no-throw construction.
+			const t = new OpenAIRealtimeTransport({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				baseURL: 'https://gateway.example.com/v1',
+				organization: 'org_x',
+				project: 'proj_y',
+			});
+			expect(t).toBeDefined();
+		});
+	});
 });
