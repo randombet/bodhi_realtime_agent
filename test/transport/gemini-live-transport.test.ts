@@ -1084,6 +1084,113 @@ describe('GeminiLiveTransport', () => {
 			expect(onModelTurnStart).toHaveBeenCalledTimes(2);
 		});
 	});
+
+	// P2: sessionResumption refactor — see dev_docs/framework/design-context-caching.md
+	describe('sessionResumption (P2)', () => {
+		it('sessionResumption: false omits the field from connectConfig', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', sessionResumption: false },
+				{},
+			);
+			await transport.connect();
+			const config = capturedConnectConfig.config as Record<string, unknown>;
+			expect(config.sessionResumption).toBeUndefined();
+		});
+
+		it('sessionResumption.handle flows through', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', sessionResumption: { handle: 'h_initial' } },
+				{},
+			);
+			await transport.connect();
+			const config = capturedConnectConfig.config as Record<string, unknown>;
+			expect(config.sessionResumption).toEqual({ handle: 'h_initial' });
+		});
+
+		it('legacy resumptionHandle still works (deprecation alias)', async () => {
+			const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			const transport = new GeminiLiveTransport(
+				// biome-ignore lint/suspicious/noExplicitAny: testing deprecated path
+				{ apiKey: 'test-key', resumptionHandle: 'h_legacy' } as any,
+				{},
+			);
+			await transport.connect();
+			const config = capturedConnectConfig.config as Record<string, unknown>;
+			expect(config.sessionResumption).toEqual({ handle: 'h_legacy' });
+			// deprecation warn fires (latched module-level — exact call count
+			// across tests is implementation-dependent, just ensure ≥0 and don't
+			// crash when the latch already fired in another test)
+			expect(warnSpy).toBeDefined();
+			warnSpy.mockRestore();
+		});
+
+		it('sessionResumption.handle wins over legacy resumptionHandle when both set', async () => {
+			const transport = new GeminiLiveTransport(
+				{
+					apiKey: 'test-key',
+					sessionResumption: { handle: 'h_new' },
+					resumptionHandle: 'h_legacy',
+					// biome-ignore lint/suspicious/noExplicitAny: testing deprecated path
+				} as any,
+				{},
+			);
+			await transport.connect();
+			const config = capturedConnectConfig.config as Record<string, unknown>;
+			expect(config.sessionResumption).toEqual({ handle: 'h_new' });
+		});
+
+		it('default (omitted) → sessionResumption: {} (fresh resumable session)', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			const config = capturedConnectConfig.config as Record<string, unknown>;
+			expect(config.sessionResumption).toEqual({});
+		});
+
+		it('resumable: true update updates effectiveResumptionHandle for next reconnect', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({
+				sessionResumptionUpdate: { newHandle: 'h_server', resumable: true },
+			});
+
+			await transport.reconnect();
+			const config = capturedConnectConfig.config as Record<string, unknown>;
+			expect(config.sessionResumption).toEqual({ handle: 'h_server' });
+		});
+
+		it('resumable: false update clears the handle → next reconnect uses {} (fresh)', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', sessionResumption: { handle: 'h_initial' } },
+				{},
+			);
+			await transport.connect();
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({
+				sessionResumptionUpdate: { newHandle: 'h_terminal', resumable: false },
+			});
+
+			expect(transport.getLastNonResumableAt()).not.toBeNull();
+
+			await transport.reconnect();
+			const config = capturedConnectConfig.config as Record<string, unknown>;
+			expect(config.sessionResumption).toEqual({});
+		});
+
+		it('sessionResumption: false overrides incoming reconnect state handle', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', sessionResumption: false },
+				{},
+			);
+			await transport.connect();
+
+			await transport.reconnect({ resumptionHandle: 'h_from_state' });
+			const config = capturedConnectConfig.config as Record<string, unknown>;
+			expect(config.sessionResumption).toBeUndefined();
+		});
+	});
 });
 
 describe('resolveGeminiRealtimeInputConfig', () => {

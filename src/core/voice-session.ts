@@ -2010,8 +2010,17 @@ export class VoiceSession {
 		}
 	}
 
-	private handleResumptionUpdate(handle: string, _resumable: boolean): void {
-		this.sessionManager.updateResumptionHandle(handle);
+	private handleResumptionUpdate(handle: string, resumable: boolean): void {
+		// On resumable updates, cache the handle so a later reconnect can resume.
+		// On non-resumable updates, CLEAR the cache so reconnect-with-state
+		// cannot attempt a resume from a stale handle (Google's docs warn that
+		// resuming after non-resumable can lose data — fresh-session-with-replay
+		// is safer; the GeminiLiveTransport applies the same policy internally).
+		if (resumable) {
+			this.sessionManager.updateResumptionHandle(handle);
+		} else {
+			this.sessionManager.clearResumptionHandle();
+		}
 	}
 
 	// --- Client transport handlers ---

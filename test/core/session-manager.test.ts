@@ -190,6 +190,22 @@ describe('SessionManager', () => {
 				handle: 'handle_abc',
 			});
 		});
+
+		// P2: clear-on-non-resumable so reconnect-with-state cannot stale-resume
+		it('clearResumptionHandle resets to null', () => {
+			const { mgr } = createManager();
+			mgr.updateResumptionHandle('handle_abc');
+			expect(mgr.resumptionHandle).toBe('handle_abc');
+			mgr.clearResumptionHandle();
+			expect(mgr.resumptionHandle).toBeNull();
+		});
+
+		it('clearResumptionHandle is idempotent on already-null state', () => {
+			const { mgr } = createManager();
+			expect(mgr.resumptionHandle).toBeNull();
+			mgr.clearResumptionHandle();
+			expect(mgr.resumptionHandle).toBeNull();
+		});
 	});
 
 	describe('message buffering', () => {
