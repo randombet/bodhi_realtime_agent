@@ -213,6 +213,11 @@ export interface SessionUpdate {
 	/** Response modality override. Used to preserve text mode across
 	 *  agent transfers and reconnects when TTSProvider is configured. */
 	responseModality?: 'audio' | 'text';
+	/** Toggle server-side audio transcription. `input: false` disables transcription
+	 *  of user audio (used when an external STT provider is the source of truth).
+	 *  Implemented by both transports — OpenAI maps to `audio.input.transcription = null`,
+	 *  Gemini maps to its `inputAudioTranscription` config. */
+	transcription?: { input?: boolean; output?: boolean };
 	providerOptions?: Record<string, unknown>;
 }
 
@@ -367,7 +372,13 @@ export interface LLMTransport {
 	unquiesce?(): Promise<void>;
 
 	// --- Session configuration ---
-	updateSession(config: SessionUpdate): void;
+	/** Apply a session update.
+	 *  Pre-connect: state-only mutation; coalesces with prior pre-connect calls
+	 *  and resolves immediately. The merged config is sent in the single
+	 *  `session.update` issued at connect time.
+	 *  Post-connect: serialized via the transport's internal FIFO queue; each
+	 *  call produces one wire `session.update` and awaits its ack. */
+	updateSession(config: SessionUpdate): Promise<void>;
 
 	// --- Agent transfer (transport decides: in-place vs reconnect) ---
 	transferSession(config: SessionUpdate, state?: ReconnectState): Promise<void>;

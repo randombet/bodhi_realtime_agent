@@ -506,8 +506,10 @@ export class GeminiLiveTransport implements LLMTransport {
 	/** No-op for V1 — server VAD only. */
 	clearAudio(): void {}
 
-	/** Update session configuration (applied on next reconnect for Gemini). */
-	updateSession(config: SessionUpdate): void {
+	/** Update session configuration (applied on next reconnect for Gemini —
+	 *  no in-place mutation, capabilities.inPlaceSessionUpdate is false).
+	 *  Async signature for LLMTransport interface parity; body is synchronous. */
+	async updateSession(config: SessionUpdate): Promise<void> {
 		if (config.instructions !== undefined) {
 			this.config.systemInstruction = config.instructions;
 		}
@@ -516,6 +518,11 @@ export class GeminiLiveTransport implements LLMTransport {
 		}
 		if (config.responseModality !== undefined) {
 			this._textMode = config.responseModality === 'text';
+		}
+		if (config.transcription?.input !== undefined) {
+			// Maps to Gemini's inputAudioTranscription connectConfig field.
+			// Applied on next connect / reconnect (Gemini has no in-place update).
+			this.config.inputAudioTranscription = config.transcription.input;
 		}
 		if (config.providerOptions !== undefined) {
 			if (typeof config.providerOptions.googleSearch === 'boolean') {
@@ -532,7 +539,7 @@ export class GeminiLiveTransport implements LLMTransport {
 
 	/** Transfer session: update config → reconnect → replay conversation history. */
 	async transferSession(config: SessionUpdate, state?: ReconnectState): Promise<void> {
-		this.updateSession(config);
+		await this.updateSession(config);
 		const resumptionHandle = state?.resumptionHandle ?? this.config.resumptionHandle;
 		if (resumptionHandle) {
 			this.config.resumptionHandle = resumptionHandle;

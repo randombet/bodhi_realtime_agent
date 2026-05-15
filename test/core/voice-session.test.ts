@@ -2253,7 +2253,7 @@ describe('VoiceSession realtimeInputConfig defaulting', () => {
 			sendAudio: vi.fn(),
 			commitAudio: vi.fn(),
 			clearAudio: vi.fn(),
-			updateSession: vi.fn(),
+			updateSession: vi.fn(async () => {}),
 			transferSession: vi.fn().mockResolvedValue(undefined),
 			sendContent: vi.fn(),
 			sendFile: vi.fn(),

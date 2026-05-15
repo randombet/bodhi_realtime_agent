@@ -51,7 +51,7 @@ function createMockLLMTransport() {
 		triggerGeneration: vi.fn(),
 		commitAudio: vi.fn(),
 		clearAudio: vi.fn(),
-		updateSession: vi.fn(),
+		updateSession: vi.fn(async () => {}),
 		transferSession: vi.fn(),
 		isConnected: true,
 	};

@@ -520,7 +520,9 @@ export class VoiceSession {
 			// Use pre-constructed transport (OpenAI, mock, etc.)
 			this.transport = config.transport;
 			// Sync tools and instructions so they're available at connect time.
-			this.transport.updateSession({
+			// Pre-connect updateSession is state-only and resolves immediately;
+			// floating the promise is safe (constructor cannot be async).
+			void this.transport.updateSession({
 				instructions,
 				tools: allInitialTools.length ? allInitialTools : undefined,
 				...(inputTranscription === false && {
@@ -1133,7 +1135,7 @@ export class VoiceSession {
 		this.sessionManager.transitionTo('CONNECTING');
 		if (this.config.transport) {
 			if (this.ttsProvider) {
-				this.transport.updateSession({ responseModality: 'text' });
+				await this.transport.updateSession({ responseModality: 'text' });
 			}
 			await this.transport.connect();
 		} else {

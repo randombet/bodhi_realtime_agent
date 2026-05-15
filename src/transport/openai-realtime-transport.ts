@@ -398,7 +398,8 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 
 	// --- Session configuration ---
 
-	updateSession(config: SessionUpdate): void {
+	async updateSession(config: SessionUpdate): Promise<void> {
+		// State mutation always happens (pre-connect coalescing relies on this).
 		if (config.instructions !== undefined) {
 			this.instructions = config.instructions;
 		}
@@ -408,9 +409,21 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		if (config.responseModality !== undefined) {
 			this._textMode = config.responseModality === 'text';
 		}
+		if (config.transcription?.input !== undefined) {
+			// false → disable transcription (transcriptionModel=null sentinel,
+			// which buildSessionConfig already handles). true → restore default
+			// model (transcriptionModel=undefined falls through to default).
+			this.config = {
+				...this.config,
+				transcriptionModel: config.transcription.input === false ? null : undefined,
+			};
+		}
 
+		// Pre-connect: state-only, no wire send. Multiple pre-connect calls coalesce —
+		// the merged state is sent in the single `session.update` issued at connect time.
 		if (!this.rt || !this._isConnected) return;
 
+		// Post-connect: send `session.update` on the wire.
 		// Cache-bust telemetry. instructions / tools mutations always bust the
 		// session prefix; responseModality changes do not (they don't enter the
 		// cached input prefix). Fire once per actual mutation; prefer
@@ -431,6 +444,18 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		}
 		if (config.responseModality !== undefined) {
 			update.output_modalities = config.responseModality === 'text' ? ['text'] : ['audio'];
+		}
+		if (config.transcription?.input !== undefined) {
+			// Toggle server-side transcription on the wire.
+			// biome-ignore lint/suspicious/noExplicitAny: transcription:null is valid wire value but not in SDK union
+			(update as any).audio = {
+				input: {
+					transcription:
+						config.transcription.input === false
+							? null
+							: { model: this.config.transcriptionModel ?? 'gpt-4o-mini-transcribe' },
+				},
+			};
 		}
 
 		this.rtSend({ type: 'session.update', session: update as RealtimeSessionCreateRequest });
