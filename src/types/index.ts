@@ -27,7 +27,15 @@ export type {
 	UIPayload,
 } from './conversation.js';
 
-export type { EventPayload, EventPayloadMap, EventType, Unsubscribe } from './events.js';
+export type {
+	EventPayload,
+	EventPayloadMap,
+	EventType,
+	RealtimeCacheBustPublished,
+	RealtimeUsagePublished,
+	RealtimeUsageSource,
+	Unsubscribe,
+} from './events.js';
 
 export type {
 	ConversationHistoryStore,

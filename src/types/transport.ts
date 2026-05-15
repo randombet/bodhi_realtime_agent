@@ -356,6 +356,10 @@ export interface RealtimeLLMUsageEvent {
 	modalityBreakdown?: RealtimeUsageModalityBreakdown;
 	/** OpenAI response id when `kind === 'response'`. */
 	providerResponseId?: string;
+	/** Provider-supplied opaque id for non-response items. Currently used
+	 *  for OpenAI input-audio transcription `item_id` so transcription usage
+	 *  events can be aggregated independently (they have no `turnId`). */
+	providerItemId?: string;
 	/** Opaque provider payload for exact downstream reconciliation. */
 	providerRaw?: unknown;
 }

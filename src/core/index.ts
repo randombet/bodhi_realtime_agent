@@ -49,5 +49,14 @@ export type { ToolCallRouterDeps } from './tool-call-router.js';
 export { TranscriptManager } from './transcript-manager.js';
 export type { TranscriptSink } from './transcript-manager.js';
 
+export {
+	computeCacheHitRatio,
+	deriveProviderItemId,
+	deriveUsageSource,
+} from './usage-helpers.js';
+// RealtimeUsageSource is exported from src/types/index.ts as the canonical
+// public type (defined identically in both modules to avoid an import cycle
+// between types/events.ts and core/usage-helpers.ts).
+
 export { VoiceSession } from './voice-session.js';
 export type { VoiceSessionConfig } from './voice-session.js';

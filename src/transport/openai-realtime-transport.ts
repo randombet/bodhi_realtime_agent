@@ -1065,9 +1065,11 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 
 		// --- Input transcription ---
 		rt.on('conversation.item.input_audio_transcription.completed', (event: unknown) => {
-			const e = event as { transcript?: string; usage?: unknown };
+			const e = event as { transcript?: string; usage?: unknown; item_id?: string };
 			if (this.onInputTranscription) this.onInputTranscription(e.transcript ?? '');
-			const tu = normalizeOpenAITranscriptionUsage(e.usage);
+			// P4: pass item_id so EventBus consumers can disambiguate transcription
+			// usage events that all have turnId === null.
+			const tu = normalizeOpenAITranscriptionUsage(e.usage, e.item_id);
 			if (tu && this.onRealtimeLLMUsage) this.onRealtimeLLMUsage(tu);
 		});
 

@@ -198,8 +198,16 @@ export function normalizeOpenAIResponseUsage(
 /**
  * Normalize OpenAI Realtime input transcription `usage` from
  * `conversation.item.input_audio_transcription.completed`.
+ *
+ * @param providerItemId The transcription `item_id` (P4) — required so
+ *   downstream consumers can aggregate transcription billing without
+ *   collapsing every event in a session into one bucket. Optional for
+ *   backward compatibility with callers that don't have it.
  */
-export function normalizeOpenAITranscriptionUsage(raw: unknown): RealtimeLLMUsageEvent | null {
+export function normalizeOpenAITranscriptionUsage(
+	raw: unknown,
+	providerItemId?: string,
+): RealtimeLLMUsageEvent | null {
 	if (!isRecord(raw)) return null;
 
 	const typ = raw.type;
@@ -212,6 +220,7 @@ export function normalizeOpenAITranscriptionUsage(raw: unknown): RealtimeLLMUsag
 			phase: 'final',
 			unit: 'duration_seconds',
 			durationSeconds: seconds,
+			...(providerItemId !== undefined ? { providerItemId } : {}),
 			providerRaw: raw,
 		};
 	}
@@ -237,6 +246,7 @@ export function normalizeOpenAITranscriptionUsage(raw: unknown): RealtimeLLMUsag
 		totalTokens: total,
 		modalityBreakdown:
 			modality && Object.values(modality).some((v) => v !== undefined) ? modality : undefined,
+		...(providerItemId !== undefined ? { providerItemId } : {}),
 		providerRaw: raw,
 	};
 }

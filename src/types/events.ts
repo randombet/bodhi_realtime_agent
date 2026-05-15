@@ -3,7 +3,55 @@
 import type { ExternalEvent } from './agent.js';
 import type { SubagentResult, ToolCall, ToolResult, UIPayload } from './conversation.js';
 import type { SessionState } from './session.js';
+import type { RealtimeLLMUsageEvent } from './transport.js';
 import type { UIResponse } from './ui.js';
+
+/** Source identifier for a published `realtime.usage` EventBus event. */
+export type RealtimeUsageSource =
+	| 'openai.response'
+	| 'openai.transcription'
+	| 'gemini.usage.update'
+	| 'gemini.turn.final';
+
+/**
+ * Payload for the `realtime.usage` EventBus event. One emission per provider
+ * usage callback (NOT one per turn) — OpenAI fires once for `response.done`
+ * and once for transcription completion; Gemini fires for interim updates
+ * and once at `turnComplete`.
+ *
+ * Aggregation key recommendations (see dev_docs/framework/design-context-caching.md §4):
+ * - openai.response       → (sessionId, turnId, source, providerItemId)
+ * - openai.transcription  → (sessionId, source, providerItemId)  // turnId is null
+ * - gemini.turn.final     → (sessionId, turnId, source)
+ * - gemini.usage.update   → ignored for billing; use `sequence` for replay
+ */
+export interface RealtimeUsagePublished {
+	sessionId: string;
+	agentName: string;
+	/** Null when the event is not bound to a model turn (transcription). */
+	turnId: string | null;
+	source: RealtimeUsageSource;
+	/** Provider-supplied opaque id. response.id for openai.response,
+	 *  item_id for openai.transcription, null for gemini.*. */
+	providerItemId: string | null;
+	/** Monotonic per-(sessionId, turnId, source). Disambiguates Gemini interim duplicates. */
+	sequence: number;
+	/** Wall-clock ms when VoiceSession published the event. */
+	emittedAt: number;
+	usage: RealtimeLLMUsageEvent;
+	/** cachedTokens / inputTokens. Undefined when caching was not reported by
+	 *  the provider for this event. Treat undefined as "no signal," NOT 0%. */
+	cacheHitRatio?: number;
+}
+
+export interface RealtimeCacheBustPublished {
+	sessionId: string;
+	/** currentModelTurnAgentName ?? activeAgent.name fallback. */
+	agentName: string;
+	/** Null when the bust fires outside an allocated model turn. */
+	turnId: string | null;
+	reason: 'instructions_changed' | 'tools_changed';
+}
 
 /** Function returned by EventBus.subscribe() — call it to remove the subscription. */
 export type Unsubscribe = () => void;
@@ -62,6 +110,10 @@ export interface EventPayloadMap {
 		mode: 'agent' | 'transcription';
 	};
 	'context.compact': { sessionId: string; removedItems: number };
+
+	// Realtime LLM usage + cache events (P4)
+	'realtime.usage': RealtimeUsagePublished;
+	'realtime.cache.bust': RealtimeCacheBustPublished;
 
 	// Subagent interaction events (Patterns 2 & 3)
 	'subagent.ui.send': { sessionId: string; payload: UIPayload };
