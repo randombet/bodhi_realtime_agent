@@ -318,9 +318,9 @@ describe('artifact registry wiring in bodhi session config', () => {
 		// so the base instructions don't contain file content. Verify via the resolver:
 		// biome-ignore lint/style/noNonNullAssertion: test assertion already checks mainAgent exists
 		const resolved = resolveAgentWithKnowledgeBase(mainAgent!);
-		expect(resolved.instructions).toContain('Calendly');
-		expect(resolved.instructions).toContain('Full Stack Engineer, Commerce');
-		expect(resolved.instructions).toContain('YIXUAN ZHAI');
+		expect(resolved.instructions).toContain('Northstar Robotics');
+		expect(resolved.instructions).toContain('Senior Software Engineer, Realtime Systems');
+		expect(resolved.instructions).toContain('Maya Chen');
 	});
 
 	it('injects read_image for standard, claude_code, and nanoclaw profiles', async () => {

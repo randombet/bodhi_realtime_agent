@@ -17,6 +17,9 @@
  *   GEMINI_VOICE      - TTS voice (default: Puck)
  *   TRANSCRIPT_DIR    - Directory for per-session WhatsApp-style markdown
  *                       transcripts (default: ./transcripts)
+ *
+ * The document interviewer subagent uses a fixed Gemini Flash Lite id in code below; override
+ * `subagentReasoningModel` there if you need a different planner model.
  */
 
 import 'dotenv/config';
@@ -37,12 +40,7 @@ function ts(): string {
 	return new Date().toISOString().slice(11, 23);
 }
 
-function parseSubagentThinkingBudget(): number {
-	const value = process.env.INTERVIEWER_SUBAGENT_THINKING_BUDGET;
-	if (value === undefined) return 128;
-	const parsed = Number.parseInt(value, 10);
-	return Number.isFinite(parsed) && parsed >= 0 ? parsed : 128;
-}
+const SUBAGENT_THINKING_BUDGET = 128;
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY ?? '';
 if (!GEMINI_API_KEY) {
@@ -59,8 +57,8 @@ const SESSION_ID = `interviewer_${Date.now()}`;
 const TRANSCRIPT_DIR = process.env.TRANSCRIPT_DIR || './transcripts';
 const LIVE_MODEL = process.env.GEMINI_LIVE_MODEL || 'gemini-3.1-flash-live-preview';
 const REASONING_MODEL = process.env.INTERVIEWER_REASONING_MODEL || 'gemini-2.5-flash';
-const SUBAGENT_MODEL = process.env.INTERVIEWER_SUBAGENT_MODEL || 'gemini-3.1-flash-lite-preview';
-const SUBAGENT_THINKING_BUDGET = parseSubagentThinkingBudget();
+/** Planner / decision `generateObject` model (edit here or wire your own `LanguageModelV1`). */
+const SUBAGENT_GEMINI_MODEL_ID = 'gemini-3.1-flash-lite-preview';
 const REALTIME_INPUT_CONFIG = {
 	automaticActivityDetection: {
 		endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
@@ -74,7 +72,7 @@ async function main() {
 	const documents = loadInterviewDocuments();
 	const state = createInterviewState();
 	const reasoningModel = google(REASONING_MODEL);
-	const subagentReasoningModel = google(SUBAGENT_MODEL);
+	const subagentReasoningModel = google(SUBAGENT_GEMINI_MODEL_ID);
 	const softwareInterviewerSubagent = new SoftwareInterviewerSubagent(
 		'record_answer_and_get_next_question',
 		state,

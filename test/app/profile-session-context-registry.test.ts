@@ -102,6 +102,68 @@ describe('profile-session-context-registry', () => {
 		});
 	});
 
+	it('putDraftForKind stores interview draft with subagentReasoning (legacy Gemini id still accepted)', () => {
+		const put = putDraftForKind(handlers, 'structured_interview', {
+			companyIntroMd: 'Intro',
+			jobDescriptionMd: 'JD',
+			candidateResumeMd: 'CV',
+			interviewerSubagentModel: 'gemini-2.5-flash-lite-preview',
+		});
+		expect(put.ok).toBe(true);
+		if (!put.ok) return;
+		const inputs = resolveProfileSessionInputsFromTokens(handlers, 'structured_interview', {
+			profileContextToken: put.token,
+		});
+		expect(inputs?.structured_interview).toMatchObject({
+			companyIntroMd: 'Intro',
+			subagentReasoning: {
+				reasoningProvider: 'google',
+				reasoningModel: 'gemini-2.5-flash-lite-preview',
+			},
+		});
+	});
+
+	it('putDraftForKind stores interview draft with full subagentReasoning object', () => {
+		const put = putDraftForKind(handlers, 'structured_interview', {
+			companyIntroMd: 'Intro',
+			jobDescriptionMd: 'JD',
+			candidateResumeMd: 'CV',
+			subagentReasoning: {
+				reasoningProvider: 'openai',
+				reasoningModel: 'gpt-4o-mini',
+			},
+		});
+		expect(put.ok).toBe(true);
+		if (!put.ok) return;
+		const inputs = resolveProfileSessionInputsFromTokens(handlers, 'structured_interview', {
+			profileContextToken: put.token,
+		});
+		expect(inputs?.structured_interview).toMatchObject({
+			subagentReasoning: { reasoningProvider: 'openai', reasoningModel: 'gpt-4o-mini' },
+		});
+	});
+
+	it('putDraftForKind rejects interview draft with invalid subagentReasoning', () => {
+		expect(
+			putDraftForKind(handlers, 'structured_interview', {
+				companyIntroMd: 'Intro',
+				jobDescriptionMd: 'JD',
+				candidateResumeMd: 'CV',
+				subagentReasoning: { reasoningProvider: 'anthropic' },
+			}).ok,
+		).toBe(false);
+
+		const tooLongModel = 'm'.repeat(300);
+		expect(
+			putDraftForKind(handlers, 'structured_interview', {
+				companyIntroMd: 'Intro',
+				jobDescriptionMd: 'JD',
+				candidateResumeMd: 'CV',
+				subagentReasoning: { reasoningProvider: 'google', reasoningModel: tooLongModel },
+			}).ok,
+		).toBe(false);
+	});
+
 	it('putDraftForKind rejects interview draft with invalid anchors', () => {
 		const put = putDraftForKind(handlers, 'structured_interview', {
 			companyIntroMd: 'Intro',
@@ -132,6 +194,25 @@ describe('profile-session-context-registry', () => {
 	it('getDefaultsForKind rejects unknown kind', () => {
 		const r = getDefaultsForKind(handlers, 'nonexistent');
 		expect(r.ok).toBe(false);
+	});
+
+	it('unified profileContextToken resolves interview draft for ua_* profile', () => {
+		const put = putDraftForKind(handlers, 'structured_interview', {
+			companyIntroMd: 'Intro',
+			jobDescriptionMd: 'JD',
+			candidateResumeMd: 'CV',
+		});
+		expect(put.ok).toBe(true);
+		if (!put.ok) return;
+
+		const inputs = resolveProfileSessionInputsFromTokens(handlers, 'ua_0123456789abcdef', {
+			profileContextToken: put.token,
+		});
+		expect(inputs?.structured_interview).toEqual({
+			companyIntroMd: 'Intro',
+			jobDescriptionMd: 'JD',
+			candidateResumeMd: 'CV',
+		});
 	});
 
 	it('unified profileContextToken resolves for ua_* recruiting draft', () => {

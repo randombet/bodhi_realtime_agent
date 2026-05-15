@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 
+import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import type { LanguageModelV1 } from 'ai';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
@@ -19,9 +20,7 @@ import {
 import type { InterviewProgressResult } from '../../app/agents/interview/interview-subagent.js';
 import { endSessionInterview } from '../../app/agents/interview/interview-tools.js';
 import {
-	INTERVIEWER_SUBAGENT_MODEL_ID,
 	buildStructuredInterviewConfig,
-	getInterviewerSubagentModel,
 	prepareStructuredInterviewSessionParts,
 	structuredInterviewSessionOptionsFromExtras,
 } from '../../app/agents/interview/structured-interview-session.js';
@@ -29,6 +28,12 @@ import type { MainAgent } from '../../src/types/agent.js';
 
 const gen = generateObject as unknown as ReturnType<typeof vi.fn>;
 const fakeModel = {} as unknown as LanguageModelV1;
+const reasoningCtx = {
+	googleApiKey: 'fake-key-for-tests',
+	defaultReasoningModel: createGoogleGenerativeAI({ apiKey: 'fake-key-for-tests' })(
+		'gemini-2.5-flash',
+	),
+};
 const docs: InterviewDocuments = {
 	jobDescription: '# Staff Engineer',
 	candidateResume: '# Priya Raman',
@@ -281,7 +286,7 @@ describe('structured-interview config helpers', () => {
 	const texts = { companyMd: '# Co', jobDescriptionMd: '# JD', candidateResumeMd: '# Cand' };
 
 	it('structuredInterviewSessionOptionsFromExtras: forwards brief/sections/mode/duration', () => {
-		const opts = structuredInterviewSessionOptionsFromExtras(texts, 'fake-key', {
+		const opts = structuredInterviewSessionOptionsFromExtras(texts, reasoningCtx, {
 			interviewerBrief: 'push for metrics',
 			sections: [{ question: 'Walk me through X.' }],
 			sectionsMode: 'verbatim',
@@ -296,7 +301,7 @@ describe('structured-interview config helpers', () => {
 	});
 
 	it('structuredInterviewSessionOptionsFromExtras: undefined extras ⇒ empty structure, no duration override', () => {
-		const opts = structuredInterviewSessionOptionsFromExtras(texts, 'fake-key', undefined);
+		const opts = structuredInterviewSessionOptionsFromExtras(texts, reasoningCtx, undefined);
 		expect(opts.durationMinutes).toBeUndefined();
 		expect(opts.structure).toEqual({
 			interviewerBrief: undefined,
@@ -326,9 +331,21 @@ describe('structured-interview config helpers', () => {
 		expect(cfg.structure.interviewerBrief).toBe('hi');
 	});
 
-	it('getInterviewerSubagentModel returns a model bound to INTERVIEWER_SUBAGENT_MODEL_ID', () => {
-		const model = getInterviewerSubagentModel('fake-key');
-		expect(model).toBeDefined();
-		expect(model.modelId).toBe(INTERVIEWER_SUBAGENT_MODEL_ID);
+	it('structuredInterviewSessionOptionsFromExtras: subagentReasoning overrides default Google model id', () => {
+		const opts = structuredInterviewSessionOptionsFromExtras(texts, reasoningCtx, {
+			subagentReasoning: { reasoningProvider: 'google', reasoningModel: 'gemini-from-extras' },
+		});
+		expect(opts.subagentLanguageModel.modelId).toBe('gemini-from-extras');
+	});
+
+	it('structuredInterviewSessionOptionsFromExtras: forwards thinkingBudget for Google', () => {
+		const opts = structuredInterviewSessionOptionsFromExtras(texts, reasoningCtx, {
+			subagentReasoning: {
+				reasoningProvider: 'google',
+				reasoningModel: 'gemini-2.5-flash',
+				thinkingBudget: 64,
+			},
+		});
+		expect(opts.subagentThinkingBudget).toBe(64);
 	});
 });

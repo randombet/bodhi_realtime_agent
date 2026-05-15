@@ -89,7 +89,7 @@ Hosted **Agent Studio** resolves Supabase-backed attachments **before** compile 
 
 **Roadmap** (ingestion providers, noise, limits, subagent KB): `dev_docs/app/design-knowledge-base-roadmap.md`.
 
-**Structured screening:** built-in profile `structured_screening` uses in-memory markdown (`source: 'text'`) from **`app/agents/builtin/structured-screening/defaults.ts`** or from a short-lived draft created by **`POST /api/structured-screening-draft`** (wired from `/structured-screening`). Local **`examples/interviewer/`** is a separate framework toy demo.
+**Structured screening / recruiting screen:** built-in profile `structured_screening` uses in-memory markdown (`source: 'text'`) from **`app/agents/builtin/structured-screening/defaults.ts`** or from a short-lived draft created via **`POST /api/profile-session-context/draft`** (wired from `/screening-demo` and Voice recruiting studio). Local **`examples/interviewer/`** is a separate framework toy demo.
 
 ## Built-in profiles vs Studio-compiled agents
 

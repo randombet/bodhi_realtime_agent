@@ -11,6 +11,8 @@ describe('app-routes', () => {
 	it('maps tab ids to pathnames', () => {
 		expect(pathnameForTab('talk')).toBe('/talk');
 		expect(pathnameForTab('agent_studio')).toBe('/agent-studio');
+		expect(pathnameForTab('screening_demo')).toBe('/screening-demo');
+		expect(pathnameForTab('recruiting_voice_studio')).toBe('/voice-recruiting-studio');
 		expect(pathnameForTab('hardware_guide')).toBe('/hardware-guide');
 		expect(pathnameForTab('terms')).toBe('/terms');
 		expect(pathnameForTab('privacy')).toBe('/privacy');
@@ -20,6 +22,8 @@ describe('app-routes', () => {
 		expect(tabFromPathname('/')).toBe('talk');
 		expect(tabFromPathname('/talk')).toBe('talk');
 		expect(tabFromPathname('/agent-studio')).toBe('agent_studio');
+		expect(tabFromPathname('/screening-demo')).toBe('screening_demo');
+		expect(tabFromPathname('/voice-recruiting-studio')).toBe('recruiting_voice_studio');
 		expect(tabFromPathname('/terms')).toBe('terms');
 		expect(tabFromPathname('/privacy')).toBe('privacy');
 		expect(tabFromPathname('/unknown-route')).toBeNull();
@@ -29,6 +33,8 @@ describe('app-routes', () => {
 		const tabs: TabId[] = [
 			'talk',
 			'agent_studio',
+			'screening_demo',
+			'recruiting_voice_studio',
 			'features',
 			'opensource',
 			'hardware_guide',

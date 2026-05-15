@@ -1,6 +1,6 @@
 # Interviewer Example
 
-**Purpose:** Local **toy demo** for framework direction (persistent subagent + voice + KB). It is **not** the production Bodhi `./app` stack. Production-shaped voice screening lives in **[`app/agents/builtin/structured-screening/`](../../app/agents/builtin/structured-screening/README.md)** and the web **Structured screening** page (`/structured-screening`).
+**Purpose:** Local **toy demo** for framework direction (persistent subagent + voice + KB). It is **not** the production Bodhi `./app` stack. Production-shaped recruiting voice lives in **[`app/agents/builtin/structured-screening/`](../../app/agents/builtin/structured-screening/README.md)** and the web **Recruiting voice demo** (`/screening-demo`).
 
 Document-driven software interviewer using one persistent `software_interviewer` subagent and a voice `MainAgent`.
 
@@ -41,8 +41,9 @@ Open the local web client and connect to `ws://localhost:9900`.
 | `HOST` | `0.0.0.0` | Bind address |
 | `GEMINI_LIVE_MODEL` | `gemini-3.1-flash-live-preview` | Live voice model |
 | `INTERVIEWER_REASONING_MODEL` | `gemini-2.5-flash` | Main voice-agent reasoning model |
-| `INTERVIEWER_SUBAGENT_MODEL` | `gemini-3.1-flash-lite-preview` | Persistent interviewer reasoning model |
-| `INTERVIEWER_SUBAGENT_THINKING_BUDGET` | `128` | Low reasoning budget for the persistent interviewer |
+| `GEMINI_API_KEY` / `GOOGLE_API_KEY` | (required) | Live + document tools |
+| `OPENAI_API_KEY` | — | Optional; only if you wire an OpenAI `LanguageModelV1` for the subagent |
+| `ANTHROPIC_API_KEY` | — | Optional; only if you wire an Anthropic `LanguageModelV1` for the subagent |
 | `GEMINI_VOICE` | `Puck` | Gemini voice name |
 
 The example also tunes Gemini Live server-side VAD with `END_SENSITIVITY_HIGH` and `silenceDurationMs: 500` so interview answers can close faster after the candidate stops speaking. Client microphone audio is gated until the greeting turn completes, which prevents startup microphone frames from racing the greeting `clientContent` request.
