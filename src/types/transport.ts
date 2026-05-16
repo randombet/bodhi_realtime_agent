@@ -200,6 +200,34 @@ export interface LLMTransportConfig {
 	providerOptions?: Record<string, unknown>;
 }
 
+/**
+ * Provider-neutral cache configuration shared across cache-aware transports.
+ * Lives here for cross-transport visibility but is currently consumed only
+ * by `OpenAIRealtimeCacheConfig` — Gemini Live has no in-place session
+ * updates, so prefix-stability enforcement does not apply.
+ */
+export interface CacheConfigCommon {
+	/**
+	 * If true, the OpenAI transport rejects prefix-busting mutations
+	 * (instructions, tools) that occur AFTER `connect()` has completed and
+	 * are NOT part of a `transferSession()` call. Default: false.
+	 *
+	 * Pre-connect config is always allowed (initial setup never throws).
+	 * Same-canonical-prefix updates do not throw — other `SessionUpdate`
+	 * fields in the same call are still sent on the wire.
+	 *
+	 * Wired in P5 of the configurable context caching design.
+	 */
+	enforcePrefixStability?: boolean;
+
+	/**
+	 * Only consulted when `enforcePrefixStability` is true. Default: true
+	 * (multi-agent transfers continue to work). Set false only for hardened
+	 * single-agent demos that should never legitimately swap instructions.
+	 */
+	allowMutationOnTransfer?: boolean;
+}
+
 /** Authentication method for the transport. */
 export type TransportAuth =
 	| { type: 'api_key'; apiKey: string }
@@ -213,6 +241,11 @@ export interface SessionUpdate {
 	/** Response modality override. Used to preserve text mode across
 	 *  agent transfers and reconnects when TTSProvider is configured. */
 	responseModality?: 'audio' | 'text';
+	/** Toggle server-side audio transcription. `input: false` disables transcription
+	 *  of user audio (used when an external STT provider is the source of truth).
+	 *  Implemented by both transports — OpenAI maps to `audio.input.transcription = null`,
+	 *  Gemini maps to its `inputAudioTranscription` config. */
+	transcription?: { input?: boolean; output?: boolean };
 	providerOptions?: Record<string, unknown>;
 }
 
@@ -323,6 +356,10 @@ export interface RealtimeLLMUsageEvent {
 	modalityBreakdown?: RealtimeUsageModalityBreakdown;
 	/** OpenAI response id when `kind === 'response'`. */
 	providerResponseId?: string;
+	/** Provider-supplied opaque id for non-response items. Currently used
+	 *  for OpenAI input-audio transcription `item_id` so transcription usage
+	 *  events can be aggregated independently (they have no `turnId`). */
+	providerItemId?: string;
 	/** Opaque provider payload for exact downstream reconciliation. */
 	providerRaw?: unknown;
 }
@@ -367,7 +404,13 @@ export interface LLMTransport {
 	unquiesce?(): Promise<void>;
 
 	// --- Session configuration ---
-	updateSession(config: SessionUpdate): void;
+	/** Apply a session update.
+	 *  Pre-connect: state-only mutation; coalesces with prior pre-connect calls
+	 *  and resolves immediately. The merged config is sent in the single
+	 *  `session.update` issued at connect time.
+	 *  Post-connect: serialized via the transport's internal FIFO queue; each
+	 *  call produces one wire `session.update` and awaits its ack. */
+	updateSession(config: SessionUpdate): Promise<void>;
 
 	// --- Agent transfer (transport decides: in-place vs reconnect) ---
 	transferSession(config: SessionUpdate, state?: ReconnectState): Promise<void>;

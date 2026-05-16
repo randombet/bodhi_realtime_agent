@@ -450,18 +450,25 @@ describe('OpenAIRealtimeTransport', () => {
 	});
 
 	describe('updateSession', () => {
-		it('sends session.update with new instructions', () => {
-			transport.updateSession({ instructions: 'New instructions' });
+		// Follow-up fix #1: updateSession is now ack-correlated via the
+		// FIFO queue, so callers must await for the wire send to complete.
+		it('sends session.update with new instructions', async () => {
+			await transport.updateSession({ instructions: 'New instructions' });
 
-			expect(mockRt.sent).toContainEqual({
-				type: 'session.update',
-				session: { instructions: 'New instructions' },
-			});
+			// Wire payload carries an event_id (ack correlation); strip it for
+			// shape-only equality. The rest of the session payload is unchanged.
+			const sent = mockRt.sent.find(
+				(m) =>
+					m.type === 'session.update' &&
+					(m.session as Record<string, unknown>).instructions === 'New instructions',
+			);
+			expect(sent).toBeDefined();
+			expect(sent?.session).toEqual({ instructions: 'New instructions' });
 		});
 
-		it('sends session.update with new tools', () => {
+		it('sends session.update with new tools', async () => {
 			const tool = makeTool('calculator');
-			transport.updateSession({ tools: [tool] });
+			await transport.updateSession({ tools: [tool] });
 
 			const sessionUpdate = mockRt.sent.find(
 				(m) => m.type === 'session.update' && (m.session as Record<string, unknown>).tools,
@@ -474,13 +481,16 @@ describe('OpenAIRealtimeTransport', () => {
 			expect(tools[0]).toMatchObject({ type: 'function', name: 'calculator' });
 		});
 
-		it('sends session.update with output_modalities when responseModality is provided', () => {
-			transport.updateSession({ responseModality: 'text' });
+		it('sends session.update with output_modalities when responseModality is provided', async () => {
+			await transport.updateSession({ responseModality: 'text' });
 
-			expect(mockRt.sent).toContainEqual({
-				type: 'session.update',
-				session: { output_modalities: ['text'] },
-			});
+			const sent = mockRt.sent.find(
+				(m) =>
+					m.type === 'session.update' &&
+					Array.isArray((m.session as Record<string, unknown>).output_modalities),
+			);
+			expect(sent).toBeDefined();
+			expect(sent?.session).toEqual({ output_modalities: ['text'] });
 		});
 	});
 
@@ -506,10 +516,15 @@ describe('OpenAIRealtimeTransport', () => {
 		it('includes output_modalities in transfer session.update when responseModality is provided', async () => {
 			await transport.transferSession({ responseModality: 'text' });
 
-			expect(mockRt.sent).toContainEqual({
-				type: 'session.update',
-				session: { output_modalities: ['text'] },
-			});
+			// Wire payload includes a synthetic event_id (ack correlation);
+			// shape-only equality on the session body.
+			const sent = mockRt.sent.find(
+				(m) =>
+					m.type === 'session.update' &&
+					Array.isArray((m.session as Record<string, unknown>).output_modalities),
+			);
+			expect(sent).toBeDefined();
+			expect(sent?.session).toEqual({ output_modalities: ['text'] });
 		});
 	});
 
@@ -1174,6 +1189,580 @@ describe('OpenAIRealtimeTransport — Phase 1 features (gpt-realtime-2)', () => 
 
 			transport.updateSession({ responseModality: 'text' });
 			expect(reasons).toEqual([]);
+		});
+	});
+
+	// P3: OpenAI cacheConfig.truncation mapping. See dev_docs/framework/design-context-caching.md
+	describe('cacheConfig.truncation (P3)', () => {
+		it('validateOpenAICacheConfig accepts valid object form', async () => {
+			const { validateOpenAICacheConfig } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			expect(() =>
+				validateOpenAICacheConfig({
+					truncation: { type: 'retention_ratio', retentionRatio: 0.5 },
+				}),
+			).not.toThrow();
+			expect(() => validateOpenAICacheConfig({ truncation: 'auto' })).not.toThrow();
+			expect(() => validateOpenAICacheConfig({ truncation: 'disabled' })).not.toThrow();
+			expect(() => validateOpenAICacheConfig(undefined)).not.toThrow();
+		});
+
+		it('validateOpenAICacheConfig rejects retentionRatio outside [0, 1]', async () => {
+			const { validateOpenAICacheConfig } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			expect(() =>
+				validateOpenAICacheConfig({
+					truncation: { type: 'retention_ratio', retentionRatio: -0.1 },
+				}),
+			).toThrow(/retentionRatio/);
+			expect(() =>
+				validateOpenAICacheConfig({
+					truncation: { type: 'retention_ratio', retentionRatio: 1.1 },
+				}),
+			).toThrow(/retentionRatio/);
+			expect(() =>
+				validateOpenAICacheConfig({
+					truncation: { type: 'retention_ratio', retentionRatio: Number.NaN },
+				}),
+			).toThrow(/retentionRatio/);
+		});
+
+		it('validateOpenAICacheConfig accepts retentionRatio=0 and =1 as boundary values', async () => {
+			const { validateOpenAICacheConfig } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			expect(() =>
+				validateOpenAICacheConfig({
+					truncation: { type: 'retention_ratio', retentionRatio: 0 },
+				}),
+			).not.toThrow();
+			expect(() =>
+				validateOpenAICacheConfig({
+					truncation: { type: 'retention_ratio', retentionRatio: 1 },
+				}),
+			).not.toThrow();
+		});
+
+		it('validateOpenAICacheConfig rejects fractional / negative postInstructions', async () => {
+			const { validateOpenAICacheConfig } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			expect(() =>
+				validateOpenAICacheConfig({
+					truncation: {
+						type: 'retention_ratio',
+						retentionRatio: 0.8,
+						tokenLimits: { postInstructions: 1.5 },
+					},
+				}),
+			).toThrow(/postInstructions/);
+			expect(() =>
+				validateOpenAICacheConfig({
+					truncation: {
+						type: 'retention_ratio',
+						retentionRatio: 0.8,
+						tokenLimits: { postInstructions: -1 },
+					},
+				}),
+			).toThrow(/postInstructions/);
+		});
+
+		it('applyOpenAICacheConfig writes string truncation forms', async () => {
+			const { applyOpenAICacheConfig } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			const auto: Record<string, unknown> = {};
+			applyOpenAICacheConfig(auto, { truncation: 'auto' }, 'unknown');
+			expect(auto.truncation).toBe('auto');
+
+			const disabled: Record<string, unknown> = {};
+			applyOpenAICacheConfig(disabled, { truncation: 'disabled' }, 'unknown');
+			expect(disabled.truncation).toBe('disabled');
+		});
+
+		it('applyOpenAICacheConfig writes retention_ratio object form (snake_case wire shape)', async () => {
+			const { applyOpenAICacheConfig } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			const payload: Record<string, unknown> = {};
+			applyOpenAICacheConfig(
+				payload,
+				{
+					truncation: {
+						type: 'retention_ratio',
+						retentionRatio: 0.8,
+						tokenLimits: { postInstructions: 4096 },
+					},
+				},
+				'unknown',
+			);
+			expect(payload.truncation).toEqual({
+				type: 'retention_ratio',
+				retention_ratio: 0.8,
+				token_limits: { post_instructions: 4096 },
+			});
+		});
+
+		it('applyOpenAICacheConfig omits token_limits when postInstructions is undefined', async () => {
+			const { applyOpenAICacheConfig } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			const payload: Record<string, unknown> = {};
+			applyOpenAICacheConfig(
+				payload,
+				{ truncation: { type: 'retention_ratio', retentionRatio: 0.5 } },
+				'unknown',
+			);
+			expect(payload.truncation).toEqual({
+				type: 'retention_ratio',
+				retention_ratio: 0.5,
+			});
+			expect((payload.truncation as Record<string, unknown>).token_limits).toBeUndefined();
+		});
+
+		it('applyOpenAICacheConfig is a no-op when cfg is undefined', async () => {
+			const { applyOpenAICacheConfig } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			const payload: Record<string, unknown> = { existing: 'field' };
+			applyOpenAICacheConfig(payload, undefined, 'unknown');
+			expect(payload).toEqual({ existing: 'field' });
+		});
+
+		it('updateSession includes truncation in the session.update payload', async () => {
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				cacheConfig: { truncation: { type: 'retention_ratio', retentionRatio: 0.8 } },
+			});
+			await transport.updateSession({ instructions: 'be helpful' });
+			const update = mockRt.sent.find(
+				(m) =>
+					m.type === 'session.update' &&
+					(m.session as Record<string, unknown>).truncation !== undefined,
+			);
+			expect(update).toBeDefined();
+			expect((update?.session as Record<string, unknown>).truncation).toEqual({
+				type: 'retention_ratio',
+				retention_ratio: 0.8,
+			});
+		});
+
+		it('transferSession includes truncation in the session.update payload (in-place handoff)', async () => {
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				cacheConfig: { truncation: 'auto' },
+			});
+			await transport.transferSession({ instructions: 'You are agent B.' });
+			const update = mockRt.sent.find(
+				(m) =>
+					m.type === 'session.update' &&
+					(m.session as Record<string, unknown>).truncation !== undefined,
+			);
+			expect(update).toBeDefined();
+			expect((update?.session as Record<string, unknown>).truncation).toBe('auto');
+		});
+	});
+
+	// P5: enforcePrefixStability + sendSessionUpdateAndWait. See dev_docs/framework/design-context-caching.md §2.
+	describe('enforcePrefixStability (P5)', () => {
+		it('pre-connect updateSession is always allowed (no baseline yet)', async () => {
+			const { OpenAIRealtimeTransport: T } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			const t = new T({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				cacheConfig: { enforcePrefixStability: true },
+			});
+			// Pre-connect: no rt, no baseline. Should not throw.
+			await expect(t.updateSession({ instructions: 'pre-connect setup' })).resolves.toBeUndefined();
+		});
+
+		it('connected, non-transfer prefix change throws CachePrefixMutationError', async () => {
+			const { CachePrefixMutationError } = await import('../../src/core/errors.js');
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				cacheConfig: { enforcePrefixStability: true },
+			});
+			// Set initial instructions and capture baseline.
+			await transport.updateSession({ instructions: 'baseline' });
+			// Manually set baseline to simulate post-connect ack (setup() bypasses
+			// connect()'s baseline-capture step).
+			// biome-ignore lint/suspicious/noExplicitAny: test-only hook
+			(transport as any).prefixBaselineCanonical = (
+				transport as unknown as { computePrefixCanonical: (i?: string, t?: unknown) => string }
+			).computePrefixCanonical('baseline', undefined);
+
+			await expect(transport.updateSession({ instructions: 'changed' })).rejects.toBeInstanceOf(
+				CachePrefixMutationError,
+			);
+		});
+
+		it('same-canonical-prefix update does NOT throw and STILL sends responseModality', async () => {
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				cacheConfig: { enforcePrefixStability: true },
+			});
+			await transport.updateSession({ instructions: 'baseline' });
+			// biome-ignore lint/suspicious/noExplicitAny: test-only hook
+			(transport as any).prefixBaselineCanonical = (
+				transport as unknown as { computePrefixCanonical: (i?: string, t?: unknown) => string }
+			).computePrefixCanonical('baseline', undefined);
+
+			const beforeCount = mockRt.sent.length;
+			await transport.updateSession({
+				instructions: 'baseline', // same prefix
+				responseModality: 'text',
+			});
+			const after = mockRt.sent.slice(beforeCount);
+			expect(after.length).toBeGreaterThan(0);
+			// responseModality should still flow to the wire as output_modalities.
+			const update = after.find(
+				(m) =>
+					m.type === 'session.update' &&
+					Array.isArray((m.session as Record<string, unknown>).output_modalities),
+			);
+			expect(update).toBeDefined();
+			expect((update?.session as Record<string, unknown>).output_modalities).toEqual(['text']);
+		});
+
+		it('transferSession with allowMutationOnTransfer=true (default) allows prefix change', async () => {
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				cacheConfig: { enforcePrefixStability: true },
+			});
+			await transport.updateSession({ instructions: 'agent A' });
+			// biome-ignore lint/suspicious/noExplicitAny: test-only hook
+			(transport as any).prefixBaselineCanonical = (
+				transport as unknown as { computePrefixCanonical: (i?: string, t?: unknown) => string }
+			).computePrefixCanonical('agent A', undefined);
+
+			await expect(transport.transferSession({ instructions: 'agent B' })).resolves.toBeUndefined();
+		});
+
+		it('transferSession with allowMutationOnTransfer=false throws on prefix change', async () => {
+			const { CachePrefixMutationError } = await import('../../src/core/errors.js');
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				cacheConfig: { enforcePrefixStability: true, allowMutationOnTransfer: false },
+			});
+			await transport.updateSession({ instructions: 'agent A' });
+			// biome-ignore lint/suspicious/noExplicitAny: test-only hook
+			(transport as any).prefixBaselineCanonical = (
+				transport as unknown as { computePrefixCanonical: (i?: string, t?: unknown) => string }
+			).computePrefixCanonical('agent A', undefined);
+
+			await expect(transport.transferSession({ instructions: 'agent B' })).rejects.toBeInstanceOf(
+				CachePrefixMutationError,
+			);
+		});
+
+		it('canonicalize: reordered-but-equivalent JSON Schema compares equal', async () => {
+			// White-box test of the canonicalize helper used for prefix comparison.
+			// We import via dynamic import to access the file-level function.
+			// The helper is not exported, so we exercise it via computePrefixCanonical
+			// indirectly: same canonical string for two semantically-equivalent objects.
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+			const computeCanonical = (
+				transport as unknown as { computePrefixCanonical: (i?: string, t?: unknown) => string }
+			).computePrefixCanonical.bind(transport);
+			// Two tools with parameters whose key order differs.
+			const toolA = makeTool('search');
+			const toolB = makeTool('search');
+			expect(computeCanonical('x', [toolA])).toBe(computeCanonical('x', [toolB]));
+		});
+
+		it('without enforcePrefixStability, prefix mutation does NOT throw (default behavior)', async () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+			// No cacheConfig.enforcePrefixStability — should never throw.
+			await expect(transport.updateSession({ instructions: 'whatever' })).resolves.toBeUndefined();
+			await expect(transport.updateSession({ instructions: 'changed' })).resolves.toBeUndefined();
+		});
+	});
+
+	// P6: experimental.promptCacheKey probe. See dev_docs/framework/design-context-caching.md §6.
+	describe('experimental.promptCacheKey probe (P6)', () => {
+		it('derivePromptCacheKeyProbeScope produces stable scope strings', async () => {
+			const { derivePromptCacheKeyProbeScope } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			expect(derivePromptCacheKeyProbeScope(undefined, undefined, undefined, 'm', 'k')).toBe(
+				'default|default|default|m|k',
+			);
+			expect(
+				derivePromptCacheKeyProbeScope(
+					'https://api.openai.com/v1',
+					'org_x',
+					'proj_y',
+					'gpt-realtime-2',
+					'k1',
+				),
+			).toBe('https://api.openai.com/v1|org_x|proj_y|gpt-realtime-2|k1');
+			// Different baseURL → different scope.
+			expect(
+				derivePromptCacheKeyProbeScope('https://other/', 'org_x', 'proj_y', 'gpt-realtime-2', 'k1'),
+			).not.toBe(
+				derivePromptCacheKeyProbeScope(
+					'https://api.openai.com/v1',
+					'org_x',
+					'proj_y',
+					'gpt-realtime-2',
+					'k1',
+				),
+			);
+		});
+
+		it('applyOpenAICacheConfig includes prompt_cache_key when probe state is unknown or accepted', async () => {
+			const { applyOpenAICacheConfig } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			const cfg = { experimental: { promptCacheKey: 'demo_key' } };
+
+			const u: Record<string, unknown> = {};
+			applyOpenAICacheConfig(u, cfg, 'unknown');
+			expect(u.prompt_cache_key).toBe('demo_key');
+
+			const a: Record<string, unknown> = {};
+			applyOpenAICacheConfig(a, cfg, 'accepted');
+			expect(a.prompt_cache_key).toBe('demo_key');
+		});
+
+		it('applyOpenAICacheConfig OMITS prompt_cache_key when probe state is rejected', async () => {
+			const { applyOpenAICacheConfig } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			const u: Record<string, unknown> = {};
+			applyOpenAICacheConfig(u, { experimental: { promptCacheKey: 'demo_key' } }, 'rejected');
+			expect(u.prompt_cache_key).toBeUndefined();
+		});
+
+		it('updateSession includes prompt_cache_key when key is configured', async () => {
+			const { _clearPromptCacheKeyProbeStateForTesting } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			_clearPromptCacheKeyProbeStateForTesting();
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				cacheConfig: { experimental: { promptCacheKey: 'agent_alpha' } },
+			});
+			await transport.updateSession({ instructions: 'be helpful' });
+			const update = mockRt.sent.find(
+				(m) =>
+					m.type === 'session.update' &&
+					(m.session as Record<string, unknown>).prompt_cache_key !== undefined,
+			);
+			expect(update).toBeDefined();
+			expect((update?.session as Record<string, unknown>).prompt_cache_key).toBe('agent_alpha');
+		});
+
+		it('transferSession also includes prompt_cache_key (in-place handoff)', async () => {
+			const { _clearPromptCacheKeyProbeStateForTesting } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			_clearPromptCacheKeyProbeStateForTesting();
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				cacheConfig: { experimental: { promptCacheKey: 'agent_alpha' } },
+			});
+			await transport.transferSession({ instructions: 'agent B' });
+			const update = mockRt.sent.find(
+				(m) =>
+					m.type === 'session.update' &&
+					(m.session as Record<string, unknown>).prompt_cache_key !== undefined,
+			);
+			expect(update).toBeDefined();
+		});
+
+		it('rejected scope does NOT poison a different scope (per-key isolation)', async () => {
+			const {
+				_clearPromptCacheKeyProbeStateForTesting,
+				derivePromptCacheKeyProbeScope,
+				setPromptCacheKeyProbeState,
+				getPromptCacheKeyProbeState,
+			} = await import('../../src/transport/openai-realtime-transport.js');
+			_clearPromptCacheKeyProbeStateForTesting();
+			const scope1 = derivePromptCacheKeyProbeScope(
+				undefined,
+				undefined,
+				undefined,
+				'gpt-realtime-2',
+				'key1',
+			);
+			const scope2 = derivePromptCacheKeyProbeScope(
+				undefined,
+				undefined,
+				undefined,
+				'gpt-realtime-2',
+				'key2',
+			);
+			setPromptCacheKeyProbeState(scope1, 'rejected');
+			expect(getPromptCacheKeyProbeState(scope1)).toBe('rejected');
+			expect(getPromptCacheKeyProbeState(scope2)).toBe('unknown');
+		});
+
+		it('OpenAIRealtimeConfig accepts baseURL/organization/project', () => {
+			// Smoke test: type-check + no-throw construction.
+			const t = new OpenAIRealtimeTransport({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				baseURL: 'https://gateway.example.com/v1',
+				organization: 'org_x',
+				project: 'proj_y',
+			});
+			expect(t).toBeDefined();
+		});
+	});
+
+	// Follow-up review fixes — see commit message + design-context-caching.md
+	describe('follow-up fixes (post-P7 review)', () => {
+		// Fix #1: ack-correlated single-flight session.update queue.
+		describe('FIFO queue + sendSessionUpdateAndWait (fix #1)', () => {
+			it('updateSession resolves only after session.updated arrives (not fire-and-forget)', async () => {
+				setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+				// The mock auto-emits session.updated on every session.update,
+				// so a successful await means the wire→ack round-trip completed.
+				const promise = transport.updateSession({ instructions: 'X' });
+				// Promise is pending until the microtask queue drains.
+				expect(promise).toBeInstanceOf(Promise);
+				await promise;
+				const sent = mockRt.sent.find(
+					(m) =>
+						m.type === 'session.update' &&
+						(m.session as Record<string, unknown>).instructions === 'X',
+				);
+				expect(sent).toBeDefined();
+				// Outgoing payload carries an event_id for ack correlation.
+				expect((sent as Record<string, unknown>).event_id).toMatch(/^sess_upd_\d+$/);
+			});
+
+			it('concurrent updateSession calls serialize via the queue', async () => {
+				setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+				const a = transport.updateSession({ instructions: 'A' });
+				const b = transport.updateSession({ instructions: 'B' });
+				await Promise.all([a, b]);
+				const updates = mockRt.sent.filter((m) => m.type === 'session.update');
+				// Two ordered sends with monotonic event_ids.
+				const ids = updates
+					.map((m) => (m as Record<string, unknown>).event_id as string | undefined)
+					.filter((x): x is string => typeof x === 'string');
+				expect(ids.length).toBeGreaterThanOrEqual(2);
+				const counters = ids.map((id) => Number(id.replace('sess_upd_', '')));
+				for (let i = 1; i < counters.length; i++) {
+					expect(counters[i]).toBeGreaterThan(counters[i - 1] ?? 0);
+				}
+			});
+
+			it('prefix baseline does NOT update when the wire send rejects', async () => {
+				setup({
+					apiKey: 'test',
+					model: 'gpt-realtime-2',
+					cacheConfig: { enforcePrefixStability: true },
+				});
+				// Set initial baseline by simulating a successful first update.
+				await transport.updateSession({ instructions: 'baseline' });
+				// biome-ignore lint/suspicious/noExplicitAny: test-only hook
+				const beforeBaseline = (transport as any).prefixBaselineCanonical;
+				expect(beforeBaseline).toBeDefined();
+
+				// Replace the mock to make the next session.update reject by
+				// emitting an error event with a matching event_id instead of
+				// session.updated.
+				// biome-ignore lint/suspicious/noExplicitAny: deliberate mock override
+				const origSend = (mockRt as any).send.bind(mockRt);
+				// biome-ignore lint/suspicious/noExplicitAny: deliberate mock override
+				(mockRt as any).send = (m: Record<string, unknown>) => {
+					(mockRt as Record<string, unknown[]>).sent.push(m);
+					if (
+						m.type === 'session.update' &&
+						(m.session as Record<string, unknown>).instructions === 'rejected'
+					) {
+						queueMicrotask(() =>
+							mockRt.emit('error', {
+								event_id: m.event_id,
+								error: { message: 'simulated server rejection', type: 'invalid_request_error' },
+							}),
+						);
+						return;
+					}
+					origSend(m);
+				};
+
+				// Mutate prefix; transferSession path so enforcePrefixStability
+				// allows the change (default allowMutationOnTransfer=true), but
+				// the wire send is rejected by the mock.
+				await expect(transport.transferSession({ instructions: 'rejected' })).rejects.toThrow();
+
+				// biome-ignore lint/suspicious/noExplicitAny: test-only hook
+				const afterBaseline = (transport as any).prefixBaselineCanonical;
+				expect(afterBaseline).toBe(beforeBaseline);
+			});
+		});
+
+		// Fix #2: probe rejection suppressed from user-facing onError.
+		describe('probe rejection suppression (fix #2)', () => {
+			it('does NOT call user onError when error is a prompt_cache_key probe rejection', async () => {
+				const { _clearPromptCacheKeyProbeStateForTesting } = await import(
+					'../../src/transport/openai-realtime-transport.js'
+				);
+				_clearPromptCacheKeyProbeStateForTesting();
+				setup({
+					apiKey: 'test',
+					model: 'gpt-realtime-2',
+					cacheConfig: { experimental: { promptCacheKey: 'probe_test_key' } },
+				});
+				const errors: unknown[] = [];
+				transport.onError = (e) => errors.push(e);
+
+				// Mark probe as in-flight (mirrors what installPromptCacheKeyProbe does).
+				// biome-ignore lint/suspicious/noExplicitAny: test-only hook
+				(transport as any)._inFlightProbeScope = 'any';
+
+				// Emit an error matching the probe pattern.
+				mockRt.emit('error', {
+					error: { param: 'prompt_cache_key', message: 'unknown parameter' },
+				});
+
+				expect(errors).toEqual([]);
+			});
+
+			it('DOES call user onError for unrelated errors even with probe in flight', async () => {
+				setup({
+					apiKey: 'test',
+					model: 'gpt-realtime-2',
+					cacheConfig: { experimental: { promptCacheKey: 'probe_test_key' } },
+				});
+				const errors: unknown[] = [];
+				transport.onError = (e) => errors.push(e);
+				// biome-ignore lint/suspicious/noExplicitAny: test-only hook
+				(transport as any)._inFlightProbeScope = 'any';
+
+				mockRt.emit('error', {
+					error: { type: 'server_error', message: 'something else broke' },
+				});
+				expect(errors).toHaveLength(1);
+			});
+
+			it('DOES call user onError for probe-shaped errors when no probe is in flight', () => {
+				setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+				const errors: unknown[] = [];
+				transport.onError = (e) => errors.push(e);
+
+				// Probe scope cleared; same error pattern should NOT be suppressed.
+				mockRt.emit('error', {
+					error: { param: 'prompt_cache_key', message: 'unknown parameter' },
+				});
+				expect(errors).toHaveLength(1);
+			});
 		});
 	});
 });

@@ -72,3 +72,17 @@ export class ValidationError extends FrameworkError {
 		this.name = 'ValidationError';
 	}
 }
+
+/**
+ * Thrown by an OpenAI Realtime transport configured with
+ * `cacheConfig.enforcePrefixStability: true` when a connected, non-transfer
+ * `updateSession()` or `transferSession()` call would mutate the cache prefix
+ * (instructions or tools). Pre-connect mutations are always allowed; same-
+ * canonical-prefix calls do not throw. See dev_docs/framework/design-context-caching.md §2.
+ */
+export class CachePrefixMutationError extends FrameworkError {
+	constructor(message: string, options?: { severity?: ErrorSeverity; cause?: Error }) {
+		super(message, { component: 'transport', ...options });
+		this.name = 'CachePrefixMutationError';
+	}
+}

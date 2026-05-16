@@ -71,7 +71,7 @@ function createMockTransport(
 		},
 		commitAudio: vi.fn(),
 		clearAudio: vi.fn(),
-		updateSession: vi.fn(),
+		updateSession: vi.fn(async () => {}),
 		transferSession: vi.fn(async () => {}),
 		sendContent: (turns: ContentTurn[]) => {
 			sentContent.push(turns);

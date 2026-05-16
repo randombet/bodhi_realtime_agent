@@ -58,6 +58,7 @@ import { MultiplexConversationHistoryStore } from './multiplex-conversation-hist
 import { SessionManager } from './session-manager.js';
 import { ToolCallRouter } from './tool-call-router.js';
 import { TranscriptManager } from './transcript-manager.js';
+import { computeCacheHitRatio, deriveProviderItemId, deriveUsageSource } from './usage-helpers.js';
 
 /**
  * Public, stable transcription mode exposed to callers. The internal routing
@@ -279,6 +280,15 @@ export class VoiceSession {
 	/** Latest `processKnowledgeBase` result for the active main agent (prompt slice + optional search tool metadata). */
 	private processedKnowledgeBase: ProcessedKnowledgeBase | null = null;
 	private turnId = 0;
+	/** P4: turn id allocated eagerly for the *current* model turn so usage
+	 *  events emitted before turn.end carry the right id. Cleared after
+	 *  turn.end publishes. See allocateCurrentModelTurn(). */
+	private currentModelTurnId: string | null = null;
+	/** P4: agent name pinned at allocation time so an asynchronous transfer
+	 *  mid-turn does not misattribute usage to the new agent. */
+	private currentModelTurnAgentName: string | null = null;
+	/** P4: per-source monotonic sequence within the current model turn. */
+	private currentTurnUsageSequence: Map<string, number> = new Map();
 	private sttProvider?: STTProvider;
 	/** Resolved post-transport-construction from config.clientAudioInputRate
 	 *  (default: transport.audioFormat.inputSampleRate — the rate the
@@ -520,7 +530,9 @@ export class VoiceSession {
 			// Use pre-constructed transport (OpenAI, mock, etc.)
 			this.transport = config.transport;
 			// Sync tools and instructions so they're available at connect time.
-			this.transport.updateSession({
+			// Pre-connect updateSession is state-only and resolves immediately;
+			// floating the promise is safe (constructor cannot be async).
+			void this.transport.updateSession({
 				instructions,
 				tools: allInitialTools.length ? allInitialTools : undefined,
 				...(inputTranscription === false && {
@@ -724,8 +736,17 @@ export class VoiceSession {
 			this.internalMode = 'transcription';
 		}
 
-		// Wire onModelTurnStart for STT commit trigger
+		// Wire onModelTurnStart for STT commit trigger.
+		// P4: also allocate the eager turn id here. Chain pattern preserves
+		// any pre-attached handler on injected transports.
+		const prevModelTurnStart = this.transport.onModelTurnStart;
 		this.transport.onModelTurnStart = () => {
+			try {
+				prevModelTurnStart?.();
+			} catch (e) {
+				this.log(`pre-attached onModelTurnStart threw: ${(e as Error).message}`);
+			}
+			this.allocateCurrentModelTurn();
 			this.logGeminiUserTurnRecognition('model/tool processing started');
 			if (this.sttProvider && !this._commitFiredForTurn) {
 				this._commitFiredForTurn = true;
@@ -857,14 +878,64 @@ export class VoiceSession {
 			this.agentRouter.responseModality = 'text';
 		}
 
+		// P4: chain pattern — preserve any pre-attached usage handler on the
+		// transport, then call the framework hook AND publish to the EventBus.
+		// Same chaining pattern is applied to onCacheBust below for symmetry.
+		const prevUsage = this.transport.onRealtimeLLMUsage;
 		this.transport.onRealtimeLLMUsage = (usage) => {
+			try {
+				prevUsage?.(usage);
+			} catch (e) {
+				this.log(`pre-attached onRealtimeLLMUsage threw: ${(e as Error).message}`);
+			}
+			const source = deriveUsageSource(usage);
+			// Allocate a turn id eagerly for any source that's bound to a model
+			// turn (everything except openai.transcription). This handles the
+			// TTS-only path where onModelTurnStart never fires.
+			if (source !== 'openai.transcription') this.allocateCurrentModelTurn();
+			const agentName =
+				source === 'openai.transcription'
+					? (this.currentModelTurnAgentName ?? this.agentRouter.activeAgent.name)
+					: (this.currentModelTurnAgentName ?? this.agentRouter.activeAgent.name);
 			if (this.hooks.onRealtimeLLMUsage) {
 				this.hooks.onRealtimeLLMUsage({
 					sessionId: this.config.sessionId,
-					agentName: this.agentRouter.activeAgent.name,
+					agentName,
 					usage,
 				});
 			}
+			const turnId = source === 'openai.transcription' ? null : this.currentModelTurnId;
+			const seqKey = `${turnId ?? 'no_turn'}:${source}`;
+			const sequence = (this.currentTurnUsageSequence.get(seqKey) ?? 0) + 1;
+			this.currentTurnUsageSequence.set(seqKey, sequence);
+			const ratio = computeCacheHitRatio(usage, source);
+			this.eventBus.publish('realtime.usage', {
+				sessionId: this.config.sessionId,
+				agentName,
+				turnId,
+				source,
+				providerItemId: deriveProviderItemId(usage, source),
+				sequence,
+				emittedAt: Date.now(),
+				usage,
+				...(ratio !== undefined ? { cacheHitRatio: ratio } : {}),
+			});
+		};
+
+		// P4: chain pattern for onCacheBust + EventBus mirror.
+		const prevCacheBust = this.transport.onCacheBust;
+		this.transport.onCacheBust = (reason) => {
+			try {
+				prevCacheBust?.(reason);
+			} catch (e) {
+				this.log(`pre-attached onCacheBust threw: ${(e as Error).message}`);
+			}
+			this.eventBus.publish('realtime.cache.bust', {
+				sessionId: this.config.sessionId,
+				agentName: this.currentModelTurnAgentName ?? this.agentRouter.activeAgent.name,
+				turnId: this.currentModelTurnId,
+				reason,
+			});
 		};
 
 		if (config.orchestrationMode === 'actor') {
@@ -1133,7 +1204,7 @@ export class VoiceSession {
 		this.sessionManager.transitionTo('CONNECTING');
 		if (this.config.transport) {
 			if (this.ttsProvider) {
-				this.transport.updateSession({ responseModality: 'text' });
+				await this.transport.updateSession({ responseModality: 'text' });
 			}
 			await this.transport.connect();
 		} else {
@@ -1832,6 +1903,19 @@ export class VoiceSession {
 		});
 		this.clientTransport.sendJsonToClient({ type: 'turn.end', turnId: turnIdStr });
 
+		// P4: reset turn-scoped state AFTER turn.end so any handlers that
+		// inspect currentModelTurnId still see the correct value. Next turn
+		// will lazy-allocate via allocateCurrentModelTurn().
+		this.currentModelTurnId = null;
+		this.currentModelTurnAgentName = null;
+		// Follow-up fix #3: turn-bound sources (openai.response, gemini.*)
+		// reset per turn; non-turn-bound sources (openai.transcription, keyed
+		// `no_turn:*`) keep their counter session-scoped so the documented
+		// monotonic-per-(sessionId, source) guarantee holds for transcription.
+		for (const k of [...this.currentTurnUsageSequence.keys()]) {
+			if (!k.startsWith('no_turn:')) this.currentTurnUsageSequence.delete(k);
+		}
+
 		// Notify active agent
 		const agent = this.agentRouter.activeAgent;
 		if (agent.onTurnCompleted) {
@@ -2008,8 +2092,28 @@ export class VoiceSession {
 		}
 	}
 
-	private handleResumptionUpdate(handle: string, _resumable: boolean): void {
-		this.sessionManager.updateResumptionHandle(handle);
+	/** P4: idempotently allocate currentModelTurnId + currentModelTurnAgentName
+	 *  for the upcoming model turn. Called from chained onModelTurnStart and
+	 *  defensively from the realtime.usage emitter (TTS-only and native-audio
+	 *  edge cases that don't fire onModelTurnStart). Reset by handleTurnComplete
+	 *  *after* turn.end publishes. */
+	private allocateCurrentModelTurn(): void {
+		if (this.currentModelTurnId !== null) return;
+		this.currentModelTurnId = `turn_${this.turnId + 1}`;
+		this.currentModelTurnAgentName = this.agentRouter.activeAgent.name;
+	}
+
+	private handleResumptionUpdate(handle: string, resumable: boolean): void {
+		// On resumable updates, cache the handle so a later reconnect can resume.
+		// On non-resumable updates, CLEAR the cache so reconnect-with-state
+		// cannot attempt a resume from a stale handle (Google's docs warn that
+		// resuming after non-resumable can lose data — fresh-session-with-replay
+		// is safer; the GeminiLiveTransport applies the same policy internally).
+		if (resumable) {
+			this.sessionManager.updateResumptionHandle(handle);
+		} else {
+			this.sessionManager.clearResumptionHandle();
+		}
 	}
 
 	// --- Client transport handlers ---

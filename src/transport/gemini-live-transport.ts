@@ -25,6 +25,18 @@ import type {
 import { normalizeGeminiUsageMetadata } from './realtime-usage-normalize.js';
 import { zodToJsonSchema } from './zod-to-schema.js';
 
+/** Module-level latch so the legacy `resumptionHandle` deprecation warning
+ *  fires at most once per process. */
+let legacyResumptionHandleWarned = false;
+function warnLegacyResumptionHandleOnce(): void {
+	if (legacyResumptionHandleWarned) return;
+	legacyResumptionHandleWarned = true;
+	console.warn(
+		'[gemini-live-transport] GeminiTransportConfig.resumptionHandle is deprecated; ' +
+			'use sessionResumption: { handle } instead. Will be removed in a future release.',
+	);
+}
+
 function toFunctionResponsePayload(value: unknown): Record<string, unknown> {
 	if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
 		return value as Record<string, unknown>;
@@ -85,7 +97,23 @@ export interface GeminiTransportConfig {
 	systemInstruction?: string;
 	/** Tool definitions to register with the model (converted to Gemini function declarations). */
 	tools?: ToolDefinition[];
-	/** Opaque handle from a previous session, used to resume an existing Gemini session. */
+	/** Server-side session resumption configuration.
+	 *  - `false` → opt out entirely (server will not issue resumption handles).
+	 *    Required for ZDR / privacy-sensitive callers who must not allow
+	 *    server-side conversation snapshots.
+	 *  - `{ handle?: string }` → opt in. Pass a prior handle to resume that
+	 *    session, or omit `handle` (i.e. `{}`) for a fresh resumable session.
+	 *  - omitted → defaults to `{}` (resume-enabled fresh session, current behavior).
+	 *
+	 *  Resolution at connect time: `false` overrides everything else, including
+	 *  any handle in `ReconnectState`. Otherwise the transport's mutable
+	 *  `effectiveResumptionHandle` is used, seeded from this field's
+	 *  `handle` or the legacy `resumptionHandle` alias and updated by every
+	 *  `resumable: true` server `sessionResumptionUpdate`. */
+	sessionResumption?: false | { handle?: string };
+	/** @deprecated Use `sessionResumption: { handle }` instead. Kept as a
+	 *  compatibility alias; emits a one-shot WARN log per process when used.
+	 *  If both are set, `sessionResumption.handle` wins. */
 	resumptionHandle?: string;
 	/** Voice configuration for Gemini's speech synthesis. */
 	speechConfig?: { voiceName?: string };
@@ -166,6 +194,19 @@ export class GeminiLiveTransport implements LLMTransport {
 	private _textDoneFired = false;
 	/** Latest Gemini `usageMetadata` for the active model turn (cleared on `turnComplete`). */
 	private _cachedGeminiUsage: unknown | null = null;
+	/** Mutable resumption handle. Seeded at construct time from cfg, then
+	 *  replaced by every `resumable: true` server update; cleared on
+	 *  `resumable: false` so reconnect forces a fresh session + replay. */
+	private effectiveResumptionHandle: string | null = null;
+	/** Wall-clock ms of the most recent `resumable: false` server update.
+	 *  Telemetry / debugging only — surfaced via getLastNonResumableAt(). */
+	private lastNonResumableAt: number | null = null;
+
+	/** Telemetry helper: the wall-clock ms of the most recent `resumable: false`
+	 *  sessionResumptionUpdate observed, or null if none has fired. */
+	getLastNonResumableAt(): number | null {
+		return this.lastNonResumableAt;
+	}
 
 	// --- LLMTransport static properties ---
 
@@ -229,6 +270,20 @@ export class GeminiLiveTransport implements LLMTransport {
 		this.ai = new GoogleGenAI({ apiKey: config.apiKey });
 		this.config = config;
 		this.callbacks = callbacks;
+
+		// Seed effectiveResumptionHandle from config (sessionResumption wins over
+		// the legacy resumptionHandle alias). After construct, server-issued
+		// resumable handles always win (see handleSessionResumptionUpdate).
+		if (
+			typeof config.sessionResumption === 'object' &&
+			config.sessionResumption !== null &&
+			config.sessionResumption.handle
+		) {
+			this.effectiveResumptionHandle = config.sessionResumption.handle;
+		} else if (config.resumptionHandle) {
+			this.effectiveResumptionHandle = config.resumptionHandle;
+			warnLegacyResumptionHandleOnce();
+		}
 	}
 
 	/** Establish a WebSocket connection to the Gemini Live API.
@@ -291,8 +346,14 @@ export class GeminiLiveTransport implements LLMTransport {
 			connectConfig.tools = toolEntries;
 		}
 
-		if (this.config.resumptionHandle) {
-			connectConfig.sessionResumption = { handle: this.config.resumptionHandle };
+		// Session resumption resolution order (per design-context-caching.md §3):
+		//   1. cfg.sessionResumption === false → omit (privacy/ZDR opt-out wins).
+		//   2. effectiveResumptionHandle !== null → use it (server-issued or seeded).
+		//   3. otherwise → {} (fresh resumable session, current default).
+		if (this.config.sessionResumption === false) {
+			// omit sessionResumption entirely
+		} else if (this.effectiveResumptionHandle !== null) {
+			connectConfig.sessionResumption = { handle: this.effectiveResumptionHandle };
 		} else {
 			connectConfig.sessionResumption = {};
 		}
@@ -354,12 +415,22 @@ export class GeminiLiveTransport implements LLMTransport {
 		try {
 			await this.disconnect();
 
-			const resumptionHandle =
-				typeof stateOrHandle === 'string'
-					? stateOrHandle
-					: (stateOrHandle?.resumptionHandle ?? this.config.resumptionHandle);
-			if (resumptionHandle) {
-				this.config.resumptionHandle = resumptionHandle;
+			// Honor the privacy/ZDR opt-out FIRST: if the caller configured
+			// sessionResumption: false, no incoming handle (constructor, state,
+			// or server) is used. Reconnect proceeds as a fresh session and
+			// replays conversation history when present.
+			let resumptionHandle: string | null;
+			if (this.config.sessionResumption === false) {
+				resumptionHandle = null;
+			} else {
+				const incoming =
+					typeof stateOrHandle === 'string'
+						? stateOrHandle
+						: (stateOrHandle?.resumptionHandle ?? null);
+				resumptionHandle = incoming ?? this.effectiveResumptionHandle;
+				if (resumptionHandle) {
+					this.effectiveResumptionHandle = resumptionHandle;
+				}
 			}
 
 			await this.connect();
@@ -506,8 +577,10 @@ export class GeminiLiveTransport implements LLMTransport {
 	/** No-op for V1 — server VAD only. */
 	clearAudio(): void {}
 
-	/** Update session configuration (applied on next reconnect for Gemini). */
-	updateSession(config: SessionUpdate): void {
+	/** Update session configuration (applied on next reconnect for Gemini —
+	 *  no in-place mutation, capabilities.inPlaceSessionUpdate is false).
+	 *  Async signature for LLMTransport interface parity; body is synchronous. */
+	async updateSession(config: SessionUpdate): Promise<void> {
 		if (config.instructions !== undefined) {
 			this.config.systemInstruction = config.instructions;
 		}
@@ -516,6 +589,11 @@ export class GeminiLiveTransport implements LLMTransport {
 		}
 		if (config.responseModality !== undefined) {
 			this._textMode = config.responseModality === 'text';
+		}
+		if (config.transcription?.input !== undefined) {
+			// Maps to Gemini's inputAudioTranscription connectConfig field.
+			// Applied on next connect / reconnect (Gemini has no in-place update).
+			this.config.inputAudioTranscription = config.transcription.input;
 		}
 		if (config.providerOptions !== undefined) {
 			if (typeof config.providerOptions.googleSearch === 'boolean') {
@@ -532,10 +610,17 @@ export class GeminiLiveTransport implements LLMTransport {
 
 	/** Transfer session: update config → reconnect → replay conversation history. */
 	async transferSession(config: SessionUpdate, state?: ReconnectState): Promise<void> {
-		this.updateSession(config);
-		const resumptionHandle = state?.resumptionHandle ?? this.config.resumptionHandle;
-		if (resumptionHandle) {
-			this.config.resumptionHandle = resumptionHandle;
+		await this.updateSession(config);
+		// Same resolution order as reconnect: privacy/ZDR opt-out wins, then
+		// the incoming state handle, then our mutable effective handle.
+		let resumptionHandle: string | null;
+		if (this.config.sessionResumption === false) {
+			resumptionHandle = null;
+		} else {
+			resumptionHandle = state?.resumptionHandle ?? this.effectiveResumptionHandle;
+			if (resumptionHandle) {
+				this.effectiveResumptionHandle = resumptionHandle;
+			}
 		}
 		const resumingSession = !!resumptionHandle;
 		await this.disconnect();
@@ -767,16 +852,24 @@ export class GeminiLiveTransport implements LLMTransport {
 		}
 
 		if (msg.sessionResumptionUpdate?.newHandle) {
-			this.config.resumptionHandle = msg.sessionResumptionUpdate.newHandle;
-			this.callbacks.onResumptionUpdate?.(
-				msg.sessionResumptionUpdate.newHandle,
-				msg.sessionResumptionUpdate.resumable ?? false,
-			);
+			const handle = msg.sessionResumptionUpdate.newHandle;
+			const resumable = msg.sessionResumptionUpdate.resumable ?? false;
+			// Policy: keep effectiveResumptionHandle in sync with the latest
+			// resumable handle. On non-resumable updates, clear it so the next
+			// reconnect forces a fresh session + replay (per Google's docs,
+			// resuming from an old handle after non-resumable can lose data).
+			if (resumable) {
+				this.effectiveResumptionHandle = handle;
+			} else {
+				this.effectiveResumptionHandle = null;
+				this.lastNonResumableAt = Date.now();
+			}
+			// Maintain the legacy alias too so any caller still reading
+			// transport.config.resumptionHandle observes the latest server handle.
+			this.config.resumptionHandle = handle;
+			this.callbacks.onResumptionUpdate?.(handle, resumable);
 			if (this.onResumptionUpdate) {
-				this.onResumptionUpdate(
-					msg.sessionResumptionUpdate.newHandle,
-					msg.sessionResumptionUpdate.resumable ?? false,
-				);
+				this.onResumptionUpdate(handle, resumable);
 			}
 		}
 	}

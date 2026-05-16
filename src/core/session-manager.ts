@@ -114,6 +114,13 @@ export class SessionManager {
 		});
 	}
 
+	/** Clear the cached resumption handle. Called when the transport reports
+	 *  a non-resumable session update — keeping a stale handle would let a
+	 *  later reconnect-with-state attempt a resume that loses data. */
+	clearResumptionHandle(): void {
+		this._resumptionHandle = null;
+	}
+
 	bufferMessage(message: ClientMessage): void {
 		this._bufferedMessages.push(message);
 	}

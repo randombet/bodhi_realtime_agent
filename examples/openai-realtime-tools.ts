@@ -30,6 +30,27 @@
  *      client as `{"type":"dictation_transcript", text, partial?, exit?}` JSON messages
  *      AND logged to the server console — so a web client (`pnpm web-client:dev`) can
  *      render live dictation, and you can see it from the server logs too.
+ *
+ * Optional context-caching env vars (see dev_docs/framework/design-context-caching.md
+ * and the Cache configuration block below for the full details):
+ *
+ *   CACHE_TRUNCATION_RATIO=0.8    Set cacheConfig.truncation = retention_ratio:0.8.
+ *                                  The documented OpenAI cost-preservation lever —
+ *                                  retains more of the cached prefix when context
+ *                                  fills, reducing per-turn cache busts.
+ *   CACHE_PROMPT_KEY=my_agent_v1  EXPERIMENTAL prompt_cache_key. Probe-gated: the
+ *                                  transport silently strips the field if the server
+ *                                  rejects it. Recommended scoping: per agent + region.
+ *   CACHE_ENFORCE_STABILITY=1     Throw CachePrefixMutationError on connected,
+ *                                  non-transfer prefix mutations. Multi-agent transfers
+ *                                  still work by default.
+ *   CACHE_DISALLOW_TRANSFER=1     Also block transfers (set with CACHE_ENFORCE_STABILITY).
+ *   OPENAI_BASE_URL / OPENAI_ORGANIZATION / OPENAI_PROJECT — pass-through to the SDK
+ *                                  client (also part of the probe scope key).
+ *
+ *   Watch for [Usage] log lines after each turn — they print input/output/cached
+ *   tokens and the computed cacheHitRatio. [CacheBust] lines fire on real
+ *   instructions/tools mutations (same-canonical-prefix updates suppress the signal).
  */
 
 import 'dotenv/config';
@@ -74,7 +95,9 @@ if (OPENAI_API_KEY.length === 0) {
 // Gemini API key is still needed for image/video subagents
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY ?? '';
 if (GEMINI_API_KEY.length === 0) {
-	console.error('Error: GEMINI_API_KEY environment variable is required (for image/video subagents)');
+	console.error(
+		'Error: GEMINI_API_KEY environment variable is required (for image/video subagents)',
+	);
 	process.exit(1);
 }
 
@@ -83,6 +106,73 @@ const HOST = process.env.HOST || '0.0.0.0'; // '0.0.0.0' binds to all interfaces
 const SESSION_ID = `session_${Date.now()}`;
 const google = createGoogleGenerativeAI({ apiKey: GEMINI_API_KEY });
 
+// =============================================================================
+// Cache configuration (env-driven, see dev_docs/framework/design-context-caching.md)
+// =============================================================================
+//
+// CACHE_TRUNCATION_RATIO  — float in [0, 1]. When set, maps to
+//                           cacheConfig.truncation = { type: 'retention_ratio', ... }.
+//                           This is the documented OpenAI cost-preservation lever:
+//                           values < 1 retain more of the cached prefix when context
+//                           fills, reducing per-turn cache busts. 0.8 is a sensible
+//                           production default. Omit to fall through to server default.
+// CACHE_PROMPT_KEY        — opaque string. EXPERIMENTAL — sent as prompt_cache_key.
+//                           Routes the session to the same backend host as other
+//                           sessions with the same key, improving hit rate. Documented
+//                           for Responses/Chat; community-reported for Realtime, so the
+//                           transport probes acceptance on first send and silently
+//                           strips the field if rejected. Recommended scoping: per agent
+//                           + region. Over-sharing one key hits the ~15 RPM/host cap and
+//                           degrades hit rate.
+// CACHE_ENFORCE_STABILITY=1  Opt in to cacheConfig.enforcePrefixStability. Throws
+//                           CachePrefixMutationError on connected, non-transfer prefix
+//                           changes. NOTE: this demo has multi-agent transfer
+//                           (main ↔ math_expert), which legitimately swaps
+//                           instructions/tools — that's allowed by default
+//                           (allowMutationOnTransfer=true). Set CACHE_DISALLOW_TRANSFER=1
+//                           on top to also block transfers (single-agent-only mode).
+// CACHE_DISALLOW_TRANSFER=1  Set allowMutationOnTransfer=false. Only meaningful when
+//                           CACHE_ENFORCE_STABILITY=1.
+// OPENAI_BASE_URL / OPENAI_ORGANIZATION / OPENAI_PROJECT — pass-through to the SDK
+//                           client. Probe scope keys include all three so a rejection
+//                           in one deployment does not poison others.
+const CACHE_TRUNCATION_RATIO_RAW = process.env.CACHE_TRUNCATION_RATIO;
+const CACHE_TRUNCATION_RATIO =
+	CACHE_TRUNCATION_RATIO_RAW !== undefined ? Number(CACHE_TRUNCATION_RATIO_RAW) : undefined;
+if (
+	CACHE_TRUNCATION_RATIO !== undefined &&
+	(Number.isNaN(CACHE_TRUNCATION_RATIO) || CACHE_TRUNCATION_RATIO < 0 || CACHE_TRUNCATION_RATIO > 1)
+) {
+	console.error(
+		`Error: CACHE_TRUNCATION_RATIO must be a number in [0, 1] (got "${CACHE_TRUNCATION_RATIO_RAW}")`,
+	);
+	process.exit(1);
+}
+const CACHE_PROMPT_KEY = process.env.CACHE_PROMPT_KEY;
+const CACHE_ENFORCE_STABILITY = process.env.CACHE_ENFORCE_STABILITY === '1';
+const CACHE_DISALLOW_TRANSFER = process.env.CACHE_DISALLOW_TRANSFER === '1';
+
+// Build the cacheConfig object only when at least one knob is requested, so
+// callers who don't opt in see the same wire payload they did before this
+// demo grew the option.
+type OpenAICacheConfig = NonNullable<
+	ConstructorParameters<typeof OpenAIRealtimeTransport>[0]['cacheConfig']
+>;
+const cacheConfig: OpenAICacheConfig | undefined = (() => {
+	const cfg: OpenAICacheConfig = {};
+	if (CACHE_TRUNCATION_RATIO !== undefined) {
+		cfg.truncation = { type: 'retention_ratio', retentionRatio: CACHE_TRUNCATION_RATIO };
+	}
+	if (CACHE_PROMPT_KEY) {
+		cfg.experimental = { promptCacheKey: CACHE_PROMPT_KEY };
+	}
+	if (CACHE_ENFORCE_STABILITY) {
+		cfg.enforcePrefixStability = true;
+		// Default true (transfers allowed); only flip when explicitly requested.
+		if (CACHE_DISALLOW_TRANSFER) cfg.allowMutationOnTransfer = false;
+	}
+	return Object.keys(cfg).length > 0 ? cfg : undefined;
+})();
 
 // =============================================================================
 // OpenAI Realtime Transport
@@ -95,7 +185,15 @@ const transport = new OpenAIRealtimeTransport({
 	turnDetection: { type: 'semantic_vad', eagerness: 'medium' },
 	// gpt-realtime-2 supports configurable reasoning (low, medium, high, and xhigh). 'low' is the
 	// documented production default — balances latency vs accuracy.
-	reasoning: { effort: 'xhigh' },
+	reasoning: { effort: 'high' },
+	// P3/P5/P6 cacheConfig — see env-vars block above. Omitted (undefined) when
+	// no caching env vars are set, so existing demo behavior is unchanged.
+	...(cacheConfig !== undefined ? { cacheConfig } : {}),
+	// P6 SDK pass-throughs. The probe scope key includes baseURL, organization,
+	// and project so a rejection in one deployment does not poison others.
+	...(process.env.OPENAI_BASE_URL ? { baseURL: process.env.OPENAI_BASE_URL } : {}),
+	...(process.env.OPENAI_ORGANIZATION ? { organization: process.env.OPENAI_ORGANIZATION } : {}),
+	...(process.env.OPENAI_PROJECT ? { project: process.env.OPENAI_PROJECT } : {}),
 });
 
 // =============================================================================
@@ -133,9 +231,7 @@ const sessionProxy = new Proxy({} as VoiceSession, {
 	get(_target, prop, receiver) {
 		const live = sessionRef;
 		if (!live) {
-			throw new Error(
-				`sessionProxy: VoiceSession not constructed yet (accessed ${String(prop)})`,
-			);
+			throw new Error(`sessionProxy: VoiceSession not constructed yet (accessed ${String(prop)})`);
 		}
 		const value = Reflect.get(live, prop, receiver);
 		return typeof value === 'function' ? value.bind(live) : value;
@@ -447,9 +543,7 @@ const transferFromMain: ToolDefinition = {
 	description: `Transfer the conversation to a specialist agent.
 - "math_expert": For complex math questions or detailed mathematical explanations.`,
 	parameters: z.object({
-		agent_name: z
-			.enum(['math_expert'])
-			.describe('The agent to transfer to'),
+		agent_name: z.enum(['math_expert']).describe('The agent to transfer to'),
 	}),
 	execution: 'inline',
 	execute: async () => ({ status: 'transferred' }),
@@ -547,7 +641,7 @@ LANGUAGE RULES:
 - Use everyday words: say "start" not "initiate", "use" not "utilize", "help" not "assist".
 - Never use jargon, acronyms, or technical terms. If you must refer to something technical, explain it in plain words right away.
 - Use positive phrasing: say "Please stay on the line" instead of "Don't hang up".
-- Give binary choices, not open-ended questions: "Do you want the weather, or the news?" not "What would you like to know?"
+- When giving suggestions, give binary choices, not open-ended questions: "Do you want the weather, or the news?" not "What would you like to know?"
 
 RESPONSE TEMPLATE (follow this pattern):
 1. Acknowledge: Confirm what the user said so they know you heard them correctly.
@@ -624,7 +718,8 @@ WHEN DONE:
 - When the user has no more math questions, say: "I will take you back to your main assistant now."
 - Then call transfer_to_agent with agent_name "main".`,
 	tools: [calculate, transferToMain],
-	greeting: 'You just transferred to the math expert. Greet the user briefly — one short sentence — then ask what math problem they need help with.',
+	greeting:
+		'You just transferred to the math expert. Greet the user briefly — one short sentence — then ask what math problem they need help with.',
 	onEnter: async () => {
 		console.log(`${ts()} [Agent] Math expert entered`);
 	},
@@ -791,6 +886,54 @@ async function main() {
 		console.log(`${ts()} [Event] Agent transfer: ${payload.fromAgent} → ${payload.toAgent}`);
 	});
 
+	// =========================================================================
+	// Cache observability — realtime.usage + realtime.cache.bust (P4)
+	// =========================================================================
+	//
+	// One realtime.usage event per provider usage callback (NOT one per turn).
+	// OpenAI fires twice for a typical turn:
+	//   - source='openai.response'      (response.done payload)
+	//   - source='openai.transcription' (input audio transcription completed)
+	// Both carry input/output/cached token counts in usage.modalityBreakdown.
+	//
+	// cacheHitRatio is provider-aware: returns a real ratio for openai.response
+	// when caching was reported, undefined for openai.transcription (transcription
+	// is not cache-eligible). For openai.response it includes explicit zero
+	// (= cache miss) — that's a meaningful signal, not "no signal".
+	//
+	// Watch the [Usage] log lines after a few turns:
+	//   - First turn typically has cachedTokens=0 (cold cache).
+	//   - Subsequent turns with the same prefix should show non-zero cachedTokens
+	//     and a cacheHitRatio ~0.5–0.95 depending on how much of the conversation
+	//     fits in the cached prefix vs the dynamic tail.
+	session.eventBus.subscribe('realtime.usage', (evt) => {
+		const u = evt.usage;
+		const cached = u.modalityBreakdown?.cachedTokens;
+		const cachedAudio = u.modalityBreakdown?.cachedAudioTokens;
+		const cachedText = u.modalityBreakdown?.cachedTextTokens;
+		const ratioStr =
+			evt.cacheHitRatio !== undefined ? `${(evt.cacheHitRatio * 100).toFixed(1)}%` : '—';
+		const breakdown =
+			cachedAudio !== undefined || cachedText !== undefined
+				? ` (audio=${cachedAudio ?? 0}, text=${cachedText ?? 0})`
+				: '';
+		console.log(
+			`${ts()} [Usage] turn=${evt.turnId ?? '-'} src=${evt.source} ` +
+				`in=${u.inputTokens ?? '?'} out=${u.outputTokens ?? '?'} ` +
+				`cached=${cached ?? 0}${breakdown} hitRatio=${ratioStr} ` +
+				`item=${evt.providerItemId ?? '-'} seq=${evt.sequence}`,
+		);
+	});
+
+	// Cache busts — fired by the OpenAI transport on instructions/tools mutations.
+	// Same-canonical-prefix updates (e.g. re-applying identical instructions) do
+	// NOT fire this signal (P5 hardening).
+	session.eventBus.subscribe('realtime.cache.bust', (evt) => {
+		console.log(
+			`${ts()} [CacheBust] reason=${evt.reason} agent=${evt.agentName} turn=${evt.turnId ?? '-'}`,
+		);
+	});
+
 	// Handle shutdown
 	const shutdown = async () => {
 		console.log(`\n${ts()} Shutting down...`);
@@ -811,6 +954,26 @@ async function main() {
 	console.log();
 	console.log(`  WebSocket audio server: ws://localhost:${PORT}`);
 	console.log(`  Session ID: ${SESSION_ID}`);
+	console.log();
+	const cacheLines: string[] = [];
+	if (cacheConfig?.truncation && typeof cacheConfig.truncation === 'object') {
+		cacheLines.push(`truncation=retention_ratio:${cacheConfig.truncation.retentionRatio}`);
+	} else if (cacheConfig?.truncation) {
+		cacheLines.push(`truncation=${cacheConfig.truncation}`);
+	}
+	if (cacheConfig?.experimental?.promptCacheKey) {
+		cacheLines.push(`promptCacheKey="${cacheConfig.experimental.promptCacheKey}" (probe-gated)`);
+	}
+	if (cacheConfig?.enforcePrefixStability) {
+		cacheLines.push(
+			`enforcePrefixStability=on (allowMutationOnTransfer=${
+				cacheConfig.allowMutationOnTransfer === false ? 'false' : 'true (default)'
+			})`,
+		);
+	}
+	console.log(
+		`  Cache:    ${cacheLines.length > 0 ? cacheLines.join(', ') : 'off (set CACHE_TRUNCATION_RATIO / CACHE_PROMPT_KEY / CACHE_ENFORCE_STABILITY to opt in)'}`,
+	);
 	console.log();
 	console.log('Connect a WebSocket audio client and try saying:');
 	console.log("  - 'What time is it?'");

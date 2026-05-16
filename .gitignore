@@ -23,6 +23,9 @@ docs/api/
 .massgen/
 /user-agents/
 /embed-widgets/
+# Demo artifacts (e.g. examples/gemini-live-context-caching.ts persists
+# Gemini resumption handles to .cache/gemini-resumption.handle)
+/.cache/
 
 # SpatialReal Python host bridges: local venvs and bytecode (per-bridge .gitignore too)
 app/lib/spatialreal/bridge/.venv/
