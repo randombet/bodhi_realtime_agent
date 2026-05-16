@@ -185,7 +185,7 @@ const transport = new OpenAIRealtimeTransport({
 	turnDetection: { type: 'semantic_vad', eagerness: 'medium' },
 	// gpt-realtime-2 supports configurable reasoning (low, medium, high, and xhigh). 'low' is the
 	// documented production default — balances latency vs accuracy.
-	reasoning: { effort: 'low' },
+	reasoning: { effort: 'high' },
 	// P3/P5/P6 cacheConfig — see env-vars block above. Omitted (undefined) when
 	// no caching env vars are set, so existing demo behavior is unchanged.
 	...(cacheConfig !== undefined ? { cacheConfig } : {}),
@@ -641,7 +641,7 @@ LANGUAGE RULES:
 - Use everyday words: say "start" not "initiate", "use" not "utilize", "help" not "assist".
 - Never use jargon, acronyms, or technical terms. If you must refer to something technical, explain it in plain words right away.
 - Use positive phrasing: say "Please stay on the line" instead of "Don't hang up".
-- Give binary choices, not open-ended questions: "Do you want the weather, or the news?" not "What would you like to know?"
+- When giving suggestions, give binary choices, not open-ended questions: "Do you want the weather, or the news?" not "What would you like to know?"
 
 RESPONSE TEMPLATE (follow this pattern):
 1. Acknowledge: Confirm what the user said so they know you heard them correctly.
