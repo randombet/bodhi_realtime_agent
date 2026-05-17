@@ -3,8 +3,13 @@
 import { describe, expect, it } from 'vitest';
 import {
 	type TabId,
+	defaultTabForHostSurface,
+	hostSurfaceFromHostname,
+	mainOriginFromLocation,
 	pathnameForTab,
+	tabAllowedOnHostSurface,
 	tabFromPathname,
+	tabFromPathnameForHostSurface,
 } from '../../app/web-client/src/app-routes.js';
 
 describe('app-routes', () => {
@@ -45,5 +50,72 @@ describe('app-routes', () => {
 		for (const t of tabs) {
 			expect(tabFromPathname(pathnameForTab(t))).toBe(t);
 		}
+	});
+
+	it('detects dedicated product subdomains', () => {
+		expect(hostSurfaceFromHostname('avatar.bodhi.example')).toBe('avatar');
+		expect(hostSurfaceFromHostname('Avatar.Bodhi.Example.')).toBe('avatar');
+		expect(hostSurfaceFromHostname('recruiting.bodhi.example')).toBe('recruiting');
+		expect(hostSurfaceFromHostname('interview.bodhi.example')).toBe('recruiting');
+		expect(hostSurfaceFromHostname('interview.localhost')).toBe('recruiting');
+		expect(hostSurfaceFromHostname('app.bodhi.example')).toBe('main');
+		expect(hostSurfaceFromHostname('localhost')).toBe('main');
+	});
+
+	it('uses product studio defaults on dedicated host surfaces', () => {
+		expect(defaultTabForHostSurface('avatar')).toBe('avatar_studio');
+		expect(defaultTabForHostSurface('recruiting')).toBe('recruiting_voice_studio');
+		expect(tabFromPathnameForHostSurface('/', 'avatar')).toBe('avatar_studio');
+		expect(tabFromPathnameForHostSurface('/talk', 'avatar')).toBe('avatar_studio');
+		expect(tabFromPathnameForHostSurface('/talk-avatar', 'avatar')).toBe('talk_avatar');
+		expect(tabFromPathnameForHostSurface('/', 'recruiting')).toBe('recruiting_voice_studio');
+		expect(tabFromPathnameForHostSurface('/screening-demo', 'recruiting')).toBe('screening_demo');
+		expect(tabFromPathnameForHostSurface('/agent-studio', 'recruiting')).toBe(
+			'recruiting_voice_studio',
+		);
+	});
+
+	it('restricts tabs on product subdomains', () => {
+		expect(tabAllowedOnHostSurface('avatar_studio', 'avatar')).toBe(true);
+		expect(tabAllowedOnHostSurface('talk_avatar', 'avatar')).toBe(true);
+		expect(tabAllowedOnHostSurface('agent_studio', 'avatar')).toBe(false);
+		expect(tabAllowedOnHostSurface('recruiting_voice_studio', 'recruiting')).toBe(true);
+		expect(tabAllowedOnHostSurface('screening_demo', 'recruiting')).toBe(true);
+		expect(tabAllowedOnHostSurface('talk_avatar', 'recruiting')).toBe(false);
+	});
+
+	it('builds a main-domain origin from product subdomains', () => {
+		expect(
+			mainOriginFromLocation({
+				hostname: 'avatar.bodhi.example',
+				origin: 'https://avatar.bodhi.example',
+				port: '',
+				protocol: 'https:',
+			}),
+		).toBe('https://bodhi.example');
+		expect(
+			mainOriginFromLocation({
+				hostname: 'recruiting.bodhi.example',
+				origin: 'https://recruiting.bodhi.example',
+				port: '',
+				protocol: 'https:',
+			}),
+		).toBe('https://bodhi.example');
+		expect(
+			mainOriginFromLocation({
+				hostname: 'interview.bodhi.example',
+				origin: 'https://interview.bodhi.example',
+				port: '',
+				protocol: 'https:',
+			}),
+		).toBe('https://bodhi.example');
+		expect(
+			mainOriginFromLocation({
+				hostname: 'avatar.localhost',
+				origin: 'http://avatar.localhost:5173',
+				port: '5173',
+				protocol: 'http:',
+			}),
+		).toBe('http://localhost:5173');
 	});
 });
