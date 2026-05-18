@@ -10,7 +10,7 @@ This repository is deprecated. It is no longer maintained, supported, or intende
 
 The source code and package files have been removed from this repository to prevent accidental use. All current work belongs in the official **BodhiAgent** repository linked above.
 
-## Fork warning
+## Suspicious Fork warning
 
 Do not rely on earlier, unsupported, or suspicious forks of this project.
 
