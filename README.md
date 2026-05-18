@@ -1,52 +1,31 @@
-<p align="center">
-  <img src="docs/images/icon_graphic_only.png" alt="Bodhi Agent" width="120" />
-</p>
-
 # Bodhi Realtime Agent
 
-## Deprecated repository
+## Official repository
 
-This repository is deprecated and is no longer the supported home for Bodhi Realtime Agent.
-
-Use the officially supported repository instead:
+Use the officially supported repository:
 
 **[BodhiAgent/bodhi_realtime_agent](https://github.com/BodhiAgent/bodhi_realtime_agent/)**
 
-New development, fixes, documentation, issues, and release guidance belong in the official BodhiAgent repository. Do not use this repository as the source of truth for installation, examples, API behavior, security posture, or roadmap decisions.
+This repository is deprecated. It is no longer maintained, supported, or intended for installation, reference implementation, issue tracking, documentation, examples, or production use.
 
-## Fork and package warning
+The source code and package files have been removed from this repository to prevent accidental use. All current work belongs in the official **BodhiAgent** repository linked above.
 
-Be careful with earlier, unsupported, or suspicious forks of this project. Repositories, packages, examples, or snippets that are not maintained under the official **BodhiAgent** organization may be outdated, incomplete, renamed, modified without review, or unsafe to depend on.
+## Fork warning
 
-For any production work, evaluation, or integration, start from:
+Do not rely on earlier, unsupported, or suspicious forks of this project.
 
-**https://github.com/BodhiAgent/bodhi_realtime_agent/**
+Only the **BodhiAgent/bodhi_realtime_agent** repository should be treated as official. Other forks, packages, examples, or copied snippets may be outdated, incomplete, renamed, modified without review, or unsafe.
 
 ## Historical early demos
 
-The original public demos below are kept here as historical references. They showed early, first-of-their-kind explorations of realtime voice agents that could keep a conversation going while background agents handled longer tasks such as coding, research, browsing, and tool execution.
+These early public demos are kept only as historical references. They showed first-of-their-kind realtime voice agent experiments where conversation continued while background agents handled longer tasks.
 
-These demos are not a substitute for the officially supported version. Use the official repository for current code and setup instructions.
+- [Claude Code Demo: Voice-Driven Coding Assistant](https://youtube.com/watch?v=n3kNK-4expo)
+- [OpenClaw Integration: Voice-Driven AI Agent](https://www.youtube.com/watch?v=skVLH2qCAQ4)
 
-### Claude Code Demo - Voice-Driven Coding Assistant
+For current setup, code, examples, and documentation, use the official repository:
 
-<p align="center">
-  <a href="https://youtube.com/watch?v=n3kNK-4expo">
-    <img src="https://img.youtube.com/vi/n3kNK-4expo/maxresdefault.jpg" alt="Watch the Claude Code demo" width="700" />
-  </a>
-  <br />
-  <em>Early demo: voice-driven coding with background command and file execution.</em>
-</p>
-
-### OpenClaw Integration - Voice-Driven AI Agent
-
-<p align="center">
-  <a href="https://www.youtube.com/watch?v=skVLH2qCAQ4">
-    <img src="https://img.youtube.com/vi/skVLH2qCAQ4/maxresdefault.jpg" alt="Watch the OpenClaw demo" width="700" />
-  </a>
-  <br />
-  <em>Early demo: realtime voice delegation to an interactive background agent.</em>
-</p>
+**[BodhiAgent/bodhi_realtime_agent](https://github.com/BodhiAgent/bodhi_realtime_agent/)**
 
 ## License
 
