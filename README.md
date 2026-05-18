@@ -21,7 +21,8 @@ Only the **BodhiAgent/bodhi_realtime_agent** repository should be treated as off
 These early public demos are kept only as historical references. They showed first-of-their-kind realtime voice agent experiments where conversation continued while background agents handled longer tasks.
 
 - [Claude Code Demo: Voice-Driven Coding Assistant](https://youtube.com/watch?v=n3kNK-4expo)
-- [OpenClaw Integration: Voice-Driven AI Agent](https://www.youtube.com/watch?v=skVLH2qCAQ4)
+- [OpenClaw Integration: Voice-Driven AI Agent](https://www.youtube.com/watch?v=skVLH2qCAQ4&t=21s)
+- [Realtime Background Agent Demo](https://www.youtube.com/watch?v=2z3fBhj64tA)
 
 For current setup, code, examples, and documentation, use the official repository:
 
