@@ -35,9 +35,10 @@ const reasoningCtx = {
 	),
 };
 const docs: InterviewDocuments = {
-	jobDescription: '# Staff Engineer',
-	candidateResume: '# Priya Raman',
-	companyIntro: '# Vector Foundry',
+	jobDescription:
+		'# Staff Engineer\n\nBuild realtime collaboration and low-latency control systems for remote robotics operations.',
+	candidateResume: '# Priya Raman\n\nStaff software engineer working on realtime systems.',
+	companyIntro: '# Vector Foundry\n\nRealtime robotics operations platform.',
 };
 
 function blueprintResult() {
@@ -48,6 +49,7 @@ function blueprintResult() {
 				candidateName: 'Priya Raman',
 				companyName: 'Vector Foundry',
 				roleTitle: 'Staff Engineer',
+				roleFamily: 'software engineering / realtime systems',
 				interviewStyle: 'screening',
 				focusSummary: 'a focus',
 				highlights: ['h1'],
@@ -119,7 +121,7 @@ describe('prepareInterviewSessionParts (integration)', () => {
 		const compiledMain: MainAgent = {
 			name: 'main',
 			instructions:
-				'You are a structured software interviewer conducting a voice interview around three primary anchors.',
+				'You are a structured interviewer conducting a voice interview around stale primary-anchor guidance.',
 			tools: [genericEndSession],
 		};
 		const [patchedMain] = parts.patchMainAgents([compiledMain]);
@@ -128,8 +130,18 @@ describe('prepareInterviewSessionParts (integration)', () => {
 		expect(patchedMain.tools.some((t) => t.name === 'record_answer_and_get_next_question')).toBe(
 			true,
 		);
-		expect(patchedMain.instructions).not.toContain('three primary anchors'); // stale guidance gone
+		expect(patchedMain.instructions).not.toContain('stale primary-anchor guidance'); // stale guidance gone
+		expect(patchedMain.instructions).toContain('running screening');
+		expect(patchedMain.instructions).toContain(
+			'interviewing Priya Raman for Staff Engineer in software engineering / realtime systems at Vector Foundry',
+		);
 		expect(patchedMain.greeting).toContain('Hi Priya, welcome to the interview.');
+		const progressTool = patchedMain.tools.find(
+			(t) => t.name === 'record_answer_and_get_next_question',
+		);
+		expect(progressTool?.description).toContain(
+			"Priya Raman's Staff Engineer in software engineering / realtime systems interview at Vector Foundry",
+		);
 
 		// patching the demo-built 'interviewer' agent is idempotent (it already has greeting + tools)
 		const baseAgent: MainAgent = createInterviewMainAgent({ documents: docs, state: parts.state });
@@ -139,6 +151,9 @@ describe('prepareInterviewSessionParts (integration)', () => {
 		expect(
 			patched.tools.filter((t) => t.name === 'record_answer_and_get_next_question'),
 		).toHaveLength(1);
+		expect(
+			patched.tools.find((t) => t.name === 'record_answer_and_get_next_question')?.description,
+		).toContain('Staff Engineer');
 		expect(patched.tools.filter((t) => t.name === 'end_session')).toHaveLength(1);
 		// an unrelated agent is left alone
 		const other: MainAgent = { name: 'mathExpert', instructions: 'x', tools: [] };

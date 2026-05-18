@@ -32,7 +32,7 @@ describe('structured interview anchors', () => {
 		expect(list.map((a) => a.id)).toEqual([
 			'walk_resume',
 			'company_interest',
-			'technical_challenge',
+			'role_relevant_challenge',
 		]);
 	});
 

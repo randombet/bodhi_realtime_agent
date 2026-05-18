@@ -48,6 +48,7 @@ function rawBlueprint(sections: ReturnType<typeof rawSection>[], over?: Record<s
 			candidateName: 'LLM Cand',
 			companyName: 'LLM Co',
 			roleTitle: 'LLM Role',
+			roleFamily: 'software engineering / data platform',
 			interviewStyle: 'screening',
 			focusSummary: 'a focus',
 			highlights: ['h1', 'h2'],
@@ -128,6 +129,7 @@ describe('normalizeBlueprint', () => {
 		expect(bp.digest.candidateName).toBe('Priya Raman');
 		expect(bp.digest.companyName).toBe('Vector Foundry');
 		expect(bp.digest.roleTitle).toBe('Staff Engineer, Data Platform');
+		expect(bp.digest.roleFamily).toBe('software engineering / data platform');
 		expect(bp.openingGreeting).toContain('Priya Raman');
 		expect(bp.openingGreeting).toContain('Vector Foundry');
 		expect(bp.openingGreeting).not.toContain('[Candidate]');
@@ -176,6 +178,7 @@ describe('normalizeBlueprint', () => {
 		expect(bp.sections[0].primaryQuestion.sourceRefs).toEqual(['company_intro']);
 		expect(bp.sections[0].id).not.toBe(bp.sections[1].id);
 		expect(bp.digest.highlights.length).toBe(8);
+		expect(bp.digest.roleFamily).toBe('software engineering / data platform');
 		expect(bp.sections.some((s) => 'mergedFromAuthoredIds' in s)).toBe(false);
 	});
 
@@ -340,6 +343,72 @@ describe('buildFallbackBlueprint', () => {
 	it("flavors the 'hard problem' section technical when styleHint says engineering", () => {
 		const bp = buildFallbackBlueprint(docs, opts({ styleHint: 'software engineering screening' }));
 		expect(bp.sections[2].primaryQuestion.text.toLowerCase()).toContain('technical');
+	});
+
+	it('infers fallback challenge wording from the role documents, not a hardcoded software role', () => {
+		const accountExecDocs: InterviewDocuments = {
+			jobDescription:
+				'# Account Executive\n\nOwn pipeline creation, discovery, negotiation, and closing for mid-market customers.',
+			candidateResume:
+				'# Jordan Lee\n\nSales leader with experience building pipeline and closing consultative deals.',
+			companyIntro: '# Acme Growth\n\nA commercial operations platform for growing teams.',
+		};
+		const bp = buildFallbackBlueprint(accountExecDocs, opts());
+		expect(bp.digest.roleTitle).toBe('Account Executive');
+		expect(bp.digest.roleFamily).toBe('sales / account executive');
+		expect(bp.digest.interviewStyle).toContain('Account Executive');
+		expect(bp.sections[2].id).toBe('role_relevant_challenge');
+		expect(bp.sections[2].primaryQuestion.text.toLowerCase()).not.toContain('technical');
+		expect(bp.sections[2].primaryQuestion.text).toContain('Account Executive');
+	});
+
+	it('infers non-software role families from role documents', () => {
+		const cases: Array<[string, InterviewDocuments, string]> = [
+			[
+				'product',
+				{
+					jobDescription:
+						'# Senior Product Manager\n\nOwn product strategy, discovery, roadmap, prioritization, and launch metrics.',
+					candidateResume: '# Alex Rivera\n\nProduct manager for B2B workflow products.',
+					companyIntro: '# Meridian\n\nWorkflow software for clinics.',
+				},
+				'product management',
+			],
+			[
+				'design',
+				{
+					jobDescription:
+						'# Senior Product Designer\n\nDesign dense operator workflows, UX research, prototypes, and Figma components.',
+					candidateResume: '# Nina Patel\n\nProduct designer for operational tools.',
+					companyIntro: '# LumaOps\n\nOperations console software.',
+				},
+				'design / user experience',
+			],
+			[
+				'ai',
+				{
+					jobDescription:
+						'# Applied AI Engineer\n\nBuild LLM voice agents, retrieval, tool-use, prompt evals, and conversation quality systems.',
+					candidateResume: '# Omar Singh\n\nApplied AI engineer for production LLM workflows.',
+					companyIntro: '# HelioAssist\n\nVoice agents for customer operations.',
+				},
+				'applied AI / voice agents',
+			],
+			[
+				'data',
+				{
+					jobDescription:
+						'# Analytics Engineer, Growth Data\n\nOwn dbt, SQL, metric layers, cohort analysis, funnel diagnostics, and BI.',
+					candidateResume: '# Sofia Martinez\n\nAnalytics engineer for ecommerce growth data.',
+					companyIntro: '# AtlasRetail\n\nRetail analytics platform.',
+				},
+				'data / analytics engineering',
+			],
+		];
+		for (const [label, documents, roleFamily] of cases) {
+			const bp = buildFallbackBlueprint(documents, opts());
+			expect(bp.digest.roleFamily, label).toBe(roleFamily);
+		}
 	});
 });
 

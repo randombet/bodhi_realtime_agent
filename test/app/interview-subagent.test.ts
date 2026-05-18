@@ -6,32 +6,41 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('ai', () => ({ generateObject: vi.fn() }));
 
 import { generateObject } from 'ai';
+import type { BlueprintSection } from '../../app/agents/interview/interview-blueprint.js';
 import type { InterviewConfig } from '../../app/agents/interview/interview-config.js';
 import { resolveInterviewConfig } from '../../app/agents/interview/interview-config.js';
 import type { InterviewDocuments } from '../../app/agents/interview/interview-documents.js';
+import { buildLeaderInstructions } from '../../app/agents/interview/interview-prompts.js';
 import { createInterviewState } from '../../app/agents/interview/interview-state.js';
 import {
 	type InterviewProgressResult,
 	InterviewSubagent,
 	createInterviewSubagentConfig,
+	fallbackDecision,
 } from '../../app/agents/interview/interview-subagent.js';
 
 const gen = generateObject as unknown as ReturnType<typeof vi.fn>;
 const fakeModel = {} as unknown as LanguageModelV1;
 const docs: InterviewDocuments = {
-	jobDescription: '# Staff Engineer',
-	candidateResume: '# Priya Raman',
-	companyIntro: '# Vector Foundry',
+	jobDescription:
+		'# Staff Engineer\n\nBuild realtime collaboration and low-latency control systems for remote robotics operations.',
+	candidateResume: '# Priya Raman\n\nStaff software engineer working on realtime systems.',
+	companyIntro: '# Vector Foundry\n\nRealtime robotics operations platform.',
 };
 
-function rawSection(id: string, text: string, maxFollowUps = 1) {
+function rawSection(
+	id: string,
+	text: string,
+	maxFollowUps = 1,
+	followUpBias: BlueprintSection['followUpBias'] = 'balanced',
+): BlueprintSection {
 	return {
 		id,
 		title: id,
 		probeGoal: `probe ${id}`,
 		primaryQuestion: { text, rationale: `r-${id}`, sourceRefs: ['candidate_resume'] },
 		maxFollowUps,
-		followUpBias: 'balanced',
+		followUpBias,
 	};
 }
 
@@ -43,6 +52,7 @@ function rawBlueprintResult(sections = [rawSection('s1', 'Q1'), rawSection('s2',
 				candidateName: 'Priya Raman',
 				companyName: 'Vector Foundry',
 				roleTitle: 'Staff Engineer',
+				roleFamily: 'software engineering / realtime systems',
 				interviewStyle: 'screening',
 				focusSummary: 'a focus',
 				highlights: ['h1'],
@@ -203,5 +213,55 @@ describe('InterviewSubagent', () => {
 		expect(cfg.lifetime).toBe('persistent_session');
 		expect(cfg.reasoningModel).toBe(fakeModel);
 		expect(typeof cfg.persistentFactory).toBe('function');
+	});
+
+	it('builds role-specific leader instructions instead of technical-by-default wording', () => {
+		const accountExecDocs: InterviewDocuments = {
+			jobDescription:
+				'# Account Executive\n\nOwn pipeline creation, discovery, negotiation, and closing for mid-market customers.',
+			candidateResume:
+				'# Jordan Lee\n\nSales leader with experience building pipeline and closing consultative deals.',
+			companyIntro: '# Acme Growth\n\nA commercial operations platform for growing teams.',
+		};
+		const state = createInterviewState();
+		state.digest = {
+			candidateName: 'Jordan Lee',
+			companyName: 'Acme Growth',
+			roleTitle: 'Account Executive',
+			roleFamily: 'sales / account executive',
+			interviewStyle: 'sales screening',
+			focusSummary: 'sales role screen',
+			highlights: [],
+			scopeLock: false,
+		};
+		const rc = resolveInterviewConfig({
+			documents: accountExecDocs,
+			durationMinutes: 30,
+			reasoning: { model: fakeModel },
+		});
+		const instructions = buildLeaderInstructions(
+			accountExecDocs,
+			state,
+			rawSection('pipeline', 'How did you build pipeline?', 1, 'prefer_deep_dive'),
+			rc.structure,
+		);
+		expect(instructions).toContain('role=Account Executive');
+		expect(instructions).toContain('roleFamily=sales / account executive');
+		expect(instructions).toContain('the Account Executive role');
+		expect(instructions).toContain('specific role');
+		expect(instructions).not.toContain('technical material');
+		expect(instructions).not.toContain('technical topic');
+	});
+
+	it('fallback deep dives use role-relevant wording, not hardcoded technical tradeoffs', () => {
+		const decision = fallbackDecision(
+			rawSection('pipeline', 'How did you build pipeline?', 1, 'prefer_deep_dive'),
+			'I owned discovery strategy, stakeholder mapping, negotiation risk, and forecast quality across the enterprise pipeline.',
+			0,
+		);
+		expect(decision.action).toBe('deep_dive');
+		expect(decision.questionText).toContain('key decision');
+		expect(decision.questionText?.toLowerCase()).not.toContain('technical');
+		expect(decision.rationale).toContain('role-relevant');
 	});
 });
