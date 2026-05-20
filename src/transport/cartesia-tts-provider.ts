@@ -10,7 +10,7 @@ export interface CartesiaTTSConfig {
 	apiKey: string;
 	/** Cartesia voice ID. Required. */
 	voiceId: string;
-	/** Model identifier. Default: `'sonic-2'`. */
+	/** Model identifier. Default: `'sonic-3.5'`. */
 	modelId?: string;
 	/** ISO 639-1 language code (e.g. `'en'`). Default: `'en'`. */
 	language?: string;
@@ -21,7 +21,7 @@ export interface CartesiaTTSConfig {
 }
 
 /** Cartesia API version header value. */
-const CARTESIA_VERSION = '2024-06-10';
+const CARTESIA_VERSION = '2026-03-01';
 
 /** WebSocket endpoint for Cartesia streaming TTS. */
 const WS_BASE_URL = 'wss://api.cartesia.ai/tts/websocket';
@@ -98,7 +98,7 @@ export class CartesiaTTSProvider implements TTSProvider {
 		}
 		this._apiKey = config.apiKey;
 		this._voiceId = config.voiceId;
-		this._modelId = config.modelId ?? 'sonic-2';
+		this._modelId = config.modelId ?? 'sonic-3.5';
 		this._language = config.language ?? 'en';
 		this._speed = config.speed ?? 'normal';
 		this._emotion = config.emotion ?? [];

@@ -30,7 +30,8 @@ This is what most people mean by “transport” in the framework: the **`LLMTra
 ### STT/TTS
 
 - Built-in transcription is supported via transport/provider capabilities.
-- External STT/TTS providers can be attached at session level.
+- External STT/TTS providers can be attached at session level. For TTS, `VoiceSession` receives a framework `ttsProvider`; app/server code should resolve human-facing choices such as named Cartesia/ElevenLabs/Hume presets into provider config before constructing the session.
+- Do not use provider API-key environment variables as provider selectors. They are fallback credentials only; product selection should come from saved agent config or an explicit session/query override.
 
 ---
 

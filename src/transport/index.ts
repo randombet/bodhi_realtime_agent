@@ -17,6 +17,8 @@ export { ElevenLabsSTTProvider } from './elevenlabs-stt-provider.js';
 export type { ElevenLabsSTTConfig } from './elevenlabs-stt-provider.js';
 export { ElevenLabsTTSProvider } from './elevenlabs-tts-provider.js';
 export type { ElevenLabsTTSConfig } from './elevenlabs-tts-provider.js';
+export { HumeTTSProvider } from './hume-tts-provider.js';
+export type { HumeTTSConfig } from './hume-tts-provider.js';
 export { GeminiBatchSTTProvider } from './gemini-batch-stt-provider.js';
 export type { GeminiBatchSTTConfig } from './gemini-batch-stt-provider.js';
 export { GeminiLiveTransport } from './gemini-live-transport.js';

@@ -238,7 +238,7 @@ describe('CartesiaTTSProvider', () => {
 			expect(url.origin).toBe('wss://api.cartesia.ai');
 			expect(url.pathname).toBe('/tts/websocket');
 			expect(url.searchParams.get('api_key')).toBe('test-api-key');
-			expect(url.searchParams.get('cartesia_version')).toBe('2024-06-10');
+			expect(url.searchParams.get('cartesia_version')).toBe('2026-03-01');
 
 			ws.triggerOpen();
 			await startPromise;
@@ -313,7 +313,7 @@ describe('CartesiaTTSProvider', () => {
 			expect(msg.transcript).toBe('Hello world. ');
 			expect(msg.continue).toBe(true);
 			expect(msg.context_id).toMatch(/^ctx-/);
-			expect(msg.model_id).toBe('sonic-2');
+			expect(msg.model_id).toBe('sonic-3.5');
 			expect(msg.voice).toEqual({ mode: 'id', id: 'test-voice-id' });
 			expect(msg.output_format).toEqual({
 				container: 'raw',

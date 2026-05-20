@@ -3,6 +3,7 @@
 import { describe, expect, it } from 'vitest';
 import {
 	parseGeminiRealtimeModelQuery,
+	parseGeminiRealtimeVoiceQuery,
 	parseOpenAiRealtimeModelQuery,
 	parseOpenAiRealtimeVoiceQuery,
 } from '../../app/server/openai-realtime-query.js';
@@ -19,6 +20,17 @@ describe('parseGeminiRealtimeModelQuery', () => {
 
 	it('rejects unknown Gemini models', () => {
 		expect(parseGeminiRealtimeModelQuery('gemini-1.5-pro')).toBeUndefined();
+	});
+});
+
+describe('parseGeminiRealtimeVoiceQuery', () => {
+	it('accepts known Gemini voices', () => {
+		expect(parseGeminiRealtimeVoiceQuery('Puck')).toBe('Puck');
+		expect(parseGeminiRealtimeVoiceQuery('Kore')).toBe('Kore');
+	});
+
+	it('rejects unknown Gemini voices', () => {
+		expect(parseGeminiRealtimeVoiceQuery('not-a-voice')).toBeUndefined();
 	});
 });
 
