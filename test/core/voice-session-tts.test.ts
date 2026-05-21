@@ -303,3 +303,47 @@ describe('TTS transcript path', () => {
 		expect(transcriptHandler).toHaveBeenCalledTimes(1);
 	});
 });
+
+describe('server-turn finalization dedup', () => {
+	// Models VoiceSession.handleTurnCompleteInternal's idempotent guard: a Gemini
+	// server turn (identified by a monotonic id from the transport) is finalized
+	// at most once — across the early generationComplete edge, a barge-in, and
+	// the late turnComplete. See design-external-tts-turn-completion.md.
+	let lastFinalizedServerTurnId: number | null;
+	let finalizations: number;
+
+	function finalize(serverTurnId: number | null) {
+		if (serverTurnId !== null && serverTurnId === lastFinalizedServerTurnId) return;
+		if (serverTurnId !== null) lastFinalizedServerTurnId = serverTurnId;
+		finalizations++;
+	}
+
+	beforeEach(() => {
+		lastFinalizedServerTurnId = null;
+		finalizations = 0;
+	});
+
+	it('finalizes a server turn exactly once across early + trailing edges', () => {
+		finalize(7); // early generationComplete
+		finalize(7); // trailing turnComplete for the same server turn
+		expect(finalizations).toBe(1);
+	});
+
+	it('finalizes distinct server turns independently', () => {
+		finalize(1);
+		finalize(2);
+		expect(finalizations).toBe(2);
+	});
+
+	it('does not dedup when the transport supplies no server-turn id', () => {
+		finalize(null);
+		finalize(null);
+		expect(finalizations).toBe(2);
+	});
+
+	it('a barge-in finalize is deduped against the trailing turnComplete', () => {
+		finalize(5); // handleInterrupted finalizes
+		finalize(5); // trailing turnComplete re-enters for the same server turn
+		expect(finalizations).toBe(1);
+	});
+});

@@ -8,6 +8,7 @@ import {
 	resolveGeminiRealtimeInputConfig,
 } from '../../src/transport/gemini-live-transport.js';
 import type { ToolDefinition } from '../../src/types/tool.js';
+import type { RealtimeLLMUsageEvent } from '../../src/types/transport.js';
 
 // Mock @google/genai
 let capturedConnectConfig: Record<string, unknown> = {};
@@ -665,6 +666,181 @@ describe('GeminiLiveTransport', () => {
 			expect(capturedConnectConfig.config).toEqual(
 				expect.objectContaining({ responseModalities: ['AUDIO', 'TEXT'] }),
 			);
+		});
+
+		describe('server-turn state machine (external-TTS turn completion)', () => {
+			async function connectTextMode(model = 'gemini-3.1-flash-live-preview') {
+				const transport = new GeminiLiveTransport({ apiKey: 'test-key', model }, {});
+				await transport.connect({
+					auth: { type: 'api_key', apiKey: 'test-key' },
+					model,
+					responseModality: 'text',
+				});
+				const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+				return { transport, cbs };
+			}
+
+			it('fires turn-end on generationComplete in native-audio text mode', async () => {
+				const { transport, cbs } = await connectTextMode();
+				const order: string[] = [];
+				transport.onTextOutput = () => order.push('text');
+				transport.onTextDone = () => order.push('textDone');
+				let completedId: number | undefined;
+				transport.onTurnComplete = (id) => {
+					order.push('turnComplete');
+					completedId = id;
+				};
+				cbs.onmessage({ serverContent: { outputTranscription: { text: 'Hello there.' } } });
+				cbs.onmessage({ serverContent: { generationComplete: true } });
+				expect(order).toEqual(['text', 'textDone', 'turnComplete']);
+				expect(typeof completedId).toBe('number');
+			});
+
+			it('does not re-fire turn-end on the trailing turnComplete after early completion', async () => {
+				const { transport, cbs } = await connectTextMode();
+				transport.onTextOutput = () => {};
+				const textDone = vi.fn();
+				const turnComplete = vi.fn();
+				transport.onTextDone = textDone;
+				transport.onTurnComplete = turnComplete;
+				cbs.onmessage({ serverContent: { outputTranscription: { text: 'Hi.' } } });
+				cbs.onmessage({ serverContent: { generationComplete: true } });
+				expect(textDone).toHaveBeenCalledTimes(1);
+				expect(turnComplete).toHaveBeenCalledTimes(1);
+				cbs.onmessage({ serverContent: { turnComplete: true } });
+				expect(textDone).toHaveBeenCalledTimes(1);
+				expect(turnComplete).toHaveBeenCalledTimes(1);
+			});
+
+			it('same-message text + generationComplete fires text before turn-end', async () => {
+				const { transport, cbs } = await connectTextMode('gemini-2.5-flash');
+				const order: string[] = [];
+				transport.onTextOutput = () => order.push('text');
+				transport.onTextDone = () => order.push('textDone');
+				transport.onTurnComplete = () => order.push('turnComplete');
+				cbs.onmessage({
+					serverContent: {
+						modelTurn: { parts: [{ text: 'Final words.' }] },
+						generationComplete: true,
+					},
+				});
+				expect(order).toEqual(['text', 'textDone', 'turnComplete']);
+			});
+
+			it('a late modelTurn after early completion does not re-fire onModelTurnStart', async () => {
+				const { transport, cbs } = await connectTextMode();
+				const modelTurnStart = vi.fn();
+				transport.onModelTurnStart = modelTurnStart;
+				transport.onTextOutput = () => {};
+				transport.onTextDone = () => {};
+				transport.onTurnComplete = () => {};
+				cbs.onmessage({
+					serverContent: { modelTurn: { parts: [{ inlineData: { data: 'aa' } }] } },
+				});
+				cbs.onmessage({ serverContent: { outputTranscription: { text: 'Hello.' } } });
+				cbs.onmessage({ serverContent: { generationComplete: true } });
+				expect(modelTurnStart).toHaveBeenCalledTimes(1);
+				cbs.onmessage({
+					serverContent: { modelTurn: { parts: [{ inlineData: { data: 'bb' } }] } },
+				});
+				expect(modelTurnStart).toHaveBeenCalledTimes(1);
+			});
+
+			it('does not early-complete a tool-call turn', async () => {
+				const { transport, cbs } = await connectTextMode();
+				transport.onTextOutput = () => {};
+				transport.onToolCall = () => {};
+				const turnComplete = vi.fn();
+				transport.onTurnComplete = turnComplete;
+				cbs.onmessage({ toolCall: { functionCalls: [{ id: 'fc1', name: 'x', args: {} }] } });
+				cbs.onmessage({ serverContent: { outputTranscription: { text: 'Checking.' } } });
+				cbs.onmessage({ serverContent: { generationComplete: true } });
+				expect(turnComplete).not.toHaveBeenCalled();
+				cbs.onmessage({ serverContent: { turnComplete: true } });
+				expect(turnComplete).toHaveBeenCalledTimes(1);
+			});
+
+			it('does not fire turn-end on generationComplete in audio mode', async () => {
+				const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+				await transport.connect();
+				const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+				const turnComplete = vi.fn();
+				transport.onTurnComplete = turnComplete;
+				cbs.onmessage({ serverContent: { generationComplete: true } });
+				expect(turnComplete).not.toHaveBeenCalled();
+				cbs.onmessage({ serverContent: { turnComplete: true } });
+				expect(turnComplete).toHaveBeenCalledTimes(1);
+			});
+
+			it('interrupted carries a server-turn id reused by the trailing turnComplete', async () => {
+				const { transport, cbs } = await connectTextMode();
+				let interruptedId: number | undefined;
+				let completedId: number | undefined;
+				transport.onInterrupted = (id) => {
+					interruptedId = id;
+				};
+				transport.onTurnComplete = (id) => {
+					completedId = id;
+				};
+				transport.onTextDone = () => {};
+				cbs.onmessage({ serverContent: { interrupted: true } });
+				cbs.onmessage({ serverContent: { turnComplete: true } });
+				expect(typeof interruptedId).toBe('number');
+				expect(completedId).toBe(interruptedId);
+			});
+
+			it('tags final usage from an early-completed turn as serverTurnWindingDown', async () => {
+				const { transport, cbs } = await connectTextMode();
+				transport.onTextOutput = () => {};
+				transport.onTextDone = () => {};
+				transport.onTurnComplete = () => {};
+				const usage: RealtimeLLMUsageEvent[] = [];
+				transport.onRealtimeLLMUsage = (u) => usage.push(u);
+				cbs.onmessage({ serverContent: { outputTranscription: { text: 'Hi.' } } });
+				cbs.onmessage({ serverContent: { generationComplete: true } });
+				cbs.onmessage({
+					usageMetadata: { promptTokenCount: 6, responseTokenCount: 4, totalTokenCount: 10 },
+					serverContent: { turnComplete: true },
+				});
+				const windingDown = usage.filter((u) => u.serverTurnWindingDown);
+				expect(windingDown.length).toBeGreaterThan(0);
+				expect(typeof windingDown[0].serverTurnId).toBe('number');
+			});
+
+			it('buffers generation-triggering sends during the divergence window', async () => {
+				const { transport, cbs } = await connectTextMode();
+				transport.onTextOutput = () => {};
+				transport.onTextDone = () => {};
+				transport.onTurnComplete = () => {};
+				cbs.onmessage({ serverContent: { outputTranscription: { text: 'Hi.' } } });
+				cbs.onmessage({ serverContent: { generationComplete: true } });
+				mockSession.sendClientContent.mockClear();
+				mockSession.sendRealtimeInput.mockClear();
+				// During ENDED_EARLY a generation-triggering send is buffered.
+				transport.sendClientContent([{ role: 'user', parts: [{ text: 'directive' }] }], true);
+				expect(mockSession.sendClientContent).not.toHaveBeenCalled();
+				// Realtime audio is never buffered.
+				transport.sendAudio('YXVkaW8=');
+				expect(mockSession.sendRealtimeInput).toHaveBeenCalled();
+				// On turnComplete (CLOSED) the buffer flushes.
+				cbs.onmessage({ serverContent: { turnComplete: true } });
+				expect(mockSession.sendClientContent).toHaveBeenCalledTimes(1);
+			});
+
+			it('disconnect() resets server-turn state', async () => {
+				const { transport, cbs } = await connectTextMode();
+				transport.onTextOutput = () => {};
+				transport.onTextDone = () => {};
+				transport.onTurnComplete = () => {};
+				cbs.onmessage({ serverContent: { outputTranscription: { text: 'Hi.' } } });
+				cbs.onmessage({ serverContent: { generationComplete: true } });
+				await transport.disconnect();
+				await transport.reconnect();
+				mockSession.sendClientContent.mockClear();
+				// After the reset the session is no longer winding down — send goes through.
+				transport.sendClientContent([{ role: 'user', parts: [{ text: 'x' }] }], true);
+				expect(mockSession.sendClientContent).toHaveBeenCalledTimes(1);
+			});
 		});
 
 		it('resumes with the latest server handle and does not replay history', async () => {
