@@ -920,8 +920,10 @@ export class GeminiLiveTransport implements LLMTransport {
 					this.beginServerTurn();
 				}
 				// The framework turn ends on interrupt; the Gemini server turn stays
-				// open until its turnComplete — the divergence window.
-				this._serverTurnWindingDown = true;
+				// open until its turnComplete — the divergence window. Only relevant
+				// in text mode (external TTS): without it the framework turn ends on
+				// turnComplete as usual, so there is no divergence window to buffer.
+				if (this._textMode) this._serverTurnWindingDown = true;
 				// Mirror interruption as speech-start signal for consumers that need
 				// barge-in semantics while model audio/text may still be flushing.
 				if (this.onSpeechStarted) this.onSpeechStarted();
