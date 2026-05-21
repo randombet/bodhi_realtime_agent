@@ -142,9 +142,9 @@ export interface GeminiTransportCallbacks {
 	/** Model is cancelling previously requested tool calls. */
 	onToolCallCancellation?(ids: string[]): void;
 	/** Model has finished its response turn. */
-	onTurnComplete?(): void;
+	onTurnComplete?(serverTurnId?: number): void;
 	/** Model's response was interrupted by user speech. */
-	onInterrupted?(): void;
+	onInterrupted?(serverTurnId?: number): void;
 	/** Model started a new response turn (first audio or tool call). */
 	onModelTurnStart?(): void;
 	/** Transcription of user's spoken input. */
@@ -190,10 +190,25 @@ export class GeminiLiveTransport implements LLMTransport {
 	 * model text parts (native-audio model compatibility path).
 	 */
 	private _textFromOutputTranscription = false;
-	/** Whether onTextDone has been fired for the current turn (prevents double-fire). */
-	private _textDoneFired = false;
 	/** Latest Gemini `usageMetadata` for the active model turn (cleared on `turnComplete`). */
 	private _cachedGeminiUsage: unknown | null = null;
+	// --- Server-turn state machine (external-TTS turn completion).
+	//     See dev_docs/framework/design-external-tts-turn-completion.md. ---
+	/** Gemini server-turn lifecycle: idle → generating → (ended_early) → closed. */
+	private _serverTurnState: 'idle' | 'generating' | 'ended_early' | 'closed' = 'idle';
+	/** Monotonic id of the current Gemini server turn (for finalization dedup). */
+	private _serverTurnId = 0;
+	/** Whether the model emitted response text/transcription in the current turn. */
+	private _textEmittedThisTurn = false;
+	/** Whether a tool call appeared in the current turn (disables early completion). */
+	private _toolCallSeenThisTurn = false;
+	/** True while the framework turn has ended (early completion or interrupt) but
+	 *  the Gemini server turn has not yet closed — the divergence window. */
+	private _serverTurnWindingDown = false;
+	/** Generation-triggering outbound sends buffered during the divergence window. */
+	private _windingDownSendBuffer: Array<() => void> = [];
+	/** Safety-net timer for a server turn whose `turnComplete` never arrives. */
+	private _windingDownTimer?: ReturnType<typeof setTimeout>;
 	/** Mutable resumption handle. Seeded at construct time from cfg, then
 	 *  replaced by every `resumable: true` server update; cleared on
 	 *  `resumable: false` so reconnect forces a fresh session + replay. */
@@ -250,8 +265,8 @@ export class GeminiLiveTransport implements LLMTransport {
 	onAudioOutput?: (base64Data: string) => void;
 	onToolCall?: (calls: TransportToolCall[]) => void;
 	onToolCallCancel?: (ids: string[]) => void;
-	onTurnComplete?: () => void;
-	onInterrupted?: () => void;
+	onTurnComplete?: (serverTurnId?: number) => void;
+	onInterrupted?: (serverTurnId?: number) => void;
 	onInputTranscription?: (text: string) => void;
 	onOutputTranscription?: (text: string) => void;
 	onSessionReady?: (sessionId: string) => void;
@@ -456,6 +471,7 @@ export class GeminiLiveTransport implements LLMTransport {
 	async disconnect(): Promise<void> {
 		this._modelTurnStarted = false;
 		this._cachedGeminiUsage = null;
+		this.resetServerTurnState();
 		if (this.session) {
 			try {
 				await this.session.close();
@@ -477,9 +493,10 @@ export class GeminiLiveTransport implements LLMTransport {
 	/** Send tool execution results back to Gemini (legacy API). */
 	sendToolResponse(
 		responses: Array<{ id?: string; name?: string; response?: Record<string, unknown> }>,
-		_scheduling?: 'SILENT' | 'WHEN_IDLE' | 'INTERRUPT',
+		scheduling?: 'SILENT' | 'WHEN_IDLE' | 'INTERRUPT',
 	): void {
 		if (!this.session) return;
+		if (this.bufferIfWindingDown(() => this.sendToolResponse(responses, scheduling))) return;
 		this.session.sendToolResponse({ functionResponses: responses });
 	}
 
@@ -495,6 +512,7 @@ export class GeminiLiveTransport implements LLMTransport {
 		turnComplete = true,
 	): void {
 		if (!this.session) return;
+		if (this.bufferIfWindingDown(() => this.sendClientContent(turns, turnComplete))) return;
 		this.session.sendClientContent({ turns, turnComplete });
 	}
 
@@ -530,6 +548,7 @@ export class GeminiLiveTransport implements LLMTransport {
 	/** Send provider-neutral content turns to Gemini. Converts ContentTurn to Gemini format. */
 	sendContent(turns: ContentTurn[], turnComplete = true): void {
 		if (!this.session) return;
+		if (this.bufferIfWindingDown(() => this.sendContent(turns, turnComplete))) return;
 		if (turnComplete && this.shouldUseRealtimeTextForContent()) {
 			const text = turns
 				.map((t) => t.text.trim())
@@ -550,6 +569,7 @@ export class GeminiLiveTransport implements LLMTransport {
 	/** Send a file/image to Gemini as inline data. */
 	sendFile(base64Data: string, mimeType: string): void {
 		if (!this.session) return;
+		if (this.bufferIfWindingDown(() => this.sendFile(base64Data, mimeType))) return;
 		this.session.sendClientContent({
 			turns: [{ role: 'user', parts: [{ inlineData: { data: base64Data, mimeType } }] as never[] }],
 			turnComplete: false,
@@ -559,6 +579,7 @@ export class GeminiLiveTransport implements LLMTransport {
 	/** Send a tool result back to Gemini (LLMTransport API). */
 	sendToolResult(result: TransportToolResult): void {
 		if (!this.session) return;
+		if (this.bufferIfWindingDown(() => this.sendToolResult(result))) return;
 		this.session.sendToolResponse({
 			functionResponses: [
 				{
@@ -732,6 +753,89 @@ export class GeminiLiveTransport implements LLMTransport {
 		this.session.sendClientContent({ turns, turnComplete: false });
 	}
 
+	// --- Server-turn state machine (external-TTS turn completion) ---
+
+	/** Begin a new Gemini server turn (fresh id) if one is not already open. */
+	private beginServerTurn(): void {
+		if (this._serverTurnState === 'generating' || this._serverTurnState === 'ended_early') {
+			return;
+		}
+		this._serverTurnState = 'generating';
+		this._serverTurnId++;
+		this._textEmittedThisTurn = false;
+		this._toolCallSeenThisTurn = false;
+		this._serverTurnWindingDown = false;
+	}
+
+	/** Close the current server turn and flush any buffered outbound sends. */
+	private closeServerTurn(): void {
+		this._serverTurnState = 'closed';
+		this._serverTurnWindingDown = false;
+		this._modelTurnStarted = false;
+		if (this._windingDownTimer) {
+			clearTimeout(this._windingDownTimer);
+			this._windingDownTimer = undefined;
+		}
+		this.flushWindingDownBuffer();
+	}
+
+	/** Reset all server-turn state (disconnect / reconnect). */
+	private resetServerTurnState(): void {
+		this._serverTurnState = 'idle';
+		this._serverTurnWindingDown = false;
+		this._textEmittedThisTurn = false;
+		this._toolCallSeenThisTurn = false;
+		this._windingDownSendBuffer = [];
+		if (this._windingDownTimer) {
+			clearTimeout(this._windingDownTimer);
+			this._windingDownTimer = undefined;
+		}
+	}
+
+	/** Buffer a generation-triggering send during the divergence window.
+	 *  Returns true if buffered (caller must not also send). */
+	private bufferIfWindingDown(send: () => void): boolean {
+		if (this._serverTurnWindingDown) {
+			this._windingDownSendBuffer.push(send);
+			return true;
+		}
+		return false;
+	}
+
+	private flushWindingDownBuffer(): void {
+		if (this._windingDownSendBuffer.length === 0) return;
+		const buffered = this._windingDownSendBuffer;
+		this._windingDownSendBuffer = [];
+		for (const send of buffered) {
+			try {
+				send();
+			} catch {
+				// best-effort flush
+			}
+		}
+	}
+
+	/** Safety net: force-close a server turn whose `turnComplete` never arrives,
+	 *  so buffered sends are not leaked. */
+	private startWindingDownTimer(): void {
+		if (this._windingDownTimer) clearTimeout(this._windingDownTimer);
+		this._windingDownTimer = setTimeout(() => {
+			this._windingDownTimer = undefined;
+			if (this._serverTurnState !== 'ended_early') return;
+			const err = new Error('GeminiLiveTransport: server turn wedged — turnComplete never arrived');
+			this.callbacks.onError?.(err);
+			if (this.onError) this.onError({ error: err, recoverable: true });
+			this.closeServerTurn();
+		}, DEFAULT_RECONNECT_TIMEOUT_MS);
+	}
+
+	/** Tag a usage event with the current server-turn id / winding-down phase. */
+	private tagUsage(usage: RealtimeLLMUsageEvent): RealtimeLLMUsageEvent {
+		usage.serverTurnId = this._serverTurnId;
+		if (this._serverTurnWindingDown) usage.serverTurnWindingDown = true;
+		return usage;
+	}
+
 	// biome-ignore lint/suspicious/noExplicitAny: LiveServerMessage is a complex union type
 	private handleMessage(msg: any): void {
 		if (msg.setupComplete) {
@@ -750,7 +854,7 @@ export class GeminiLiveTransport implements LLMTransport {
 		if (msg.usageMetadata) {
 			this._cachedGeminiUsage = msg.usageMetadata;
 			const update = normalizeGeminiUsageMetadata(msg.usageMetadata, 'update');
-			if (update && this.onRealtimeLLMUsage) this.onRealtimeLLMUsage(update);
+			if (update && this.onRealtimeLLMUsage) this.onRealtimeLLMUsage(this.tagUsage(update));
 		}
 
 		if (msg.serverContent) {
@@ -758,6 +862,7 @@ export class GeminiLiveTransport implements LLMTransport {
 
 			// Model output — fire onModelTurnStart on first modelTurn.parts per turn
 			if (content.modelTurn?.parts) {
+				this.beginServerTurn();
 				if (!this._modelTurnStarted) {
 					this._modelTurnStarted = true;
 					this.callbacks.onModelTurnStart?.();
@@ -776,7 +881,10 @@ export class GeminiLiveTransport implements LLMTransport {
 					if (part.text !== undefined && part.text !== null && !this._textFromOutputTranscription) {
 						// Text output (text mode — for TTS). In native-audio text fallback,
 						// prefer outputTranscription and suppress model text parts.
-						if (this.onTextOutput) this.onTextOutput(part.text);
+						if (this.onTextOutput) {
+							this._textEmittedThisTurn = true;
+							this.onTextOutput(part.text);
+						}
 					}
 				}
 			}
@@ -796,42 +904,78 @@ export class GeminiLiveTransport implements LLMTransport {
 				if (this.onInputTranscription) this.onInputTranscription(content.inputTranscription.text);
 			}
 			if (content.outputTranscription?.text) {
+				this.beginServerTurn();
 				this.callbacks.onOutputTranscription?.(content.outputTranscription.text);
 				if (this.onOutputTranscription)
 					this.onOutputTranscription(content.outputTranscription.text);
 				if (this._textMode && this._textFromOutputTranscription && this.onTextOutput) {
+					this._textEmittedThisTurn = true;
 					this.onTextOutput(content.outputTranscription.text);
 				}
 			}
 
 			// Turn signals
 			if (content.interrupted) {
+				if (this._serverTurnState === 'idle' || this._serverTurnState === 'closed') {
+					this.beginServerTurn();
+				}
+				// The framework turn ends on interrupt; the Gemini server turn stays
+				// open until its turnComplete — the divergence window.
+				this._serverTurnWindingDown = true;
 				// Mirror interruption as speech-start signal for consumers that need
 				// barge-in semantics while model audio/text may still be flushing.
 				if (this.onSpeechStarted) this.onSpeechStarted();
-				this.callbacks.onInterrupted?.();
-				if (this.onInterrupted) this.onInterrupted();
+				this.callbacks.onInterrupted?.(this._serverTurnId);
+				if (this.onInterrupted) this.onInterrupted(this._serverTurnId);
 			}
+
+			// generationComplete — early turn end in text mode. It arrives well
+			// before the playback-gated turnComplete and (verified) after all
+			// transcription text. See design-external-tts-turn-completion.md.
+			if (
+				content.generationComplete &&
+				this._textMode &&
+				this._textEmittedThisTurn &&
+				!this._toolCallSeenThisTurn &&
+				this._serverTurnState === 'generating' &&
+				!this._serverTurnWindingDown
+			) {
+				this._serverTurnState = 'ended_early';
+				this._serverTurnWindingDown = true;
+				this.startWindingDownTimer();
+				// onTextDone before onTurnComplete (ordering contract).
+				if (this.onTextDone) this.onTextDone();
+				this.callbacks.onTurnComplete?.(this._serverTurnId);
+				if (this.onTurnComplete) this.onTurnComplete(this._serverTurnId);
+			}
+
 			if (content.turnComplete) {
-				this._modelTurnStarted = false;
-				// In text mode, fire onTextDone before onTurnComplete (ordering contract)
-				if (this._textMode && !this._textDoneFired) {
-					this._textDoneFired = true;
-					if (this.onTextDone) this.onTextDone();
+				if (this._serverTurnState === 'idle' || this._serverTurnState === 'closed') {
+					// Bare turnComplete, no model content — no-model-output safety net.
+					this.beginServerTurn();
 				}
-				this._textDoneFired = false;
+				const completedServerTurnId = this._serverTurnId;
+				const firedEarly = this._serverTurnState === 'ended_early';
+				// Final usage is only known at turnComplete.
 				if (this._cachedGeminiUsage) {
 					const fin = normalizeGeminiUsageMetadata(this._cachedGeminiUsage, 'final');
-					if (fin && this.onRealtimeLLMUsage) this.onRealtimeLLMUsage(fin);
+					if (fin && this.onRealtimeLLMUsage) this.onRealtimeLLMUsage(this.tagUsage(fin));
 					this._cachedGeminiUsage = null;
 				}
-				this.callbacks.onTurnComplete?.();
-				if (this.onTurnComplete) this.onTurnComplete();
+				if (!firedEarly) {
+					// GENERATING/IDLE → CLOSED: turn-end callbacks were not fired early.
+					if (this._textMode && this.onTextDone) this.onTextDone();
+					this.callbacks.onTurnComplete?.(completedServerTurnId);
+					if (this.onTurnComplete) this.onTurnComplete(completedServerTurnId);
+				}
+				this.closeServerTurn();
 			}
 			return;
 		}
 
 		if (msg.toolCall?.functionCalls?.length) {
+			this.beginServerTurn();
+			this._toolCallSeenThisTurn = true;
 			// Fire onModelTurnStart on first toolCall if no audio preceded it
 			if (!this._modelTurnStarted) {
 				this._modelTurnStarted = true;
