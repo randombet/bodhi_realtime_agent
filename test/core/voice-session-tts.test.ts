@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 
+import type { LanguageModelV1 } from 'ai';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { VoiceSession } from '../../src/core/voice-session.js';
+import type { MainAgent } from '../../src/types/agent.js';
 import type {
 	AudioFormatSpec,
 	LLMTransport,
@@ -16,6 +19,24 @@ import type { TTSAudioConfig, TTSProvider } from '../../src/types/tts.js';
  * (which requires real WebSocket servers). Instead, we test the state machine
  * logic directly by simulating the callback sequences.
  */
+
+const mockModel = { modelId: 'test-model' } as unknown as LanguageModelV1;
+
+function createAgent(): MainAgent {
+	return {
+		name: 'main',
+		instructions: 'You are a concise assistant.',
+		tools: [],
+	};
+}
+
+function createVoiceFrame(): Buffer {
+	const frame = Buffer.alloc(480 * 2);
+	for (let i = 0; i < frame.length; i += 2) {
+		frame.writeInt16LE(2400, i);
+	}
+	return frame;
+}
 
 function createMockTTSProvider(): TTSProvider & {
 	_onAudio: NonNullable<TTSProvider['onAudio']>;
@@ -201,6 +222,104 @@ describe('TTS stale audio filtering', () => {
 		// New request audio — accepted
 		onAudio('chunk3_new', 100, 2);
 		expect(delivered).toEqual(['chunk1', 'chunk3_new']);
+	});
+});
+
+describe('VoiceSession TTS completion', () => {
+	it('waits for provider onDone and keeps tail audio after an inter-chunk gap', async () => {
+		vi.useFakeTimers();
+		let session: VoiceSession | undefined;
+		try {
+			const provider = createMockTTSProvider();
+			const transport = createMockTransport();
+			const sendAudio = vi.fn();
+			const sendJson = vi.fn();
+
+			session = new VoiceSession({
+				sessionId: 'sess_tts_gap',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createAgent()],
+				initialAgent: 'main',
+				model: mockModel,
+				transport,
+				orchestrationMode: 'actor',
+				ttsProvider: provider,
+				clientSender: { sendAudio, sendJson },
+			});
+			await session.start();
+
+			transport.onTextOutput?.('It is 12:05 AM. Anything else you need?');
+			transport.onTextDone?.();
+			provider.onAudio?.(Buffer.from('first').toString('base64'), 100, 1);
+			transport.onTurnComplete?.(1);
+
+			vi.advanceTimersByTime(2500);
+
+			provider.onAudio?.(Buffer.from('tail').toString('base64'), 100, 1);
+			expect(sendAudio).toHaveBeenCalledTimes(2);
+			expect(sendAudio).toHaveBeenLastCalledWith(Buffer.from('tail'));
+
+			const turnEndsBeforeDone = sendJson.mock.calls.filter(([msg]) => msg?.type === 'turn.end');
+			expect(turnEndsBeforeDone).toHaveLength(0);
+
+			provider.onDone?.(1);
+
+			const turnEndsAfterDone = sendJson.mock.calls.filter(([msg]) => msg?.type === 'turn.end');
+			expect(turnEndsAfterDone).toHaveLength(1);
+			expect(session.conversationContext.items.at(-1)?.content).toBe(
+				'It is 12:05 AM. Anything else you need?',
+			);
+		} finally {
+			await session?.close();
+			vi.useRealTimers();
+		}
+	});
+
+	it('handles client VAD barge-in while TTS is still speaking before delayed Gemini interrupt', async () => {
+		const provider = createMockTTSProvider();
+		const transport = createMockTransport();
+		const sendAudio = vi.fn();
+		const sendJson = vi.fn();
+		const session = new VoiceSession({
+			sessionId: 'sess_tts_barge_in',
+			userId: 'user_1',
+			apiKey: 'test-key',
+			agents: [createAgent()],
+			initialAgent: 'main',
+			model: mockModel,
+			transport,
+			orchestrationMode: 'actor',
+			ttsProvider: provider,
+			clientSender: { sendAudio, sendJson },
+		});
+
+		try {
+			await session.start();
+			transport.onSessionReady?.('mock_session');
+			transport.onTextOutput?.('Hello, I am still speaking.');
+			transport.onTextDone?.();
+			transport.onTurnComplete?.(3);
+			provider.onAudio?.(Buffer.from('first').toString('base64'), 100, 1);
+
+			session.feedAudioFromClient(createVoiceFrame());
+
+			expect(provider.cancel).toHaveBeenCalledTimes(1);
+			const interruptedMessages = sendJson.mock.calls.filter(
+				([msg]) => msg?.type === 'turn.interrupted',
+			);
+			expect(interruptedMessages).toHaveLength(1);
+
+			provider.onDone?.(1);
+			transport.onInterrupted?.(3);
+
+			const interruptedAfterTrailing = sendJson.mock.calls.filter(
+				([msg]) => msg?.type === 'turn.interrupted',
+			);
+			expect(interruptedAfterTrailing).toHaveLength(1);
+		} finally {
+			await session.close();
+		}
 	});
 });
 

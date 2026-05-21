@@ -2025,6 +2025,45 @@ describe('VoiceSession', () => {
 			await new Promise<void>((r) => ws.on('close', r));
 		});
 
+		it('drops late STT transcript after Gemini correction was finalized before a tool call', async () => {
+			const stt = createMockSTTProvider();
+			session = new VoiceSession({
+				sessionId: 'sess_stt_tool_dedup',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createToolAgent()],
+				initialAgent: 'tool-agent',
+				model: mockModel,
+				sttProvider: stt,
+				orchestrationMode: 'actor',
+				clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+			fire({ serverContent: { inputTranscription: { text: 'What time is it?' } } });
+			fire({
+				toolCall: {
+					functionCalls: [{ id: 'tc_1', name: 'get_weather', args: { city: 'SF' } }],
+				},
+			});
+			await new Promise((r) => setTimeout(r, 50));
+
+			stt.onTranscript?.('Uh, what time is it?', 0);
+			fire({ serverContent: { outputTranscription: { text: 'It is sunny.' } } });
+			fire({ serverContent: { turnComplete: true } });
+			await new Promise((r) => setTimeout(r, 100));
+
+			const userItems = session.conversationContext.items
+				.filter((i) => i.role === 'user')
+				.map((i) => i.content);
+			expect(userItems).toEqual(['What time is it?']);
+		});
+
 		it('skips Gemini transcript correction on interrupted turns', async () => {
 			const stt = createMockSTTProvider();
 			session = new VoiceSession({

@@ -333,7 +333,6 @@ export class VoiceSession {
 	private _ttsAudioDone = false;
 	private _ttsSpeaking = false;
 	private _ttsFormat?: TTSAudioConfig;
-	private _ttsIdleTimer?: ReturnType<typeof setTimeout>;
 	private _ttsHardTimer?: ReturnType<typeof setTimeout>;
 	private _ttsFirstTextMs = 0;
 	private _ttsFirstAudioMs = 0;
@@ -350,6 +349,8 @@ export class VoiceSession {
 		turnId: string;
 		agentName: string;
 	} | null = null;
+	/** Server turns already interrupted by local client VAD before Gemini's delayed interrupted edge. */
+	private _locallyInterruptedServerTurnIds = new Set<number>();
 	private config: VoiceSessionConfig;
 	private directiveManager = new DirectiveManager();
 	private transcriptManager!: TranscriptManager;
@@ -387,6 +388,7 @@ export class VoiceSession {
 	private lastClientSpeechDurationMs = 0;
 	private lastGeminiRecognitionLoggedForSpeechEndMs = 0;
 	private lastInputTranscriptionLogText = '';
+	private finalizedInputTurnIds = new Set<number>();
 	private ownsClientTransport: boolean;
 	private static readonly AUDIO_VAD_SILENCE_MS = 500;
 	private static readonly AUDIO_VAD_MIN_SPEECH_MS = 120;
@@ -409,6 +411,7 @@ export class VoiceSession {
 		// waiting for input. The callback captures `this` via closure and is only
 		// invoked at runtime (agentRouter is initialized before any transcript fires).
 		this.transcriptManager.onInputFinalized = (text) => {
+			this.finalizedInputTurnIds.add(this.turnId);
 			const activeId = this.interactionMode.getActiveToolCallId();
 			if (activeId) {
 				const session = this.agentRouter.getSubagentSession(activeId);
@@ -690,6 +693,7 @@ export class VoiceSession {
 			// rejecting truly stale transcripts from 2+ turns ago.
 			this.sttProvider.onTranscript = (text, turnId) => {
 				if (turnId !== undefined && turnId < this.turnId - 1) return; // Drop stale results (2+ turns old)
+				if (turnId !== undefined && this.finalizedInputTurnIds.has(turnId)) return;
 				this.transcriptManager.handleInput(text);
 			};
 			this.sttProvider.onPartialTranscript = (text) => {
@@ -1583,6 +1587,7 @@ export class VoiceSession {
 				this.log(
 					`[Latency] User voice input started (client audio VAD; peak=${maxAbs}; avgAbs=${Math.round(avgAbs)})`,
 				);
+				this.handleClientTtsBargeIn();
 			}
 			this.audioVadLastVoiceMs = now;
 			return;
@@ -1630,6 +1635,15 @@ export class VoiceSession {
 		this.log(
 			`[Latency] Gemini input transcription update (${source}; chars=${trimmed.length}${sinceVadEnd}; text="${preview}")`,
 		);
+	}
+
+	private handleClientTtsBargeIn(): void {
+		if (!this.ttsProvider || !this._ttsSpeaking) return;
+		const serverTurnId = this._pendingServerTurnId ?? undefined;
+		if (serverTurnId !== undefined) {
+			this._locallyInterruptedServerTurnIds.add(serverTurnId);
+		}
+		this.handleInterrupted(serverTurnId);
 	}
 
 	private logGeminiUserTurnRecognition(reason: string): void {
@@ -1753,8 +1767,6 @@ export class VoiceSession {
 			if (this._ttsFirstAudioMs === 0) {
 				this._ttsFirstAudioMs = Date.now();
 			}
-			// Reset idle watchdog on each audio chunk
-			this.ttsResetIdleTimer();
 		};
 
 		// Wire TTS done → turn gating + hook
@@ -1828,24 +1840,8 @@ export class VoiceSession {
 		}
 	}
 
-	/** Reset the idle watchdog timer (called on each TTS audio chunk). */
-	private ttsResetIdleTimer(): void {
-		if (this._ttsIdleTimer) clearTimeout(this._ttsIdleTimer);
-		this._ttsIdleTimer = setTimeout(() => {
-			this.log('TTS idle watchdog fired — forcing turn completion');
-			this._ttsAudioDone = true;
-			this._ttsSpeaking = false;
-			this._ttsCurrentRequestId++; // Invalidate late-arriving chunks
-			this.ttsMaybeCompleteTurn();
-		}, 2000);
-	}
-
 	/** Clear all TTS timers. */
 	private ttsClearTimers(): void {
-		if (this._ttsIdleTimer) {
-			clearTimeout(this._ttsIdleTimer);
-			this._ttsIdleTimer = undefined;
-		}
 		if (this._ttsHardTimer) {
 			clearTimeout(this._ttsHardTimer);
 			this._ttsHardTimer = undefined;
@@ -1936,6 +1932,11 @@ export class VoiceSession {
 
 		this.transcriptManager.flush();
 		this.turnId++;
+		for (const finalizedTurnId of this.finalizedInputTurnIds) {
+			if (finalizedTurnId < this.turnId - 1) {
+				this.finalizedInputTurnIds.delete(finalizedTurnId);
+			}
+		}
 		const turnIdStr = `turn_${this.turnId}`;
 		this.log(`Turn complete: ${turnIdStr}`);
 		this.eventBus.publish('turn.end', {
@@ -2053,6 +2054,7 @@ export class VoiceSession {
 			serverTurnId === this._lastFinalizedServerTurnId &&
 			!this._ttsSpeaking
 		) {
+			if (this._locallyInterruptedServerTurnIds.delete(serverTurnId)) return;
 			this.log('Ignoring trailing interrupt for already-finalized turn');
 			return;
 		}
