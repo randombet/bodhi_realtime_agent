@@ -338,6 +338,18 @@ export class VoiceSession {
 	private _ttsFirstTextMs = 0;
 	private _ttsFirstAudioMs = 0;
 	private _ttsTextLength = 0;
+	// --- Server-turn finalization dedup (external-TTS turn completion).
+	//     See dev_docs/framework/design-external-tts-turn-completion.md. ---
+	/** Server-turn id captured from the transport's onTurnComplete/onInterrupted. */
+	private _pendingServerTurnId: number | null = null;
+	/** Last server-turn id finalized — dedup guard for handleTurnCompleteInternal. */
+	private _lastFinalizedServerTurnId: number | null = null;
+	/** Attribution for usage that arrives after a server turn's framework turn ended. */
+	private _finalizedTurnInfo: {
+		serverTurnId: number;
+		turnId: string;
+		agentName: string;
+	} | null = null;
 	private config: VoiceSessionConfig;
 	private directiveManager = new DirectiveManager();
 	private transcriptManager!: TranscriptManager;
@@ -628,8 +640,8 @@ export class VoiceSession {
 			}
 			this.toolCallRouter?.handleToolCallCancellation(ids);
 		};
-		this.transport.onTurnComplete = () => this.handleTurnComplete();
-		this.transport.onInterrupted = () => this.handleInterrupted();
+		this.transport.onTurnComplete = (serverTurnId) => this.handleTurnComplete(serverTurnId);
+		this.transport.onInterrupted = (serverTurnId) => this.handleInterrupted(serverTurnId);
 		this.transport.onOutputTranscription = (text) => this.transcriptManager.handleOutput(text);
 		this.transport.onSessionReady = (sessionId) => this.handleSetupComplete(sessionId);
 		this.transport.onError = (error) => this.handleTransportError(error);
@@ -889,14 +901,24 @@ export class VoiceSession {
 				this.log(`pre-attached onRealtimeLLMUsage threw: ${(e as Error).message}`);
 			}
 			const source = deriveUsageSource(usage);
+			// Trailing usage: a server turn's usage that arrived after the framework
+			// turn finalized (Gemini's final usage comes on the late turnComplete).
+			// Attribute it to the just-completed turn rather than lazily allocating
+			// a phantom next turn. See design-external-tts-turn-completion.md.
+			const trailing =
+				usage.serverTurnWindingDown === true &&
+				usage.serverTurnId !== undefined &&
+				this._finalizedTurnInfo !== null &&
+				usage.serverTurnId === this._finalizedTurnInfo.serverTurnId;
 			// Allocate a turn id eagerly for any source that's bound to a model
 			// turn (everything except openai.transcription). This handles the
-			// TTS-only path where onModelTurnStart never fires.
-			if (source !== 'openai.transcription') this.allocateCurrentModelTurn();
-			const agentName =
-				source === 'openai.transcription'
-					? (this.currentModelTurnAgentName ?? this.agentRouter.activeAgent.name)
-					: (this.currentModelTurnAgentName ?? this.agentRouter.activeAgent.name);
+			// TTS-only path where onModelTurnStart never fires. Skipped for
+			// trailing usage, which is attributed to the already-finalized turn.
+			if (source !== 'openai.transcription' && !trailing) this.allocateCurrentModelTurn();
+			const agentName = trailing
+				? // biome-ignore lint/style/noNonNullAssertion: guarded by `trailing`
+					this._finalizedTurnInfo!.agentName
+				: (this.currentModelTurnAgentName ?? this.agentRouter.activeAgent.name);
 			if (this.hooks.onRealtimeLLMUsage) {
 				this.hooks.onRealtimeLLMUsage({
 					sessionId: this.config.sessionId,
@@ -904,7 +926,12 @@ export class VoiceSession {
 					usage,
 				});
 			}
-			const turnId = source === 'openai.transcription' ? null : this.currentModelTurnId;
+			const turnId = trailing
+				? // biome-ignore lint/style/noNonNullAssertion: guarded by `trailing`
+					this._finalizedTurnInfo!.turnId
+				: source === 'openai.transcription'
+					? null
+					: this.currentModelTurnId;
 			const seqKey = `${turnId ?? 'no_turn'}:${source}`;
 			const sequence = (this.currentTurnUsageSequence.get(seqKey) ?? 0) + 1;
 			this.currentTurnUsageSequence.set(seqKey, sequence);
@@ -1850,9 +1877,12 @@ export class VoiceSession {
 		this.sttProvider.start().catch((err) => this.reportError('stt', err));
 	}
 
-	private handleTurnComplete(): void {
+	private handleTurnComplete(serverTurnId?: number): void {
 		// A completed turn means the connection is healthy — reset reconnect counter
 		this.reconnectAttempts = 0;
+		// Capture the server-turn id so handleTurnCompleteInternal can dedup
+		// finalization across the early generationComplete / late turnComplete edges.
+		if (serverTurnId !== undefined) this._pendingServerTurnId = serverTurnId;
 
 		// TTS turn gating: when TTS is active, defer turn completion until TTS finishes
 		if (this.ttsProvider) {
@@ -1881,6 +1911,16 @@ export class VoiceSession {
 
 	/** Core turn-end logic — called directly (no TTS) or via ttsMaybeCompleteTurn (TTS gate). */
 	private handleTurnCompleteInternal(): void {
+		// Idempotent finalization: a server turn is finalized at most once. The
+		// early generationComplete edge, a barge-in, and the late turnComplete can
+		// all reach here for the same server turn. Transports without server-turn
+		// ids (OpenAI Realtime) leave _pendingServerTurnId null → no dedup.
+		const serverTurnId = this._pendingServerTurnId;
+		if (serverTurnId !== null && serverTurnId === this._lastFinalizedServerTurnId) {
+			return;
+		}
+		if (serverTurnId !== null) this._lastFinalizedServerTurnId = serverTurnId;
+
 		// ORDERING: STT commit + cleanup BEFORE turnId increment.
 		// This ensures commit(turnId) uses the turn being completed, and
 		// stale-drop (turnId < this.turnId) correctly rejects prior-turn results.
@@ -1902,6 +1942,16 @@ export class VoiceSession {
 			turnId: turnIdStr,
 		});
 		this.clientTransport.sendJsonToClient({ type: 'turn.end', turnId: turnIdStr });
+
+		// Record attribution for trailing Gemini usage (final usage arrives on the
+		// late turnComplete, after the framework turn has already finalized).
+		if (serverTurnId !== null) {
+			this._finalizedTurnInfo = {
+				serverTurnId,
+				turnId: this.currentModelTurnId ?? turnIdStr,
+				agentName: this.currentModelTurnAgentName ?? this.agentRouter.activeAgent.name,
+			};
+		}
 
 		// P4: reset turn-scoped state AFTER turn.end so any handlers that
 		// inspect currentModelTurnId still see the correct value. Next turn
@@ -1991,19 +2041,34 @@ export class VoiceSession {
 		this.transport.sendContent([{ role: 'user', text: greetingText }], true);
 	}
 
-	private handleInterrupted(): void {
+	private handleInterrupted(serverTurnId?: number): void {
+		if (serverTurnId !== undefined) this._pendingServerTurnId = serverTurnId;
+		// Trailing-interrupt guard: a Gemini `interrupted` for an already-finalized
+		// server turn while TTS is not speaking is the server closing a lingering
+		// turn in the divergence window — not a real barge-in. Ignore it so it does
+		// not publish a spurious turn.interrupted after a clean turn.end.
+		if (
+			serverTurnId !== undefined &&
+			serverTurnId === this._lastFinalizedServerTurnId &&
+			!this._ttsSpeaking
+		) {
+			this.log('Ignoring trailing interrupt for already-finalized turn');
+			return;
+		}
 		this.log('Interrupted by user');
 		this._turnWasInterrupted = true;
 		this.sttProvider?.handleInterrupted();
-		// Cancel TTS and invalidate in-flight audio
+		// Cancel TTS and invalidate in-flight audio. Per design hazard 2,
+		// invalidate gate state and bump the requestId BEFORE cancel() so a
+		// synchronous onDone from cancel() cannot complete the turn mid-interrupt.
 		if (this.ttsProvider) {
-			this.ttsProvider.cancel();
 			this._ttsSpeaking = false;
 			this._ttsLlmTextDone = false;
 			this._ttsAudioDone = false;
 			this._ttsTurnHasText = false;
 			this._ttsCurrentRequestId++;
 			this.ttsClearTimers();
+			this.ttsProvider.cancel();
 		}
 		// Audio-gate reset + interrupted flag. We own these sends in
 		// VoiceSession (not TransportActor) because handleInterrupted is also
@@ -2027,6 +2092,14 @@ export class VoiceSession {
 			turnId: `turn_${this.turnId}`,
 		});
 		this.clientTransport.sendJsonToClient({ type: 'turn.interrupted' });
+		// An interrupt terminates the turn. With the Gemini server-turn state
+		// machine, the trailing turnComplete for an early-completed turn is
+		// suppressed, so finalize here — idempotently (deduped by server-turn id).
+		// Only when the transport supplies server-turn ids (Gemini external-TTS);
+		// other transports still finalize via their trailing turnComplete.
+		if (this.ttsProvider && this._pendingServerTurnId !== null) {
+			this.handleTurnCompleteInternal();
+		}
 	}
 
 	/** Handle a message from an interactive subagent (question, progress update). */
