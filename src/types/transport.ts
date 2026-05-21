@@ -362,6 +362,16 @@ export interface RealtimeLLMUsageEvent {
 	providerItemId?: string;
 	/** Opaque provider payload for exact downstream reconciliation. */
 	providerRaw?: unknown;
+	/** Monotonic id of the server turn this usage belongs to. Set by transports
+	 *  that model the server turn explicitly (Gemini Live external-TTS path) so
+	 *  consumers can attribute usage that arrives after the framework turn ended. */
+	serverTurnId?: number;
+	/** True when the transport emitted this usage event while the server turn was
+	 *  winding down — the framework turn had ended early (or been interrupted) but
+	 *  the provider's server turn was not yet closed. A transport-phase marker:
+	 *  consumers should attribute by `serverTurnId`, not assume the framework
+	 *  turn already finalized. */
+	serverTurnWindingDown?: boolean;
 }
 
 /**
@@ -442,8 +452,14 @@ export interface LLMTransport {
 	onAudioOutput?: (base64Data: string) => void;
 	onToolCall?: (calls: TransportToolCall[]) => void;
 	onToolCallCancel?: (ids: string[]) => void;
-	onTurnComplete?: () => void;
-	onInterrupted?: () => void;
+	/** @param serverTurnId Monotonic id of the server turn that completed, when
+	 *  the transport models server turns explicitly (Gemini external-TTS path).
+	 *  Consumers dedupe finalization by this id. `undefined` for transports that
+	 *  do not track server turns. */
+	onTurnComplete?: (serverTurnId?: number) => void;
+	/** @param serverTurnId Monotonic id of the server turn being interrupted
+	 *  (see `onTurnComplete`). `undefined` for transports without server turns. */
+	onInterrupted?: (serverTurnId?: number) => void;
 	onInputTranscription?: (text: string) => void;
 	onOutputTranscription?: (text: string) => void;
 	onSessionReady?: (sessionId: string) => void;
