@@ -303,7 +303,11 @@ export class GeminiLiveTransport implements LLMTransport {
 		});
 
 		const model = this.config.model ?? 'gemini-live-2.5-flash-preview';
-		const nativeAudioTextFallback = this._textMode && /native-audio/i.test(model);
+		// Native-audio Live models reject the TEXT response modality. Beyond the
+		// explicit "native-audio" names, all Gemini 3.x Live models are
+		// native-audio (the suffix was dropped once it became the only mode).
+		const isNativeAudioModel = /native-audio/i.test(model) || /^gemini-3[.-]/i.test(model);
+		const nativeAudioTextFallback = this._textMode && isNativeAudioModel;
 		this._textFromOutputTranscription = nativeAudioTextFallback;
 
 		const connectConfig: Record<string, unknown> = {

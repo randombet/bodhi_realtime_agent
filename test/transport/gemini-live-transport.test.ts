@@ -518,6 +518,22 @@ describe('GeminiLiveTransport', () => {
 			);
 		});
 
+		it('uses AUDIO + outputAudioTranscription in text mode for Gemini 3.x live models', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect({
+				auth: { type: 'api_key', apiKey: 'test-key' },
+				model: 'gemini-3.1-flash-live-preview',
+				responseModality: 'text',
+			});
+
+			expect(capturedConnectConfig.config).toEqual(
+				expect.objectContaining({
+					responseModalities: ['AUDIO'],
+					outputAudioTranscription: {},
+				}),
+			);
+		});
+
 		it('fires onTextOutput for text parts in modelTurn', async () => {
 			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
 			await transport.connect({
