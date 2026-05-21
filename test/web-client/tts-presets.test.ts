@@ -7,6 +7,7 @@ import {
 	presetIdForPersistedTtsConfig,
 	presetIdForStudioSpeechOutput,
 	presetIdForTalkTtsConfig,
+	speechOutputConfigForTalkTtsConfig,
 	speechOutputProviderId,
 	speechOutputProviderLabel,
 	speechOutputSourceLabel,
@@ -97,5 +98,34 @@ describe('TTS speech output presets', () => {
 		expect(speechOutputSourceLabel('agent_default')).toBe('Saved');
 		expect(speechOutputProviderLabel('native:gemini:Kore')).toBe('Gemini');
 		expect(speechOutputProviderId('elevenlabs:rachel')).toBe('elevenlabs');
+	});
+
+	it('converts Talk speech choices to the API speechOutput object', () => {
+		expect(speechOutputConfigForTalkTtsConfig({ provider: 'agent_default' })).toEqual({
+			mode: 'saved',
+		});
+		expect(
+			speechOutputConfigForTalkTtsConfig({
+				provider: 'native',
+				nativeVoiceProvider: 'openai',
+				openaiVoice: 'marin',
+			}),
+		).toEqual({ mode: 'native', provider: 'openai', voice: 'marin' });
+		expect(
+			speechOutputConfigForTalkTtsConfig({
+				provider: 'hume',
+				voiceName: 'Ava Song',
+				voiceProvider: 'HUME_AI',
+				version: '2',
+				speed: 1,
+			}),
+		).toEqual({
+			mode: 'tts',
+			provider: 'hume',
+			voiceName: 'Ava Song',
+			voiceProvider: 'HUME_AI',
+			version: '2',
+			speed: 1,
+		});
 	});
 });

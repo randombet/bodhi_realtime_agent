@@ -78,9 +78,10 @@ Base path (hosted): **`https://bodhiagent.live/api/`** — use your own origin i
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `POST` | `/api/mobile/sessions` | Create a **short-lived session intent**. Optional JSON body: `agentProfile` (a registered catalog id from `app/agents/agent-profiles-catalog.ts` — unknown values are treated as `standard` — **or**, when enabled on your deployment, a saved Agent Studio id `ua_` + 16 hex with a **Bodhi integration key**, see §2.1), `deviceId`, `resumeSessionId`. Response includes `sessionIntentId`, `token`, `expiresAt`, `wsPath` (typically `/ws/mobile`). |
+| `POST` | `/api/mobile/sessions` | Create a **short-lived session intent**. Optional JSON body: `agentProfile` (a registered catalog id from `app/agents/agent-profiles-catalog.ts` — unknown values are treated as `standard` — **or**, when enabled on your deployment, a saved Agent Studio id `ua_` + 16 hex with a **Bodhi integration key**, see §2.1), `deviceId`, `resumeSessionId`, `speechOutput`. Response includes `sessionIntentId`, `token`, `expiresAt`, `wsPath` (typically `/ws/mobile`). |
 | `POST` | `/api/mobile/device-events` | Send **summarized** context while a voice session is **active** (e.g. location, motion, health aggregates). Body: `sessionId`, `eventType`, `payload` (object), optional `deviceId`, `timestamp`. Expect **`202`** when accepted. |
 | `POST` | `/api/mobile/sessions/:sessionId/close` | Close that session for the authenticated user. |
+| `GET` | `/api/voice/speech-output-options` | Return supported native voices, TTS providers, featured presets, model choices, and required BYOK key names. |
 | `GET` | `/api/users/me/sessions` | List sessions (when history/auth are configured on the deployment). |
 | `GET` | `/api/users/me/sessions/:id` | Session metadata and conversation items. |
 | `GET` | `/api/users/me/sessions/:id/export` | Same as above with download-friendly headers. |
@@ -88,6 +89,39 @@ Base path (hosted): **`https://bodhiagent.live/api/`** — use your own origin i
 **Device events:** Prefer **aggregates** computed on device (e.g. per second or per activity), not raw high-frequency sensor streams. Example `eventType` values you might standardize with your product team: `location.update`, `motion.summary`, `health.metric`.
 
 **Operator note:** whether device events are injected into the live model depends on server version and configuration — confirm behavior with your backend team if the model must “see” sensor data without a spoken utterance.
+
+### 3.1 Speech output
+
+Omit `speechOutput` to use the saved agent or server default.
+
+Native live-model speech:
+
+```jsonc
+{
+  "agentProfile": "ua_...",
+  "speechOutput": {
+    "mode": "native",
+    "provider": "gemini",
+    "voiceName": "Puck"
+  }
+}
+```
+
+External TTS:
+
+```jsonc
+{
+  "agentProfile": "ua_...",
+  "speechOutput": {
+    "mode": "tts",
+    "provider": "elevenlabs",
+    "voiceId": "21m00Tcm4TlvDq8ikWAM",
+    "modelId": "eleven_flash_v2_5"
+  }
+}
+```
+
+Provider credentials still live on the server. For saved Agent Studio agents, user BYOK keys win over server fallback environment keys.
 
 ---
 
