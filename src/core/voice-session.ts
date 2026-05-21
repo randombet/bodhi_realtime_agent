@@ -1719,7 +1719,8 @@ export class VoiceSession {
 			tts.synthesize(text, this._ttsCurrentRequestId);
 		};
 
-		// When LLM text stream ends — flush TTS buffer (does NOT mean end-of-request)
+		// When the LLM text stream ends — flush is end-of-input for this requestId;
+		// the provider must then finalize and emit onDone (see TTSProvider.synthesize).
 		this.transport.onTextDone = () => {
 			if (this._ttsTurnHasText) {
 				tts.synthesize('', this._ttsCurrentRequestId, { flush: true });
