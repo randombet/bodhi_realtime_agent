@@ -71,6 +71,7 @@ describe('buildVoiceWebSocketUrl', () => {
 			},
 		});
 		expect(u).toContain('ttsProvider=native');
+		expect(u).toContain('realtimeProvider=gemini');
 		expect(u).toContain('geminiRealtimeVoice=Puck');
 	});
 
@@ -86,6 +87,7 @@ describe('buildVoiceWebSocketUrl', () => {
 			},
 		});
 		expect(u).toContain('ttsProvider=native');
+		expect(u).toContain('realtimeProvider=openai');
 		expect(u).toContain('openaiRealtimeVoice=marin');
 	});
 

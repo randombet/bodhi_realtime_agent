@@ -7,6 +7,9 @@ import {
 	presetIdForPersistedTtsConfig,
 	presetIdForStudioSpeechOutput,
 	presetIdForTalkTtsConfig,
+	speechOutputProviderId,
+	speechOutputProviderLabel,
+	speechOutputSourceLabel,
 } from '../../app/web-client/src/tts-presets.js';
 
 describe('TTS speech output presets', () => {
@@ -89,5 +92,10 @@ describe('TTS speech output presets', () => {
 			provider: 'gemini',
 			voice: 'Kore',
 		});
+		expect(speechOutputSourceLabel('native:gemini:Kore')).toBe('Native live');
+		expect(speechOutputSourceLabel('elevenlabs:rachel')).toBe('External TTS');
+		expect(speechOutputSourceLabel('agent_default')).toBe('Saved');
+		expect(speechOutputProviderLabel('native:gemini:Kore')).toBe('Gemini');
+		expect(speechOutputProviderId('elevenlabs:rachel')).toBe('elevenlabs');
 	});
 });
