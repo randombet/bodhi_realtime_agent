@@ -71,9 +71,16 @@ export function createClientChannel(params: CreateClientChannelParams): IClientC
 	}
 
 	if (params.clientSender) {
-		// The WebSocket-PCM path delivers audio and JSON FIFO on one socket —
-		// the playback-state protocol is supported at the transport level.
-		return new ClientSenderAdapter(params.clientSender, true);
+		// Playback-state support depends on the rendering sink, not just
+		// transport ordering: the Spatial Avatar and Twilio senders also write
+		// audio + JSON FIFO on one socket, but render through a sink that cannot
+		// report playback completion. The sender's producer declares the
+		// capability via SessionClientSender.supportsPlaybackStateProtocol;
+		// absent ⇒ false.
+		return new ClientSenderAdapter(
+			params.clientSender,
+			params.clientSender.supportsPlaybackStateProtocol === true,
+		);
 	}
 
 	return new ClientTransport(

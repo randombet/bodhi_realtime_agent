@@ -541,6 +541,10 @@ describe('TTS playback-aware turn completion', () => {
 	function setup(
 		clientAudioVad?: { bargeInConfirmMs?: number },
 		playbackStateProtocol?: 'disabled' | 'audio_done',
+		// Mirrors the per-surface capability the sender's producer declares
+		// (true for the browser PCM sender; false for Spatial Avatar / Twilio).
+		// Default true — the common first-party web case.
+		senderSupportsProtocol = true,
 	) {
 		const provider = createMockTTSProvider();
 		const transport = createMockTransport();
@@ -556,7 +560,7 @@ describe('TTS playback-aware turn completion', () => {
 			transport,
 			orchestrationMode: 'actor',
 			ttsProvider: provider,
-			clientSender: { sendAudio, sendJson },
+			clientSender: { sendAudio, sendJson, supportsPlaybackStateProtocol: senderSupportsProtocol },
 			...(clientAudioVad ? { clientAudioVad } : {}),
 			...(playbackStateProtocol ? { playbackStateProtocol } : {}),
 		});
@@ -814,6 +818,30 @@ describe('TTS playback-aware turn completion', () => {
 			const audioDone = s.sendJson.mock.calls.filter(([m]) => m?.type === 'audio.done');
 			expect(audioDone).toHaveLength(1);
 			expect(audioDone[0][0]).toMatchObject({ type: 'audio.done', playbackId: 1 });
+		} finally {
+			await session?.close();
+			vi.useRealTimers();
+		}
+	});
+
+	it('stays inactive when the config opts in but the sender cannot support it', async () => {
+		vi.useFakeTimers();
+		let session: VoiceSession | undefined;
+		try {
+			// playbackStateProtocol 'audio_done' but a sender (Spatial Avatar /
+			// Twilio) that declares supportsPlaybackStateProtocol false — the
+			// two-factor resolution must keep the protocol inactive.
+			const s = setup(undefined, 'audio_done', false);
+			session = s.session;
+			await session.start();
+
+			s.transport.onTextOutput?.('Hello.');
+			s.transport.onTextDone?.();
+			s.transport.onTurnComplete?.(1);
+			s.provider.onAudio?.(Buffer.from('aud').toString('base64'), 1000, 1);
+			s.provider.onDone?.(1);
+
+			expect(s.sendJson.mock.calls.filter(([m]) => m?.type === 'audio.done')).toHaveLength(0);
 		} finally {
 			await session?.close();
 			vi.useRealTimers();

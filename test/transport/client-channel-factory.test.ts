@@ -31,19 +31,47 @@ describe('createClientChannel', () => {
 	});
 
 	it('wires supportsPlaybackStateProtocol per surface', () => {
-		const sender = { sendAudio: vi.fn(), sendJson: vi.fn() };
-		// WebSocket-PCM web path → supported.
-		const webChannel = createClientChannel({
+		// Normal browser PCM web sender — its producer declares support (audio
+		// renders via playChunk and reports playback.ended).
+		const webPcm = createClientChannel({
 			profile: { kind: 'websocket' },
-			clientSender: sender,
+			clientSender: { sendAudio: vi.fn(), sendJson: vi.fn(), supportsPlaybackStateProtocol: true },
 			callbacks: {},
 		});
-		expect(webChannel.supportsPlaybackStateProtocol).toBe(true);
+		expect(webPcm.supportsPlaybackStateProtocol).toBe(true);
 
-		// direct_rtc with rtcAudio 'none' uses the WebSocket-PCM path → supported.
+		// Spatial Avatar sender — same WebSocket transport, but audio renders
+		// through the avatar sink; its producer declares false.
+		const avatar = createClientChannel({
+			profile: { kind: 'websocket' },
+			clientSender: { sendAudio: vi.fn(), sendJson: vi.fn(), supportsPlaybackStateProtocol: false },
+			callbacks: {},
+		});
+		expect(avatar.supportsPlaybackStateProtocol).toBe(false);
+
+		// Twilio sender — the phone leg sends no playback signal; producer
+		// declares false.
+		const twilio = createClientChannel({
+			profile: { kind: 'websocket' },
+			clientSender: { sendAudio: vi.fn(), sendJson: vi.fn(), supportsPlaybackStateProtocol: false },
+			callbacks: {},
+		});
+		expect(twilio.supportsPlaybackStateProtocol).toBe(false);
+
+		// A sender that omits the capability fails safe to false — it is never
+		// inferred from the bare { sendAudio, sendJson } shape.
+		const unset = createClientChannel({
+			profile: { kind: 'websocket' },
+			clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			callbacks: {},
+		});
+		expect(unset.supportsPlaybackStateProtocol).toBe(false);
+
+		// direct_rtc with rtcAudio 'none' uses the WebSocket-PCM path → supported,
+		// derived from the RTC audio mode (not the sender flag).
 		const rtcNone = createClientChannel({
 			profile: { kind: 'direct_rtc', rtcAudio: 'none' },
-			clientSender: sender,
+			clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
 			callbacks: {},
 		});
 		expect(rtcNone.supportsPlaybackStateProtocol).toBe(true);
@@ -52,7 +80,7 @@ describe('createClientChannel', () => {
 		// not supported (no directRtcMedia needed since the engine is lazy here).
 		const rtcOpus = createClientChannel({
 			profile: { kind: 'direct_rtc', rtcAudio: 'werift_opus' },
-			clientSender: sender,
+			clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
 			directRtcMedia: {
 				inputPcmSampleRate: 16000,
 				outputPcmSampleRate: 24000,
