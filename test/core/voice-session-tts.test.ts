@@ -793,6 +793,98 @@ describe('TTS playback-aware turn completion', () => {
 		}
 	});
 
+	it('playback.ended completes the turn when no VAD segment is active', async () => {
+		vi.useFakeTimers();
+		let session: VoiceSession | undefined;
+		try {
+			const s = setup(undefined, 'audio_done');
+			session = s.session;
+			await session.start();
+			s.transport.onTextOutput?.('Hello.');
+			s.transport.onTextDone?.();
+			s.transport.onTurnComplete?.(1);
+			s.provider.onAudio?.(Buffer.from('aud').toString('base64'), 3000, 1);
+			s.provider.onDone?.(1);
+			expect(s.sendJson.mock.calls.filter(([m]) => m?.type === 'turn.end')).toHaveLength(0);
+
+			session.feedJsonFromClient({ type: 'playback.ended', playbackId: 1 });
+			expect(s.sendJson.mock.calls.filter(([m]) => m?.type === 'turn.end')).toHaveLength(1);
+		} finally {
+			await session?.close();
+			vi.useRealTimers();
+		}
+	});
+
+	it('rejects a stale playback.ended (wrong playbackId), honours the correct one', async () => {
+		vi.useFakeTimers();
+		let session: VoiceSession | undefined;
+		try {
+			const s = setup(undefined, 'audio_done');
+			session = s.session;
+			await session.start();
+			s.transport.onTextOutput?.('Hello.');
+			s.transport.onTextDone?.();
+			s.transport.onTurnComplete?.(1);
+			s.provider.onAudio?.(Buffer.from('aud').toString('base64'), 3000, 1);
+			s.provider.onDone?.(1);
+
+			session.feedJsonFromClient({ type: 'playback.ended', playbackId: 99 });
+			expect(s.sendJson.mock.calls.filter(([m]) => m?.type === 'turn.end')).toHaveLength(0);
+			session.feedJsonFromClient({ type: 'playback.ended', playbackId: 1 });
+			expect(s.sendJson.mock.calls.filter(([m]) => m?.type === 'turn.end')).toHaveLength(1);
+		} finally {
+			await session?.close();
+			vi.useRealTimers();
+		}
+	});
+
+	it('rejects a premature playback.ended before tts.onDone', async () => {
+		vi.useFakeTimers();
+		let session: VoiceSession | undefined;
+		try {
+			const s = setup(undefined, 'audio_done');
+			session = s.session;
+			await session.start();
+			s.transport.onTextOutput?.('Hello.');
+			s.transport.onTextDone?.();
+			s.transport.onTurnComplete?.(1);
+			s.provider.onAudio?.(Buffer.from('aud').toString('base64'), 3000, 1);
+
+			// onDone has not fired — the playback timer is not armed.
+			session.feedJsonFromClient({ type: 'playback.ended', playbackId: 1 });
+			expect(s.sendJson.mock.calls.filter(([m]) => m?.type === 'turn.end')).toHaveLength(0);
+
+			s.provider.onDone?.(1);
+			session.feedJsonFromClient({ type: 'playback.ended', playbackId: 1 });
+			expect(s.sendJson.mock.calls.filter(([m]) => m?.type === 'turn.end')).toHaveLength(1);
+		} finally {
+			await session?.close();
+			vi.useRealTimers();
+		}
+	});
+
+	it('a duplicate playback.ended after completion is a no-op', async () => {
+		vi.useFakeTimers();
+		let session: VoiceSession | undefined;
+		try {
+			const s = setup(undefined, 'audio_done');
+			session = s.session;
+			await session.start();
+			s.transport.onTextOutput?.('Hello.');
+			s.transport.onTextDone?.();
+			s.transport.onTurnComplete?.(1);
+			s.provider.onAudio?.(Buffer.from('aud').toString('base64'), 3000, 1);
+			s.provider.onDone?.(1);
+
+			session.feedJsonFromClient({ type: 'playback.ended', playbackId: 1 });
+			session.feedJsonFromClient({ type: 'playback.ended', playbackId: 1 });
+			expect(s.sendJson.mock.calls.filter(([m]) => m?.type === 'turn.end')).toHaveLength(1);
+		} finally {
+			await session?.close();
+			vi.useRealTimers();
+		}
+	});
+
 	it('does not defer for a sub-threshold (echo-level) VAD segment', async () => {
 		vi.useFakeTimers();
 		let session: VoiceSession | undefined;

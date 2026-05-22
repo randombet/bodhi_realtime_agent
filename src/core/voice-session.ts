@@ -2553,7 +2553,32 @@ export class VoiceSession {
 			this.handleFileUpload(data.base64, data.mimeType, data.fileName);
 		} else if (message.type === 'text_input' && typeof message.text === 'string') {
 			this.handleTextInput(message.text);
+		} else if (message.type === 'playback.ended' && typeof message.playbackId === 'number') {
+			this.handlePlaybackEnded(message.playbackId);
 		}
+	}
+
+	/**
+	 * Client→server playback-state signal: the client's audio buffer for
+	 * `playbackId` has drained. Completes the turn (or defers it for an
+	 * in-progress potential barge-in via `finishOrDeferForVad`). Six guards
+	 * reject every signal that does not concern the live, post-synthesis turn.
+	 * See dev_docs/framework/design-playback-state-protocol.md.
+	 */
+	private handlePlaybackEnded(playbackId: number): void {
+		if (!this.playbackStateProtocolActive) return;
+		if (!this.ttsProvider) return;
+		// `_ttsPlaybackTimer` armed ⇒ tts.onDone has fired — rejects a premature
+		// signal that would otherwise complete the turn mid-synthesis.
+		if (this._ttsPlaybackTimer === undefined) return;
+		// A signal was already accepted and deferred this turn — ignore further
+		// ones so a client cannot keep re-arming the defer timeout.
+		if (this._ttsPlaybackEndedPending !== null) return;
+		// `_ttsSpeaking` false ⇒ the turn already finished or was interrupted.
+		if (!this._ttsSpeaking) return;
+		// Stale: a signal for a turn superseded by an interrupt (bumps the id).
+		if (playbackId !== this._ttsCurrentRequestId) return;
+		this.finishOrDeferForVad('signal');
 	}
 
 	private handleFileUpload(base64: string, mimeType: string, fileName?: string): void {
