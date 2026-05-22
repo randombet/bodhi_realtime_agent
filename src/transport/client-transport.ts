@@ -32,6 +32,10 @@ export class ClientTransport {
 	private client: WebSocket | null = null;
 	private audioBuffer = new AudioBuffer();
 	private _buffering = false;
+	/** Audio (binary) and JSON (text) share the one WebSocket and are sent
+	 *  synchronously in call order, so this transport supports the
+	 *  playback-state protocol. */
+	readonly supportsPlaybackStateProtocol = true;
 
 	constructor(
 		private port: number,
@@ -118,6 +122,13 @@ export class ClientTransport {
 		if (this.client?.readyState === 1) {
 			this.client.send(JSON.stringify(message));
 		}
+	}
+
+	/** Playback-state protocol: deliver JSON in order after the turn's audio.
+	 *  Binary and text frames go out on the one socket synchronously in call
+	 *  order, so this is `sendJsonToClient` issued after the audio sends. */
+	sendJsonAfterAudio(message: Record<string, unknown>): void {
+		this.sendJsonToClient(message);
 	}
 
 	startBuffering(): void {
