@@ -125,6 +125,20 @@ export interface ClientAudioVadConfig {
 export type ResolvedClientAudioVadConfig = Required<ClientAudioVadConfig>;
 
 /**
+ * Pure energy gate: is this frame loud enough — peak AND average — to clear the
+ * in-TTS echo floor? The energy half of `clientVadBargeInAllowed`, *without* the
+ * `bargeInConfirmMs` time check, so it can mark a VAD segment a *potential*
+ * barge-in the first loud frame, before the confirmation window elapses.
+ */
+export function clientVadBargeInEnergyEligible(
+	cfg: ResolvedClientAudioVadConfig,
+	maxAbs: number,
+	avgAbs: number,
+): boolean {
+	return maxAbs >= cfg.bargeInTtsPeakThreshold && avgAbs >= cfg.bargeInTtsAvgAbsThreshold;
+}
+
+/**
  * Pure decision: while the assistant's TTS is playing, should the in-progress
  * client speech segment count as a real barge-in? Filters residual TTS echo —
  * a barge-in must be sustained past the confirmation window AND loud enough
@@ -138,9 +152,7 @@ export function clientVadBargeInAllowed(
 ): boolean {
 	if (!cfg.bargeInEnabled) return false;
 	if (speechElapsedMs < cfg.bargeInConfirmMs) return false;
-	if (maxAbs < cfg.bargeInTtsPeakThreshold) return false;
-	if (avgAbs < cfg.bargeInTtsAvgAbsThreshold) return false;
-	return true;
+	return clientVadBargeInEnergyEligible(cfg, maxAbs, avgAbs);
 }
 
 const DEFAULT_CLIENT_AUDIO_VAD: ResolvedClientAudioVadConfig = {

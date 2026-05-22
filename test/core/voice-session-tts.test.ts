@@ -6,6 +6,7 @@ import {
 	type ResolvedClientAudioVadConfig,
 	VoiceSession,
 	clientVadBargeInAllowed,
+	clientVadBargeInEnergyEligible,
 } from '../../src/core/voice-session.js';
 import type { MainAgent } from '../../src/types/agent.js';
 import type {
@@ -516,6 +517,20 @@ describe('client-VAD echo-aware barge-in (clientVadBargeInAllowed)', () => {
 	it('rejects everything when the client barge-in is disabled', () => {
 		const disabled: ResolvedClientAudioVadConfig = { ...cfg, bargeInEnabled: false };
 		expect(clientVadBargeInAllowed(disabled, 5000, 30000, 9000)).toBe(false);
+	});
+
+	it('clientVadBargeInEnergyEligible gates on peak AND average, no time check', () => {
+		expect(clientVadBargeInEnergyEligible(cfg, 10242, 2701)).toBe(true);
+		expect(clientVadBargeInEnergyEligible(cfg, 1999, 2701)).toBe(false); // peak short
+		expect(clientVadBargeInEnergyEligible(cfg, 10242, 449)).toBe(false); // avg short
+		expect(clientVadBargeInEnergyEligible(cfg, 2000, 450)).toBe(true); // boundary
+	});
+
+	it('a loud frame is energy-eligible before the confirmation window elapses', () => {
+		// Energy gate passes immediately; the full barge-in still waits for the
+		// confirmation window — this is what marks a *potential* barge-in.
+		expect(clientVadBargeInEnergyEligible(cfg, 10242, 2701)).toBe(true);
+		expect(clientVadBargeInAllowed(cfg, 0, 10242, 2701)).toBe(false);
 	});
 });
 
