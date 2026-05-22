@@ -388,6 +388,20 @@ export class VoiceSession {
 	 *  `playbackStateProtocol === 'audio_done'` AND the client channel reports
 	 *  `supportsPlaybackStateProtocol`. Resolved once in the constructor. */
 	private playbackStateProtocolActive = false;
+	/** Effective native-audio playback-end gating for this session —
+	 *  `playbackStateProtocolActive` AND `config.nativePlaybackGating` AND the
+	 *  native audio path (no `ttsProvider`) AND a generation-gated transport
+	 *  (`!capabilities.playbackGatedTurnComplete`). Resolved once in the
+	 *  constructor. See design-playback-end-gating-openai-native.md. */
+	private nativePlaybackGatingActive = false;
+	/** Native-audio playback cursor — wall-clock (ms) when the current native
+	 *  turn's buffered audio is estimated to finish playing. `0` = the current
+	 *  turn has produced no native audio yet. Reset at each turn boundary. */
+	private _nativeEstimatedPlaybackEndMs = 0;
+	/** Per-turn `playbackId` for native `audio.done` / `playback.ended`
+	 *  correlation. Session-monotonic — incremented on the first native audio
+	 *  chunk of a turn and on gate teardown; never reset to `0`. */
+	private _nativePlaybackId = 0;
 	/** Reference to the transport's original sendToolResult, captured at
 	 *  construction. flushPendingToolResults calls through this to bypass
 	 *  the guard wrapper installed on the transport. */
@@ -940,6 +954,15 @@ export class VoiceSession {
 		this.playbackStateProtocolActive =
 			config.playbackStateProtocol === 'audio_done' &&
 			this.clientTransport.supportsPlaybackStateProtocol === true;
+
+		// Resolve native-audio playback-end gating (the OpenAI native path): the
+		// protocol must be active, the surface rolled in, the session on the
+		// native audio path, and the transport generation-gated (not Gemini).
+		this.nativePlaybackGatingActive =
+			this.playbackStateProtocolActive &&
+			config.nativePlaybackGating === true &&
+			!this.ttsProvider &&
+			!this.transport.capabilities.playbackGatedTurnComplete;
 
 		// Forward GUI events from EventBus to the client as JSON text frames
 		this.eventBus.subscribe('gui.update', (payload) => {
@@ -1844,6 +1867,7 @@ export class VoiceSession {
 		this.ensureCurrentTurn();
 		this.signalAudioStarted();
 		const raw = Buffer.from(data, 'base64');
+		if (this.nativePlaybackGatingActive) this.noteNativeAudioChunk(raw.length);
 		// Telephony mode: transport emits G.711 μ-law on the wire; client
 		// transports (web RTC, mic playback) expect PCM. Decode at this seam
 		// using the OUTPUT-side encoding (input encoding may differ on mixed
@@ -1852,6 +1876,27 @@ export class VoiceSession {
 		const outEnc = this.transport.audioFormat.outputEncoding ?? this.transport.audioFormat.encoding;
 		const buffer: Buffer = outEnc === 'pcmu' ? this.decodeMulawToPcm(raw) : raw;
 		this.clientTransport.sendAudioToClient(buffer);
+	}
+
+	/**
+	 * Advance the native-audio playback cursor by one chunk and bump the
+	 * `playbackId` on the turn's first chunk. `byteLength` is the transport's
+	 * pre-decode output byte count; duration is derived from the output-side
+	 * `audioFormat`. The `max(cursor, now)` recurrence absorbs any mid-turn
+	 * stall (the cursor cannot run ahead of wall-clock); `/ MIN_PLAYBACK_RATE`
+	 * widens the estimate so a slightly-slow client cannot have the fallback
+	 * pre-empt its real `playback.ended`.
+	 * See dev_docs/framework/design-playback-end-gating-openai-native.md.
+	 */
+	private noteNativeAudioChunk(byteLength: number): void {
+		const fmt = this.transport.audioFormat;
+		const bytesPerSample = (fmt.outputBitDepth ?? fmt.bitDepth) === 8 ? 1 : 2;
+		const channels = fmt.channels ?? 1;
+		const chunkMs = (byteLength / (fmt.outputSampleRate * channels * bytesPerSample)) * 1000;
+		if (this._nativeEstimatedPlaybackEndMs === 0) this._nativePlaybackId++;
+		this._nativeEstimatedPlaybackEndMs =
+			Math.max(this._nativeEstimatedPlaybackEndMs, Date.now()) +
+			chunkMs / VoiceSession.MIN_PLAYBACK_RATE;
 	}
 
 	/**
