@@ -43,6 +43,15 @@ export interface TransportCapabilities {
 	 *  `false`, VoiceSession falls back to a framework-layer audio-output guard
 	 *  during mode flips. */
 	quiescible?: boolean;
+	/** `onTurnComplete` fires only after model audio playback should be done
+	 *  (Gemini Live: yes — `turnComplete` is delayed until playback; OpenAI
+	 *  Realtime: no — `response.done` is generation-gated). When `false`, the
+	 *  native playback-end gate must supply playback-end gating itself.
+	 *  Optional — `undefined` means `false`. EVERY transport should set this
+	 *  explicitly; the default exists only so adding the flag does not break
+	 *  compilation of existing custom transports.
+	 *  See dev_docs/framework/design-playback-end-gating-openai-native.md. */
+	playbackGatedTurnComplete?: boolean;
 }
 
 /** Explicit defaults for every flag. Downstream `LLMTransport` implementations
@@ -61,6 +70,7 @@ export const DEFAULT_TRANSPORT_CAPABILITIES: Required<TransportCapabilities> = {
 	reasoningEffort: false,
 	automaticPreambles: false,
 	quiescible: false,
+	playbackGatedTurnComplete: false,
 };
 
 /** Audio format descriptor passed to an STT provider at configuration time. */
