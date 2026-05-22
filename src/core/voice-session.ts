@@ -290,14 +290,7 @@ export class VoiceSession {
 	/** The turn before `currentTurn` — kept so late id-bearing signals for a
 	 *  just-finalized turn can still correlate after the next turn is born. */
 	private previousTurn: Turn | null = null;
-	/** P4: turn id allocated eagerly for the *current* model turn so usage
-	 *  events emitted before turn.end carry the right id. Cleared after
-	 *  turn.end publishes. See allocateCurrentModelTurn(). */
-	private currentModelTurnId: string | null = null;
-	/** P4: agent name pinned at allocation time so an asynchronous transfer
-	 *  mid-turn does not misattribute usage to the new agent. */
-	private currentModelTurnAgentName: string | null = null;
-	/** P4: per-source monotonic sequence within the current model turn. */
+	/** Per-source monotonic sequence within the current model turn. */
 	private currentTurnUsageSequence: Map<string, number> = new Map();
 	private sttProvider?: STTProvider;
 	/** Resolved post-transport-construction from config.clientAudioInputRate
@@ -349,13 +342,6 @@ export class VoiceSession {
 	private _ttsTextLength = 0;
 	// --- Server-turn finalization dedup (external-TTS turn completion).
 	//     See dev_docs/framework/design-external-tts-turn-completion.md. ---
-	/** Attribution for usage that arrives after a server turn's framework turn ended.
-	 *  Legacy dedup-web field — still read by the usage wrapper; removed in step 12. */
-	private _finalizedTurnInfo: {
-		serverTurnId: number;
-		turnId: string;
-		agentName: string;
-	} | null = null;
 	private config: VoiceSessionConfig;
 	private directiveManager = new DirectiveManager();
 	private transcriptManager!: TranscriptManager;
@@ -775,7 +761,6 @@ export class VoiceSession {
 				this.log(`pre-attached onModelTurnStart threw: ${(e as Error).message}`);
 			}
 			this.ensureCurrentTurn();
-			this.allocateCurrentModelTurn();
 			this.logGeminiUserTurnRecognition('model/tool processing started');
 			if (this.sttProvider && !this._commitFiredForTurn) {
 				this._commitFiredForTurn = true;
@@ -918,24 +903,27 @@ export class VoiceSession {
 				this.log(`pre-attached onRealtimeLLMUsage threw: ${(e as Error).message}`);
 			}
 			const source = deriveUsageSource(usage);
-			// Trailing usage: a server turn's usage that arrived after the framework
-			// turn finalized (Gemini's final usage comes on the late turnComplete).
-			// Attribute it to the just-completed turn rather than lazily allocating
-			// a phantom next turn. See design-external-tts-turn-completion.md.
-			const trailing =
-				usage.serverTurnWindingDown === true &&
-				usage.serverTurnId !== undefined &&
-				this._finalizedTurnInfo !== null &&
-				usage.serverTurnId === this._finalizedTurnInfo.serverTurnId;
-			// Allocate a turn id eagerly for any source that's bound to a model
-			// turn (everything except openai.transcription). This handles the
-			// TTS-only path where onModelTurnStart never fires. Skipped for
-			// trailing usage, which is attributed to the already-finalized turn.
-			if (source !== 'openai.transcription' && !trailing) this.allocateCurrentModelTurn();
-			const agentName = trailing
-				? // biome-ignore lint/style/noNonNullAssertion: guarded by `trailing`
-					this._finalizedTurnInfo!.agentName
-				: (this.currentModelTurnAgentName ?? this.agentRouter.activeAgent.name);
+			// Derive the turnId for this usage event without creating a Turn.
+			// Input-transcription usage is not turn-bound. Otherwise resolveTurn
+			// maps it to its Turn (a `match` — including trailing winding-down
+			// usage for the just-finalized turn); a `new`/`stale` result means a
+			// turn not yet born, which gets `turn_${turnId+1}` — the id it will
+			// be born with.
+			let turnId: string | null;
+			let agentName: string;
+			if (source === 'openai.transcription') {
+				turnId = null;
+				agentName = this.activeTurn()?.agentName ?? this.agentRouter.activeAgent.name;
+			} else {
+				const r = this.resolveTurn(usage.serverTurnId, 'usage');
+				if (r.kind === 'match') {
+					turnId = r.turn.id;
+					agentName = r.turn.agentName;
+				} else {
+					turnId = `turn_${this.turnId + 1}`;
+					agentName = this.agentRouter.activeAgent.name;
+				}
+			}
 			if (this.hooks.onRealtimeLLMUsage) {
 				this.hooks.onRealtimeLLMUsage({
 					sessionId: this.config.sessionId,
@@ -943,12 +931,6 @@ export class VoiceSession {
 					usage,
 				});
 			}
-			const turnId = trailing
-				? // biome-ignore lint/style/noNonNullAssertion: guarded by `trailing`
-					this._finalizedTurnInfo!.turnId
-				: source === 'openai.transcription'
-					? null
-					: this.currentModelTurnId;
 			const seqKey = `${turnId ?? 'no_turn'}:${source}`;
 			const sequence = (this.currentTurnUsageSequence.get(seqKey) ?? 0) + 1;
 			this.currentTurnUsageSequence.set(seqKey, sequence);
@@ -974,10 +956,11 @@ export class VoiceSession {
 			} catch (e) {
 				this.log(`pre-attached onCacheBust threw: ${(e as Error).message}`);
 			}
+			const active = this.activeTurn();
 			this.eventBus.publish('realtime.cache.bust', {
 				sessionId: this.config.sessionId,
-				agentName: this.currentModelTurnAgentName ?? this.agentRouter.activeAgent.name,
-				turnId: this.currentModelTurnId,
+				agentName: active?.agentName ?? this.agentRouter.activeAgent.name,
+				turnId: active?.id ?? null,
 				reason,
 			});
 		};
@@ -2016,18 +1999,6 @@ export class VoiceSession {
 			this.clientTransport.sendJsonToClient({ type: 'turn.end', turnId: turn.id });
 		});
 
-		// Record attribution for trailing Gemini usage (legacy — removed in step 12).
-		const finalizedServerId = turn.latestServerTurnId;
-		if (finalizedServerId !== null) {
-			this._finalizedTurnInfo = {
-				serverTurnId: finalizedServerId,
-				turnId: turn.id,
-				agentName: turn.agentName,
-			};
-		}
-
-		this.currentModelTurnId = null;
-		this.currentModelTurnAgentName = null;
 		// Turn-bound usage sources reset per turn; non-turn-bound (`no_turn:*`)
 		// keep their session-scoped counter.
 		for (const k of [...this.currentTurnUsageSequence.keys()]) {
@@ -2185,15 +2156,13 @@ export class VoiceSession {
 		}
 	}
 
-	/** P4: idempotently allocate currentModelTurnId + currentModelTurnAgentName
-	 *  for the upcoming model turn. Called from chained onModelTurnStart and
-	 *  defensively from the realtime.usage emitter (TTS-only and native-audio
-	 *  edge cases that don't fire onModelTurnStart). Reset by handleTurnComplete
-	 *  *after* turn.end publishes. */
-	private allocateCurrentModelTurn(): void {
-		if (this.currentModelTurnId !== null) return;
-		this.currentModelTurnId = `turn_${this.turnId + 1}`;
-		this.currentModelTurnAgentName = this.agentRouter.activeAgent.name;
+	/**
+	 * The current framework `Turn` only while it is *active* — `null` between
+	 * turns (`currentTurn` itself keeps pointing at the finalized turn for
+	 * late-signal correlation, so it must not be used for active-turn readers).
+	 */
+	private activeTurn(): Turn | null {
+		return this.currentTurn && !this.currentTurn.isFinalized ? this.currentTurn : null;
 	}
 
 	/**
