@@ -18,6 +18,7 @@ import { ToolExecutor } from '../tools/tool-executor.js';
 import { createClientChannel } from '../transport/client-channel-factory.js';
 import { DirectRtcClientChannel } from '../transport/direct-rtc-client-channel.js';
 import {
+	DEFAULT_GEMINI_LIVE_MODEL,
 	GeminiLiveTransport,
 	type GeminiRealtimeInputConfig,
 	resolveGeminiRealtimeInputConfig,
@@ -132,7 +133,7 @@ export interface VoiceSessionConfig {
 	host?: string;
 	/** Listen timeout for local client WebSocket server startup (legacy/local mode). */
 	listenTimeoutMs?: number;
-	/** LLM model name (e.g. "gemini-live-2.5-flash-preview"). */
+	/** LLM model name (e.g. "gemini-3.1-flash-live-preview"). */
 	geminiModel?: string;
 	/** Vercel AI SDK model for subagent text generation. */
 	model: LanguageModelV1;
@@ -1237,7 +1238,7 @@ export class VoiceSession {
 		} else {
 			await this.transport.connect({
 				auth: { type: 'api_key', apiKey: this.config.apiKey },
-				model: this.config.geminiModel ?? 'gemini-live-2.5-flash-preview',
+				model: this.config.geminiModel ?? DEFAULT_GEMINI_LIVE_MODEL,
 				...(this.resolvedRealtimeInputConfig
 					? {
 							realtimeInputConfig: this.resolvedRealtimeInputConfig as Record<string, unknown>,

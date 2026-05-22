@@ -3,6 +3,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import {
+	DEFAULT_GEMINI_LIVE_MODEL,
 	DEFAULT_GEMINI_REALTIME_INPUT_CONFIG,
 	GeminiLiveTransport,
 	resolveGeminiRealtimeInputConfig,
@@ -57,7 +58,7 @@ describe('GeminiLiveTransport', () => {
 			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
 			await transport.connect();
 
-			expect(capturedConnectConfig.model).toBe('gemini-live-2.5-flash-preview');
+			expect(capturedConnectConfig.model).toBe(DEFAULT_GEMINI_LIVE_MODEL);
 			const config = capturedConnectConfig.config as Record<string, unknown>;
 			expect(config.responseModalities).toEqual(['AUDIO']);
 			expect(config.sessionResumption).toEqual({});
@@ -204,7 +205,7 @@ describe('GeminiLiveTransport', () => {
 			});
 		});
 
-		it.each(['gemini-live-2.5-flash-preview', 'gemini-3.1-flash-live-preview'])(
+		it.each([DEFAULT_GEMINI_LIVE_MODEL, 'gemini-2.5-flash-native-audio-preview-12-2025'])(
 			'sends non-deprecated audio realtime input for %s',
 			async (model) => {
 				const transport = new GeminiLiveTransport({ apiKey: 'test-key', model }, {});

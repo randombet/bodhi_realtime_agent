@@ -65,6 +65,9 @@ export const DEFAULT_GEMINI_REALTIME_INPUT_CONFIG: GeminiRealtimeInputConfig = {
 	},
 };
 
+/** Current default Gemini Live model for bidiGenerateContent sessions. */
+export const DEFAULT_GEMINI_LIVE_MODEL = 'gemini-3.1-flash-live-preview';
+
 /**
  * Deep-merges a user-supplied realtimeInputConfig over
  * DEFAULT_GEMINI_REALTIME_INPUT_CONFIG. Merge depth is exactly one level into
@@ -91,7 +94,7 @@ export function resolveGeminiRealtimeInputConfig(
 export interface GeminiTransportConfig {
 	/** Google API key for authentication. */
 	apiKey: string;
-	/** Gemini model name (default: "gemini-live-2.5-flash-preview"). */
+	/** Gemini model name (default: "gemini-3.1-flash-live-preview"). */
 	model?: string;
 	/** System instruction sent to the model at connection time. */
 	systemInstruction?: string;
@@ -317,7 +320,7 @@ export class GeminiLiveTransport implements LLMTransport {
 			this.setupResolver = resolve;
 		});
 
-		const model = this.config.model ?? 'gemini-live-2.5-flash-preview';
+		const model = this.config.model ?? DEFAULT_GEMINI_LIVE_MODEL;
 		// Native-audio Live models reject the TEXT response modality. Beyond the
 		// explicit "native-audio" names, all Gemini 3.x Live models are
 		// native-audio (the suffix was dropped once it became the only mode).
