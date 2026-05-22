@@ -783,7 +783,7 @@ export class VoiceSession {
 			this._nativeResponseDispatchedToolCall = true;
 			if (this.runtimeOrchestrator) {
 				const names = calls.map((c) => c.name).join(', ');
-				this.logGeminiUserTurnRecognition('tool call received');
+				this.logProviderUserTurnRecognition('tool call received');
 				const sinceVadEnd = this.lastClientSpeechCompletedMs
 					? ` (${Date.now() - this.lastClientSpeechCompletedMs}ms after client audio VAD end)`
 					: '';
@@ -867,14 +867,14 @@ export class VoiceSession {
 			// Skipped on interrupted turns — Gemini may miss audio spoken during
 			// model output, producing incomplete transcripts.
 			this.transport.onInputTranscription = (text) => {
-				this.logInputTranscriptionLatency(text, 'gemini-correction');
+				this.logInputTranscriptionLatency(text, 'provider-correction');
 				if (this._turnWasInterrupted) return;
 				this.transcriptManager.correctInput(text);
 			};
 		} else {
 			// No external STT — use transport built-in transcription
 			this.transport.onInputTranscription = (text) => {
-				this.logInputTranscriptionLatency(text, 'gemini');
+				this.logInputTranscriptionLatency(text, 'provider');
 				this.transcriptManager.handleInput(text);
 			};
 		}
@@ -928,7 +928,7 @@ export class VoiceSession {
 			// Native playback-end gate: a new model response begins clean.
 			this._nativeResponseDispatchedToolCall = false;
 			this.ensureCurrentTurn();
-			this.logGeminiUserTurnRecognition('model/tool processing started');
+			this.logProviderUserTurnRecognition('model/tool processing started');
 			if (this.sttProvider && !this._commitFiredForTurn) {
 				this._commitFiredForTurn = true;
 				this.sttProvider.commit(this.turnId);
@@ -1866,7 +1866,7 @@ export class VoiceSession {
 			: '';
 		const preview = trimmed.replace(/\s+/g, ' ').slice(0, 120);
 		this.log(
-			`[Latency] Gemini input transcription update (${source}; chars=${trimmed.length}${sinceVadEnd}; text="${preview}")`,
+			`[Latency] Input transcription update (${source}; chars=${trimmed.length}${sinceVadEnd}; text="${preview}")`,
 		);
 	}
 
@@ -1879,13 +1879,13 @@ export class VoiceSession {
 		this.finalizeTurn(this._nativePlaybackTurn ?? this.currentTurn, { interrupted: true });
 	}
 
-	private logGeminiUserTurnRecognition(reason: string): void {
-		this.completeClientAudioVad(Date.now(), 'gemini-recognition');
+	private logProviderUserTurnRecognition(reason: string): void {
+		this.completeClientAudioVad(Date.now(), 'provider-recognition');
 		if (!this.lastClientSpeechCompletedMs) return;
 		if (this.lastGeminiRecognitionLoggedForSpeechEndMs === this.lastClientSpeechCompletedMs) return;
 		this.lastGeminiRecognitionLoggedForSpeechEndMs = this.lastClientSpeechCompletedMs;
 		this.log(
-			`[Latency] Gemini Live recognized user input completed (${reason}; ${Date.now() - this.lastClientSpeechCompletedMs}ms after client audio VAD end; clientSpeechDuration=${this.lastClientSpeechDurationMs}ms)`,
+			`[Latency] Provider recognized user input completed (${reason}; ${Date.now() - this.lastClientSpeechCompletedMs}ms after client audio VAD end; clientSpeechDuration=${this.lastClientSpeechDurationMs}ms)`,
 		);
 	}
 
@@ -2265,7 +2265,7 @@ export class VoiceSession {
 	// --- Gemini event handlers ---
 
 	private handleSetupComplete(_sessionId: string): void {
-		this.log(`Gemini setup complete (clientConnected=${this.clientConnected})`);
+		this.log(`LLM transport setup complete (clientConnected=${this.clientConnected})`);
 		if (this.sessionManager.state === 'CONNECTING') {
 			this.sessionManager.transitionTo('ACTIVE');
 		}
