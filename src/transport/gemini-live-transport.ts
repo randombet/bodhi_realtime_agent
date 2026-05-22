@@ -755,6 +755,18 @@ export class GeminiLiveTransport implements LLMTransport {
 
 	// --- Server-turn state machine (external-TTS turn completion) ---
 
+	/**
+	 * The id of the server turn currently being generated, or `undefined` when
+	 * no server turn is active. Active-only by contract: between turns
+	 * (`idle` / `closed`) `_serverTurnId` still holds the previous turn's value,
+	 * so it must not be exposed — a stale id would mis-bind a freshly-born `Turn`.
+	 */
+	getActiveServerTurnId(): number | undefined {
+		return this._serverTurnState === 'generating' || this._serverTurnState === 'ended_early'
+			? this._serverTurnId
+			: undefined;
+	}
+
 	/** Begin a new Gemini server turn (fresh id) if one is not already open. */
 	private beginServerTurn(): void {
 		if (this._serverTurnState === 'generating' || this._serverTurnState === 'ended_early') {

@@ -841,6 +841,34 @@ describe('GeminiLiveTransport', () => {
 				transport.sendClientContent([{ role: 'user', parts: [{ text: 'x' }] }], true);
 				expect(mockSession.sendClientContent).toHaveBeenCalledTimes(1);
 			});
+
+			it('getActiveServerTurnId() is active-only — id while generating, undefined otherwise', async () => {
+				const { transport, cbs } = await connectTextMode();
+				transport.onTextOutput = () => {};
+				transport.onTextDone = () => {};
+				transport.onTurnComplete = () => {};
+				// idle — no server turn yet
+				expect(transport.getActiveServerTurnId()).toBeUndefined();
+				// generating — a live id
+				cbs.onmessage({ serverContent: { outputTranscription: { text: 'Hi.' } } });
+				const generatingId = transport.getActiveServerTurnId();
+				expect(typeof generatingId).toBe('number');
+				// ended_early (winding down) — still the same live id
+				cbs.onmessage({ serverContent: { generationComplete: true } });
+				expect(transport.getActiveServerTurnId()).toBe(generatingId);
+				// closed (trailing turnComplete) — undefined, not the stale id
+				cbs.onmessage({ serverContent: { turnComplete: true } });
+				expect(transport.getActiveServerTurnId()).toBeUndefined();
+			});
+
+			it('getActiveServerTurnId() is undefined after disconnect/reset', async () => {
+				const { transport, cbs } = await connectTextMode();
+				transport.onTextOutput = () => {};
+				cbs.onmessage({ serverContent: { outputTranscription: { text: 'Hi.' } } });
+				expect(typeof transport.getActiveServerTurnId()).toBe('number');
+				await transport.disconnect();
+				expect(transport.getActiveServerTurnId()).toBeUndefined();
+			});
 		});
 
 		it('resumes with the latest server handle and does not replay history', async () => {

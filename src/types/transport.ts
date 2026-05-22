@@ -448,6 +448,14 @@ export interface LLMTransport {
 		overrides?: { reasoning?: { effort: ReasoningEffort } },
 	): void;
 
+	// --- Turn correlation (optional) ---
+	/** The transport's currently-active server-turn id, or `undefined` when no
+	 *  server turn is active (idle/closed) or the transport does not model
+	 *  server turns. Read synchronously from a model-output callback to bind the
+	 *  framework `Turn` to the server turn at birth. Active-only by contract:
+	 *  it must NOT return a stale id between turns. */
+	getActiveServerTurnId?(): number | undefined;
+
 	// --- Core callbacks (all providers must support) ---
 	onAudioOutput?: (base64Data: string) => void;
 	onToolCall?: (calls: TransportToolCall[]) => void;
