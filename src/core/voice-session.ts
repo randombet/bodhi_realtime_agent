@@ -402,6 +402,14 @@ export class VoiceSession {
 	 *  correlation. Session-monotonic — incremented on the first native audio
 	 *  chunk of a turn and on gate teardown; never reset to `0`. */
 	private _nativePlaybackId = 0;
+	/** True while a native turn's completion is deferred pending playback end. */
+	private _nativePlaybackPending = false;
+	/** Native playback fallback timer — armed at `handleTurnComplete`. */
+	private _nativePlaybackTimer?: ReturnType<typeof setTimeout>;
+	/** The `Turn` captured when the native gate is armed — finalized when the
+	 *  gate completes (clean or interrupted), so a later `currentTurn` change
+	 *  cannot misdirect the completion. */
+	private _nativePlaybackTurn: Turn | null = null;
 	/** Reference to the transport's original sendToolResult, captured at
 	 *  construction. flushPendingToolResults calls through this to bypass
 	 *  the guard wrapper installed on the transport. */
@@ -1493,6 +1501,9 @@ export class VoiceSession {
 		// active sockets don't survive session close. Idempotent.
 		await this.whisperProvider?.stop().catch(() => undefined);
 		this.ttsClearTimers();
+		// close() bypasses finalizeTurn — tear down the native gate directly so
+		// no _nativePlaybackTimer outlives the session.
+		if (this.nativePlaybackGatingActive) this.clearNativePlaybackGate();
 		await this.ttsProvider?.stop();
 		if (this.runtimeOrchestrator) {
 			await this.runtimeOrchestrator.stop();
@@ -1810,7 +1821,7 @@ export class VoiceSession {
 			);
 			this._ttsPlaybackEndedPending = null;
 			this.ttsClearTimers();
-			this.completeTtsPlayback();
+			this.completePlayback();
 		}
 		if (speechDurationMs < VoiceSession.AUDIO_VAD_MIN_SPEECH_MS) {
 			this.log(
@@ -2022,7 +2033,7 @@ export class VoiceSession {
 			// ran slower than realtime), so a barge-in during the tail works and
 			// a healthy client has room to answer with a playback signal.
 			if (this._ttsFirstAudioMs === 0) {
-				this.completeTtsPlayback();
+				this.completePlayback();
 				return;
 			}
 			// When the protocol is active the client may slow playback (it
@@ -2104,7 +2115,13 @@ export class VoiceSession {
 	 * has (estimated) finished draining the buffered audio. Split out of
 	 * `onDone` so the turn stays interruptible through the playback tail.
 	 */
-	private completeTtsPlayback(): void {
+	private completePlayback(): void {
+		// Native playback-end gate: finalize the turn captured when the gate was
+		// armed, not whatever `currentTurn` is now.
+		if (this.nativePlaybackGatingActive && this._nativePlaybackPending) {
+			this.finalizeTurn(this._nativePlaybackTurn, { interrupted: false });
+			return;
+		}
 		this._ttsAudioDone = true;
 		this._ttsSpeaking = false;
 		this.ttsMaybeCompleteTurn();
@@ -2140,7 +2157,7 @@ export class VoiceSession {
 			return;
 		}
 		this.log(`[Latency] TTS turn complete via ${reason}`);
-		this.completeTtsPlayback();
+		this.completePlayback();
 	}
 
 	/** Force-complete a VAD-deferred turn whose segment never resolved (mic
@@ -2155,7 +2172,7 @@ export class VoiceSession {
 		this.audioVadSpeechStartMs = 0;
 		this.audioVadLastVoiceMs = 0;
 		this.audioVadBargeInEligible = false;
-		this.completeTtsPlayback();
+		this.completePlayback();
 	}
 
 	/** Turn gating: check if both LLM and TTS are done. */
@@ -2167,6 +2184,28 @@ export class VoiceSession {
 			this.ttsClearTimers();
 			this.finalizeTurn(this.currentTurn, { interrupted: false });
 		}
+	}
+
+	/** Clear just the native playback fallback timer (timer-only — the
+	 *  counterpart of `ttsClearTimers`; used by the VAD-defer re-arm). */
+	private clearNativePlaybackTimer(): void {
+		if (this._nativePlaybackTimer) {
+			clearTimeout(this._nativePlaybackTimer);
+			this._nativePlaybackTimer = undefined;
+		}
+	}
+
+	/** Full native playback-end gate teardown — clears the timer, pending flag,
+	 *  captured turn, cursor, and the shared defer flag, and bumps
+	 *  `_nativePlaybackId` so a late signal for the finalized turn cannot match
+	 *  a later turn. Called from `finalizeTurn` and `close()`. */
+	private clearNativePlaybackGate(): void {
+		this.clearNativePlaybackTimer();
+		this._nativePlaybackPending = false;
+		this._nativePlaybackTurn = null;
+		this._nativeEstimatedPlaybackEndMs = 0;
+		this._nativePlaybackId++;
+		this._ttsPlaybackEndedPending = null;
 	}
 
 	/** Clear all TTS timers. */
@@ -2266,6 +2305,13 @@ export class VoiceSession {
 				this.reportError('finalizeTurn', e as Error);
 			}
 		};
+
+		// Native playback-end gate teardown — runs on both the clean and the
+		// interrupted path. clearNativePlaybackGate bumps _nativePlaybackId so a
+		// late playback.ended / fallback for this turn cannot match a later one.
+		if (this.nativePlaybackGatingActive) {
+			this.clearNativePlaybackGate();
+		}
 
 		if (opts.interrupted) {
 			this.log('Interrupted by user');
