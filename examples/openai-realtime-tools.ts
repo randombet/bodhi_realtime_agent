@@ -745,6 +745,11 @@ async function main() {
 		subagentConfigs: { generate_image: imageSubagent, generate_video: videoSubagent },
 		transport, // Inject OpenAI Realtime transport
 		whisperProvider, // Powers transcription mode (gpt-realtime-whisper)
+		// Playback-end gating for OpenAI native audio — keeps barge-in armed
+		// through the buffered-playback tail (OpenAI streams faster than
+		// realtime). See design-playback-end-gating-openai-native.md.
+		playbackStateProtocol: 'audio_done',
+		nativePlaybackGating: true,
 		hooks: {
 			onSessionStart: (event) => {
 				console.log(`${ts()} [Session] Started: ${event.sessionId} (agent: ${event.agentName})`);
