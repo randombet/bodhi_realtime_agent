@@ -410,6 +410,11 @@ export class VoiceSession {
 	 *  gate completes (clean or interrupted), so a later `currentTurn` change
 	 *  cannot misdirect the completion. */
 	private _nativePlaybackTurn: Turn | null = null;
+	/** Per-response flag: true once the framework dispatches tool calls for the
+	 *  current model response. Cleared at each response start
+	 *  (`onModelTurnStart`); read by `handleTurnComplete` so the native gate
+	 *  engages only on a turn's terminal spoken response (audio, no tool call). */
+	private _nativeResponseDispatchedToolCall = false;
 	/** Reference to the transport's original sendToolResult, captured at
 	 *  construction. flushPendingToolResults calls through this to bypass
 	 *  the guard wrapper installed on the transport. */
@@ -773,6 +778,9 @@ export class VoiceSession {
 		// Wire LLMTransport property callbacks — works for both injected and default transports
 		this.transport.onAudioOutput = (data) => this.handleAudioOutput(data);
 		this.transport.onToolCall = (calls) => {
+			// Native playback-end gate: this response dispatched a tool call, so
+			// it is not the turn's terminal spoken response.
+			this._nativeResponseDispatchedToolCall = true;
 			if (this.runtimeOrchestrator) {
 				const names = calls.map((c) => c.name).join(', ');
 				this.logGeminiUserTurnRecognition('tool call received');
@@ -917,6 +925,8 @@ export class VoiceSession {
 			} catch (e) {
 				this.log(`pre-attached onModelTurnStart threw: ${(e as Error).message}`);
 			}
+			// Native playback-end gate: a new model response begins clean.
+			this._nativeResponseDispatchedToolCall = false;
 			this.ensureCurrentTurn();
 			this.logGeminiUserTurnRecognition('model/tool processing started');
 			if (this.sttProvider && !this._commitFiredForTurn) {
@@ -2278,6 +2288,36 @@ export class VoiceSession {
 			}
 			this.ttsMaybeCompleteTurn();
 			return; // Defer — actual turn-end runs via ttsMaybeCompleteTurn → finalizeTurn
+		}
+
+		// Native playback-end gate: when this terminal response produced audio
+		// and dispatched no tool call, defer finalization until the client
+		// reports playback end (playback.ended) or the fallback timer fires.
+		// See dev_docs/framework/design-playback-end-gating-openai-native.md.
+		if (
+			this.nativePlaybackGatingActive &&
+			this._nativeEstimatedPlaybackEndMs !== 0 &&
+			!this._nativeResponseDispatchedToolCall
+		) {
+			// Arm the gate fully BEFORE sendJsonAfterAudio so a sender that
+			// synchronously echoes audio.done back as playback.ended meets an
+			// armed gate rather than a premature-rejected signal.
+			const armedId = this._nativePlaybackId;
+			this._nativePlaybackPending = true;
+			this._nativePlaybackTurn = turn;
+			const delayMs =
+				Math.max(this._nativeEstimatedPlaybackEndMs - Date.now(), 0) +
+				this.ttsPlaybackFallbackMarginMs;
+			this._nativePlaybackTimer = setTimeout(() => {
+				this._nativePlaybackTimer = undefined;
+				// The captured-id guard makes a callback already queued when the
+				// turn was interrupted a guaranteed no-op.
+				if (this._nativePlaybackPending && armedId === this._nativePlaybackId) {
+					this.finishOrDeferForVad('fallback');
+				}
+			}, delayMs);
+			this.clientTransport.sendJsonAfterAudio?.({ type: 'audio.done', playbackId: armedId });
+			return; // Defer — completion runs via playback.ended / the fallback.
 		}
 
 		this.finalizeTurn(turn, { interrupted: false });
