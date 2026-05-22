@@ -1929,7 +1929,7 @@ export class VoiceSession {
 				Math.max(estimatedEndMs - Date.now(), 0) + this.ttsPlaybackFallbackMarginMs;
 			this._ttsPlaybackTimer = setTimeout(() => {
 				this._ttsPlaybackTimer = undefined;
-				this.completeTtsPlayback();
+				this.finishOrDeferForVad('fallback');
 			}, remainingMs);
 		};
 
@@ -1994,6 +1994,16 @@ export class VoiceSession {
 		this._ttsAudioDone = true;
 		this._ttsSpeaking = false;
 		this.ttsMaybeCompleteTurn();
+	}
+
+	/**
+	 * The single VAD-aware completion entry point — both the `playback.ended`
+	 * signal and the fallback timer route through it. A pass-through to
+	 * `completeTtsPlayback()` for now; the VAD-resolution defer is wired in a
+	 * later step. See dev_docs/framework/design-playback-state-protocol.md.
+	 */
+	private finishOrDeferForVad(_reason: 'signal' | 'fallback'): void {
+		this.completeTtsPlayback();
 	}
 
 	/** Turn gating: check if both LLM and TTS are done. */
