@@ -538,7 +538,10 @@ describe('TTS playback-aware turn completion', () => {
 	// External TTS synthesizes far faster than realtime playback. The turn must
 	// stay open (and interruptible) until the client has — by estimate —
 	// finished draining the buffered audio, not the moment synthesis is done.
-	function setup(clientAudioVad?: { bargeInConfirmMs?: number }) {
+	function setup(
+		clientAudioVad?: { bargeInConfirmMs?: number },
+		playbackStateProtocol?: 'disabled' | 'audio_done',
+	) {
 		const provider = createMockTTSProvider();
 		const transport = createMockTransport();
 		const sendAudio = vi.fn();
@@ -555,6 +558,7 @@ describe('TTS playback-aware turn completion', () => {
 			ttsProvider: provider,
 			clientSender: { sendAudio, sendJson },
 			...(clientAudioVad ? { clientAudioVad } : {}),
+			...(playbackStateProtocol ? { playbackStateProtocol } : {}),
 		});
 		return { provider, transport, sendJson, session };
 	}
@@ -739,6 +743,50 @@ describe('TTS playback-aware turn completion', () => {
 			// And it does not loop / double-complete.
 			vi.advanceTimersByTime(5000);
 			expect(s.sendJson.mock.calls.filter(([m]) => m?.type === 'turn.end')).toHaveLength(1);
+		} finally {
+			await session?.close();
+			vi.useRealTimers();
+		}
+	});
+
+	it('sends audio.done when the playback-state protocol is active', async () => {
+		vi.useFakeTimers();
+		let session: VoiceSession | undefined;
+		try {
+			const s = setup(undefined, 'audio_done');
+			session = s.session;
+			await session.start();
+
+			s.transport.onTextOutput?.('Hello.');
+			s.transport.onTextDone?.();
+			s.transport.onTurnComplete?.(1);
+			s.provider.onAudio?.(Buffer.from('aud').toString('base64'), 1000, 1);
+			s.provider.onDone?.(1);
+
+			const audioDone = s.sendJson.mock.calls.filter(([m]) => m?.type === 'audio.done');
+			expect(audioDone).toHaveLength(1);
+			expect(audioDone[0][0]).toMatchObject({ type: 'audio.done', playbackId: 1 });
+		} finally {
+			await session?.close();
+			vi.useRealTimers();
+		}
+	});
+
+	it('sends no audio.done when the protocol is disabled (default)', async () => {
+		vi.useFakeTimers();
+		let session: VoiceSession | undefined;
+		try {
+			const s = setup();
+			session = s.session;
+			await session.start();
+
+			s.transport.onTextOutput?.('Hello.');
+			s.transport.onTextDone?.();
+			s.transport.onTurnComplete?.(1);
+			s.provider.onAudio?.(Buffer.from('aud').toString('base64'), 1000, 1);
+			s.provider.onDone?.(1);
+
+			expect(s.sendJson.mock.calls.filter(([m]) => m?.type === 'audio.done')).toHaveLength(0);
 		} finally {
 			await session?.close();
 			vi.useRealTimers();

@@ -378,6 +378,10 @@ export class VoiceSession {
 	/** Resolved TTS fallback-completion margin (validated config + defaults).
 	 *  Assigned in the constructor. */
 	private ttsPlaybackFallbackMarginMs!: number;
+	/** Effective playback-state protocol participation for this session —
+	 *  `playbackStateProtocol === 'audio_done'` AND the client channel reports
+	 *  `supportsPlaybackStateProtocol`. Resolved once in the constructor. */
+	private playbackStateProtocolActive = false;
 	/** Reference to the transport's original sendToolResult, captured at
 	 *  construction. flushPendingToolResults calls through this to bypass
 	 *  the guard wrapper installed on the transport. */
@@ -493,6 +497,11 @@ export class VoiceSession {
 	 *  See dev_docs/framework/design-playback-state-protocol.md. */
 	private static readonly TTS_PLAYBACK_FALLBACK_MARGIN_DEFAULT_MS = 1500;
 	private static readonly TTS_PLAYBACK_FALLBACK_MARGIN_FLOOR_MS = 500;
+	/** Slowest client `playbackRate` — the fallback estimate divides the
+	 *  synthesized (1.0×) audio duration by this so slowed playback cannot
+	 *  pre-empt a healthy client's `playback.ended`. Must track the web
+	 *  client's rate map (`slow | normal | fast → 0.85 | 1.0 | 1.2`). */
+	private static readonly MIN_PLAYBACK_RATE = 0.85;
 
 	constructor(config: VoiceSessionConfig) {
 		this.config = config;
@@ -915,6 +924,12 @@ export class VoiceSession {
 		});
 		this.directRtcChannel =
 			this.clientTransport instanceof DirectRtcClientChannel ? this.clientTransport : null;
+
+		// Resolve effective playback-state protocol participation: the surface
+		// must intend it AND the client channel must support ordered delivery.
+		this.playbackStateProtocolActive =
+			config.playbackStateProtocol === 'audio_done' &&
+			this.clientTransport.supportsPlaybackStateProtocol === true;
 
 		// Forward GUI events from EventBus to the client as JSON text frames
 		this.eventBus.subscribe('gui.update', (payload) => {
@@ -1951,13 +1966,25 @@ export class VoiceSession {
 				this.completeTtsPlayback();
 				return;
 			}
-			const estimatedEndMs = this._ttsFirstAudioMs + this._ttsAudioDurationMs;
+			// When the protocol is active the client may slow playback (it
+			// schedules at audioBuf.duration / playbackRate); divide by the
+			// slowest rate so the fallback cannot pre-empt a healthy client.
+			const rateDivisor = this.playbackStateProtocolActive ? VoiceSession.MIN_PLAYBACK_RATE : 1;
+			const estimatedEndMs = this._ttsFirstAudioMs + this._ttsAudioDurationMs / rateDivisor;
 			const remainingMs =
 				Math.max(estimatedEndMs - Date.now(), 0) + this.ttsPlaybackFallbackMarginMs;
 			this._ttsPlaybackTimer = setTimeout(() => {
 				this._ttsPlaybackTimer = undefined;
 				this.finishOrDeferForVad('fallback');
 			}, remainingMs);
+			// Tell the client "no more audio for this turn" — it answers with
+			// `playback.ended` once its buffer drains. Ordered after the audio.
+			if (this.playbackStateProtocolActive) {
+				this.clientTransport.sendJsonAfterAudio?.({
+					type: 'audio.done',
+					playbackId: this._ttsCurrentRequestId,
+				});
+			}
 		};
 
 		// Wire TTS errors
