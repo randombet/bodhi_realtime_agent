@@ -242,6 +242,9 @@ export class GeminiLiveTransport implements LLMTransport {
 		// transport keeps the WS open and lets server-VAD handle pre-emption
 		// when the user starts dictating into Whisper.
 		quiescible: true,
+		// `turnComplete` is delayed by the SDK until model audio playback should
+		// be done — so the native playback-end gate must NOT engage for Gemini.
+		playbackGatedTurnComplete: true,
 	};
 
 	// --- Quiesce / unquiesce (cross-provider transcription-mode contract) ---

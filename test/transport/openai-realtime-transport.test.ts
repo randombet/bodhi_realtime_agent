@@ -108,6 +108,7 @@ describe('OpenAIRealtimeTransport', () => {
 				reasoningEffort: false,
 				automaticPreambles: false,
 				quiescible: true,
+				playbackGatedTurnComplete: false,
 			});
 		});
 

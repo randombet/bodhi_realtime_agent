@@ -297,6 +297,9 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		contextCompression: false,
 		groundingMetadata: false,
 		textResponseModality: true,
+		// `response.done` fires at generation end, not playback end — the native
+		// playback-end gate engages for OpenAI native audio.
+		playbackGatedTurnComplete: false,
 	};
 
 	// --- LLMTransport callback properties ---
