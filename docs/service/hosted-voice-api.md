@@ -153,7 +153,7 @@ It is **opt-in per deployment**. If your deployment has not enabled it you will 
 { "type": "audio.done", "playbackId": 7 }
 ```
 
-Sent **after the last binary audio frame** of a turn, only when the turn produced audio. `playbackId` is a per-turn integer that increases monotonically; it changes on every new turn, interrupt, and reconnect.
+Sent **after the last binary audio frame** of a turn, only when the turn produced audio. Treat `playbackId` as an **opaque token**: it identifies one turn's audio within the current live session — it changes per turn and on each interrupt — and is meaningful only for that session. Do **not** assume it is globally unique or monotonic across reconnects; the counter restarts when the session does, so an id from a prior connection can collide with a new one. Echo it back unchanged in the matching `playback.ended`, and discard any outstanding `audio.done` when the connection drops.
 
 **Client → server:**
 
