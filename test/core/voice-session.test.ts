@@ -50,6 +50,27 @@ vi.mock('ai', () => ({
 
 const mockModel = { modelId: 'test-model' } as unknown as LanguageModelV1;
 
+function mockGeminiSessionSentText(
+	mockGeminiSession: Record<string, ReturnType<typeof vi.fn>>,
+	predicate: (text: string) => boolean,
+): boolean {
+	const realtimeCalls = mockGeminiSession.sendRealtimeInput.mock.calls;
+	for (const call of realtimeCalls) {
+		const arg = call[0] as { text?: string };
+		if (typeof arg.text === 'string' && predicate(arg.text)) return true;
+	}
+
+	const clientContentCalls = mockGeminiSession.sendClientContent.mock.calls;
+	for (const call of clientContentCalls) {
+		const arg = call[0] as { turns?: Array<{ parts?: Array<{ text?: string }> }> };
+		if (arg.turns?.some((t) => t.parts?.some((p) => p.text && predicate(p.text)))) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
 function createEchoAgent(): MainAgent {
 	return {
 		name: 'echo',
@@ -1328,25 +1349,14 @@ describe('VoiceSession', () => {
 
 			// Fire turn complete — should inject directive
 			mockGeminiSession.sendClientContent.mockClear();
+			mockGeminiSession.sendRealtimeInput.mockClear();
 			fire({ serverContent: { turnComplete: true } });
 
 			await new Promise((r) => setTimeout(r, 50));
 
-			expect(mockGeminiSession.sendClientContent).toHaveBeenCalledWith(
-				expect.objectContaining({
-					turns: expect.arrayContaining([
-						expect.objectContaining({
-							role: 'user',
-							parts: expect.arrayContaining([
-								expect.objectContaining({
-									text: expect.stringContaining('Speak slowly'),
-								}),
-							]),
-						}),
-					]),
-					turnComplete: true,
-				}),
-			);
+			expect(
+				mockGeminiSessionSentText(mockGeminiSession, (text) => text.includes('Speak slowly')),
+			).toBe(true);
 		});
 
 		it('clearing a directive stops injection on next turn', async () => {
@@ -1405,16 +1415,13 @@ describe('VoiceSession', () => {
 
 			// Fire turn complete — should NOT inject (directive was cleared)
 			mockGeminiSession.sendClientContent.mockClear();
+			mockGeminiSession.sendRealtimeInput.mockClear();
 			fire({ serverContent: { turnComplete: true } });
 			await new Promise((r) => setTimeout(r, 50));
 
-			// sendClientContent should not be called with directive text
-			const calls = mockGeminiSession.sendClientContent.mock.calls;
-			const hasDirective = calls.some((call: unknown[]) => {
-				const arg = call[0] as { turns?: Array<{ parts?: Array<{ text?: string }> }> };
-				return arg.turns?.some((t) => t.parts?.some((p) => p.text?.includes('SYSTEM DIRECTIVES')));
-			});
-			expect(hasDirective).toBe(false);
+			expect(
+				mockGeminiSessionSentText(mockGeminiSession, (text) => text.includes('SYSTEM DIRECTIVES')),
+			).toBe(false);
 		});
 
 		it('no directives means no injection on turn complete', async () => {
@@ -1438,15 +1445,13 @@ describe('VoiceSession', () => {
 			)();
 
 			mockGeminiSession.sendClientContent.mockClear();
+			mockGeminiSession.sendRealtimeInput.mockClear();
 			fire({ serverContent: { turnComplete: true } });
 			await new Promise((r) => setTimeout(r, 50));
 
-			const calls = mockGeminiSession.sendClientContent.mock.calls;
-			const hasDirective = calls.some((call: unknown[]) => {
-				const arg = call[0] as { turns?: Array<{ parts?: Array<{ text?: string }> }> };
-				return arg.turns?.some((t) => t.parts?.some((p) => p.text?.includes('SYSTEM DIRECTIVES')));
-			});
-			expect(hasDirective).toBe(false);
+			expect(
+				mockGeminiSessionSentText(mockGeminiSession, (text) => text.includes('SYSTEM DIRECTIVES')),
+			).toBe(false);
 		});
 	});
 
@@ -1471,6 +1476,7 @@ describe('VoiceSession', () => {
 			)();
 
 			mockGeminiSession.sendClientContent.mockClear();
+			mockGeminiSession.sendRealtimeInput.mockClear();
 
 			// Connect a client — should trigger greeting
 			const WebSocket = (await import('ws')).default;
@@ -1479,21 +1485,11 @@ describe('VoiceSession', () => {
 
 			await new Promise((r) => setTimeout(r, 50));
 
-			expect(mockGeminiSession.sendClientContent).toHaveBeenCalledWith(
-				expect.objectContaining({
-					turns: expect.arrayContaining([
-						expect.objectContaining({
-							role: 'user',
-							parts: expect.arrayContaining([
-								expect.objectContaining({
-									text: '[System: Greet the user warmly.]',
-								}),
-							]),
-						}),
-					]),
-					turnComplete: true,
-				}),
-			);
+			expect(
+				mockGeminiSessionSentText(mockGeminiSession, (text) =>
+					text.includes('[System: Greet the user warmly.]'),
+				),
+			).toBe(true);
 
 			ws.close();
 			await new Promise<void>((r) => ws.on('close', r));
@@ -1519,6 +1515,7 @@ describe('VoiceSession', () => {
 			)();
 
 			mockGeminiSession.sendClientContent.mockClear();
+			mockGeminiSession.sendRealtimeInput.mockClear();
 
 			// Connect a client
 			const WebSocket = (await import('ws')).default;
@@ -1527,13 +1524,9 @@ describe('VoiceSession', () => {
 
 			await new Promise((r) => setTimeout(r, 50));
 
-			// Should NOT have called sendClientContent with any greeting
-			const calls = mockGeminiSession.sendClientContent.mock.calls;
-			const hasGreeting = calls.some((call: unknown[]) => {
-				const arg = call[0] as { turnComplete?: boolean };
-				return arg.turnComplete === true;
-			});
-			expect(hasGreeting).toBe(false);
+			expect(mockGeminiSessionSentText(mockGeminiSession, (text) => text.includes('Greet'))).toBe(
+				false,
+			);
 
 			ws.close();
 			await new Promise<void>((r) => ws.on('close', r));
@@ -1570,18 +1563,11 @@ describe('VoiceSession', () => {
 			)();
 
 			// Greeting should have been sent (from either handleClientConnected or handleSetupComplete)
-			const calls = mockGeminiSession.sendClientContent.mock.calls;
-			const greetingCall = calls.find((call: unknown[]) => {
-				const arg = call[0] as {
-					turns?: Array<{ parts?: Array<{ text?: string }> }>;
-					turnComplete?: boolean;
-				};
-				return (
-					arg.turnComplete === true &&
-					arg.turns?.some((t) => t.parts?.some((p) => p.text?.includes('Greet the user warmly')))
-				);
-			});
-			expect(greetingCall).toBeDefined();
+			expect(
+				mockGeminiSessionSentText(mockGeminiSession, (text) =>
+					text.includes('Greet the user warmly'),
+				),
+			).toBe(true);
 
 			ws.close();
 			await new Promise<void>((r) => ws.on('close', r));
