@@ -162,14 +162,51 @@ Each **text** frame is **one** UTF-8 JSON object.
 - `session.ready` — includes `userId`, `sessionId`, `agentProfile` when the voice session is live.
 - `session.error` — `code`, `message`.
 - `transcript` — user or assistant text; may include `"partial": true` while streaming.
+- `audio.done` — end of a turn's audio, when the optional playback-state protocol is enabled (see §4.4).
 - Additional types may include behavior catalogs, GUI updates, and turn/tool-related events aligned with the web client protocol.
 
 **Client → server (examples):**
 
 - `text_input` — user text to the model.
 - `behavior.set`, `ui.response`, `file_upload` — when exposed by your deployment.
+- `playback.ended` — reports turn audio finished playing, when the optional playback-state protocol is enabled (see §4.4).
 
 Voice-first apps usually send **only binary PCM** on the socket and use **`POST /api/mobile/device-events`** for structured context.
+
+**Forward compatibility:** a client **MUST ignore** any JSON text frame whose `type` it does not recognize. New message types are added over time; an unknown `type` is never an error.
+
+### 4.4 Playback-state protocol (optional)
+
+This is an **optional** two-message handshake that lets the server know exactly when your device has finished *playing* a turn's audio — not just when it finished *sending* it. The server uses it to keep the barge-in (interrupt) window open precisely while audio is audible, which matters most when the server's text-to-speech runs faster than realtime (it cannot otherwise know your playback clock).
+
+It is **opt-in per deployment**. If your deployment has not enabled it you will simply never receive `audio.done`; ignore this section. If you do not implement it, nothing breaks — see *Fallback* below.
+
+**Server → client:**
+
+```json
+{ "type": "audio.done", "playbackId": 7 }
+```
+
+Sent **after the last binary audio frame** of a turn, only when the turn produced audio. Treat `playbackId` as an **opaque token**: it identifies one turn's audio within the current live session — it changes per turn and on each interrupt — and is meaningful only for that session. Do **not** assume it is globally unique or monotonic across reconnects; the counter restarts when the session does, so an id from a prior connection can collide with a new one. Echo it back unchanged in the matching `playback.ended`, and discard any outstanding `audio.done` when the connection drops.
+
+**Client → server:**
+
+```json
+{ "type": "playback.ended", "playbackId": 7 }
+```
+
+Send this **once** per turn, when **both** of these are true:
+
+1. You have received `audio.done` for that `playbackId`, **and**
+2. Your audio output buffer for the turn has fully drained (all PCM has been played).
+
+Echo back the **exact** `playbackId` from the matching `audio.done`. A short settle delay after buffer drain (covering the OS/hardware output buffer) before sending is recommended so a tail barge-in's microphone frame reaches the server first.
+
+**Ordering precondition.** `audio.done` always arrives after the final audio frame of its turn. You **must** wait for `audio.done` before sending `playback.ended` — never send it on buffer-drain alone. A mid-turn synthesis stall can drain the buffer momentarily; without the `audio.done` gate you would report the turn finished early and lose the rest of it.
+
+**`playbackId` correlation.** The server ignores a `playback.ended` whose `playbackId` is not the current turn's (e.g. a late signal for a turn the user already barged in on). Stale or duplicate `playback.ended` frames are harmless.
+
+**Fallback.** If the server never receives `playback.ended` (client does not implement the protocol, a dropped frame, a disconnect), it completes the turn on its own internal timer. The protocol is therefore **safe to skip** — you get a slightly less precise barge-in window, nothing more.
 
 ---
 

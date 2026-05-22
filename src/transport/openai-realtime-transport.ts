@@ -1388,7 +1388,12 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		// --- Turn complete: dispatch batched tool calls, normalise usage,
 		//                     flush when_idle queue, signal turn done. ---
 		rt.on('response.done', (event: unknown) => {
-			const e = event as { response?: { id?: string; usage?: unknown } };
+			const e = event as { response?: { id?: string; usage?: unknown; status?: string } };
+			// A cancelled response is the trailing response.done of a server-VAD
+			// barge-in (or an explicit response.cancel). The framework already
+			// finalized the interrupted turn via onInterrupted.
+			const cancelled = e?.response?.status === 'cancelled';
+
 			const normalized = normalizeOpenAIResponseUsage(e?.response?.usage, e?.response?.id);
 			if (normalized) {
 				// Capture reasoning-token count if exposed; useful for the
@@ -1396,6 +1401,19 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 				// item in a subsequent response.
 				this._reasoningTokensThisResponse = normalized.modalityBreakdown?.reasoningTokens;
 				if (this.onRealtimeLLMUsage) this.onRealtimeLLMUsage(normalized);
+			}
+
+			if (cancelled) {
+				// Usage above is still forwarded so it attributes to the
+				// interrupted turn. But this trailing response.done must NOT
+				// finalize a newer framework turn, dispatch the cancelled
+				// response's partial tool calls, or trigger a generation-flush.
+				// Only state cleanup runs; onTurnComplete is suppressed.
+				this.completedToolCallsThisResponse = [];
+				this._isModelGenerating = false;
+				this.lastAssistantItemId = null;
+				this.audioOutputMs = 0;
+				return;
 			}
 
 			// Dispatch all parallel function_call items collected during this

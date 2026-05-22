@@ -147,11 +147,11 @@ describe('LLMTransport type definitions', () => {
 	it('LLMTransportConfig supports all auth types', () => {
 		const apiKeyConfig: LLMTransportConfig = {
 			auth: { type: 'api_key', apiKey: 'test' },
-			model: 'gemini-live-2.5-flash-preview',
+			model: 'gemini-3.1-flash-live-preview',
 		};
 		const saConfig: LLMTransportConfig = {
 			auth: { type: 'service_account', projectId: 'my-project', location: 'us-central1' },
-			model: 'gemini-live-2.5-flash-preview',
+			model: 'gemini-3.1-flash-live-preview',
 			instructions: 'Be helpful',
 			providerOptions: { googleSearch: true },
 		};

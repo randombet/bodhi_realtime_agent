@@ -28,6 +28,8 @@
     "build": "tsup",
     "web-client:build": "vite build --config app/web-client/vite.config.ts",
     "web-client:dev": "vite --config app/web-client/vite.config.ts",
+    "web-client:typecheck": "tsc --noEmit -p app/web-client/tsconfig.json",
+    "web-client:lint": "biome check app/web-client/src",
     "demo:direct-rtc": "tsx examples/direct-rtc-demo/server.ts",
     "examples:embed-widget-dump": "node examples/embed-widget-dump/server.mjs",
     "examples:setup": "bash scripts/examples-setup.sh",

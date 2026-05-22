@@ -38,7 +38,7 @@
  * Usage:
  *   1. Set GEMINI_API_KEY in .env or env
  *   2. Run: pnpm tsx examples/gemini-live-context-caching.ts
- *   3. Connect a WebSocket audio client to ws://localhost:9901
+ *   3. Connect a WebSocket audio client to ws://localhost:9900
  *   4. Try saying:
  *        "What time is it?"
  *        "What is 25 times 17?"
@@ -60,6 +60,8 @@
  *                                  subsequent run with _RESUME=1 picks it up.
  *   COMPRESSION_TRIGGER=8000      triggerTokens (default off).
  *   COMPRESSION_TARGET=4000       slidingWindow.targetTokens (default off).
+ *   GEMINI_LIVE_MODEL             Live model (default:
+ *                                  gemini-3.1-flash-live-preview).
  */
 
 import 'dotenv/config';
@@ -68,7 +70,10 @@ import { dirname, join } from 'node:path';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { z } from 'zod';
 import { VoiceSession } from '../src/core/voice-session.js';
-import { GeminiLiveTransport } from '../src/transport/gemini-live-transport.js';
+import {
+	DEFAULT_GEMINI_LIVE_MODEL,
+	GeminiLiveTransport,
+} from '../src/transport/gemini-live-transport.js';
 import type { MainAgent } from '../src/types/agent.js';
 import type { ToolContext, ToolDefinition } from '../src/types/tool.js';
 
@@ -120,7 +125,7 @@ if (GEMINI_API_KEY.length === 0) {
 	process.exit(1);
 }
 
-const PORT = Number(process.env.PORT) || 9901;
+const PORT = Number(process.env.PORT) || 9900;
 const HOST = process.env.HOST || '0.0.0.0';
 const SESSION_ID = `gemini_cache_demo_${Date.now()}`;
 
@@ -128,6 +133,7 @@ const SESSION_RESUMPTION_DISABLE = process.env.SESSION_RESUMPTION_DISABLE === '1
 const SESSION_RESUMPTION_RESUME = process.env.SESSION_RESUMPTION_RESUME === '1';
 const COMPRESSION_TRIGGER = Number(process.env.COMPRESSION_TRIGGER) || 0;
 const COMPRESSION_TARGET = Number(process.env.COMPRESSION_TARGET) || 0;
+const LIVE_MODEL = process.env.GEMINI_LIVE_MODEL || DEFAULT_GEMINI_LIVE_MODEL;
 
 if (SESSION_RESUMPTION_DISABLE && SESSION_RESUMPTION_RESUME) {
 	console.error(
@@ -176,8 +182,10 @@ const google = createGoogleGenerativeAI({ apiKey: GEMINI_API_KEY });
 const transport = new GeminiLiveTransport(
 	{
 		apiKey: GEMINI_API_KEY,
-		// Use a half-cascade Live model — these support tools robustly.
-		model: 'gemini-live-2.5-flash-preview',
+		// Use the current documented Live model by default. Override with
+		// GEMINI_LIVE_MODEL if your API key or region has a different Live
+		// model enabled.
+		model: LIVE_MODEL,
 		// Session resumption — three modes resolved above:
 		//   `false`        → ZDR opt-out, no handles issued
 		//   `{ handle }`   → resume a specific prior session
@@ -407,6 +415,7 @@ async function main() {
 	console.log();
 	console.log(`  WebSocket audio: ws://localhost:${PORT}`);
 	console.log(`  Session ID:      ${SESSION_ID}`);
+	console.log(`  Live model:      ${LIVE_MODEL}`);
 	const resumptionLabel =
 		sessionResumptionConfig === false
 			? 'DISABLED (ZDR opt-out — server will not issue handles)'

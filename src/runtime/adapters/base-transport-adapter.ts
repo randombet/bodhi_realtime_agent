@@ -46,12 +46,14 @@ export abstract class BaseTransportAdapter implements TransportAdapter {
 			prevOnSessionReady?.(sessionId);
 			this.onSessionReady?.();
 		};
-		this.transport.onTurnComplete = () => {
-			prevOnTurnComplete?.();
+		this.transport.onTurnComplete = (serverTurnId) => {
+			// Forward serverTurnId to the chained VoiceSession handler — it drives
+			// server-turn-id finalization dedup for external TTS (actor-mode only).
+			prevOnTurnComplete?.(serverTurnId);
 			this.onTurnComplete?.();
 		};
-		this.transport.onInterrupted = () => {
-			prevOnInterrupted?.();
+		this.transport.onInterrupted = (serverTurnId) => {
+			prevOnInterrupted?.(serverTurnId);
 			this.onInterrupted?.();
 		};
 		this.transport.onToolCall = (calls) => {

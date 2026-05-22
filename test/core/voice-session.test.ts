@@ -50,6 +50,27 @@ vi.mock('ai', () => ({
 
 const mockModel = { modelId: 'test-model' } as unknown as LanguageModelV1;
 
+function mockGeminiSessionSentText(
+	mockGeminiSession: Record<string, ReturnType<typeof vi.fn>>,
+	predicate: (text: string) => boolean,
+): boolean {
+	const realtimeCalls = mockGeminiSession.sendRealtimeInput.mock.calls;
+	for (const call of realtimeCalls) {
+		const arg = call[0] as { text?: string };
+		if (typeof arg.text === 'string' && predicate(arg.text)) return true;
+	}
+
+	const clientContentCalls = mockGeminiSession.sendClientContent.mock.calls;
+	for (const call of clientContentCalls) {
+		const arg = call[0] as { turns?: Array<{ parts?: Array<{ text?: string }> }> };
+		if (arg.turns?.some((t) => t.parts?.some((p) => p.text && predicate(p.text)))) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
 function createEchoAgent(): MainAgent {
 	return {
 		name: 'echo',
@@ -1054,6 +1075,105 @@ describe('VoiceSession', () => {
 	});
 
 	// =========================================================================
+	// Turn lifecycle (Turn entity — idempotent finalization)
+	// =========================================================================
+
+	describe('Turn lifecycle', () => {
+		it('a repeated interrupt for the same turn publishes turn.interrupted exactly once', async () => {
+			session = new VoiceSession({
+				sessionId: 'sess_tl1',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9940,
+				model: mockModel,
+			});
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			let interruptedCount = 0;
+			session.eventBus.subscribe('turn.interrupted', () => {
+				interruptedCount++;
+			});
+
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+			fire({ serverContent: { outputTranscription: { text: 'Telling you about—' } } });
+			// One physical barge-in observed twice (e.g. server VAD then a mirror).
+			fire({ serverContent: { interrupted: true } });
+			fire({ serverContent: { interrupted: true } });
+			await new Promise((r) => setTimeout(r, 50));
+
+			expect(interruptedCount).toBe(1);
+		});
+
+		it('interrupt then the trailing turnComplete: one turn.interrupted + one turn.end, shared id', async () => {
+			session = new VoiceSession({
+				sessionId: 'sess_tl2',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9941,
+				model: mockModel,
+			});
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const interrupted: string[] = [];
+			const ended: string[] = [];
+			session.eventBus.subscribe('turn.interrupted', (e) => {
+				interrupted.push((e as { turnId: string }).turnId);
+			});
+			session.eventBus.subscribe('turn.end', (e) => {
+				ended.push((e as { turnId: string }).turnId);
+			});
+
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+			fire({ serverContent: { outputTranscription: { text: 'Half a sen—' } } });
+			fire({ serverContent: { interrupted: true } });
+			// The server's trailing turnComplete for the same server turn — a no-op.
+			fire({ serverContent: { turnComplete: true } });
+			await new Promise((r) => setTimeout(r, 50));
+
+			expect(interrupted).toHaveLength(1);
+			expect(ended).toHaveLength(1);
+			expect(interrupted[0]).toBe(ended[0]);
+		});
+
+		it('close() mid-turn finalizes the active turn with exactly one turn.end', async () => {
+			session = new VoiceSession({
+				sessionId: 'sess_tl3',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9942,
+				model: mockModel,
+			});
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			let endCount = 0;
+			session.eventBus.subscribe('turn.end', () => {
+				endCount++;
+			});
+
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+			fire({ serverContent: { outputTranscription: { text: 'mid turn' } } });
+			await new Promise((r) => setTimeout(r, 20));
+
+			await session.close();
+			expect(endCount).toBe(1);
+		});
+	});
+
+	// =========================================================================
 	// Tool call error handling tests
 	// =========================================================================
 
@@ -1229,25 +1349,14 @@ describe('VoiceSession', () => {
 
 			// Fire turn complete — should inject directive
 			mockGeminiSession.sendClientContent.mockClear();
+			mockGeminiSession.sendRealtimeInput.mockClear();
 			fire({ serverContent: { turnComplete: true } });
 
 			await new Promise((r) => setTimeout(r, 50));
 
-			expect(mockGeminiSession.sendClientContent).toHaveBeenCalledWith(
-				expect.objectContaining({
-					turns: expect.arrayContaining([
-						expect.objectContaining({
-							role: 'user',
-							parts: expect.arrayContaining([
-								expect.objectContaining({
-									text: expect.stringContaining('Speak slowly'),
-								}),
-							]),
-						}),
-					]),
-					turnComplete: true,
-				}),
-			);
+			expect(
+				mockGeminiSessionSentText(mockGeminiSession, (text) => text.includes('Speak slowly')),
+			).toBe(true);
 		});
 
 		it('clearing a directive stops injection on next turn', async () => {
@@ -1306,16 +1415,13 @@ describe('VoiceSession', () => {
 
 			// Fire turn complete — should NOT inject (directive was cleared)
 			mockGeminiSession.sendClientContent.mockClear();
+			mockGeminiSession.sendRealtimeInput.mockClear();
 			fire({ serverContent: { turnComplete: true } });
 			await new Promise((r) => setTimeout(r, 50));
 
-			// sendClientContent should not be called with directive text
-			const calls = mockGeminiSession.sendClientContent.mock.calls;
-			const hasDirective = calls.some((call: unknown[]) => {
-				const arg = call[0] as { turns?: Array<{ parts?: Array<{ text?: string }> }> };
-				return arg.turns?.some((t) => t.parts?.some((p) => p.text?.includes('SYSTEM DIRECTIVES')));
-			});
-			expect(hasDirective).toBe(false);
+			expect(
+				mockGeminiSessionSentText(mockGeminiSession, (text) => text.includes('SYSTEM DIRECTIVES')),
+			).toBe(false);
 		});
 
 		it('no directives means no injection on turn complete', async () => {
@@ -1339,15 +1445,13 @@ describe('VoiceSession', () => {
 			)();
 
 			mockGeminiSession.sendClientContent.mockClear();
+			mockGeminiSession.sendRealtimeInput.mockClear();
 			fire({ serverContent: { turnComplete: true } });
 			await new Promise((r) => setTimeout(r, 50));
 
-			const calls = mockGeminiSession.sendClientContent.mock.calls;
-			const hasDirective = calls.some((call: unknown[]) => {
-				const arg = call[0] as { turns?: Array<{ parts?: Array<{ text?: string }> }> };
-				return arg.turns?.some((t) => t.parts?.some((p) => p.text?.includes('SYSTEM DIRECTIVES')));
-			});
-			expect(hasDirective).toBe(false);
+			expect(
+				mockGeminiSessionSentText(mockGeminiSession, (text) => text.includes('SYSTEM DIRECTIVES')),
+			).toBe(false);
 		});
 	});
 
@@ -1372,6 +1476,7 @@ describe('VoiceSession', () => {
 			)();
 
 			mockGeminiSession.sendClientContent.mockClear();
+			mockGeminiSession.sendRealtimeInput.mockClear();
 
 			// Connect a client — should trigger greeting
 			const WebSocket = (await import('ws')).default;
@@ -1380,21 +1485,11 @@ describe('VoiceSession', () => {
 
 			await new Promise((r) => setTimeout(r, 50));
 
-			expect(mockGeminiSession.sendClientContent).toHaveBeenCalledWith(
-				expect.objectContaining({
-					turns: expect.arrayContaining([
-						expect.objectContaining({
-							role: 'user',
-							parts: expect.arrayContaining([
-								expect.objectContaining({
-									text: '[System: Greet the user warmly.]',
-								}),
-							]),
-						}),
-					]),
-					turnComplete: true,
-				}),
-			);
+			expect(
+				mockGeminiSessionSentText(mockGeminiSession, (text) =>
+					text.includes('[System: Greet the user warmly.]'),
+				),
+			).toBe(true);
 
 			ws.close();
 			await new Promise<void>((r) => ws.on('close', r));
@@ -1420,6 +1515,7 @@ describe('VoiceSession', () => {
 			)();
 
 			mockGeminiSession.sendClientContent.mockClear();
+			mockGeminiSession.sendRealtimeInput.mockClear();
 
 			// Connect a client
 			const WebSocket = (await import('ws')).default;
@@ -1428,13 +1524,9 @@ describe('VoiceSession', () => {
 
 			await new Promise((r) => setTimeout(r, 50));
 
-			// Should NOT have called sendClientContent with any greeting
-			const calls = mockGeminiSession.sendClientContent.mock.calls;
-			const hasGreeting = calls.some((call: unknown[]) => {
-				const arg = call[0] as { turnComplete?: boolean };
-				return arg.turnComplete === true;
-			});
-			expect(hasGreeting).toBe(false);
+			expect(mockGeminiSessionSentText(mockGeminiSession, (text) => text.includes('Greet'))).toBe(
+				false,
+			);
 
 			ws.close();
 			await new Promise<void>((r) => ws.on('close', r));
@@ -1471,18 +1563,11 @@ describe('VoiceSession', () => {
 			)();
 
 			// Greeting should have been sent (from either handleClientConnected or handleSetupComplete)
-			const calls = mockGeminiSession.sendClientContent.mock.calls;
-			const greetingCall = calls.find((call: unknown[]) => {
-				const arg = call[0] as {
-					turns?: Array<{ parts?: Array<{ text?: string }> }>;
-					turnComplete?: boolean;
-				};
-				return (
-					arg.turnComplete === true &&
-					arg.turns?.some((t) => t.parts?.some((p) => p.text?.includes('Greet the user warmly')))
-				);
-			});
-			expect(greetingCall).toBeDefined();
+			expect(
+				mockGeminiSessionSentText(mockGeminiSession, (text) =>
+					text.includes('Greet the user warmly'),
+				),
+			).toBe(true);
 
 			ws.close();
 			await new Promise<void>((r) => ws.on('close', r));
@@ -2023,6 +2108,45 @@ describe('VoiceSession', () => {
 
 			ws.close();
 			await new Promise<void>((r) => ws.on('close', r));
+		});
+
+		it('drops late STT transcript after Gemini correction was finalized before a tool call', async () => {
+			const stt = createMockSTTProvider();
+			session = new VoiceSession({
+				sessionId: 'sess_stt_tool_dedup',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createToolAgent()],
+				initialAgent: 'tool-agent',
+				model: mockModel,
+				sttProvider: stt,
+				orchestrationMode: 'actor',
+				clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+			fire({ serverContent: { inputTranscription: { text: 'What time is it?' } } });
+			fire({
+				toolCall: {
+					functionCalls: [{ id: 'tc_1', name: 'get_weather', args: { city: 'SF' } }],
+				},
+			});
+			await new Promise((r) => setTimeout(r, 50));
+
+			stt.onTranscript?.('Uh, what time is it?', 0);
+			fire({ serverContent: { outputTranscription: { text: 'It is sunny.' } } });
+			fire({ serverContent: { turnComplete: true } });
+			await new Promise((r) => setTimeout(r, 100));
+
+			const userItems = session.conversationContext.items
+				.filter((i) => i.role === 'user')
+				.map((i) => i.content);
+			expect(userItems).toEqual(['What time is it?']);
 		});
 
 		it('skips Gemini transcript correction on interrupted turns', async () => {

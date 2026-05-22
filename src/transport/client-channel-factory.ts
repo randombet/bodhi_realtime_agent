@@ -63,11 +63,24 @@ export function createClientChannel(params: CreateClientChannelParams): IClientC
 		return new DirectRtcClientChannel({
 			sender: params.clientSender,
 			weriftOpus,
+			// Opus RTP sends audio on a separate channel from JSON control —
+			// the playback-state protocol needs one ordered channel, so it is
+			// supported only for the `rtcAudio: 'none'` WebSocket-PCM path.
+			supportsPlaybackStateProtocol: rtcAudio !== 'werift_opus',
 		});
 	}
 
 	if (params.clientSender) {
-		return new ClientSenderAdapter(params.clientSender);
+		// Playback-state support depends on the rendering sink, not just
+		// transport ordering: the Spatial Avatar and Twilio senders also write
+		// audio + JSON FIFO on one socket, but render through a sink that cannot
+		// report playback completion. The sender's producer declares the
+		// capability via SessionClientSender.supportsPlaybackStateProtocol;
+		// absent ⇒ false.
+		return new ClientSenderAdapter(
+			params.clientSender,
+			params.clientSender.supportsPlaybackStateProtocol === true,
+		);
 	}
 
 	return new ClientTransport(

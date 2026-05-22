@@ -53,7 +53,11 @@ export interface TTSProvider {
 	 *  @param text Partial or complete text from LLM response
 	 *  @param requestId Monotonic ID correlating this text to a specific turn/response.
 	 *                   All onAudio/onDone callbacks for this text MUST carry the same requestId.
-	 *  @param options.flush If true, flush any buffered text to TTS now (does NOT mean end-of-request). */
+	 *  @param options.flush If true, this is the end of input for `requestId`:
+	 *                   flush any buffered text and finalize the request. The
+	 *                   provider MUST eventually emit `onDone` for `requestId`
+	 *                   unless it is cancelled or fails. VoiceSession issues this
+	 *                   from `onTextDone` (end of the LLM text stream for a turn). */
 	synthesize(text: string, requestId: number, options?: { flush?: boolean }): void;
 
 	// --- Interruption ---

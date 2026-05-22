@@ -50,6 +50,9 @@ export type { ToolCallRouterDeps } from './tool-call-router.js';
 export { TranscriptManager } from './transcript-manager.js';
 export type { TranscriptSink } from './transcript-manager.js';
 
+export { Turn } from './turn.js';
+export type { TurnMatch, TurnSignalPurpose, TurnState } from './turn.js';
+
 export {
 	computeCacheHitRatio,
 	deriveProviderItemId,

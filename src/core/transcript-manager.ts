@@ -23,6 +23,8 @@ export class TranscriptManager {
 	private outputBuffer = '';
 	/** Pre-tool-call output text, saved when a tool call splits a turn. */
 	private outputPrefix = '';
+	/** True after the user transcript was finalized early for a tool call. */
+	private inputFinalizedThisTurn = false;
 
 	/**
 	 * Optional callback fired when user input is finalized (committed as a non-partial message).
@@ -56,6 +58,7 @@ export class TranscriptManager {
 	 */
 	correctInput(text: string): void {
 		if (!text.trim()) return;
+		if (this.inputFinalizedThisTurn) return;
 		this.inputBuffer = text;
 		this.sink.sendToClient({
 			type: 'transcript',
@@ -68,6 +71,7 @@ export class TranscriptManager {
 
 	/** Accumulate incoming user speech transcription and emit a partial transcript. */
 	handleInput(text: string): void {
+		if (this.inputFinalizedThisTurn) return;
 		if (text.trim()) {
 			this.inputBuffer += text;
 			this.sink.sendToClient({
@@ -120,13 +124,14 @@ export class TranscriptManager {
 				partial: false,
 			});
 			this.inputBuffer = '';
+			this.inputFinalizedThisTurn = true;
 			this.onInputFinalized?.(text);
 		}
 	}
 
 	/** Flush all transcript buffers — finalize user and assistant messages. */
 	flush(): void {
-		if (this.inputBuffer.trim()) {
+		if (!this.inputFinalizedThisTurn && this.inputBuffer.trim()) {
 			const text = this.inputBuffer.trim();
 			this.sink.addUserMessage(text);
 			this.sink.sendToClient({
@@ -150,6 +155,7 @@ export class TranscriptManager {
 		this.inputBuffer = '';
 		this.outputBuffer = '';
 		this.outputPrefix = '';
+		this.inputFinalizedThisTurn = false;
 	}
 
 	/**

@@ -123,6 +123,33 @@ describe('ClientTransport', () => {
 		await new Promise<void>((r) => ws.on('close', r));
 	});
 
+	it('sendJsonAfterAudio delivers JSON after audio, and reports protocol support', async () => {
+		transport = new ClientTransport(TEST_PORT, {});
+		await transport.start();
+
+		const ws = new WebSocket(`ws://localhost:${TEST_PORT}`);
+		await new Promise<void>((r) => ws.on('open', r));
+
+		const frames: Array<{ binary: boolean; text: string }> = [];
+		ws.on('message', (data, isBinary) => {
+			frames.push({ binary: isBinary, text: isBinary ? '' : data.toString() });
+		});
+
+		transport.sendAudioToClient(Buffer.from([1, 2, 3, 4]));
+		transport.sendJsonAfterAudio({ type: 'audio.done', playbackId: 1 });
+
+		await new Promise((r) => setTimeout(r, 50));
+
+		expect(frames).toHaveLength(2);
+		expect(frames[0].binary).toBe(true);
+		expect(frames[1].binary).toBe(false);
+		expect(JSON.parse(frames[1].text)).toEqual({ type: 'audio.done', playbackId: 1 });
+		expect(transport.supportsPlaybackStateProtocol).toBe(true);
+
+		ws.close();
+		await new Promise<void>((r) => ws.on('close', r));
+	});
+
 	it('receives JSON text frames from client via onJsonFromClient', async () => {
 		const onJsonFromClient = vi.fn();
 		transport = new ClientTransport(TEST_PORT, { onJsonFromClient });

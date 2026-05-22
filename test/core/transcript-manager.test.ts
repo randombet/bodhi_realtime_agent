@@ -103,6 +103,29 @@ describe('TranscriptManager', () => {
 		expect(sink.assistantMessages).toEqual(['answer']);
 	});
 
+	it('ignores late input after flushInput finalized the user transcript', () => {
+		const sink = createSink();
+		const mgr = new TranscriptManager(sink);
+
+		mgr.correctInput('What time is it?');
+		mgr.flushInput();
+		mgr.handleInput('Uh, what time is it?');
+		mgr.flush();
+
+		expect(sink.userMessages).toEqual(['What time is it?']);
+	});
+
+	it('accepts late input after an empty flushInput call', () => {
+		const sink = createSink();
+		const mgr = new TranscriptManager(sink);
+
+		mgr.flushInput();
+		mgr.handleInput('late transcript');
+		mgr.flush();
+
+		expect(sink.userMessages).toEqual(['late transcript']);
+	});
+
 	it('saveOutputPrefix preserves pre-tool output for deduplication', () => {
 		const sink = createSink();
 		const mgr = new TranscriptManager(sink);

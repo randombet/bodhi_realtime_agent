@@ -13,9 +13,14 @@ export class ClientSenderAdapter implements IClientChannel {
 	private readonly sender: SessionClientSender;
 	private readonly audioBuffer = new AudioBuffer();
 	private _buffering = false;
+	/** Whether this channel participates in the playback-state protocol. Set by
+	 *  the channel producer (the factory) — not inferred here, since the adapter
+	 *  only sees a `SessionClientSender` and cannot tell PCM from avatar/RTC. */
+	readonly supportsPlaybackStateProtocol: boolean;
 
-	constructor(sender: SessionClientSender) {
+	constructor(sender: SessionClientSender, supportsPlaybackStateProtocol = false) {
 		this.sender = sender;
+		this.supportsPlaybackStateProtocol = supportsPlaybackStateProtocol;
 	}
 
 	async start(): Promise<void> {
@@ -37,6 +42,17 @@ export class ClientSenderAdapter implements IClientChannel {
 
 	sendJsonToClient(message: Record<string, unknown>): void {
 		this.sender.sendJson(message);
+	}
+
+	/** Playback-state protocol: deliver JSON in order after the turn's audio.
+	 *  The underlying sender writes audio and JSON to the one client socket in
+	 *  call order, so this is `sendJsonToClient` after the audio sends. During a
+	 *  reconnect-buffering window audio is buffered for replay while JSON would
+	 *  send immediately — sending `audio.done` then would let it overtake the
+	 *  buffered audio, so it is dropped and the turn falls to the fallback. */
+	sendJsonAfterAudio(message: Record<string, unknown>): void {
+		if (this._buffering) return;
+		this.sendJsonToClient(message);
 	}
 
 	startBuffering(): void {
