@@ -226,6 +226,12 @@ export interface VoiceSessionConfig {
 	 *  signal. Default 1500; below the 500 ms floor is clamped up; invalid
 	 *  values fall back to the default. */
 	ttsPlaybackFallbackMarginMs?: number;
+	/** Playback-state protocol mode for this session's client surface.
+	 *  `'audio_done'` enables the `audio.done` / `playback.ended` handshake;
+	 *  `'disabled'` (default) keeps the estimate-only fallback. Effective
+	 *  participation additionally requires the client sender to support it.
+	 *  See dev_docs/framework/design-playback-state-protocol.md. */
+	playbackStateProtocol?: 'disabled' | 'audio_done';
 	/** Initial transcription mode for the session. Default `'agent'`.
 	 *  - `'agent'` (default): mic audio flows to `transport`; the agent
 	 *    responds. Existing behaviour.
