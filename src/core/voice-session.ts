@@ -244,6 +244,12 @@ export interface VoiceSessionConfig {
 	 *  participation additionally requires the client sender to support it.
 	 *  See dev_docs/framework/design-playback-state-protocol.md. */
 	playbackStateProtocol?: 'disabled' | 'audio_done';
+	/** Rollout switch for native-audio playback-end gating (the OpenAI native
+	 *  path). Default `false`. When `true`, and the session is on the native
+	 *  audio path with a generation-gated transport and `playbackStateProtocol`
+	 *  active, native turn completion is gated on playback end.
+	 *  See dev_docs/framework/design-playback-end-gating-openai-native.md. */
+	nativePlaybackGating?: boolean;
 	/** Initial transcription mode for the session. Default `'agent'`.
 	 *  - `'agent'` (default): mic audio flows to `transport`; the agent
 	 *    responds. Existing behaviour.
