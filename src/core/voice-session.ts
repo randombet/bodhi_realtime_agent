@@ -2717,25 +2717,65 @@ export class VoiceSession {
 	}
 
 	/**
+	 * The live playback-completion gate for this session — the external-TTS gate
+	 * when a `ttsProvider` is set, the native-audio gate when native playback-end
+	 * gating is active, else `null`. A session is TTS *or* native, never both.
+	 * See dev_docs/framework/design-playback-end-gating-openai-native.md §6.
+	 */
+	private liveGate(): {
+		pending: boolean;
+		timerArmed: boolean;
+		id: number;
+		armTimer: (delayMs: number, cb: () => void) => void;
+		clearTimer: () => void;
+	} | null {
+		if (this.ttsProvider) {
+			return {
+				pending: this._ttsSpeaking,
+				timerArmed: this._ttsPlaybackTimer !== undefined,
+				id: this._ttsCurrentRequestId,
+				armTimer: (ms, cb) => {
+					this._ttsPlaybackTimer = setTimeout(cb, ms);
+				},
+				clearTimer: () => this.ttsClearTimers(),
+			};
+		}
+		if (this.nativePlaybackGatingActive) {
+			return {
+				pending: this._nativePlaybackPending,
+				timerArmed: this._nativePlaybackTimer !== undefined,
+				id: this._nativePlaybackId,
+				armTimer: (ms, cb) => {
+					this._nativePlaybackTimer = setTimeout(cb, ms);
+				},
+				clearTimer: () => this.clearNativePlaybackTimer(),
+			};
+		}
+		return null;
+	}
+
+	/**
 	 * Client→server playback-state signal: the client's audio buffer for
 	 * `playbackId` has drained. Completes the turn (or defers it for an
-	 * in-progress potential barge-in via `finishOrDeferForVad`). Six guards
-	 * reject every signal that does not concern the live, post-synthesis turn.
-	 * See dev_docs/framework/design-playback-state-protocol.md.
+	 * in-progress potential barge-in via `finishOrDeferForVad`). The guards
+	 * reject every signal that does not concern the live, post-synthesis turn —
+	 * source-agnostic via `liveGate()` (external TTS or native audio).
+	 * See dev_docs/framework/design-playback-end-gating-openai-native.md §5.
 	 */
 	private handlePlaybackEnded(playbackId: number): void {
 		if (!this.playbackStateProtocolActive) return;
-		if (!this.ttsProvider) return;
-		// `_ttsPlaybackTimer` armed ⇒ tts.onDone has fired — rejects a premature
-		// signal that would otherwise complete the turn mid-synthesis.
-		if (this._ttsPlaybackTimer === undefined) return;
 		// A signal was already accepted and deferred this turn — ignore further
 		// ones so a client cannot keep re-arming the defer timeout.
 		if (this._ttsPlaybackEndedPending !== null) return;
-		// `_ttsSpeaking` false ⇒ the turn already finished or was interrupted.
-		if (!this._ttsSpeaking) return;
+		const gate = this.liveGate();
+		if (!gate) return;
+		// Timer armed ⇒ the audio-done point has passed — rejects a premature
+		// signal that would otherwise complete the turn mid-synthesis.
+		if (!gate.timerArmed) return;
+		// Not pending ⇒ the turn already finished or was interrupted.
+		if (!gate.pending) return;
 		// Stale: a signal for a turn superseded by an interrupt (bumps the id).
-		if (playbackId !== this._ttsCurrentRequestId) return;
+		if (playbackId !== gate.id) return;
 		this.finishOrDeferForVad('signal');
 	}
 

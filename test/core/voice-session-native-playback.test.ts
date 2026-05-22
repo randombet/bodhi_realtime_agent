@@ -192,6 +192,89 @@ describe('native playback-end gating — deferred completion', () => {
 		}
 	});
 
+	it('playback.ended completes a native turn before the fallback fires', async () => {
+		let session: VoiceSession | undefined;
+		try {
+			const s = setupNative();
+			session = s.session;
+			await session.start();
+
+			s.transport.onModelTurnStart?.();
+			s.transport.onAudioOutput?.(pcmBase64(1000));
+			s.transport.onTurnComplete?.(1);
+			expect(jsonOfType(s.sendJson, 'turn.end')).toHaveLength(0);
+
+			session.feedJsonFromClient({ type: 'playback.ended', playbackId: 1 });
+			expect(jsonOfType(s.sendJson, 'turn.end')).toHaveLength(1);
+
+			// Advancing past the fallback adds no second turn.end.
+			vi.advanceTimersByTime(5000);
+			expect(jsonOfType(s.sendJson, 'turn.end')).toHaveLength(1);
+		} finally {
+			await session?.close();
+		}
+	});
+
+	it('rejects a stale playback.ended (wrong playbackId)', async () => {
+		let session: VoiceSession | undefined;
+		try {
+			const s = setupNative();
+			session = s.session;
+			await session.start();
+
+			s.transport.onModelTurnStart?.();
+			s.transport.onAudioOutput?.(pcmBase64(1000));
+			s.transport.onTurnComplete?.(1);
+
+			session.feedJsonFromClient({ type: 'playback.ended', playbackId: 99 });
+			expect(jsonOfType(s.sendJson, 'turn.end')).toHaveLength(0); // ignored
+
+			session.feedJsonFromClient({ type: 'playback.ended', playbackId: 1 });
+			expect(jsonOfType(s.sendJson, 'turn.end')).toHaveLength(1); // honoured
+		} finally {
+			await session?.close();
+		}
+	});
+
+	it('rejects a premature playback.ended (before the gate is armed)', async () => {
+		let session: VoiceSession | undefined;
+		try {
+			const s = setupNative();
+			session = s.session;
+			await session.start();
+
+			s.transport.onModelTurnStart?.();
+			s.transport.onAudioOutput?.(pcmBase64(1000));
+			// playback.ended before onTurnComplete arms the gate.
+			session.feedJsonFromClient({ type: 'playback.ended', playbackId: 1 });
+
+			s.transport.onTurnComplete?.(1);
+			// The premature signal was dropped — completion still pends.
+			expect(jsonOfType(s.sendJson, 'turn.end')).toHaveLength(0);
+		} finally {
+			await session?.close();
+		}
+	});
+
+	it('a duplicate / post-completion playback.ended is idempotent', async () => {
+		let session: VoiceSession | undefined;
+		try {
+			const s = setupNative();
+			session = s.session;
+			await session.start();
+
+			s.transport.onModelTurnStart?.();
+			s.transport.onAudioOutput?.(pcmBase64(1000));
+			s.transport.onTurnComplete?.(1);
+
+			session.feedJsonFromClient({ type: 'playback.ended', playbackId: 1 });
+			session.feedJsonFromClient({ type: 'playback.ended', playbackId: 1 });
+			expect(jsonOfType(s.sendJson, 'turn.end')).toHaveLength(1);
+		} finally {
+			await session?.close();
+		}
+	});
+
 	it('a barge-in during the playback-pending window finalizes exactly once', async () => {
 		let session: VoiceSession | undefined;
 		try {
