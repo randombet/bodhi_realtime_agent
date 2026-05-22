@@ -100,6 +100,57 @@ class SessionMutationQueue {
 }
 
 /**
+ * Tuning for the client-side energy-VAD barge-in — interrupting the assistant
+ * when the user starts speaking over it. Defaults suit a headphones setup; on a
+ * speakers setup, where the assistant's own TTS echoes back into the mic, the
+ * raised in-TTS thresholds keep the assistant from interrupting itself. Set
+ * `bargeInEnabled: false` to drop the client barge-in entirely and rely on the
+ * transport's server-side VAD.
+ */
+export interface ClientAudioVadConfig {
+	/** Enable the client-side energy-VAD barge-in. Default `true`. */
+	bargeInEnabled?: boolean;
+	/** Minimum ms of continuously-voiced audio before a barge-in fires —
+	 *  filters transient echo / noise blips. Default `200`. */
+	bargeInConfirmMs?: number;
+	/** While the assistant's TTS is playing, a barge-in additionally requires
+	 *  the frame's peak amplitude to reach this raised threshold — residual TTS
+	 *  echo sits below a genuine close-mic barge-in. Default `2000`. */
+	bargeInTtsPeakThreshold?: number;
+	/** Companion to `bargeInTtsPeakThreshold` for average amplitude. Default `450`. */
+	bargeInTtsAvgAbsThreshold?: number;
+}
+
+/** Resolved (defaults-applied) form of `ClientAudioVadConfig`. */
+export type ResolvedClientAudioVadConfig = Required<ClientAudioVadConfig>;
+
+/**
+ * Pure decision: while the assistant's TTS is playing, should the in-progress
+ * client speech segment count as a real barge-in? Filters residual TTS echo —
+ * a barge-in must be sustained past the confirmation window AND loud enough
+ * (peak and average) to clear the echo floor. Unit-tested in isolation.
+ */
+export function clientVadBargeInAllowed(
+	cfg: ResolvedClientAudioVadConfig,
+	speechElapsedMs: number,
+	maxAbs: number,
+	avgAbs: number,
+): boolean {
+	if (!cfg.bargeInEnabled) return false;
+	if (speechElapsedMs < cfg.bargeInConfirmMs) return false;
+	if (maxAbs < cfg.bargeInTtsPeakThreshold) return false;
+	if (avgAbs < cfg.bargeInTtsAvgAbsThreshold) return false;
+	return true;
+}
+
+const DEFAULT_CLIENT_AUDIO_VAD: ResolvedClientAudioVadConfig = {
+	bargeInEnabled: true,
+	bargeInConfirmMs: 200,
+	bargeInTtsPeakThreshold: 2000,
+	bargeInTtsAvgAbsThreshold: 450,
+};
+
+/**
  * Configuration for creating a VoiceSession.
  */
 export interface VoiceSessionConfig {
@@ -167,6 +218,9 @@ export interface VoiceSessionConfig {
 	 *  client genuinely sends a different rate and you've taken responsibility
 	 *  for the resample upstream. */
 	clientAudioInputRate?: number;
+	/** Tuning for the client-side energy-VAD barge-in. See `ClientAudioVadConfig`.
+	 *  Omitted fields fall back to defaults suited to a headphones setup. */
+	clientAudioVad?: ClientAudioVadConfig;
 	/** Initial transcription mode for the session. Default `'agent'`.
 	 *  - `'agent'` (default): mic audio flows to `transport`; the agent
 	 *    responds. Existing behaviour.
@@ -376,6 +430,11 @@ export class VoiceSession {
 	private audioVadSpeechActive = false;
 	private audioVadSpeechStartMs = 0;
 	private audioVadLastVoiceMs = 0;
+	/** True once a barge-in has fired for the current client speech segment —
+	 *  the barge-in fires at most once per segment. Reset when a new segment begins. */
+	private audioVadBargeInFired = false;
+	/** Resolved client-VAD barge-in tuning (config + defaults). */
+	private readonly clientVad: ResolvedClientAudioVadConfig;
 	private lastClientSpeechCompletedMs = 0;
 	private lastClientSpeechDurationMs = 0;
 	private lastGeminiRecognitionLoggedForSpeechEndMs = 0;
@@ -571,6 +630,9 @@ export class VoiceSession {
 		// matches what the framework tells clients to send (line ~1994 in this file).
 		this.clientAudioInputRate =
 			config.clientAudioInputRate ?? this.transport.audioFormat.inputSampleRate;
+
+		// Resolve client-VAD barge-in tuning over the defaults.
+		this.clientVad = { ...DEFAULT_CLIENT_AUDIO_VAD, ...config.clientAudioVad };
 
 		// Intercept transport.sendToolResult so BOTH legacy and actor-mode
 		// dispatch paths go through the transcription-mode guard. The actor
@@ -1582,13 +1644,14 @@ export class VoiceSession {
 			if (!this.audioVadSpeechActive) {
 				this.audioVadSpeechActive = true;
 				this.audioVadSpeechStartMs = now;
+				this.audioVadBargeInFired = false;
 				this.lastInputTranscriptionLogText = '';
 				this.log(
 					`[Latency] User voice input started (client audio VAD; peak=${maxAbs}; avgAbs=${Math.round(avgAbs)})`,
 				);
-				this.handleClientTtsBargeIn();
 			}
 			this.audioVadLastVoiceMs = now;
+			this.maybeClientTtsBargeIn(now, maxAbs, avgAbs);
 			return;
 		}
 
@@ -1599,6 +1662,26 @@ export class VoiceSession {
 		) {
 			this.completeClientAudioVad(now, 'silence');
 		}
+	}
+
+	/**
+	 * Fire a client-VAD barge-in for the in-progress speech segment if it is a
+	 * genuine barge-in — sustained past the confirmation window and loud enough
+	 * to clear the TTS-echo floor (see `clientVadBargeInAllowed`). Fires at most
+	 * once per segment. Evaluated on every voiced frame so a quiet onset still
+	 * barges in once it gets loud. Only meaningful while the assistant's TTS is
+	 * playing; otherwise there is no turn to interrupt.
+	 */
+	private maybeClientTtsBargeIn(now: number, maxAbs: number, avgAbs: number): void {
+		if (this.audioVadBargeInFired) return;
+		if (!this.ttsProvider || !this._ttsSpeaking) return;
+		if (
+			!clientVadBargeInAllowed(this.clientVad, now - this.audioVadSpeechStartMs, maxAbs, avgAbs)
+		) {
+			return;
+		}
+		this.audioVadBargeInFired = true;
+		this.handleClientTtsBargeIn();
 	}
 
 	private completeClientAudioVad(now: number, reason: string): 'completed' | 'ignored' | 'none' {

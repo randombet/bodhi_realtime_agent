@@ -2,7 +2,11 @@
 
 import type { LanguageModelV1 } from 'ai';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { VoiceSession } from '../../src/core/voice-session.js';
+import {
+	type ResolvedClientAudioVadConfig,
+	VoiceSession,
+	clientVadBargeInAllowed,
+} from '../../src/core/voice-session.js';
 import type { MainAgent } from '../../src/types/agent.js';
 import type {
 	AudioFormatSpec,
@@ -292,6 +296,9 @@ describe('VoiceSession TTS completion', () => {
 			orchestrationMode: 'actor',
 			ttsProvider: provider,
 			clientSender: { sendAudio, sendJson },
+			// This test exercises the barge-in/Gemini-interrupt dedup, not the
+			// confirmation window — opt out of the delay so a single frame fires.
+			clientAudioVad: { bargeInConfirmMs: 0 },
 		});
 
 		try {
@@ -464,5 +471,46 @@ describe('server-turn finalization dedup', () => {
 		finalize(5); // handleInterrupted finalizes
 		finalize(5); // trailing turnComplete re-enters for the same server turn
 		expect(finalizations).toBe(1);
+	});
+});
+
+describe('client-VAD echo-aware barge-in (clientVadBargeInAllowed)', () => {
+	// Mirrors the defaults VoiceSession resolves for a headphones-tuned setup.
+	// The raised in-TTS thresholds are what keep the assistant's own speaker
+	// echo from tripping a self-interrupt.
+	const cfg: ResolvedClientAudioVadConfig = {
+		bargeInEnabled: true,
+		bargeInConfirmMs: 200,
+		bargeInTtsPeakThreshold: 2000,
+		bargeInTtsAvgAbsThreshold: 450,
+	};
+
+	it('rejects a loud blip shorter than the confirmation window', () => {
+		// Plenty loud, but only 120 ms of voiced audio — a transient echo/click.
+		expect(clientVadBargeInAllowed(cfg, 120, 9000, 2000)).toBe(false);
+	});
+
+	it('rejects sustained but quiet audio (residual TTS echo)', () => {
+		// Past the confirm window, but echo-level energy — mirrors the real
+		// cartesia-tts-demo turn_4 onset (peak=1861, avgAbs=333).
+		expect(clientVadBargeInAllowed(cfg, 400, 1861, 333)).toBe(false);
+	});
+
+	it('rejects when peak clears the floor but average does not', () => {
+		expect(clientVadBargeInAllowed(cfg, 400, 5000, 300)).toBe(false);
+	});
+
+	it('accepts sustained, loud, close-mic speech', () => {
+		// Mirrors the real cartesia-tts-demo turn_2 barge-in.
+		expect(clientVadBargeInAllowed(cfg, 336, 10242, 2701)).toBe(true);
+	});
+
+	it('accepts exactly at the confirmation-window and threshold boundaries', () => {
+		expect(clientVadBargeInAllowed(cfg, 200, 2000, 450)).toBe(true);
+	});
+
+	it('rejects everything when the client barge-in is disabled', () => {
+		const disabled: ResolvedClientAudioVadConfig = { ...cfg, bargeInEnabled: false };
+		expect(clientVadBargeInAllowed(disabled, 5000, 30000, 9000)).toBe(false);
 	});
 });
