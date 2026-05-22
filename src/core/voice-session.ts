@@ -2844,6 +2844,12 @@ export class VoiceSession {
 	private handleTextInput(text: string): void {
 		if (!this.sessionManager.isActive || !text.trim()) return;
 
+		// Direct user input during a native playback-pending window is a
+		// barge-in — interrupt the pending turn before sending the new content.
+		if (this._nativePlaybackPending) {
+			this.finalizeTurn(this._nativePlaybackTurn, { interrupted: true });
+		}
+
 		const trimmed = text.trim();
 
 		// Relay to interactive subagent if one is waiting for input.
@@ -3050,6 +3056,11 @@ export class VoiceSession {
 	/** Lower-level: inject an arbitrary user message. */
 	injectTranscript(text: string): void {
 		if (!text) return;
+		// Direct user input during a native playback-pending window is a
+		// barge-in — interrupt the pending turn before sending the new content.
+		if (this._nativePlaybackPending) {
+			this.finalizeTurn(this._nativePlaybackTurn, { interrupted: true });
+		}
 		this.transport.sendContent([{ role: 'user', text }], /* turnComplete */ true);
 		// Mirror the existing text-input path: persist into ConversationContext
 		// so the user turn shows up in history / memory / subagent context.
