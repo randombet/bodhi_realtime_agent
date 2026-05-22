@@ -58,6 +58,8 @@ import { MultiplexConversationHistoryStore } from './multiplex-conversation-hist
 import { SessionManager } from './session-manager.js';
 import { ToolCallRouter } from './tool-call-router.js';
 import { TranscriptManager } from './transcript-manager.js';
+import { Turn } from './turn.js';
+import type { TurnMatch, TurnSignalPurpose } from './turn.js';
 import { computeCacheHitRatio, deriveProviderItemId, deriveUsageSource } from './usage-helpers.js';
 
 /**
@@ -280,6 +282,14 @@ export class VoiceSession {
 	/** Latest `processKnowledgeBase` result for the active main agent (prompt slice + optional search tool metadata). */
 	private processedKnowledgeBase: ProcessedKnowledgeBase | null = null;
 	private turnId = 0;
+	/** Turn-lifecycle entity — the most recent framework turn (active or
+	 *  finalized). See dev_docs/framework/design-turn-lifecycle-refactor.md.
+	 *  Maintained in parallel with the legacy fields during the refactor;
+	 *  not yet read on the hot path. */
+	private currentTurn: Turn | null = null;
+	/** The turn before `currentTurn` — kept so late id-bearing signals for a
+	 *  just-finalized turn can still correlate after the next turn is born. */
+	private previousTurn: Turn | null = null;
 	/** P4: turn id allocated eagerly for the *current* model turn so usage
 	 *  events emitted before turn.end carry the right id. Cleared after
 	 *  turn.end publishes. See allocateCurrentModelTurn(). */
@@ -645,7 +655,10 @@ export class VoiceSession {
 		};
 		this.transport.onTurnComplete = (serverTurnId) => this.handleTurnComplete(serverTurnId);
 		this.transport.onInterrupted = (serverTurnId) => this.handleInterrupted(serverTurnId);
-		this.transport.onOutputTranscription = (text) => this.transcriptManager.handleOutput(text);
+		this.transport.onOutputTranscription = (text) => {
+			this.ensureCurrentTurn();
+			this.transcriptManager.handleOutput(text);
+		};
 		this.transport.onSessionReady = (sessionId) => this.handleSetupComplete(sessionId);
 		this.transport.onError = (error) => this.handleTransportError(error);
 		this.transport.onClose = (code, reason) => this.handleTransportClose(code, reason);
@@ -762,6 +775,7 @@ export class VoiceSession {
 			} catch (e) {
 				this.log(`pre-attached onModelTurnStart threw: ${(e as Error).message}`);
 			}
+			this.ensureCurrentTurn();
 			this.allocateCurrentModelTurn();
 			this.logGeminiUserTurnRecognition('model/tool processing started');
 			if (this.sttProvider && !this._commitFiredForTurn) {
@@ -1663,6 +1677,7 @@ export class VoiceSession {
 		// mode even if a quiesce race occurs.
 		if (this.internalMode !== 'agent') return;
 
+		this.ensureCurrentTurn();
 		this.signalAudioStarted();
 		const raw = Buffer.from(data, 'base64');
 		// Telephony mode: transport emits G.711 μ-law on the wire; client
@@ -1711,6 +1726,7 @@ export class VoiceSession {
 
 		// Wire LLM text output → TTS provider + transcript
 		this.transport.onTextOutput = (text) => {
+			this.ensureCurrentTurn();
 			this.transcriptManager.handleOutput(text);
 			// Phase 3 dictation guard: when not in agent mode, drop model text
 			// before it reaches the TTS provider. Belt-and-braces backup for
@@ -1880,6 +1896,11 @@ export class VoiceSession {
 		// Capture the server-turn id so handleTurnCompleteInternal can dedup
 		// finalization across the early generationComplete / late turnComplete edges.
 		if (serverTurnId !== undefined) this._pendingServerTurnId = serverTurnId;
+		// Parallel Turn graph (inert during phase 2): a completion that resolves
+		// to `new` is a no-model-output turn — birth it so the graph stays faithful.
+		if (this.resolveTurn(serverTurnId, 'completion').kind === 'new') {
+			this.ensureCurrentTurn(serverTurnId);
+		}
 
 		// TTS turn gating: when TTS is active, defer turn completion until TTS finishes
 		if (this.ttsProvider) {
@@ -1917,6 +1938,10 @@ export class VoiceSession {
 			return;
 		}
 		if (serverTurnId !== null) this._lastFinalizedServerTurnId = serverTurnId;
+
+		// Parallel Turn graph (inert during phase 2): mark the entity finalized
+		// so the graph transitions faithfully alongside the legacy fields.
+		this.currentTurn?.finalize();
 
 		// ORDERING: STT commit + cleanup BEFORE turnId increment.
 		// This ensures commit(turnId) uses the turn being completed, and
@@ -2059,6 +2084,12 @@ export class VoiceSession {
 			return;
 		}
 		this.log('Interrupted by user');
+		// Parallel Turn graph (inert during phase 2): an interrupt before any
+		// model output has no turn yet — birth one, then finalize.
+		if (this.resolveTurn(serverTurnId, 'interrupt').kind === 'new') {
+			this.ensureCurrentTurn(serverTurnId);
+		}
+		this.currentTurn?.finalize();
 		this._turnWasInterrupted = true;
 		this.sttProvider?.handleInterrupted();
 		// Cancel TTS and invalidate in-flight audio. Per design hazard 2,
@@ -2177,6 +2208,78 @@ export class VoiceSession {
 		if (this.currentModelTurnId !== null) return;
 		this.currentModelTurnId = `turn_${this.turnId + 1}`;
 		this.currentModelTurnAgentName = this.agentRouter.activeAgent.name;
+	}
+
+	/**
+	 * Birth or return the current framework `Turn`. Called from every
+	 * model-output path; the first one to fire births and binds the turn, the
+	 * rest get the existing `currentTurn`. A `null` return means the signal is
+	 * trailing content of an already-finalized turn — the caller drops it.
+	 *
+	 * `explicitServerId` (a transport callback's own id) wins over the live
+	 * `getActiveServerTurnId()` accessor, which may have moved on.
+	 *
+	 * See dev_docs/framework/design-turn-lifecycle-refactor.md § Turn birth.
+	 */
+	private ensureCurrentTurn(explicitServerId?: number): Turn | null {
+		const cur = this.currentTurn;
+		const serverId = explicitServerId ?? this.transport.getActiveServerTurnId?.();
+
+		if (cur && !cur.isFinalized) {
+			if (serverId !== undefined) cur.bindServerTurnId(serverId);
+			return cur;
+		}
+
+		// currentTurn is finalized (or null): trailing content of the
+		// just-finalized turn, or a genuinely new server turn?
+		if (cur?.isFinalized && serverId !== undefined && cur.ownsServerTurn(serverId)) {
+			return null;
+		}
+
+		this.previousTurn = cur;
+		this.currentTurn = new Turn(`turn_${this.turnId + 1}`, this.agentRouter.activeAgent.name);
+		if (serverId !== undefined) this.currentTurn.bindServerTurnId(serverId);
+		return this.currentTurn;
+	}
+
+	/**
+	 * Map a transport completion/interrupt/usage signal to the `Turn` it
+	 * concerns — `match` (an existing turn), `new` (newer than any known, the
+	 * caller may birth one), or `stale` (already gone, ignore).
+	 *
+	 * See dev_docs/framework/design-turn-lifecycle-refactor.md
+	 * § Transport-signal correlation.
+	 */
+	private resolveTurn(serverTurnId: number | undefined, purpose: TurnSignalPurpose): TurnMatch {
+		const cur = this.currentTurn;
+		// Rule 1 — no turn yet.
+		if (cur === null) return { kind: 'new' };
+		// Rule 2 — id-less transports (OpenAI Realtime, mocks).
+		if (serverTurnId === undefined) {
+			if (purpose === 'usage') return { kind: 'match', turn: cur };
+			if (!cur.isFinalized) return { kind: 'match', turn: cur };
+			// A lifecycle signal that survives after the current turn finalized is
+			// the first sign of a new no-model-output response (id-less adapters
+			// must suppress stale cancelled callbacks).
+			return { kind: 'new' };
+		}
+		// Rule 3 — the current turn owns this id.
+		if (cur.ownsServerTurn(serverTurnId)) return { kind: 'match', turn: cur };
+		// Rule 4 — a late signal for the just-finalized turn.
+		if (this.previousTurn?.ownsServerTurn(serverTurnId)) {
+			return { kind: 'match', turn: this.previousTurn };
+		}
+		// Rule 5 — active turn that owns no id yet: bind and claim it.
+		if (!cur.isFinalized && !cur.hasServerTurnId) {
+			cur.bindServerTurnId(serverTurnId);
+			return { kind: 'match', turn: cur };
+		}
+		// Rule 6 — finalized turn that owns no id: a no-model-output turn, so an
+		// incoming id-bearing signal is the first sign of a newer turn.
+		if (cur.isFinalized && !cur.hasServerTurnId) return { kind: 'new' };
+		// Rules 7/8 — newer than any known id → new; otherwise stale.
+		const latest = cur.latestServerTurnId;
+		return latest !== null && serverTurnId > latest ? { kind: 'new' } : { kind: 'stale' };
 	}
 
 	private handleResumptionUpdate(handle: string, resumable: boolean): void {
