@@ -1054,6 +1054,105 @@ describe('VoiceSession', () => {
 	});
 
 	// =========================================================================
+	// Turn lifecycle (Turn entity — idempotent finalization)
+	// =========================================================================
+
+	describe('Turn lifecycle', () => {
+		it('a repeated interrupt for the same turn publishes turn.interrupted exactly once', async () => {
+			session = new VoiceSession({
+				sessionId: 'sess_tl1',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9940,
+				model: mockModel,
+			});
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			let interruptedCount = 0;
+			session.eventBus.subscribe('turn.interrupted', () => {
+				interruptedCount++;
+			});
+
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+			fire({ serverContent: { outputTranscription: { text: 'Telling you about—' } } });
+			// One physical barge-in observed twice (e.g. server VAD then a mirror).
+			fire({ serverContent: { interrupted: true } });
+			fire({ serverContent: { interrupted: true } });
+			await new Promise((r) => setTimeout(r, 50));
+
+			expect(interruptedCount).toBe(1);
+		});
+
+		it('interrupt then the trailing turnComplete: one turn.interrupted + one turn.end, shared id', async () => {
+			session = new VoiceSession({
+				sessionId: 'sess_tl2',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9941,
+				model: mockModel,
+			});
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const interrupted: string[] = [];
+			const ended: string[] = [];
+			session.eventBus.subscribe('turn.interrupted', (e) => {
+				interrupted.push((e as { turnId: string }).turnId);
+			});
+			session.eventBus.subscribe('turn.end', (e) => {
+				ended.push((e as { turnId: string }).turnId);
+			});
+
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+			fire({ serverContent: { outputTranscription: { text: 'Half a sen—' } } });
+			fire({ serverContent: { interrupted: true } });
+			// The server's trailing turnComplete for the same server turn — a no-op.
+			fire({ serverContent: { turnComplete: true } });
+			await new Promise((r) => setTimeout(r, 50));
+
+			expect(interrupted).toHaveLength(1);
+			expect(ended).toHaveLength(1);
+			expect(interrupted[0]).toBe(ended[0]);
+		});
+
+		it('close() mid-turn finalizes the active turn with exactly one turn.end', async () => {
+			session = new VoiceSession({
+				sessionId: 'sess_tl3',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9942,
+				model: mockModel,
+			});
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			let endCount = 0;
+			session.eventBus.subscribe('turn.end', () => {
+				endCount++;
+			});
+
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+			fire({ serverContent: { outputTranscription: { text: 'mid turn' } } });
+			await new Promise((r) => setTimeout(r, 20));
+
+			await session.close();
+			expect(endCount).toBe(1);
+		});
+	});
+
+	// =========================================================================
 	// Tool call error handling tests
 	// =========================================================================
 
