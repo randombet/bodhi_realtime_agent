@@ -269,6 +269,10 @@ describe('VoiceSession TTS completion', () => {
 
 			provider.onDone?.(1);
 
+			// onDone arms the fallback timer (never completes synchronously for
+			// an audio-bearing turn); the turn completes once it fires.
+			vi.advanceTimersByTime(1600);
+
 			const turnEndsAfterDone = sendJson.mock.calls.filter(([msg]) => msg?.type === 'turn.end');
 			expect(turnEndsAfterDone).toHaveLength(1);
 			expect(session.conversationContext.items.at(-1)?.content).toBe(
@@ -559,8 +563,8 @@ describe('TTS playback-aware turn completion', () => {
 			// the turn must NOT be complete yet.
 			expect(s.sendJson.mock.calls.filter(([m]) => m?.type === 'turn.end')).toHaveLength(0);
 
-			// Advance past the estimated playback end (3000 ms audio + 300 ms slack).
-			vi.advanceTimersByTime(3400);
+			// Advance past the estimated end + fallback margin (3000 + 1500 ms).
+			vi.advanceTimersByTime(4600);
 			expect(s.sendJson.mock.calls.filter(([m]) => m?.type === 'turn.end')).toHaveLength(1);
 		} finally {
 			await session?.close();
@@ -626,7 +630,7 @@ describe('TTS playback-aware turn completion', () => {
 		}
 	});
 
-	it('completes immediately when the audio has already drained by onDone', async () => {
+	it('never completes synchronously in onDone, even when the estimate is already past', async () => {
 		vi.useFakeTimers();
 		let session: VoiceSession | undefined;
 		try {
@@ -638,11 +642,15 @@ describe('TTS playback-aware turn completion', () => {
 			s.transport.onTextDone?.();
 			s.transport.onTurnComplete?.(1);
 			s.provider.onAudio?.(Buffer.from('aud').toString('base64'), 100, 1);
-			// Playback (100 ms audio + 300 ms slack) is long over by the time
-			// synthesis reports done — completion must not be deferred.
+			// Synthesis ran slower than realtime — the 100 ms of audio is long
+			// drained by the time onDone fires. An audio-bearing turn must still
+			// NOT complete synchronously; the fallback timer always gets at
+			// least the margin so a healthy client can answer.
 			vi.advanceTimersByTime(600);
 			s.provider.onDone?.(1);
+			expect(s.sendJson.mock.calls.filter(([m]) => m?.type === 'turn.end')).toHaveLength(0);
 
+			vi.advanceTimersByTime(1600);
 			expect(s.sendJson.mock.calls.filter(([m]) => m?.type === 'turn.end')).toHaveLength(1);
 		} finally {
 			await session?.close();

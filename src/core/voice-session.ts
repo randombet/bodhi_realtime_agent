@@ -221,6 +221,11 @@ export interface VoiceSessionConfig {
 	/** Tuning for the client-side energy-VAD barge-in. See `ClientAudioVadConfig`.
 	 *  Omitted fields fall back to defaults suited to a headphones setup. */
 	clientAudioVad?: ClientAudioVadConfig;
+	/** Fallback margin (ms) added to the estimated client playback end before
+	 *  the server force-completes a TTS turn that received no client playback
+	 *  signal. Default 1500; below the 500 ms floor is clamped up; invalid
+	 *  values fall back to the default. */
+	ttsPlaybackFallbackMarginMs?: number;
 	/** Initial transcription mode for the session. Default `'agent'`.
 	 *  - `'agent'` (default): mic audio flows to `transport`; the agent
 	 *    responds. Existing behaviour.
@@ -352,6 +357,9 @@ export class VoiceSession {
 	 *  (default: transport.audioFormat.inputSampleRate — the rate the
 	 *  framework instructs clients to send). */
 	private clientAudioInputRate = 16000;
+	/** Resolved TTS fallback-completion margin (validated config + defaults).
+	 *  Assigned in the constructor. */
+	private ttsPlaybackFallbackMarginMs!: number;
 	/** Reference to the transport's original sendToolResult, captured at
 	 *  construction. flushPendingToolResults calls through this to bypass
 	 *  the guard wrapper installed on the transport. */
@@ -452,10 +460,11 @@ export class VoiceSession {
 	private static readonly AUDIO_VAD_MIN_SPEECH_MS = 120;
 	private static readonly AUDIO_VAD_PEAK_THRESHOLD = 1200;
 	private static readonly AUDIO_VAD_AVG_ABS_THRESHOLD = 220;
-	/** Slack added to the estimated TTS playback end — covers the client's
-	 *  small scheduling buffer and send→play latency. Erring slightly long
-	 *  keeps the barge-in window covering the true audio tail. */
-	private static readonly TTS_PLAYBACK_SLACK_MS = 300;
+	/** Default and floor (ms) for the TTS fallback-completion margin — estimate
+	 *  padding before the server force-completes a turn with no playback signal.
+	 *  See dev_docs/framework/design-playback-state-protocol.md. */
+	private static readonly TTS_PLAYBACK_FALLBACK_MARGIN_DEFAULT_MS = 1500;
+	private static readonly TTS_PLAYBACK_FALLBACK_MARGIN_FLOOR_MS = 500;
 
 	constructor(config: VoiceSessionConfig) {
 		this.config = config;
@@ -644,6 +653,11 @@ export class VoiceSession {
 
 		// Resolve client-VAD barge-in tuning over the defaults.
 		this.clientVad = { ...DEFAULT_CLIENT_AUDIO_VAD, ...config.clientAudioVad };
+
+		// Resolve the TTS fallback-completion margin: validate, clamp to the floor.
+		this.ttsPlaybackFallbackMarginMs = this.resolveTtsPlaybackFallbackMarginMs(
+			config.ttsPlaybackFallbackMarginMs,
+		);
 
 		// Intercept transport.sendToolResult so BOTH legacy and actor-mode
 		// dispatch paths go through the transcription-mode guard. The actor
@@ -1883,16 +1897,18 @@ export class VoiceSession {
 				});
 			}
 			// Synthesis is done, but the client is still draining the buffered
-			// audio — it plays in realtime while synthesis ran far faster. Keep
-			// the turn interruptible (`_ttsSpeaking` stays true) until the
-			// estimated playback end so a barge-in during the tail still works.
-			const estimatedEndMs =
-				this._ttsFirstAudioMs + this._ttsAudioDurationMs + VoiceSession.TTS_PLAYBACK_SLACK_MS;
-			const remainingMs = estimatedEndMs - Date.now();
-			if (this._ttsFirstAudioMs === 0 || remainingMs <= 0) {
+			// audio — it plays in realtime while synthesis ran far faster. A
+			// no-audio turn completes now; an audio-bearing turn always arms the
+			// fallback timer (never completes synchronously, even when synthesis
+			// ran slower than realtime), so a barge-in during the tail works and
+			// a healthy client has room to answer with a playback signal.
+			if (this._ttsFirstAudioMs === 0) {
 				this.completeTtsPlayback();
 				return;
 			}
+			const estimatedEndMs = this._ttsFirstAudioMs + this._ttsAudioDurationMs;
+			const remainingMs =
+				Math.max(estimatedEndMs - Date.now(), 0) + this.ttsPlaybackFallbackMarginMs;
 			this._ttsPlaybackTimer = setTimeout(() => {
 				this._ttsPlaybackTimer = undefined;
 				this.completeTtsPlayback();
@@ -1935,6 +1951,20 @@ export class VoiceSession {
 		// Disable native audio output and output transcription in TTS mode
 		this.transport.onAudioOutput = undefined;
 		this.transport.onOutputTranscription = undefined;
+	}
+
+	/** Validate a configured TTS fallback margin: invalid (negative, NaN,
+	 *  non-finite) → default with a warning; valid but below the floor →
+	 *  clamped up to the floor. */
+	private resolveTtsPlaybackFallbackMarginMs(raw: number | undefined): number {
+		if (raw === undefined) return VoiceSession.TTS_PLAYBACK_FALLBACK_MARGIN_DEFAULT_MS;
+		if (!Number.isFinite(raw) || raw < 0) {
+			this.log(
+				`Invalid ttsPlaybackFallbackMarginMs=${raw}; using default ${VoiceSession.TTS_PLAYBACK_FALLBACK_MARGIN_DEFAULT_MS}ms`,
+			);
+			return VoiceSession.TTS_PLAYBACK_FALLBACK_MARGIN_DEFAULT_MS;
+		}
+		return Math.max(raw, VoiceSession.TTS_PLAYBACK_FALLBACK_MARGIN_FLOOR_MS);
 	}
 
 	/**
