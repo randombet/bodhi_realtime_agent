@@ -301,6 +301,41 @@ describe('OpenAIRealtimeTransport', () => {
 		});
 	});
 
+	describe('cancelled response handling', () => {
+		it('cancelled response.done suppresses onTurnComplete and tool dispatch', () => {
+			const turnComplete = vi.fn();
+			const toolCalls: unknown[] = [];
+			transport.onTurnComplete = turnComplete;
+			transport.onToolCall = (c) => toolCalls.push(...c);
+
+			mockRt.emit('response.created', {});
+			// A partial tool call buffered during the about-to-be-cancelled response.
+			mockRt.emit('response.output_item.done', {
+				item: { id: 'i1', type: 'function_call', call_id: 'c1', name: 't', arguments: '{}' },
+			});
+			mockRt.emit('response.done', { response: { id: 'r1', status: 'cancelled' } });
+
+			expect(turnComplete).not.toHaveBeenCalled();
+			expect(toolCalls).toHaveLength(0);
+		});
+
+		it('a completed response.done still fires onTurnComplete and dispatches tool calls', () => {
+			const turnComplete = vi.fn();
+			const toolCalls: unknown[] = [];
+			transport.onTurnComplete = turnComplete;
+			transport.onToolCall = (c) => toolCalls.push(...c);
+
+			mockRt.emit('response.created', {});
+			mockRt.emit('response.output_item.done', {
+				item: { id: 'i2', type: 'function_call', call_id: 'c2', name: 't', arguments: '{}' },
+			});
+			mockRt.emit('response.done', { response: { id: 'r2', status: 'completed' } });
+
+			expect(turnComplete).toHaveBeenCalledTimes(1);
+			expect(toolCalls).toHaveLength(1);
+		});
+	});
+
 	describe('sendToolResult', () => {
 		it('sends conversation.item.create and response.create for immediate', () => {
 			transport.sendToolResult({
