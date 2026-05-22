@@ -64,6 +64,13 @@ function pcmBase64(ms: number): string {
 	return Buffer.alloc(Math.round(ms * 48)).toString('base64');
 }
 
+/** A 30 ms client mic frame (16 kHz PCM16) at the given amplitude. */
+function micFrame(amplitude: number): Buffer {
+	const f = Buffer.alloc(480 * 2);
+	for (let i = 0; i < f.length; i += 2) f.writeInt16LE(amplitude, i);
+	return f;
+}
+
 type JsonCall = [Record<string, unknown>];
 
 function jsonOfType(sendJson: ReturnType<typeof vi.fn>, type: string): Record<string, unknown>[] {
@@ -72,7 +79,10 @@ function jsonOfType(sendJson: ReturnType<typeof vi.fn>, type: string): Record<st
 		.map((c: JsonCall) => c[0]);
 }
 
-function setupNative(opts?: { nativePlaybackGating?: boolean }) {
+function setupNative(opts?: {
+	nativePlaybackGating?: boolean;
+	clientAudioVad?: { bargeInConfirmMs?: number };
+}) {
 	const transport = createMockTransport();
 	const sendAudio = vi.fn();
 	const sendJson = vi.fn();
@@ -88,6 +98,7 @@ function setupNative(opts?: { nativePlaybackGating?: boolean }) {
 		clientSender: { sendAudio, sendJson, supportsPlaybackStateProtocol: true },
 		playbackStateProtocol: 'audio_done',
 		nativePlaybackGating: opts?.nativePlaybackGating ?? true,
+		...(opts?.clientAudioVad ? { clientAudioVad: opts.clientAudioVad } : {}),
 	});
 	return { transport, sendJson, session };
 }
@@ -270,6 +281,52 @@ describe('native playback-end gating — deferred completion', () => {
 			session.feedJsonFromClient({ type: 'playback.ended', playbackId: 1 });
 			session.feedJsonFromClient({ type: 'playback.ended', playbackId: 1 });
 			expect(jsonOfType(s.sendJson, 'turn.end')).toHaveLength(1);
+		} finally {
+			await session?.close();
+		}
+	});
+
+	it('a client-VAD barge-in during the native playback-pending window interrupts', async () => {
+		let session: VoiceSession | undefined;
+		try {
+			const s = setupNative({ clientAudioVad: { bargeInConfirmMs: 0 } });
+			session = s.session;
+			await session.start();
+			s.transport.onSessionReady?.('mock_session'); // → session ACTIVE
+
+			s.transport.onModelTurnStart?.();
+			s.transport.onAudioOutput?.(pcmBase64(1000));
+			s.transport.onTurnComplete?.(1);
+			expect(jsonOfType(s.sendJson, 'audio.done')).toHaveLength(1);
+
+			// User speaks loudly over the still-playing buffered audio.
+			session.feedAudioFromClient(micFrame(2400));
+			expect(jsonOfType(s.sendJson, 'turn.interrupted')).toHaveLength(1);
+
+			// The gate was torn down — the fallback drives no second finalization.
+			const turnEnds = jsonOfType(s.sendJson, 'turn.end').length;
+			vi.advanceTimersByTime(5000);
+			expect(jsonOfType(s.sendJson, 'turn.end')).toHaveLength(turnEnds);
+		} finally {
+			await session?.close();
+		}
+	});
+
+	it('a sub-threshold (echo-level) client frame does not barge in', async () => {
+		let session: VoiceSession | undefined;
+		try {
+			const s = setupNative({ clientAudioVad: { bargeInConfirmMs: 0 } });
+			session = s.session;
+			await session.start();
+			s.transport.onSessionReady?.('mock_session'); // → session ACTIVE
+
+			s.transport.onModelTurnStart?.();
+			s.transport.onAudioOutput?.(pcmBase64(1000));
+			s.transport.onTurnComplete?.(1);
+
+			// Quiet, echo-level audio must not clear the barge-in energy floor.
+			session.feedAudioFromClient(micFrame(80));
+			expect(jsonOfType(s.sendJson, 'turn.interrupted')).toHaveLength(0);
 		} finally {
 			await session?.close();
 		}

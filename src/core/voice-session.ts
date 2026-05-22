@@ -1792,17 +1792,19 @@ export class VoiceSession {
 	 * genuine barge-in — sustained past the confirmation window and loud enough
 	 * to clear the TTS-echo floor (see `clientVadBargeInAllowed`). Fires at most
 	 * once per segment. Evaluated on every voiced frame so a quiet onset still
-	 * barges in once it gets loud. Only meaningful while the assistant's TTS is
-	 * playing; otherwise there is no turn to interrupt.
+	 * barges in once it gets loud. Meaningful while a playback gate is pending —
+	 * external TTS or native audio (see liveGate()).
 	 */
 	private maybeClientTtsBargeIn(now: number, maxAbs: number, avgAbs: number): void {
-		if (!this.ttsProvider || !this._ttsSpeaking) return;
 		// Mark the segment a *potential* barge-in once a frame clears the in-TTS
-		// energy floor — before the confirmation window elapses. The VAD-defer
-		// in `finishOrDeferForVad` keys on this.
+		// energy floor — UNCONDITIONALLY, even before a playback gate is armed,
+		// so a segment that begins just before `handleTurnComplete` arms the
+		// native gate is still recognised. `finishOrDeferForVad` keys on this.
 		if (clientVadBargeInEnergyEligible(this.clientVad, maxAbs, avgAbs)) {
 			this.audioVadBargeInEligible = true;
 		}
+		// The interrupt itself fires only while a playback gate is pending.
+		if (this.liveGate()?.pending !== true) return;
 		if (this.audioVadBargeInFired) return;
 		if (
 			!clientVadBargeInAllowed(this.clientVad, now - this.audioVadSpeechStartMs, maxAbs, avgAbs)
@@ -1861,11 +1863,12 @@ export class VoiceSession {
 	}
 
 	private handleClientTtsBargeIn(): void {
-		if (!this.ttsProvider || !this._ttsSpeaking) return;
+		if (this.liveGate()?.pending !== true) return;
 		// The client-side VAD holds the Turn by reference — no server-turn id
-		// needed. Gemini's later onInterrupted resolves to this same finalized
-		// Turn and no-ops structurally.
-		this.finalizeTurn(this.currentTurn, { interrupted: true });
+		// needed. A native gate finalizes the captured _nativePlaybackTurn; a
+		// later provider onInterrupted resolves to this same finalized Turn and
+		// no-ops structurally.
+		this.finalizeTurn(this._nativePlaybackTurn ?? this.currentTurn, { interrupted: true });
 	}
 
 	private logGeminiUserTurnRecognition(reason: string): void {
