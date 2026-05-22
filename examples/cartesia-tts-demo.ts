@@ -216,6 +216,9 @@ async function main() {
 		model: google('gemini-2.5-flash'),
 		orchestrationMode: 'actor',
 		ttsProvider,
+		// Exercise the audio.done / playback.ended handshake so a manual
+		// barge-in test against the web client runs the real protocol.
+		playbackStateProtocol: 'audio_done',
 		// Use a live model that can emit text; external TTS handles speech synthesis.
 		geminiModel: geminiLiveModel,
 		speechConfig: { voiceName: 'Puck' },
