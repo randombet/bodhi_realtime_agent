@@ -677,6 +677,54 @@ describe('TTS playback-aware turn completion', () => {
 		}
 	});
 
+	it('logs the completion source as "signal" when completed by playback.ended', async () => {
+		vi.useFakeTimers();
+		const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+		let session: VoiceSession | undefined;
+		try {
+			const s = setup(undefined, 'audio_done');
+			session = s.session;
+			await session.start();
+			s.transport.onTextOutput?.('Hello.');
+			s.transport.onTextDone?.();
+			s.transport.onTurnComplete?.(1);
+			s.provider.onAudio?.(Buffer.from('aud').toString('base64'), 3000, 1);
+			s.provider.onDone?.(1);
+			session.feedJsonFromClient({ type: 'playback.ended', playbackId: 1 });
+
+			const logged = logSpy.mock.calls.map((c) => String(c[0]));
+			expect(logged.some((l) => l.includes('TTS turn complete via signal'))).toBe(true);
+		} finally {
+			await session?.close();
+			logSpy.mockRestore();
+			vi.useRealTimers();
+		}
+	});
+
+	it('logs the completion source as "fallback" when completed by the timer', async () => {
+		vi.useFakeTimers();
+		const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+		let session: VoiceSession | undefined;
+		try {
+			const s = setup(undefined, 'audio_done');
+			session = s.session;
+			await session.start();
+			s.transport.onTextOutput?.('Hello.');
+			s.transport.onTextDone?.();
+			s.transport.onTurnComplete?.(1);
+			s.provider.onAudio?.(Buffer.from('aud').toString('base64'), 1000, 1);
+			s.provider.onDone?.(1);
+			vi.advanceTimersByTime(5000); // no signal — fallback timer fires
+
+			const logged = logSpy.mock.calls.map((c) => String(c[0]));
+			expect(logged.some((l) => l.includes('TTS turn complete via fallback'))).toBe(true);
+		} finally {
+			await session?.close();
+			logSpy.mockRestore();
+			vi.useRealTimers();
+		}
+	});
+
 	// --- VAD-resolution defer (step 9) ---
 
 	/** A PCM frame of all-`amplitude` int16 samples (480 samples = 30 ms @ 16 kHz). */

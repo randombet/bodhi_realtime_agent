@@ -436,6 +436,10 @@ export class VoiceSession {
 	 *  timer) was deferred pending an in-progress potential barge-in; the value
 	 *  records which source triggered it (for the completion-source log). */
 	private _ttsPlaybackEndedPending: 'signal' | 'fallback' | null = null;
+	/** Estimated client playback-end (ms epoch) for the current turn — set in
+	 *  `tts.onDone`, used only to classify a barge-in as before/after the
+	 *  estimate for observability. */
+	private _ttsEstimatedPlaybackEndMs: number | null = null;
 	// --- Server-turn finalization dedup (external-TTS turn completion).
 	//     See dev_docs/framework/design-external-tts-turn-completion.md. ---
 	private config: VoiceSessionConfig;
@@ -1772,6 +1776,9 @@ export class VoiceSession {
 		// would have set `_ttsSpeaking` false via finalizeTurn). If a completion
 		// was deferred for this potential barge-in, finish the turn now.
 		if (this._ttsPlaybackEndedPending !== null && this._ttsSpeaking) {
+			this.log(
+				`[Latency] TTS turn complete via ${this._ttsPlaybackEndedPending} (after VAD-resolution defer)`,
+			);
 			this._ttsPlaybackEndedPending = null;
 			this.ttsClearTimers();
 			this.completeTtsPlayback();
@@ -1897,6 +1904,7 @@ export class VoiceSession {
 				this._ttsTextLength = 0;
 				this._ttsAudioDurationMs = 0;
 				this._ttsPlaybackEndedPending = null;
+				this._ttsEstimatedPlaybackEndMs = null;
 			}
 			this._ttsTextLength += text.length;
 			tts.synthesize(text, this._ttsCurrentRequestId);
@@ -1971,6 +1979,7 @@ export class VoiceSession {
 			// slowest rate so the fallback cannot pre-empt a healthy client.
 			const rateDivisor = this.playbackStateProtocolActive ? VoiceSession.MIN_PLAYBACK_RATE : 1;
 			const estimatedEndMs = this._ttsFirstAudioMs + this._ttsAudioDurationMs / rateDivisor;
+			this._ttsEstimatedPlaybackEndMs = estimatedEndMs;
 			const remainingMs =
 				Math.max(estimatedEndMs - Date.now(), 0) + this.ttsPlaybackFallbackMarginMs;
 			this._ttsPlaybackTimer = setTimeout(() => {
@@ -2079,6 +2088,7 @@ export class VoiceSession {
 			}, deferMs);
 			return;
 		}
+		this.log(`[Latency] TTS turn complete via ${reason}`);
 		this.completeTtsPlayback();
 	}
 
@@ -2086,6 +2096,9 @@ export class VoiceSession {
 	 *  frames stopped). Resets the stale VAD segment so it cannot leak into the
 	 *  next turn. */
 	private forceCompleteAfterVadDefer(): void {
+		this.log(
+			`[Latency] TTS turn complete via ${this._ttsPlaybackEndedPending ?? 'fallback'} (forced after VAD defer)`,
+		);
 		this._ttsPlaybackEndedPending = null;
 		this.audioVadSpeechActive = false;
 		this.audioVadSpeechStartMs = 0;
@@ -2168,6 +2181,7 @@ export class VoiceSession {
 					this._ttsAudioDone = true;
 					this._ttsSpeaking = false;
 					this._ttsPlaybackEndedPending = null;
+					this._ttsEstimatedPlaybackEndMs = null;
 					this._ttsCurrentRequestId++; // Invalidate late-arriving chunks
 					this.ttsMaybeCompleteTurn();
 				}, 60000);
@@ -2204,6 +2218,12 @@ export class VoiceSession {
 
 		if (opts.interrupted) {
 			this.log('Interrupted by user');
+			if (
+				this._ttsEstimatedPlaybackEndMs !== null &&
+				Date.now() > this._ttsEstimatedPlaybackEndMs
+			) {
+				this.log('[Latency] barge-in finalized after the estimated playback end');
+			}
 			// Hazard-2 order: invalidate TTS gate state and bump the requestId
 			// BEFORE ttsProvider.cancel() so a synchronous onDone cannot complete
 			// the turn mid-interrupt.
@@ -2214,6 +2234,7 @@ export class VoiceSession {
 				this._ttsAudioDone = false;
 				this._ttsTurnHasText = false;
 				this._ttsPlaybackEndedPending = null;
+				this._ttsEstimatedPlaybackEndMs = null;
 				this._ttsCurrentRequestId++;
 				this.ttsClearTimers();
 				safeStep('tts.cancel', () => this.ttsProvider?.cancel());
