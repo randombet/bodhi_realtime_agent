@@ -514,3 +514,139 @@ describe('client-VAD echo-aware barge-in (clientVadBargeInAllowed)', () => {
 		expect(clientVadBargeInAllowed(disabled, 5000, 30000, 9000)).toBe(false);
 	});
 });
+
+describe('TTS playback-aware turn completion', () => {
+	// External TTS synthesizes far faster than realtime playback. The turn must
+	// stay open (and interruptible) until the client has — by estimate —
+	// finished draining the buffered audio, not the moment synthesis is done.
+	function setup(clientAudioVad?: { bargeInConfirmMs?: number }) {
+		const provider = createMockTTSProvider();
+		const transport = createMockTransport();
+		const sendAudio = vi.fn();
+		const sendJson = vi.fn();
+		const session = new VoiceSession({
+			sessionId: 'sess_tts_playback',
+			userId: 'user_1',
+			apiKey: 'test-key',
+			agents: [createAgent()],
+			initialAgent: 'main',
+			model: mockModel,
+			transport,
+			orchestrationMode: 'actor',
+			ttsProvider: provider,
+			clientSender: { sendAudio, sendJson },
+			...(clientAudioVad ? { clientAudioVad } : {}),
+		});
+		return { provider, transport, sendJson, session };
+	}
+
+	it('defers turn completion until the estimated client playback end', async () => {
+		vi.useFakeTimers();
+		let session: VoiceSession | undefined;
+		try {
+			const s = setup();
+			session = s.session;
+			await session.start();
+
+			s.transport.onTextOutput?.('Hello, this is a fairly long greeting.');
+			s.transport.onTextDone?.();
+			s.transport.onTurnComplete?.(1);
+			// 3000 ms of synthesized audio, then synthesis reports done.
+			s.provider.onAudio?.(Buffer.from('aud').toString('base64'), 3000, 1);
+			s.provider.onDone?.(1);
+
+			// Synthesis is done but the client is still playing ~3 s of audio —
+			// the turn must NOT be complete yet.
+			expect(s.sendJson.mock.calls.filter(([m]) => m?.type === 'turn.end')).toHaveLength(0);
+
+			// Advance past the estimated playback end (3000 ms audio + 300 ms slack).
+			vi.advanceTimersByTime(3400);
+			expect(s.sendJson.mock.calls.filter(([m]) => m?.type === 'turn.end')).toHaveLength(1);
+		} finally {
+			await session?.close();
+			vi.useRealTimers();
+		}
+	});
+
+	it('a barge-in during the playback tail still interrupts and clears the timer', async () => {
+		vi.useFakeTimers();
+		let session: VoiceSession | undefined;
+		try {
+			// bargeInConfirmMs:0 — a single sustained frame fires; this test
+			// exercises the tail window, not the confirmation delay.
+			const s = setup({ bargeInConfirmMs: 0 });
+			session = s.session;
+			await session.start();
+			s.transport.onSessionReady?.('mock_session');
+
+			s.transport.onTextOutput?.('Hello, this is a fairly long greeting.');
+			s.transport.onTextDone?.();
+			s.transport.onTurnComplete?.(1);
+			s.provider.onAudio?.(Buffer.from('aud').toString('base64'), 3000, 1);
+			s.provider.onDone?.(1); // turn now in the playback tail
+
+			// User speaks over the still-playing audio.
+			session.feedAudioFromClient(createVoiceFrame());
+
+			expect(s.provider.cancel).toHaveBeenCalledTimes(1);
+			expect(s.sendJson.mock.calls.filter(([m]) => m?.type === 'turn.interrupted')).toHaveLength(1);
+			const turnEndsAfterBargeIn = s.sendJson.mock.calls.filter(
+				([m]) => m?.type === 'turn.end',
+			).length;
+
+			// The playback timer must have been cleared — no late second completion.
+			vi.advanceTimersByTime(5000);
+			expect(s.sendJson.mock.calls.filter(([m]) => m?.type === 'turn.end')).toHaveLength(
+				turnEndsAfterBargeIn,
+			);
+		} finally {
+			await session?.close();
+			vi.useRealTimers();
+		}
+	});
+
+	it('completes immediately when onDone arrives with no audio played', async () => {
+		vi.useFakeTimers();
+		let session: VoiceSession | undefined;
+		try {
+			const s = setup();
+			session = s.session;
+			await session.start();
+
+			s.transport.onTextOutput?.('Hi.');
+			s.transport.onTextDone?.();
+			s.transport.onTurnComplete?.(1);
+			// No onAudio fed — nothing is playing on the client.
+			s.provider.onDone?.(1);
+
+			expect(s.sendJson.mock.calls.filter(([m]) => m?.type === 'turn.end')).toHaveLength(1);
+		} finally {
+			await session?.close();
+			vi.useRealTimers();
+		}
+	});
+
+	it('completes immediately when the audio has already drained by onDone', async () => {
+		vi.useFakeTimers();
+		let session: VoiceSession | undefined;
+		try {
+			const s = setup();
+			session = s.session;
+			await session.start();
+
+			s.transport.onTextOutput?.('Hi.');
+			s.transport.onTextDone?.();
+			s.transport.onTurnComplete?.(1);
+			s.provider.onAudio?.(Buffer.from('aud').toString('base64'), 100, 1);
+			// Playback (100 ms audio + 300 ms slack) is long over by the time
+			// synthesis reports done — completion must not be deferred.
+			vi.advanceTimersByTime(600);
+			s.provider.onDone?.(1);
+
+			expect(s.sendJson.mock.calls.filter(([m]) => m?.type === 'turn.end')).toHaveLength(1);
+		} finally {
+			await session?.close();
+			vi.useRealTimers();
+		}
+	});
+});

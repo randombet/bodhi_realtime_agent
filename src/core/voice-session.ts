@@ -395,6 +395,13 @@ export class VoiceSession {
 	private _ttsFirstTextMs = 0;
 	private _ttsFirstAudioMs = 0;
 	private _ttsTextLength = 0;
+	/** Sum of durationMs across the current turn's TTS audio chunks. Synthesis
+	 *  finishes far faster than realtime playback; this estimates how long the
+	 *  client is still draining audio after the provider reports done. */
+	private _ttsAudioDurationMs = 0;
+	/** Defers turn completion from synthesis-done to estimated client
+	 *  playback-done, keeping the turn interruptible through the audio tail. */
+	private _ttsPlaybackTimer?: ReturnType<typeof setTimeout>;
 	// --- Server-turn finalization dedup (external-TTS turn completion).
 	//     See dev_docs/framework/design-external-tts-turn-completion.md. ---
 	private config: VoiceSessionConfig;
@@ -445,6 +452,10 @@ export class VoiceSession {
 	private static readonly AUDIO_VAD_MIN_SPEECH_MS = 120;
 	private static readonly AUDIO_VAD_PEAK_THRESHOLD = 1200;
 	private static readonly AUDIO_VAD_AVG_ABS_THRESHOLD = 220;
+	/** Slack added to the estimated TTS playback end — covers the client's
+	 *  small scheduling buffer and send→play latency. Erring slightly long
+	 *  keeps the barge-in window covering the true audio tail. */
+	private static readonly TTS_PLAYBACK_SLACK_MS = 300;
 
 	constructor(config: VoiceSessionConfig) {
 		this.config = config;
@@ -1811,6 +1822,7 @@ export class VoiceSession {
 				this._ttsFirstTextMs = Date.now();
 				this._ttsFirstAudioMs = 0;
 				this._ttsTextLength = 0;
+				this._ttsAudioDurationMs = 0;
 			}
 			this._ttsTextLength += text.length;
 			tts.synthesize(text, this._ttsCurrentRequestId);
@@ -1825,7 +1837,7 @@ export class VoiceSession {
 		};
 
 		// Wire TTS audio output → client (fast-path, with stale filtering + resampling)
-		tts.onAudio = (base64Pcm, _durationMs, requestId) => {
+		tts.onAudio = (base64Pcm, durationMs, requestId) => {
 			if (requestId !== this._ttsCurrentRequestId) return; // stale
 			// Phase 3 dictation guard: silence the TTS path when not in agent
 			// mode. Queued synthesis can complete after a transcription-mode
@@ -1847,6 +1859,7 @@ export class VoiceSession {
 			this.clientTransport.sendAudioToClient(buffer);
 			this.signalAudioStarted();
 			this._ttsSpeaking = true;
+			this._ttsAudioDurationMs += durationMs;
 			if (this._ttsFirstAudioMs === 0) {
 				this._ttsFirstAudioMs = Date.now();
 			}
@@ -1855,8 +1868,6 @@ export class VoiceSession {
 		// Wire TTS done → turn gating + hook
 		tts.onDone = (requestId) => {
 			if (requestId !== this._ttsCurrentRequestId) return; // stale
-			this._ttsAudioDone = true;
-			this._ttsSpeaking = false;
 			this.ttsClearTimers();
 			// Fire TTS synthesis hook with timing metrics
 			if (this.hooks.onTTSSynthesis && this._ttsFirstTextMs > 0) {
@@ -1871,7 +1882,21 @@ export class VoiceSession {
 					requestId,
 				});
 			}
-			this.ttsMaybeCompleteTurn();
+			// Synthesis is done, but the client is still draining the buffered
+			// audio — it plays in realtime while synthesis ran far faster. Keep
+			// the turn interruptible (`_ttsSpeaking` stays true) until the
+			// estimated playback end so a barge-in during the tail still works.
+			const estimatedEndMs =
+				this._ttsFirstAudioMs + this._ttsAudioDurationMs + VoiceSession.TTS_PLAYBACK_SLACK_MS;
+			const remainingMs = estimatedEndMs - Date.now();
+			if (this._ttsFirstAudioMs === 0 || remainingMs <= 0) {
+				this.completeTtsPlayback();
+				return;
+			}
+			this._ttsPlaybackTimer = setTimeout(() => {
+				this._ttsPlaybackTimer = undefined;
+				this.completeTtsPlayback();
+			}, remainingMs);
 		};
 
 		// Wire TTS errors
@@ -1912,6 +1937,17 @@ export class VoiceSession {
 		this.transport.onOutputTranscription = undefined;
 	}
 
+	/**
+	 * Finalize the TTS audio side of a turn — synthesis is done AND the client
+	 * has (estimated) finished draining the buffered audio. Split out of
+	 * `onDone` so the turn stays interruptible through the playback tail.
+	 */
+	private completeTtsPlayback(): void {
+		this._ttsAudioDone = true;
+		this._ttsSpeaking = false;
+		this.ttsMaybeCompleteTurn();
+	}
+
 	/** Turn gating: check if both LLM and TTS are done. */
 	private ttsMaybeCompleteTurn(): void {
 		if (this._ttsLlmTextDone && this._ttsAudioDone) {
@@ -1928,6 +1964,10 @@ export class VoiceSession {
 		if (this._ttsHardTimer) {
 			clearTimeout(this._ttsHardTimer);
 			this._ttsHardTimer = undefined;
+		}
+		if (this._ttsPlaybackTimer) {
+			clearTimeout(this._ttsPlaybackTimer);
+			this._ttsPlaybackTimer = undefined;
 		}
 	}
 
