@@ -672,4 +672,104 @@ describe('TTS playback-aware turn completion', () => {
 			vi.useRealTimers();
 		}
 	});
+
+	// --- VAD-resolution defer (step 9) ---
+
+	/** A PCM frame of all-`amplitude` int16 samples (480 samples = 30 ms @ 16 kHz). */
+	function frameOf(amplitude: number): Buffer {
+		const frame = Buffer.alloc(480 * 2);
+		for (let i = 0; i < frame.length; i += 2) frame.writeInt16LE(amplitude, i);
+		return frame;
+	}
+
+	it('defers the fallback completion while a potential barge-in is active, then completes on silence', async () => {
+		vi.useFakeTimers();
+		let session: VoiceSession | undefined;
+		try {
+			const s = setup();
+			session = s.session;
+			await session.start();
+			s.transport.onSessionReady?.('mock_session');
+
+			s.transport.onTextOutput?.('Hello there, a fairly long greeting.');
+			s.transport.onTextDone?.();
+			s.transport.onTurnComplete?.(1);
+			s.provider.onAudio?.(Buffer.from('aud').toString('base64'), 3000, 1);
+			s.provider.onDone?.(1); // fallback timer armed at ~4500 ms
+
+			// A loud sound during the tail — VAD segment active + energy-eligible.
+			session.feedAudioFromClient(frameOf(2400));
+
+			// Fallback timer fires → finishOrDeferForVad → potential barge-in → defer.
+			vi.advanceTimersByTime(4600);
+			expect(s.sendJson.mock.calls.filter(([m]) => m?.type === 'turn.end')).toHaveLength(0);
+
+			// The segment resolves as silence (no sustained barge-in) → the
+			// completeClientAudioVad hook completes the turn.
+			session.feedAudioFromClient(frameOf(0));
+			expect(s.sendJson.mock.calls.filter(([m]) => m?.type === 'turn.end')).toHaveLength(1);
+		} finally {
+			await session?.close();
+			vi.useRealTimers();
+		}
+	});
+
+	it('force-completes a deferred turn when mic frames stop (no loop)', async () => {
+		vi.useFakeTimers();
+		let session: VoiceSession | undefined;
+		try {
+			const s = setup();
+			session = s.session;
+			await session.start();
+			s.transport.onSessionReady?.('mock_session');
+
+			s.transport.onTextOutput?.('Hello there, a fairly long greeting.');
+			s.transport.onTextDone?.();
+			s.transport.onTurnComplete?.(1);
+			s.provider.onAudio?.(Buffer.from('aud').toString('base64'), 3000, 1);
+			s.provider.onDone?.(1);
+
+			session.feedAudioFromClient(frameOf(2400));
+			vi.advanceTimersByTime(4600); // fallback fires → defer
+			expect(s.sendJson.mock.calls.filter(([m]) => m?.type === 'turn.end')).toHaveLength(0);
+
+			// No further mic frames — the re-armed defer timer force-completes.
+			vi.advanceTimersByTime(800);
+			expect(s.sendJson.mock.calls.filter(([m]) => m?.type === 'turn.end')).toHaveLength(1);
+			// And it does not loop / double-complete.
+			vi.advanceTimersByTime(5000);
+			expect(s.sendJson.mock.calls.filter(([m]) => m?.type === 'turn.end')).toHaveLength(1);
+		} finally {
+			await session?.close();
+			vi.useRealTimers();
+		}
+	});
+
+	it('does not defer for a sub-threshold (echo-level) VAD segment', async () => {
+		vi.useFakeTimers();
+		let session: VoiceSession | undefined;
+		try {
+			const s = setup();
+			session = s.session;
+			await session.start();
+			s.transport.onSessionReady?.('mock_session');
+
+			s.transport.onTextOutput?.('Hello there, a fairly long greeting.');
+			s.transport.onTextDone?.();
+			s.transport.onTurnComplete?.(1);
+			s.provider.onAudio?.(Buffer.from('aud').toString('base64'), 3000, 1);
+			s.provider.onDone?.(1);
+
+			// Loud enough to start a VAD segment (peak >= 1200) but below the
+			// in-TTS barge-in energy floor — not a potential barge-in.
+			session.feedAudioFromClient(frameOf(1500));
+
+			// Fallback fires → no defer → the turn completes normally.
+			vi.advanceTimersByTime(4600);
+			expect(s.sendJson.mock.calls.filter(([m]) => m?.type === 'turn.end')).toHaveLength(1);
+		} finally {
+			await session?.close();
+			vi.useRealTimers();
+		}
+	});
 });

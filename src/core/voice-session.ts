@@ -428,6 +428,10 @@ export class VoiceSession {
 	/** Defers turn completion from synthesis-done to estimated client
 	 *  playback-done, keeping the turn interruptible through the audio tail. */
 	private _ttsPlaybackTimer?: ReturnType<typeof setTimeout>;
+	/** Non-null when a completion (the `playback.ended` signal or the fallback
+	 *  timer) was deferred pending an in-progress potential barge-in; the value
+	 *  records which source triggered it (for the completion-source log). */
+	private _ttsPlaybackEndedPending: 'signal' | 'fallback' | null = null;
 	// --- Server-turn finalization dedup (external-TTS turn completion).
 	//     See dev_docs/framework/design-external-tts-turn-completion.md. ---
 	private config: VoiceSessionConfig;
@@ -466,6 +470,10 @@ export class VoiceSession {
 	/** True once a barge-in has fired for the current client speech segment —
 	 *  the barge-in fires at most once per segment. Reset when a new segment begins. */
 	private audioVadBargeInFired = false;
+	/** True once the current client speech segment has had a frame loud enough
+	 *  to clear the in-TTS barge-in energy floor — a *potential* barge-in.
+	 *  Reset when a new segment begins. */
+	private audioVadBargeInEligible = false;
 	/** Resolved client-VAD barge-in tuning (config + defaults). */
 	private readonly clientVad: ResolvedClientAudioVadConfig;
 	private lastClientSpeechCompletedMs = 0;
@@ -475,6 +483,8 @@ export class VoiceSession {
 	private finalizedInputTurnIds = new Set<number>();
 	private ownsClientTransport: boolean;
 	private static readonly AUDIO_VAD_SILENCE_MS = 500;
+	/** Margin (ms) added to the VAD-defer force-completion timeout. */
+	private static readonly VAD_DEFER_FORCE_MARGIN_MS = 50;
 	private static readonly AUDIO_VAD_MIN_SPEECH_MS = 120;
 	private static readonly AUDIO_VAD_PEAK_THRESHOLD = 1200;
 	private static readonly AUDIO_VAD_AVG_ABS_THRESHOLD = 220;
@@ -1688,6 +1698,7 @@ export class VoiceSession {
 				this.audioVadSpeechActive = true;
 				this.audioVadSpeechStartMs = now;
 				this.audioVadBargeInFired = false;
+				this.audioVadBargeInEligible = false;
 				this.lastInputTranscriptionLogText = '';
 				this.log(
 					`[Latency] User voice input started (client audio VAD; peak=${maxAbs}; avgAbs=${Math.round(avgAbs)})`,
@@ -1716,8 +1727,14 @@ export class VoiceSession {
 	 * playing; otherwise there is no turn to interrupt.
 	 */
 	private maybeClientTtsBargeIn(now: number, maxAbs: number, avgAbs: number): void {
-		if (this.audioVadBargeInFired) return;
 		if (!this.ttsProvider || !this._ttsSpeaking) return;
+		// Mark the segment a *potential* barge-in once a frame clears the in-TTS
+		// energy floor — before the confirmation window elapses. The VAD-defer
+		// in `finishOrDeferForVad` keys on this.
+		if (clientVadBargeInEnergyEligible(this.clientVad, maxAbs, avgAbs)) {
+			this.audioVadBargeInEligible = true;
+		}
+		if (this.audioVadBargeInFired) return;
 		if (
 			!clientVadBargeInAllowed(this.clientVad, now - this.audioVadSpeechStartMs, maxAbs, avgAbs)
 		) {
@@ -1735,6 +1752,15 @@ export class VoiceSession {
 		this.audioVadSpeechActive = false;
 		this.audioVadSpeechStartMs = 0;
 		this.audioVadLastVoiceMs = 0;
+		this.audioVadBargeInEligible = false;
+		// VAD-resolution hook: the segment ended without a barge-in (a barge-in
+		// would have set `_ttsSpeaking` false via finalizeTurn). If a completion
+		// was deferred for this potential barge-in, finish the turn now.
+		if (this._ttsPlaybackEndedPending !== null && this._ttsSpeaking) {
+			this._ttsPlaybackEndedPending = null;
+			this.ttsClearTimers();
+			this.completeTtsPlayback();
+		}
 		if (speechDurationMs < VoiceSession.AUDIO_VAD_MIN_SPEECH_MS) {
 			this.log(
 				`[Latency] User voice input ignored (client audio VAD; reason=${reason}; speechDuration=${speechDurationMs}ms; silenceObserved=${silenceObservedMs}ms; minSpeechDuration=${VoiceSession.AUDIO_VAD_MIN_SPEECH_MS}ms)`,
@@ -1855,6 +1881,7 @@ export class VoiceSession {
 				this._ttsFirstAudioMs = 0;
 				this._ttsTextLength = 0;
 				this._ttsAudioDurationMs = 0;
+				this._ttsPlaybackEndedPending = null;
 			}
 			this._ttsTextLength += text.length;
 			tts.synthesize(text, this._ttsCurrentRequestId);
@@ -1998,11 +2025,45 @@ export class VoiceSession {
 
 	/**
 	 * The single VAD-aware completion entry point — both the `playback.ended`
-	 * signal and the fallback timer route through it. A pass-through to
-	 * `completeTtsPlayback()` for now; the VAD-resolution defer is wired in a
-	 * later step. See dev_docs/framework/design-playback-state-protocol.md.
+	 * signal and the fallback timer route through it. Completes the turn unless
+	 * a *potential barge-in* is in progress, in which case completion is
+	 * deferred until that VAD segment resolves (a barge-in interrupts the turn;
+	 * silence completes it via the `completeClientAudioVad` hook).
+	 * See dev_docs/framework/design-playback-state-protocol.md.
 	 */
-	private finishOrDeferForVad(_reason: 'signal' | 'fallback'): void {
+	private finishOrDeferForVad(reason: 'signal' | 'fallback'): void {
+		// A potential barge-in: an active VAD segment, client barge-in enabled,
+		// and a frame already past the in-TTS energy floor. Gating on the energy
+		// floor is essential — residual echo below it would defer every turn.
+		const potentialBargeIn =
+			this.audioVadSpeechActive && this.clientVad.bargeInEnabled && this.audioVadBargeInEligible;
+		this.ttsClearTimers();
+		if (potentialBargeIn) {
+			this._ttsPlaybackEndedPending = reason;
+			// Bounded defer — long enough for the barge-in to confirm even with a
+			// high `bargeInConfirmMs`. The callback force-completes (no re-defer,
+			// so it cannot loop) and resets the stale VAD segment.
+			const deferMs =
+				Math.max(VoiceSession.AUDIO_VAD_SILENCE_MS, this.clientVad.bargeInConfirmMs) +
+				VoiceSession.VAD_DEFER_FORCE_MARGIN_MS;
+			this._ttsPlaybackTimer = setTimeout(() => {
+				this._ttsPlaybackTimer = undefined;
+				this.forceCompleteAfterVadDefer();
+			}, deferMs);
+			return;
+		}
+		this.completeTtsPlayback();
+	}
+
+	/** Force-complete a VAD-deferred turn whose segment never resolved (mic
+	 *  frames stopped). Resets the stale VAD segment so it cannot leak into the
+	 *  next turn. */
+	private forceCompleteAfterVadDefer(): void {
+		this._ttsPlaybackEndedPending = null;
+		this.audioVadSpeechActive = false;
+		this.audioVadSpeechStartMs = 0;
+		this.audioVadLastVoiceMs = 0;
+		this.audioVadBargeInEligible = false;
 		this.completeTtsPlayback();
 	}
 
@@ -2079,6 +2140,7 @@ export class VoiceSession {
 					this.log('TTS hard cap timer fired — forcing turn completion');
 					this._ttsAudioDone = true;
 					this._ttsSpeaking = false;
+					this._ttsPlaybackEndedPending = null;
 					this._ttsCurrentRequestId++; // Invalidate late-arriving chunks
 					this.ttsMaybeCompleteTurn();
 				}, 60000);
@@ -2124,6 +2186,7 @@ export class VoiceSession {
 				this._ttsLlmTextDone = false;
 				this._ttsAudioDone = false;
 				this._ttsTurnHasText = false;
+				this._ttsPlaybackEndedPending = null;
 				this._ttsCurrentRequestId++;
 				this.ttsClearTimers();
 				safeStep('tts.cancel', () => this.ttsProvider?.cancel());
