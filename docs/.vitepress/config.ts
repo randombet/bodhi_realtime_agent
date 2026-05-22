@@ -44,6 +44,7 @@ export default withMermaid(
 							{ text: 'Architecture Overview', link: '/guide/architecture' },
 							{ text: 'Actor Runtime Pattern', link: '/guide/actor-pattern' },
 							{ text: 'VoiceSession', link: '/guide/voice-session' },
+							{ text: 'Playback Gate', link: '/guide/playback-gate' },
 							{ text: 'Agents', link: '/guide/agents' },
 							{ text: 'Tools', link: '/guide/tools' },
 							{ text: 'Behaviors', link: '/guide/behaviors' },

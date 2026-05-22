@@ -46,9 +46,22 @@ The **client ↔ framework** audio/control path is **not** the same socket as th
 
 **Important:** `direct_rtc` does **not** replace **`VoiceSession`** or **`LLMTransport`**. Gemini/OpenAI still use their **existing** provider WebSockets from the server. Only the **device ↔ your app server ↔ `VoiceSession` input/output** audio encoding changes when you opt into direct RTC.
 
+### Playback-state support
+
+The playback gate needs one ordered path for assistant audio and JSON. It is
+supported on WebSocket PCM surfaces that render audio through the buffered client
+playback path. It is not supported when assistant audio is delivered over
+`direct_rtc` Opus RTP, because the audio and `audio.done` JSON frame no longer
+share ordering.
+
+For server-owned sockets, expose this capability with
+`SessionClientSender.supportsPlaybackStateProtocol` and implement
+`sendJsonAfterAudio`. See [Playback Gate](/guide/playback-gate).
+
 See also:
 
 - [VoiceSession](/guide/voice-session) — `clientMedia`, `clientSender`, and session wiring
+- [Playback Gate](/guide/playback-gate) — `audio.done` / `playback.ended` turn-completion gating
 - [Architecture overview](/guide/architecture) — two independent realtime links (client leg vs vendor leg)
 
 Internal implementation notes: `dev_docs/framework/low-signal-client-transport-implementation-plan.md` (repository path).
