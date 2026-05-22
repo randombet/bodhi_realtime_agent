@@ -424,6 +424,61 @@ describe('native playback-end gating — deferred completion', () => {
 		}
 	});
 
+	it('a playback.ended during an active VAD segment defers, then force-completes', async () => {
+		let session: VoiceSession | undefined;
+		try {
+			// High bargeInConfirmMs — a loud frame marks the segment energy-eligible
+			// but does not fire a barge-in, so the signal must defer.
+			const s = setupNative({ clientAudioVad: { bargeInConfirmMs: 5000 } });
+			session = s.session;
+			await session.start();
+			s.transport.onSessionReady?.('mock_session');
+
+			s.transport.onModelTurnStart?.();
+			s.transport.onAudioOutput?.(pcmBase64(1000));
+			s.transport.onTurnComplete?.(1);
+
+			// User speech is mid-flight (a potential barge-in).
+			session.feedAudioFromClient(micFrame(2400));
+			session.feedJsonFromClient({ type: 'playback.ended', playbackId: 1 });
+			// Deferred — not completed while the VAD segment is unresolved.
+			expect(jsonOfType(s.sendJson, 'turn.end')).toHaveLength(0);
+			expect(jsonOfType(s.sendJson, 'turn.interrupted')).toHaveLength(0);
+
+			// Mic frames stop — the bounded re-armed timer force-completes.
+			vi.advanceTimersByTime(7000);
+			expect(jsonOfType(s.sendJson, 'turn.end')).toHaveLength(1);
+		} finally {
+			await session?.close();
+		}
+	});
+
+	it('a deferred native turn that confirms as a barge-in is interrupted', async () => {
+		let session: VoiceSession | undefined;
+		try {
+			const s = setupNative({ clientAudioVad: { bargeInConfirmMs: 200 } });
+			session = s.session;
+			await session.start();
+			s.transport.onSessionReady?.('mock_session');
+
+			s.transport.onModelTurnStart?.();
+			s.transport.onAudioOutput?.(pcmBase64(1000));
+			s.transport.onTurnComplete?.(1);
+
+			// First frame — segment starts, energy-eligible, not yet confirmed.
+			session.feedAudioFromClient(micFrame(2400));
+			session.feedJsonFromClient({ type: 'playback.ended', playbackId: 1 });
+			expect(jsonOfType(s.sendJson, 'turn.end')).toHaveLength(0); // deferred
+
+			// Sustained speech past bargeInConfirmMs confirms the barge-in.
+			vi.advanceTimersByTime(250);
+			session.feedAudioFromClient(micFrame(2400));
+			expect(jsonOfType(s.sendJson, 'turn.interrupted')).toHaveLength(1);
+		} finally {
+			await session?.close();
+		}
+	});
+
 	it('a barge-in during the playback-pending window finalizes exactly once', async () => {
 		let session: VoiceSession | undefined;
 		try {

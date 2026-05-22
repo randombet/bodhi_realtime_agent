@@ -1832,14 +1832,15 @@ export class VoiceSession {
 		this.audioVadLastVoiceMs = 0;
 		this.audioVadBargeInEligible = false;
 		// VAD-resolution hook: the segment ended without a barge-in (a barge-in
-		// would have set `_ttsSpeaking` false via finalizeTurn). If a completion
-		// was deferred for this potential barge-in, finish the turn now.
-		if (this._ttsPlaybackEndedPending !== null && this._ttsSpeaking) {
+		// would have torn the gate down via finalizeTurn). If a completion was
+		// deferred for this potential barge-in, finish the turn now.
+		const deferGate = this.liveGate();
+		if (this._ttsPlaybackEndedPending !== null && deferGate?.pending === true) {
 			this.log(
-				`[Latency] TTS turn complete via ${this._ttsPlaybackEndedPending} (after VAD-resolution defer)`,
+				`[Latency] turn complete via ${this._ttsPlaybackEndedPending} (after VAD-resolution defer)`,
 			);
 			this._ttsPlaybackEndedPending = null;
-			this.ttsClearTimers();
+			deferGate.clearTimer();
 			this.completePlayback();
 		}
 		if (speechDurationMs < VoiceSession.AUDIO_VAD_MIN_SPEECH_MS) {
@@ -2183,7 +2184,9 @@ export class VoiceSession {
 		// floor is essential — residual echo below it would defer every turn.
 		const potentialBargeIn =
 			this.audioVadSpeechActive && this.clientVad.bargeInEnabled && this.audioVadBargeInEligible;
-		this.ttsClearTimers();
+		// Operate on the live gate's timer (external TTS or native audio).
+		const gate = this.liveGate();
+		gate?.clearTimer();
 		if (potentialBargeIn) {
 			this._ttsPlaybackEndedPending = reason;
 			// Bounded defer — long enough for the barge-in to confirm even with a
@@ -2192,13 +2195,10 @@ export class VoiceSession {
 			const deferMs =
 				Math.max(VoiceSession.AUDIO_VAD_SILENCE_MS, this.clientVad.bargeInConfirmMs) +
 				VoiceSession.VAD_DEFER_FORCE_MARGIN_MS;
-			this._ttsPlaybackTimer = setTimeout(() => {
-				this._ttsPlaybackTimer = undefined;
-				this.forceCompleteAfterVadDefer();
-			}, deferMs);
+			gate?.armTimer(deferMs, () => this.forceCompleteAfterVadDefer());
 			return;
 		}
-		this.log(`[Latency] TTS turn complete via ${reason}`);
+		this.log(`[Latency] turn complete via ${reason}`);
 		this.completePlayback();
 	}
 
@@ -2767,7 +2767,10 @@ export class VoiceSession {
 				timerArmed: this._ttsPlaybackTimer !== undefined,
 				id: this._ttsCurrentRequestId,
 				armTimer: (ms, cb) => {
-					this._ttsPlaybackTimer = setTimeout(cb, ms);
+					this._ttsPlaybackTimer = setTimeout(() => {
+						this._ttsPlaybackTimer = undefined;
+						cb();
+					}, ms);
 				},
 				clearTimer: () => this.ttsClearTimers(),
 			};
@@ -2778,7 +2781,10 @@ export class VoiceSession {
 				timerArmed: this._nativePlaybackTimer !== undefined,
 				id: this._nativePlaybackId,
 				armTimer: (ms, cb) => {
-					this._nativePlaybackTimer = setTimeout(cb, ms);
+					this._nativePlaybackTimer = setTimeout(() => {
+						this._nativePlaybackTimer = undefined;
+						cb();
+					}, ms);
 				},
 				clearTimer: () => this.clearNativePlaybackTimer(),
 			};
