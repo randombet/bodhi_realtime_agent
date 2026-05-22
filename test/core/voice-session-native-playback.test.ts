@@ -82,8 +82,10 @@ function jsonOfType(sendJson: ReturnType<typeof vi.fn>, type: string): Record<st
 function setupNative(opts?: {
 	nativePlaybackGating?: boolean;
 	clientAudioVad?: { bargeInConfirmMs?: number };
+	preSpeechStarted?: () => void;
 }) {
 	const transport = createMockTransport();
+	if (opts?.preSpeechStarted) transport.onSpeechStarted = opts.preSpeechStarted;
 	const sendAudio = vi.fn();
 	const sendJson = vi.fn();
 	const session = new VoiceSession({
@@ -327,6 +329,55 @@ describe('native playback-end gating — deferred completion', () => {
 			// Quiet, echo-level audio must not clear the barge-in energy floor.
 			session.feedAudioFromClient(micFrame(80));
 			expect(jsonOfType(s.sendJson, 'turn.interrupted')).toHaveLength(0);
+		} finally {
+			await session?.close();
+		}
+	});
+
+	it('onSpeechStarted during the native playback-pending window interrupts', async () => {
+		let session: VoiceSession | undefined;
+		try {
+			const s = setupNative();
+			session = s.session;
+			await session.start();
+
+			s.transport.onModelTurnStart?.();
+			s.transport.onAudioOutput?.(pcmBase64(1000));
+			s.transport.onTurnComplete?.(1);
+
+			s.transport.onSpeechStarted?.();
+			expect(jsonOfType(s.sendJson, 'turn.interrupted')).toHaveLength(1);
+		} finally {
+			await session?.close();
+		}
+	});
+
+	it('onSpeechStarted outside the playback-pending window finalizes nothing', async () => {
+		let session: VoiceSession | undefined;
+		try {
+			const s = setupNative();
+			session = s.session;
+			await session.start();
+
+			// No native turn armed — onSpeechStarted must be a no-op.
+			s.transport.onSpeechStarted?.();
+			expect(jsonOfType(s.sendJson, 'turn.interrupted')).toHaveLength(0);
+			expect(jsonOfType(s.sendJson, 'turn.end')).toHaveLength(0);
+		} finally {
+			await session?.close();
+		}
+	});
+
+	it('a pre-attached onSpeechStarted handler still fires (chaining)', async () => {
+		let session: VoiceSession | undefined;
+		const preAttached = vi.fn();
+		try {
+			const s = setupNative({ preSpeechStarted: preAttached });
+			session = s.session;
+			await session.start();
+
+			s.transport.onSpeechStarted?.();
+			expect(preAttached).toHaveBeenCalledTimes(1);
 		} finally {
 			await session?.close();
 		}

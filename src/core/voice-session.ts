@@ -982,6 +982,13 @@ export class VoiceSession {
 			!this.ttsProvider &&
 			!this.transport.capabilities.playbackGatedTurnComplete;
 
+		// Native sessions install the native barge-in path — the !ttsProvider
+		// sibling of wireTtsProvider(). Harmless when gating is off (the handler
+		// only acts while _nativePlaybackPending, which the gate alone sets).
+		if (!this.ttsProvider) {
+			this.wireNativeBargeIn();
+		}
+
 		// Forward GUI events from EventBus to the client as JSON text frames
 		this.eventBus.subscribe('gui.update', (payload) => {
 			this.clientTransport.sendJsonToClient({ type: 'gui.update', payload });
@@ -1944,6 +1951,28 @@ export class VoiceSession {
 	// --- TTS wiring (actor-mode only) ---
 
 	/** Wire TTSProvider callbacks and override transport callbacks for text mode. */
+	/**
+	 * Native-session barge-in setup — the `!ttsProvider` sibling of
+	 * `wireTtsProvider()`. Installs a chained `onSpeechStarted` that interrupts a
+	 * playback-pending native turn (the post-`response.done` window the
+	 * provider's own interrupt path no longer covers). Chaining preserves any
+	 * handler a pre-configured injected transport already attached.
+	 * See dev_docs/framework/design-playback-end-gating-openai-native.md §7.
+	 */
+	private wireNativeBargeIn(): void {
+		const prevSpeechStarted = this.transport.onSpeechStarted;
+		this.transport.onSpeechStarted = () => {
+			try {
+				prevSpeechStarted?.();
+			} catch (e) {
+				this.log(`pre-attached onSpeechStarted threw: ${(e as Error).message}`);
+			}
+			if (this._nativePlaybackPending) {
+				this.finalizeTurn(this._nativePlaybackTurn, { interrupted: true });
+			}
+		};
+	}
+
 	private wireTtsProvider(): void {
 		const tts = this.ttsProvider;
 		if (!tts) return;
