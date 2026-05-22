@@ -19,6 +19,9 @@ export interface DirectRtcClientChannelOptions {
 	readonly sender: SessionClientSender;
 	/** Enables server-side WebRTC Opus audio (requires `werift` + `@evan/opus` at runtime). */
 	readonly weriftOpus?: WeriftOpusClientOptions;
+	/** Playback-state protocol support — true only when audio renders over the
+	 *  WebSocket PCM path (i.e. `rtcAudio !== 'werift_opus'`). Set by the factory. */
+	readonly supportsPlaybackStateProtocol?: boolean;
 }
 
 const PRE_MEDIA_MAX_BYTES = 96_000;
@@ -35,9 +38,14 @@ export class DirectRtcClientChannel implements IClientChannel {
 	private _lastSignaling: RtcClientSignalingMessage | null = null;
 	private readonly engine: WeriftOpusRtcEngine | null;
 	private preMediaOutbound = Buffer.alloc(0);
+	/** True only when assistant audio renders over the WebSocket PCM path — the
+	 *  Opus-RTP sink sends audio on a separate channel from the JSON control
+	 *  plane, so ordering with `audio.done` cannot be guaranteed there. */
+	readonly supportsPlaybackStateProtocol: boolean;
 
 	constructor(options: DirectRtcClientChannelOptions) {
 		this.sender = options.sender;
+		this.supportsPlaybackStateProtocol = options.supportsPlaybackStateProtocol ?? false;
 		this.engine = options.weriftOpus
 			? new WeriftOpusRtcEngine({
 					iceServers: options.weriftOpus.iceServers,
@@ -115,6 +123,14 @@ export class DirectRtcClientChannel implements IClientChannel {
 
 	sendJsonToClient(message: Record<string, unknown>): void {
 		this.sender.sendJson(message);
+	}
+
+	/** Playback-state protocol: deliver JSON in order after the turn's audio.
+	 *  Only meaningful when audio uses the WebSocket PCM path (no Opus engine);
+	 *  dropped during a reconnect-buffering window. */
+	sendJsonAfterAudio(message: Record<string, unknown>): void {
+		if (this._buffering) return;
+		this.sendJsonToClient(message);
 	}
 
 	startBuffering(): void {

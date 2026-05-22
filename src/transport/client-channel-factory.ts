@@ -63,11 +63,17 @@ export function createClientChannel(params: CreateClientChannelParams): IClientC
 		return new DirectRtcClientChannel({
 			sender: params.clientSender,
 			weriftOpus,
+			// Opus RTP sends audio on a separate channel from JSON control —
+			// the playback-state protocol needs one ordered channel, so it is
+			// supported only for the `rtcAudio: 'none'` WebSocket-PCM path.
+			supportsPlaybackStateProtocol: rtcAudio !== 'werift_opus',
 		});
 	}
 
 	if (params.clientSender) {
-		return new ClientSenderAdapter(params.clientSender);
+		// The WebSocket-PCM path delivers audio and JSON FIFO on one socket —
+		// the playback-state protocol is supported at the transport level.
+		return new ClientSenderAdapter(params.clientSender, true);
 	}
 
 	return new ClientTransport(
