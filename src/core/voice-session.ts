@@ -2780,8 +2780,18 @@ export class VoiceSession {
 	/** Send the active agent's greeting prompt to the LLM to trigger a spoken greeting. */
 	private sendGreeting(): void {
 		const agent = this.agentRouter.activeAgent;
-		if (!agent.greeting) return;
+		if (!agent.greeting) {
+			this._greetingInFlight = false;
+			return;
+		}
 		this.log(`Sending greeting for agent "${agent.name}"`);
+		// The effective pre-audio gate must start at the actual greeting send,
+		// not only at setup-complete: in the common ordering where the LLM is
+		// ready before the browser connects, handleClientConnected resets the
+		// per-client grace state immediately before scheduling this greeting.
+		if (this.greetingInterruptGraceMs > 0 && !this._graceArmingLogged) {
+			this._greetingInFlight = true;
+		}
 		// Pre-greeting audio-gate reset: legacy queue.resetAudio() vs actor
 		// notification.reset_audio. In actor mode also clear the debounce flag.
 		if (this._isActorMode) {

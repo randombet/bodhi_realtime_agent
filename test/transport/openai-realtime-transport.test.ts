@@ -413,7 +413,7 @@ describe('OpenAIRealtimeTransport', () => {
 			expect(mockRt.sent).toContainEqual({ type: 'response.create' });
 		});
 
-		it('sends response.cancel before result for interrupt scheduling', () => {
+		it('waits for cancelled response.done before sending interrupt-scheduled result', async () => {
 			// Model must be generating for cancel to be sent
 			mockRt.emit('response.created', {});
 
@@ -424,10 +424,22 @@ describe('OpenAIRealtimeTransport', () => {
 				scheduling: 'interrupt',
 			});
 
+			await vi.waitFor(() =>
+				expect(mockRt.sent.some((m) => m.type === 'response.cancel')).toBe(true),
+			);
+			expect(mockRt.sent.some((m) => m.type === 'conversation.item.create')).toBe(false);
+			expect(mockRt.sent.some((m) => m.type === 'response.create')).toBe(false);
+
+			mockRt.emit('response.done', { response: { status: 'cancelled' } });
+			await vi.waitFor(() =>
+				expect(mockRt.sent.some((m) => m.type === 'conversation.item.create')).toBe(true),
+			);
+
 			const cancelIdx = mockRt.sent.findIndex((m) => m.type === 'response.cancel');
 			const createIdx = mockRt.sent.findIndex((m) => m.type === 'conversation.item.create');
-			expect(cancelIdx).toBeGreaterThanOrEqual(0);
+			const responseCreateIdx = mockRt.sent.findIndex((m) => m.type === 'response.create');
 			expect(createIdx).toBeGreaterThan(cancelIdx);
+			expect(responseCreateIdx).toBeGreaterThan(createIdx);
 			expect(mockRt.sent).toContainEqual({ type: 'response.create' });
 		});
 	});

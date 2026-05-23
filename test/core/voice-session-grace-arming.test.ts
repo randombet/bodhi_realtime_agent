@@ -89,6 +89,7 @@ function createMockTransport(opts: {
 async function buildSession(opts: {
 	greetingInterruptGraceMs?: number;
 	transport: LLMTransport;
+	connectOrder?: 'client-before-ready' | 'ready-before-client';
 }): Promise<VoiceSession> {
 	const session = new VoiceSession({
 		sessionId: 'sess_grace_arm',
@@ -105,8 +106,13 @@ async function buildSession(opts: {
 		}),
 	});
 	await session.start();
-	session.notifyClientConnected();
-	opts.transport.onSessionReady?.('mock_session');
+	if (opts.connectOrder === 'ready-before-client') {
+		opts.transport.onSessionReady?.('mock_session');
+		session.notifyClientConnected();
+	} else {
+		session.notifyClientConnected();
+		opts.transport.onSessionReady?.('mock_session');
+	}
 	await new Promise((r) => setTimeout(r, 5));
 	return session;
 }
@@ -246,6 +252,24 @@ describe('VoiceSession greeting-grace arming + suppression', () => {
 			expect((transport.sendAudio as ReturnType<typeof vi.fn>).mock.calls.length).toBe(
 				sendAudioCallsBeforeFrame,
 			);
+		} finally {
+			await session.close();
+		}
+	});
+
+	it('routeAudioToAgent drops mic frames when session-ready happens before client connect', async () => {
+		const transport = createMockTransport({
+			frameworkOwnsInterrupt: true,
+			greetingInterruptGraceMs: 1000,
+			hasCancelResponse: true,
+		});
+		const session = await buildSession({ transport, connectOrder: 'ready-before-client' });
+		try {
+			const micFrame = Buffer.alloc(960);
+			micFrame.fill(0x10);
+			const before = (transport.sendAudio as ReturnType<typeof vi.fn>).mock.calls.length;
+			session.feedAudioFromClient(micFrame);
+			expect((transport.sendAudio as ReturnType<typeof vi.fn>).mock.calls.length).toBe(before);
 		} finally {
 			await session.close();
 		}

@@ -387,6 +387,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	// when_idle scheduling: buffer tool results while model is generating
 	private _isModelGenerating = false;
 	private _pendingWhenIdle: TransportToolResult[] = [];
+	private _interruptToolResultQueue: Promise<void> = Promise.resolve();
 
 	// Text mode: whether the transport is configured for text-mode responses (for TTS)
 	private _textMode = false;
@@ -987,15 +988,38 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			return;
 		}
 
-		// 'interrupt': cancel in-flight response before delivering. Routed
-		// through actuateCancelInternal so the shared cancel-actuation state
-		// (`_suppressAudio` + `_isModelGenerating`) stays consistent with the
-		// public cancelResponse path and any framework-owned barge-in.
+		// 'interrupt': cancel/wait before delivering, then create the follow-up
+		// response. Public API remains sync; the internal queue serializes
+		// cancel -> response.done(cancelled) -> item/create so OpenAI never sees
+		// a new response.create while the cancelled response is still active.
 		// See dev_docs/framework/design-greeting-interrupt-grace.md §7.
-		if (scheduling === 'interrupt' && this._isModelGenerating) {
-			this.actuateCancelInternal();
+		if (
+			scheduling === 'interrupt' &&
+			(this._isModelGenerating || this._resolveActiveResponseDone !== null)
+		) {
+			this.enqueueInterruptToolResult(result);
+			return;
 		}
 
+		this.sendToolResultNow(result);
+	}
+
+	private enqueueInterruptToolResult(result: TransportToolResult): void {
+		const run = async () => {
+			if (!this.rt || !this._isConnected) return;
+			await this.cancelResponse({ waitForDone: true });
+			if (!this.rt || !this._isConnected) return;
+			this.sendToolResultNow(result);
+		};
+		const next = this._interruptToolResultQueue.then(run, run);
+		this._interruptToolResultQueue = next.catch((err) => {
+			console.warn('[OpenAIRealtimeTransport] interrupt tool-result queue failed:', err);
+		});
+	}
+
+	private sendToolResultNow(result: TransportToolResult): void {
+		if (!this.rt || !this._isConnected) return;
+		const scheduling = result.scheduling ?? 'immediate';
 		// Send the tool output as a conversation item
 		this.rt.send({
 			type: 'conversation.item.create',
