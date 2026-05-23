@@ -1769,6 +1769,15 @@ export class VoiceSession {
 
 	/** Forward PCM frame to the agent transport + optional sttProvider. */
 	private routeAudioToAgent(data: Buffer): void {
+		// Greeting interrupt grace: drop both LLM-transport and STT-provider
+		// audio while the window is active. Echo would otherwise (a) accumulate
+		// in OpenAI's server-side input buffer and auto-commit on speech_stopped
+		// (phantom user turn), and (b) get recorded by external STT as a fake
+		// user transcript that lands in conversation history. The local
+		// client-VAD in handleAudioFromClient still processes — only the
+		// downstream consumers are gated.
+		// See dev_docs/framework/design-greeting-interrupt-grace.md §8.
+		if (this._grace.isActive()) return;
 		// PCM is the source of truth at this layer. Two consumers fork off:
 		// (a) the transport: G.711 μ-law (telephony) requires resample to
 		//     8 kHz THEN encode. PCM transports just need rate-matching to

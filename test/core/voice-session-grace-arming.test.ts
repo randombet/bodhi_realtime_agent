@@ -216,6 +216,33 @@ describe('VoiceSession greeting-grace arming + suppression', () => {
 		}
 	});
 
+	it('routeAudioToAgent drops mic frames AND STT feeds during grace', async () => {
+		const transport = createMockTransport({
+			frameworkOwnsInterrupt: true,
+			greetingInterruptGraceMs: 1000,
+			hasCancelResponse: true,
+		});
+		const session = await buildSession({ transport });
+		try {
+			// Arm the window via a first assistant audio chunk.
+			const ttsPcm = Buffer.alloc(960).toString('base64');
+			transport.onAudioOutput?.(ttsPcm);
+			// While in grace: feed a mic frame; transport.sendAudio MUST NOT
+			// fire (routeAudioToAgent is gated). 480 samples of int16 PCM @
+			// 16 kHz = 960 bytes (a typical 30 ms frame).
+			const micFrame = Buffer.alloc(960);
+			micFrame.fill(0x10); // non-zero so resample doesn't trip
+			const sendAudioCallsBefore = (transport.sendAudio as ReturnType<typeof vi.fn>).mock.calls
+				.length;
+			session.feedAudioFromClient(micFrame);
+			const sendAudioCallsAfter = (transport.sendAudio as ReturnType<typeof vi.fn>).mock.calls
+				.length;
+			expect(sendAudioCallsAfter).toBe(sendAudioCallsBefore);
+		} finally {
+			await session.close();
+		}
+	});
+
 	it('handleClientConnected (reconnect) resets the window — next chunk re-arms', async () => {
 		const transport = createMockTransport({
 			frameworkOwnsInterrupt: true,
