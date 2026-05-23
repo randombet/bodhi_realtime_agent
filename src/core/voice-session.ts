@@ -54,6 +54,7 @@ import { DirectiveManager } from './directive-manager.js';
 import { EventBus } from './event-bus.js';
 import { HooksManager } from './hooks.js';
 import { InteractionModeManager } from './interaction-mode.js';
+import { InterruptGraceWindow } from './interrupt-grace-window.js';
 import { MemoryCacheManager } from './memory-cache-manager.js';
 import { MultiplexConversationHistoryStore } from './multiplex-conversation-history-store.js';
 import { SessionManager } from './session-manager.js';
@@ -446,6 +447,20 @@ export class VoiceSession {
 	 *  `conversation_already_has_active_response`.
 	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §7.5. */
 	private _directInputChain: Promise<void> = Promise.resolve();
+	/** Per-session interrupt grace window. Constructed in
+	 *  `handleSetupComplete()` once pass-2 validation finalizes
+	 *  `this.greetingInterruptGraceMs`. Until then, holds a windowMs=0
+	 *  placeholder whose `isActive()` always returns `false`, so the gate
+	 *  is structurally inert before connect resolution. Re-armed by
+	 *  `maybeArmGraceOnFirstAudio()` on the first assistant audio chunk;
+	 *  reset on `handleClientConnected()`.
+	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §4, §6. */
+	private _grace: InterruptGraceWindow = new InterruptGraceWindow(0);
+	/** One-shot gate for the `[Latency] Interrupt grace window armed (Nms)`
+	 *  log line — only fires on the arming audio chunk, not on subsequent
+	 *  idempotent `onAudioStart()` calls. Cleared in `handleClientConnected`
+	 *  alongside `_grace.reset()`. */
+	private _graceArmingLogged = false;
 	/** Native-audio playback cursor — wall-clock (ms) when the current native
 	 *  turn's buffered audio is estimated to finish playing. `0` = the current
 	 *  turn has produced no native audio yet. Reset at each turn boundary. */
@@ -1876,6 +1891,12 @@ export class VoiceSession {
 		) {
 			return;
 		}
+		// Grace check goes BEFORE setting audioVadBargeInFired — otherwise a
+		// frame at t=500ms within a 1s grace would set the "fired" flag, and
+		// the existing `if (this.audioVadBargeInFired) return` guard above
+		// would skip the next loud frame at t=1100ms (post-grace), defeating
+		// real barge-ins. See dev_docs/framework/design-greeting-interrupt-grace.md §4.
+		if (!this.requestInterrupt('client-vad')) return;
 		this.audioVadBargeInFired = true;
 		this.handleClientTtsBargeIn();
 	}
@@ -1960,6 +1981,10 @@ export class VoiceSession {
 		// implement quiesce(); guarantees no model audio leaks into dictation
 		// mode even if a quiesce race occurs.
 		if (this.internalMode !== 'agent') return;
+
+		// Greeting interrupt grace: arm on the first assistant audio chunk.
+		// Idempotent — subsequent chunks no-op inside the class.
+		this.maybeArmGraceOnFirstAudio();
 
 		this.ensureCurrentTurn();
 		this.signalAudioStarted();
@@ -2052,11 +2077,10 @@ export class VoiceSession {
 			if (!this.currentTurn || this.currentTurn.isFinalized) return;
 
 			if (this._nativePlaybackPending) {
-				// Tail mode (post `response.done`). The transport has cleared
-				// lastAssistantItemId/audioOutputMs — no truncate is meaningful;
-				// cancelResponse({}) is a no-op on the wire (no in-flight
-				// response). The cancel call exists for state-mutation parity
-				// and finalizing the playback gate locally.
+				// Tail mode (post `response.done`). Guarded by the grace window:
+				// the gate denies → early return, no cancelResponse, no
+				// finalize. See design §4.
+				if (!this.requestInterrupt('native-onSpeechStarted-tail')) return;
 				this.transport.cancelResponse?.({});
 				this.finalizeTurn(this._nativePlaybackTurn ?? this.currentTurn, { interrupted: true });
 				return;
@@ -2064,7 +2088,8 @@ export class VoiceSession {
 
 			// Generation mode (before `response.done`): truncate the in-flight
 			// response using the transport's own per-response generated-audio
-			// counter, then finalize the current turn.
+			// counter, then finalize the current turn. Also grace-guarded.
+			if (!this.requestInterrupt('native-onSpeechStarted-generation')) return;
 			this.transport.cancelResponse?.({ truncate: 'generated' });
 			this.finalizeTurn(this.currentTurn, { interrupted: true });
 		};
@@ -2127,6 +2152,9 @@ export class VoiceSession {
 			// flip; without this guard the client would hear stale agent
 			// speech during dictation.
 			if (this.internalMode !== 'agent') return;
+			// Greeting interrupt grace: arm on the first assistant audio
+			// chunk (idempotent — subsequent chunks no-op inside the class).
+			this.maybeArmGraceOnFirstAudio();
 			let buffer: Buffer = Buffer.from(base64Pcm, 'base64');
 			if (
 				this._ttsFormat &&
@@ -2223,7 +2251,7 @@ export class VoiceSession {
 			});
 		};
 
-		// Wire speech-started for TTS barge-in. Two cases:
+		// Wire speech-started for TTS barge-in. Two cases (each grace-guarded):
 		//   tts-tail: `_ttsSpeaking && _ttsLlmTextDone` — LLM text done; only
 		//     TTS audio still playing locally. No LLM response in flight, so
 		//     cancelResponse is a no-op on the wire (framework-owned mode).
@@ -2236,6 +2264,7 @@ export class VoiceSession {
 		this.transport.onSpeechStarted = () => {
 			const frameworkOwns = this.transport.capabilities.frameworkOwnsInterrupt === true;
 			if (this._ttsSpeaking && this._ttsLlmTextDone) {
+				if (!this.requestInterrupt('tts-onSpeechStarted-tail')) return;
 				if (frameworkOwns) this.transport.cancelResponse?.({});
 				this.finalizeTurn(this.currentTurn, { interrupted: true });
 				return;
@@ -2247,6 +2276,7 @@ export class VoiceSession {
 				this.currentTurn &&
 				!this.currentTurn.isFinalized
 			) {
+				if (!this.requestInterrupt('tts-onSpeechStarted-generation')) return;
 				this.transport.cancelResponse?.({});
 				this.finalizeTurn(this.currentTurn, { interrupted: true });
 			}
@@ -2435,6 +2465,46 @@ export class VoiceSession {
 		}
 		this.greetingInterruptGraceMs = requestedGraceMs;
 		this.log(`[Latency] greetingInterruptGraceMs resolved to ${this.greetingInterruptGraceMs}ms`);
+		// Construct the runtime grace window with the finalized length.
+		// Arming happens later, on the first assistant audio chunk.
+		this._grace = new InterruptGraceWindow(this.greetingInterruptGraceMs);
+		this._graceArmingLogged = false;
+	}
+
+	/** Idempotent arming hook called from every assistant-audio chunk site
+	 *  (native `handleAudioOutput`, external TTS `tts.onAudio`). Arms the
+	 *  window on the first chunk via the class's own idempotency; emits the
+	 *  one-shot armed-log; and asks the transport to clear any pre-arming
+	 *  echo residue from its input buffer (no-op on transports without
+	 *  `clearInputAudio`).
+	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §6, §8. */
+	private maybeArmGraceOnFirstAudio(): void {
+		if (this.greetingInterruptGraceMs <= 0) return;
+		const wasActive = this._grace.isActive();
+		this._grace.onAudioStart();
+		if (!wasActive && this._grace.isActive() && !this._graceArmingLogged) {
+			this._graceArmingLogged = true;
+			this.log(`[Latency] Interrupt grace window armed (${this.greetingInterruptGraceMs}ms)`);
+			// Belt-and-suspenders: discard any pre-arming residue sitting in
+			// the provider's server-side input buffer (OpenAI) so a suppressed
+			// speech_started during grace cannot lead to speech_stopped
+			// committing echo as a phantom user turn.
+			this.transport.clearInputAudio?.();
+		}
+	}
+
+	/** Returns `true` if the caller should proceed with the interrupt;
+	 *  `false` (and logs) if the grace is currently suppressing it. Wraps
+	 *  `_grace.isActive()` with the session's log channel.
+	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §4. */
+	private requestInterrupt(source: string): boolean {
+		if (this._grace.isActive()) {
+			this.log(
+				`[Latency] interrupt suppressed (grace, ${this._grace.remainingMs()}ms remaining; src=${source})`,
+			);
+			return false;
+		}
+		return true;
 	}
 
 	/** Start STT when session becomes ACTIVE (agent ready). Fire-and-forget. */
@@ -3079,6 +3149,15 @@ export class VoiceSession {
 	private handleClientConnected(): void {
 		this.log(`Client connected (geminiActive=${this.sessionManager.isActive})`);
 		this.clientConnected = true;
+		// Greeting interrupt grace: a fresh browser tab / RTC audio context
+		// typically means a cold AEC. Reset the window so the next first
+		// audio chunk re-arms cleanly. Leaving any prior session's grace
+		// active would suppress new-client mic frames before its own first
+		// audio chunk armed — leaking the prior session's grace into a
+		// different audio context.
+		// See dev_docs/framework/design-greeting-interrupt-grace.md §6.
+		this._grace.reset();
+		this._graceArmingLogged = false;
 		const transportInfo = describeClientTransport(this.config.clientMedia);
 
 		// Send audio format config so the client can negotiate correct sample rates
