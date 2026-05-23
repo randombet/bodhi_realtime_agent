@@ -216,6 +216,62 @@ describe('VoiceSession greeting-grace arming + suppression', () => {
 		}
 	});
 
+	it('routeAudioToAgent drops mic frames between session-ready and first-audio (_greetingInFlight)', async () => {
+		// Regression: between handleSetupComplete (session-ready) and the
+		// first assistant audio chunk, real user speech sent on the wire
+		// would auto-commit via OpenAI's VAD and race the greeting's
+		// response.create. The fix is the _greetingInFlight flag — extend
+		// the mic-drop gate backwards in time so this gap is also covered.
+		const transport = createMockTransport({
+			frameworkOwnsInterrupt: true,
+			greetingInterruptGraceMs: 1000,
+			hasCancelResponse: true,
+		});
+		const session = await buildSession({ transport });
+		try {
+			// Pre-first-audio: send a mic frame. Should be dropped because
+			// `_greetingInFlight` was set in handleSetupComplete.
+			const micFrame = Buffer.alloc(960);
+			micFrame.fill(0x10);
+			const sendAudioCallsBeforeFrame = (transport.sendAudio as ReturnType<typeof vi.fn>).mock.calls
+				.length;
+			session.feedAudioFromClient(micFrame);
+			expect((transport.sendAudio as ReturnType<typeof vi.fn>).mock.calls.length).toBe(
+				sendAudioCallsBeforeFrame,
+			);
+			// Now arm the window (first audio chunk).
+			transport.onAudioOutput?.(Buffer.alloc(960).toString('base64'));
+			// Post-arming but still in grace: also dropped.
+			session.feedAudioFromClient(micFrame);
+			expect((transport.sendAudio as ReturnType<typeof vi.fn>).mock.calls.length).toBe(
+				sendAudioCallsBeforeFrame,
+			);
+		} finally {
+			await session.close();
+		}
+	});
+
+	it('grace=0 session does not set _greetingInFlight (pre-audio mic flows normally)', async () => {
+		const transport = createMockTransport({
+			frameworkOwnsInterrupt: true,
+			greetingInterruptGraceMs: 1000,
+			hasCancelResponse: true,
+		});
+		const session = await buildSession({ transport, greetingInterruptGraceMs: 0 });
+		try {
+			const micFrame = Buffer.alloc(960);
+			micFrame.fill(0x10);
+			const before = (transport.sendAudio as ReturnType<typeof vi.fn>).mock.calls.length;
+			session.feedAudioFromClient(micFrame);
+			// Pre-audio user speech IS forwarded — no greeting-in-flight gate.
+			expect((transport.sendAudio as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(
+				before,
+			);
+		} finally {
+			await session.close();
+		}
+	});
+
 	it('routeAudioToAgent drops mic frames AND STT feeds during grace', async () => {
 		const transport = createMockTransport({
 			frameworkOwnsInterrupt: true,

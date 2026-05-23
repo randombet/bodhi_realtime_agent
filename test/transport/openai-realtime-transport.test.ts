@@ -993,6 +993,46 @@ describe('OpenAIRealtimeTransport', () => {
 			).resolves.toBeUndefined();
 		});
 
+		it('sendContent(turnComplete=true) pre-arms _activeResponseDone before response.created', async () => {
+			// Regression: response.create is sent synchronously, but
+			// response.created arrives later. Without pre-arming, a
+			// cancelResponse({waitForDone:true}) called between send and
+			// server ack would resolve to the previous Promise.resolve() and
+			// race the next response.create. After fix, sendContent calls
+			// markResponsePending() FIRST so the waiter is already pending.
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			expect((transport as any)._resolveActiveResponseDone).toBeNull();
+			transport.sendContent([{ role: 'user', text: 'hi' }], true);
+			// Without any server ack, the waiter MUST be pending.
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			expect((transport as any)._resolveActiveResponseDone).not.toBeNull();
+			// A waitForDone caller right now should NOT resolve until
+			// response.done fires.
+			let resolved = false;
+			transport.cancelResponse?.({ waitForDone: true }).then(() => {
+				resolved = true;
+			});
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(resolved).toBe(false);
+			// Simulate response.created (idempotent — reuses existing waiter).
+			mockRt.emit('response.created', {});
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			expect((transport as any)._isModelGenerating).toBe(true);
+			// response.done resolves the waiter.
+			mockRt.emit('response.done', { response: { status: 'completed' } });
+			await new Promise((r) => setTimeout(r, 5));
+			expect(resolved).toBe(true);
+		});
+
+		it('triggerGeneration pre-arms _activeResponseDone', () => {
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			expect((transport as any)._resolveActiveResponseDone).toBeNull();
+			transport.triggerGeneration();
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			expect((transport as any)._resolveActiveResponseDone).not.toBeNull();
+		});
+
 		it('disconnect resolves a pending waitForDone caller', async () => {
 			setGenerating(true);
 			mockRt.emit('response.created', {});

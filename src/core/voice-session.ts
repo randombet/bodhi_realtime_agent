@@ -461,6 +461,15 @@ export class VoiceSession {
 	 *  idempotent `onAudioStart()` calls. Cleared in `handleClientConnected`
 	 *  alongside `_grace.reset()`. */
 	private _graceArmingLogged = false;
+	/** True between session-ready (`handleSetupComplete`) and the first
+	 *  assistant-audio chunk (where `_grace` then takes over). Extends the
+	 *  mic-drop window backwards in time so user speech sent in the gap
+	 *  between session-ready and first-audio doesn't (a) accumulate in the
+	 *  provider's input buffer and (b) get auto-committed by server VAD
+	 *  before the greeting response completes. Only set when the resolved
+	 *  `greetingInterruptGraceMs > 0`.
+	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §6, §8. */
+	private _greetingInFlight = false;
 	/** Native-audio playback cursor — wall-clock (ms) when the current native
 	 *  turn's buffered audio is estimated to finish playing. `0` = the current
 	 *  turn has produced no native audio yet. Reset at each turn boundary. */
@@ -1769,15 +1778,21 @@ export class VoiceSession {
 
 	/** Forward PCM frame to the agent transport + optional sttProvider. */
 	private routeAudioToAgent(data: Buffer): void {
-		// Greeting interrupt grace: drop both LLM-transport and STT-provider
-		// audio while the window is active. Echo would otherwise (a) accumulate
-		// in OpenAI's server-side input buffer and auto-commit on speech_stopped
-		// (phantom user turn), and (b) get recorded by external STT as a fake
-		// user transcript that lands in conversation history. The local
-		// client-VAD in handleAudioFromClient still processes — only the
-		// downstream consumers are gated.
-		// See dev_docs/framework/design-greeting-interrupt-grace.md §8.
-		if (this._grace.isActive()) return;
+		// Greeting interrupt grace + pre-audio greeting-in-flight gate: drop
+		// both LLM-transport and STT-provider audio. The gate spans two
+		// phases:
+		//   (1) `_greetingInFlight`: from session-ready (handleSetupComplete)
+		//       to the first assistant audio chunk. Prevents real pre-audio
+		//       user speech from auto-committing via OpenAI's server VAD
+		//       while the greeting response is in flight — would otherwise
+		//       race the greeting's own response.create.
+		//   (2) `_grace.isActive()`: from first-audio through grace expiry.
+		//       Prevents AEC echo from accumulating in the provider buffer
+		//       and from being recorded by external STT as a fake user turn.
+		// The local client-VAD in handleAudioFromClient still processes —
+		// only the downstream consumers are gated.
+		// See dev_docs/framework/design-greeting-interrupt-grace.md §6, §8.
+		if (this._greetingInFlight || this._grace.isActive()) return;
 		// PCM is the source of truth at this layer. Two consumers fork off:
 		// (a) the transport: G.711 μ-law (telephony) requires resample to
 		//     8 kHz THEN encode. PCM transports just need rate-matching to
@@ -2478,6 +2493,14 @@ export class VoiceSession {
 		// Arming happens later, on the first assistant audio chunk.
 		this._grace = new InterruptGraceWindow(this.greetingInterruptGraceMs);
 		this._graceArmingLogged = false;
+		// Begin the pre-audio mic-drop phase. The user might speak between
+		// now and the first audio chunk (e.g. while memory loads or the
+		// greeting response generates); dropping those frames prevents a
+		// real pre-greeting user turn from racing the greeting's own
+		// response.create. Maybe-arming flips this false on the first audio
+		// chunk (handoff to the grace window).
+		// See dev_docs/framework/design-greeting-interrupt-grace.md §6, §8.
+		this._greetingInFlight = this.greetingInterruptGraceMs > 0;
 	}
 
 	/** Idempotent arming hook called from every assistant-audio chunk site
@@ -2493,11 +2516,18 @@ export class VoiceSession {
 		this._grace.onAudioStart();
 		if (!wasActive && this._grace.isActive() && !this._graceArmingLogged) {
 			this._graceArmingLogged = true;
+			// Hand off pre-audio mic-drop to the grace window. (The two flags
+			// are deliberately overlapped during the same call: the gate in
+			// routeAudioToAgent ORs them, and the order of assignment doesn't
+			// matter — mic frames sent in this tick are still dropped.)
+			this._greetingInFlight = false;
 			this.log(`[Latency] Interrupt grace window armed (${this.greetingInterruptGraceMs}ms)`);
-			// Belt-and-suspenders: discard any pre-arming residue sitting in
-			// the provider's server-side input buffer (OpenAI) so a suppressed
-			// speech_started during grace cannot lead to speech_stopped
-			// committing echo as a phantom user turn.
+			// Belt-and-suspenders: discard any provider input-buffer residue.
+			// With `_greetingInFlight` active from handleSetupComplete, the
+			// only frames that could be in the buffer at this point are
+			// pre-handleSetupComplete (very narrow window — between WS
+			// connect and session.ready). Safe to discard; the user is not
+			// expected to be speaking before session-ready.
 			this.transport.clearInputAudio?.();
 		}
 	}
@@ -3167,6 +3197,9 @@ export class VoiceSession {
 		// See dev_docs/framework/design-greeting-interrupt-grace.md §6.
 		this._grace.reset();
 		this._graceArmingLogged = false;
+		// Don't leak greeting-in-flight state into the new client session.
+		// The next sendGreeting (if any) will re-set it.
+		this._greetingInFlight = false;
 		const transportInfo = describeClientTransport(this.config.clientMedia);
 
 		// Send audio format config so the client can negotiate correct sample rates

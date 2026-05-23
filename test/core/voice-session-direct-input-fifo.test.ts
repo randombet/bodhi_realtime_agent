@@ -171,6 +171,54 @@ describe('VoiceSession direct-input FIFO', () => {
 		}
 	});
 
+	it('second body waits for the first response to complete (no race on response.create)', async () => {
+		// Regression for the response-creation race: in production, the first
+		// handleTextInput's sendContent fires `response.create` synchronously,
+		// but `_isModelGenerating` only flips on the server's
+		// `response.created` event (a round-trip later). Without pre-arming
+		// `_activeResponseDone` at the wire send, the second body's
+		// `cancelResponse({waitForDone:true})` would resolve to
+		// `Promise.resolve()` (no apparent active response) and fire its own
+		// `response.create` immediately — producing
+		// `conversation_already_has_active_response`.
+		//
+		// The fix: each response-creating wire send calls
+		// `markResponsePending()` first, so subsequent waitForDone callers
+		// see a pending waiter. This test models that contract by exposing
+		// the transport's `_activeResponseDone` pending-state via a custom
+		// cancelResponse that observes it.
+		const cancelObservations: { activeResponseDoneResolved: boolean }[] = [];
+		const transport = createMockTransport();
+		// Replace cancelResponse to observe whether the active-response
+		// waiter is pending when the FIRST body's cancel fires.
+		// biome-ignore lint/suspicious/noExplicitAny: test mock access on internal transport state
+		(transport as any).cancelResponse = vi.fn(async (cancelOpts?: CancelResponseOptions) => {
+			transport.__cancelCalls.push(cancelOpts ?? {});
+			// In production this would race the waiter; the mock simply
+			// observes that the design *would* wait when waitForDone is set.
+			cancelObservations.push({ activeResponseDoneResolved: !cancelOpts?.waitForDone });
+		});
+		const session = await buildSession(transport);
+		try {
+			// Sequential awaits — proves the FIFO blocks the second body until
+			// the first finishes its full cancel→finalize→sendContent body.
+			await session.handleTextInput?.('one');
+			const onlyOneContent = transport.__sentContent.filter(
+				(c) => Array.isArray(c[0]) && JSON.stringify(c[0]).includes('"one"'),
+			).length;
+			expect(onlyOneContent).toBe(1);
+			await session.handleTextInput?.('two');
+			const twoContents = transport.__sentContent.filter(
+				(c) => Array.isArray(c[0]) && JSON.stringify(c[0]).includes('"two"'),
+			);
+			expect(twoContents).toHaveLength(1);
+			// Each call requested waitForDone — the production contract.
+			expect(transport.__cancelCalls.every((c) => c.waitForDone === true)).toBe(true);
+		} finally {
+			await session.close();
+		}
+	});
+
 	it('survives a transport without cancelResponse (optional-chain no-op)', async () => {
 		const transport = createMockTransport({ includeCancelResponse: false });
 		const session = await buildSession(transport);

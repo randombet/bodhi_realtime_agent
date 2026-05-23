@@ -401,8 +401,17 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	// disconnect, or transport error). `cancelResponse({ waitForDone: true })`
 	// returns a promise that races this waiter against a 2000 ms timeout so
 	// callers can sequence cancel → next response.create without
-	// `conversation_already_has_active_response` races. When no response is
-	// in flight, the waiter is already resolved.
+	// `conversation_already_has_active_response` races.
+	//
+	// Crucially, the waiter is *pre-armed* at every wire site that sends a
+	// `response.create` (`sendContent` with `turnComplete=true`,
+	// `triggerGeneration`, `sendToolResult` non-silent) — NOT only on the
+	// `response.created` server event. Without pre-arming, a second direct
+	// input enqueued microseconds after the first would see
+	// `_activeResponseDone === Promise.resolve()` (the first `response.created`
+	// hasn't arrived yet) and fire its own `response.create` immediately,
+	// producing `conversation_already_has_active_response`. See
+	// `markResponsePending()` below and design-greeting-interrupt-grace.md §7.5.
 	private _activeResponseDone: Promise<void> = Promise.resolve();
 	private _resolveActiveResponseDone: (() => void) | null = null;
 	// Durable suppression: set by quiesce(), cleared by unquiesce(). Audio
@@ -638,14 +647,28 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		// Step 1 (no-op fast path): nothing to cancel AND nothing to truncate.
 		// True no-op — no state mutation, no wire events. Tail-mode case
 		// (post response.done) lands here.
-		if (!this._isModelGenerating && !opts?.truncate) {
+		//
+		// Exception: if a `response.create` has been sent on the wire but
+		// `response.created` hasn't arrived yet (so `_isModelGenerating` is
+		// still false but `_resolveActiveResponseDone !== null`), and the
+		// caller requested `waitForDone`, we must NOT short-circuit — we
+		// have to wait for that pending response to complete, otherwise the
+		// caller's subsequent `response.create` will race the pending one.
+		// See dev_docs/framework/design-greeting-interrupt-grace.md §7.5.
+		const responsePending = this._resolveActiveResponseDone !== null;
+		if (!this._isModelGenerating && !opts?.truncate && !(opts?.waitForDone && responsePending)) {
 			return;
 		}
 		// Steps 2-5 are shared with internal cancel sites (quiesce,
 		// sendToolResult({scheduling:'interrupt'})) — centralised so
 		// `_suppressAudio` + `_isModelGenerating` state mutation stays in
-		// sync regardless of which path triggers a cancel.
-		this.actuateCancelInternal(opts?.truncate);
+		// sync regardless of which path triggers a cancel. Skip the
+		// state-mutation steps if we're only here to wait for a pending
+		// response (no `_isModelGenerating`, no truncate); just race the
+		// waiter at the bottom.
+		if (this._isModelGenerating || opts?.truncate) {
+			this.actuateCancelInternal(opts?.truncate);
+		}
 		// Step 6 (optional): wait for response.done to acknowledge the cancel.
 		// Races with a 2000 ms timeout so a missing/late ack doesn't hang the
 		// direct-input FIFO or tool-result interrupt queue forever.
@@ -660,6 +683,26 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 				}, TIMEOUT_MS).unref?.();
 			});
 			await Promise.race([this._activeResponseDone, timeout]);
+		}
+	}
+
+	/** Arm `_activeResponseDone` BEFORE sending a wire `response.create` so a
+	 *  follow-up `cancelResponse({ waitForDone: true })` properly waits for
+	 *  the response we're about to start. Idempotent — calling twice without
+	 *  an intervening `response.done` reuses the existing waiter.
+	 *
+	 *  Why this is required: between `rt.send({type:'response.create'})` and
+	 *  the server's `response.created` event there is a network round-trip
+	 *  (~10-100 ms). Without pre-arming, a second direct input enqueued in
+	 *  that gap sees `_activeResponseDone` still resolved (from before),
+	 *  skips the wait, and sends its own `response.create` — producing
+	 *  `conversation_already_has_active_response`. See
+	 *  dev_docs/framework/design-greeting-interrupt-grace.md §7.5. */
+	private markResponsePending(): void {
+		if (this._resolveActiveResponseDone === null) {
+			this._activeResponseDone = new Promise<void>((resolve) => {
+				this._resolveActiveResponseDone = resolve;
+			});
 		}
 	}
 
@@ -901,6 +944,10 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		}
 
 		if (turnComplete) {
+			// Pre-arm the active-response waiter BEFORE the wire send so a
+			// follow-up cancelResponse({waitForDone:true}) waits for the
+			// response we're starting. See markResponsePending() JSDoc.
+			this.markResponsePending();
 			this.rt.send({ type: 'response.create' });
 		}
 	}
@@ -962,6 +1009,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		// Trigger response generation (OpenAI requires explicit response.create).
 		// 'silent': skip — result is injected without triggering a new turn.
 		if (scheduling !== 'silent') {
+			this.markResponsePending();
 			this.rt.send({ type: 'response.create' });
 		}
 	}
@@ -990,6 +1038,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			}
 		}
 
+		this.markResponsePending();
 		if (Object.keys(response).length > 0) {
 			this.rt.send({
 				type: 'response.create',
@@ -1481,11 +1530,16 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		// --- Response lifecycle: track when a response is active ---
 		rt.on('response.created', () => {
 			this._isModelGenerating = true;
-			// Arm the active-response waiter — see _activeResponseDone field.
-			// `response.done` (any status) and disconnect/error resolve it.
-			this._activeResponseDone = new Promise<void>((resolve) => {
-				this._resolveActiveResponseDone = resolve;
-			});
+			// Arm the active-response waiter — idempotent. The waiter may
+			// already be armed by `markResponsePending()` if the framework
+			// sent `response.create` itself (sendContent/triggerGeneration/
+			// tool-result). For server-initiated responses (VAD-driven) we
+			// arm here on first sight.
+			if (this._resolveActiveResponseDone === null) {
+				this._activeResponseDone = new Promise<void>((resolve) => {
+					this._resolveActiveResponseDone = resolve;
+				});
+			}
 			// Only clear per-turn barge-in suppression. The durable _quiesced
 			// flag stays set until unquiesce() — preserves the transcription-mode
 			// dictation-only guarantee even if a response sneaks in.
@@ -1749,6 +1803,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			});
 		}
 		// Trigger a single response for all flushed results
+		this.markResponsePending();
 		this.rt.send({ type: 'response.create' });
 	}
 
