@@ -1400,7 +1400,14 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 
 		const wire: Record<string, unknown> =
 			callerType === 'semantic_vad'
-				? { type: 'semantic_vad', eagerness: 'medium', ...commonDefaults, ...callerTdObj }
+				? // `eagerness: 'low'` default — less aggressive server-side speech
+					// detection so under-converged AEC echo (esp. on the 2nd+
+					// response, before AEC has fully settled in this audio context)
+					// doesn't trigger false `speech_started` events. Real
+					// barge-ins still fire; they just need a touch more sustained
+					// speech to register. Callers wanting snappier interrupts can
+					// override `eagerness: 'medium'` or `'high'` in turnDetection.
+					{ type: 'semantic_vad', eagerness: 'low', ...commonDefaults, ...callerTdObj }
 				: callerType === 'server_vad'
 					? { type: 'server_vad', ...commonDefaults, ...callerTdObj }
 					: { ...commonDefaults, ...callerTdObj };

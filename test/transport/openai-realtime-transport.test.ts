@@ -1067,12 +1067,15 @@ describe('OpenAIRealtimeTransport', () => {
 			expect(r.effective).toEqual({ interrupt_response: false, create_response: false });
 		});
 
-		it('defaults to semantic_vad with eagerness:medium + interrupt_response:false', () => {
+		it('defaults to semantic_vad with eagerness:low + interrupt_response:false', () => {
 			const t = new OpenAIRealtimeTransport({ apiKey: 'k', model: 'gpt-realtime' });
 			const r = resolve(t);
 			expect(r.wire).toEqual({
 				type: 'semantic_vad',
-				eagerness: 'medium',
+				// Default lowered from 'medium' → 'low' to reduce false-positive
+				// barge-ins from under-converged AEC echo on subsequent
+				// responses (see transport defaults JSDoc).
+				eagerness: 'low',
 				create_response: true,
 				interrupt_response: false, // B8 framework-owned default
 			});
