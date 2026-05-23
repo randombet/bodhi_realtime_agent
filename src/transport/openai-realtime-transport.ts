@@ -630,7 +630,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 
 	/** Cancel the in-flight response — wire-only actuation. See
 	 *  `LLMTransport.cancelResponse` JSDoc on the interface for the contract.
-	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §2.
+	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §2, §7.
 	 *
 	 *  Returns Promise<void>. Never rejects — transient send failures are
 	 *  caught and logged internally. */
@@ -641,46 +641,11 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		if (!this._isModelGenerating && !opts?.truncate) {
 			return;
 		}
-
-		// Step 2: suppress any late audio that arrived between our cancel
-		// decision and the server's response.cancel ack.
-		this._suppressAudio = true;
-
-		// Step 3: optional truncate — preserves what the user actually heard
-		// in the stored assistant item. Requires a known item id.
-		if (opts?.truncate && this.lastAssistantItemId) {
-			const rawMs = opts.truncate === 'generated' ? this.audioOutputMs : opts.truncate.audioEndMs;
-			const audioEndMs = Math.max(0, Math.floor(rawMs));
-			try {
-				this.rt?.send({
-					type: 'conversation.item.truncate',
-					item_id: this.lastAssistantItemId,
-					content_index: 0,
-					audio_end_ms: audioEndMs,
-				});
-			} catch (err) {
-				// Never reject — transport-layer send failures are logged but
-				// don't propagate to fire-and-forget barge-in callers.
-				console.warn('[OpenAIRealtimeTransport] truncate send failed:', err);
-			}
-		}
-
-		// Step 4: send the actual cancel wire message if a response is in
-		// flight. Skipped in the truncate-only-no-active-response case
-		// (which is unusual but covered for completeness).
-		if (this._isModelGenerating) {
-			try {
-				this.rt?.send({ type: 'response.cancel' });
-			} catch (err) {
-				console.warn('[OpenAIRealtimeTransport] response.cancel send failed:', err);
-			}
-		}
-
-		// Step 5: update local generation-state. The trailing
-		// response.done(cancelled) handler also sets this to false; doing it
-		// here first prevents a same-tick second cancel from re-sending.
-		this._isModelGenerating = false;
-
+		// Steps 2-5 are shared with internal cancel sites (quiesce,
+		// sendToolResult({scheduling:'interrupt'})) — centralised so
+		// `_suppressAudio` + `_isModelGenerating` state mutation stays in
+		// sync regardless of which path triggers a cancel.
+		this.actuateCancelInternal(opts?.truncate);
 		// Step 6 (optional): wait for response.done to acknowledge the cancel.
 		// Races with a 2000 ms timeout so a missing/late ack doesn't hang the
 		// direct-input FIFO or tool-result interrupt queue forever.
@@ -698,6 +663,41 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		}
 	}
 
+	/** Shared cancel-actuation steps used by both public `cancelResponse` and
+	 *  internal sites (`quiesce`, `sendToolResult({scheduling:'interrupt'})`).
+	 *  Runs §2 steps 2-5: suppress late audio, optional truncate, send
+	 *  `response.cancel` if a response is in flight, reset
+	 *  `_isModelGenerating`. No top-level no-op guard — internal callers
+	 *  invoke only when they know a response is in flight (or want the
+	 *  state-mutation parity even when one isn't).
+	 *  Never rejects — wraps wire sends in try/catch + console.warn.
+	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §7. */
+	private actuateCancelInternal(truncate?: CancelResponseOptions['truncate']): void {
+		this._suppressAudio = true;
+		if (truncate && this.lastAssistantItemId) {
+			const rawMs = truncate === 'generated' ? this.audioOutputMs : truncate.audioEndMs;
+			const audioEndMs = Math.max(0, Math.floor(rawMs));
+			try {
+				this.rt?.send({
+					type: 'conversation.item.truncate',
+					item_id: this.lastAssistantItemId,
+					content_index: 0,
+					audio_end_ms: audioEndMs,
+				});
+			} catch (err) {
+				console.warn('[OpenAIRealtimeTransport] truncate send failed:', err);
+			}
+		}
+		if (this._isModelGenerating) {
+			try {
+				this.rt?.send({ type: 'response.cancel' });
+			} catch (err) {
+				console.warn('[OpenAIRealtimeTransport] response.cancel send failed:', err);
+			}
+		}
+		this._isModelGenerating = false;
+	}
+
 	// --- Quiesce / unquiesce (cross-provider transcription-mode contract) ---
 
 	/** Pause the transport without disconnecting. Used by VoiceSession to
@@ -713,17 +713,11 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	async quiesce(): Promise<void> {
 		this._quiesced = true;
 		if (!this.rt || !this._isConnected) return;
-		this._suppressAudio = true;
-		if (this._isModelGenerating) {
-			try {
-				this.rt.send({ type: 'response.cancel' });
-			} catch {
-				// Ignore — server-VAD may have already cancelled, in which case
-				// response.cancel races and produces a benign "no active response"
-				// error. We don't surface it.
-			}
-			this._isModelGenerating = false;
-		}
+		// Route through the shared cancel-actuation helper so quiesce stays
+		// in lockstep with cancelResponse on `_suppressAudio` +
+		// `_isModelGenerating` state mutation. The helper itself logs send
+		// failures and never throws. See design-greeting-interrupt-grace.md §7.
+		this.actuateCancelInternal();
 	}
 
 	/** Resume normal operation. Idempotent. Drains any when_idle tool
@@ -946,10 +940,13 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			return;
 		}
 
-		// 'interrupt': cancel in-flight response before delivering
+		// 'interrupt': cancel in-flight response before delivering. Routed
+		// through actuateCancelInternal so the shared cancel-actuation state
+		// (`_suppressAudio` + `_isModelGenerating`) stays consistent with the
+		// public cancelResponse path and any framework-owned barge-in.
+		// See dev_docs/framework/design-greeting-interrupt-grace.md §7.
 		if (scheduling === 'interrupt' && this._isModelGenerating) {
-			this.rt.send({ type: 'response.cancel' });
-			this._isModelGenerating = false;
+			this.actuateCancelInternal();
 		}
 
 		// Send the tool output as a conversation item
