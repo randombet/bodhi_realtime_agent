@@ -182,7 +182,11 @@ const transport = new OpenAIRealtimeTransport({
 	apiKey: OPENAI_API_KEY,
 	model: 'gpt-realtime-2',
 	voice: 'coral',
-	turnDetection: { type: 'semantic_vad', eagerness: 'medium' },
+	// `eagerness` left to framework default ('low') — reduces echo-induced
+	// false-positive barge-ins on the 2nd+ response. Override to 'medium'
+	// or 'high' here if you want snappier interrupts and accept the higher
+	// false-positive rate.
+	turnDetection: { type: 'semantic_vad' },
 	// gpt-realtime-2 supports configurable reasoning (low, medium, high, and xhigh). 'low' is the
 	// documented production default — balances latency vs accuracy.
 	reasoning: { effort: 'high' },
@@ -745,6 +749,11 @@ async function main() {
 		subagentConfigs: { generate_image: imageSubagent, generate_video: videoSubagent },
 		transport, // Inject OpenAI Realtime transport
 		whisperProvider, // Powers transcription mode (gpt-realtime-whisper)
+		// Playback-end gating for OpenAI native audio — keeps barge-in armed
+		// through the buffered-playback tail (OpenAI streams faster than
+		// realtime). See design-playback-end-gating-openai-native.md.
+		playbackStateProtocol: 'audio_done',
+		nativePlaybackGating: true,
 		hooks: {
 			onSessionStart: (event) => {
 				console.log(`${ts()} [Session] Started: ${event.sessionId} (agent: ${event.agentName})`);

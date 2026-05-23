@@ -36,4 +36,14 @@ describe('createBodhiSessionConfig — playback-state config threading', () => {
 		expect(config.playbackStateProtocol).toBeUndefined();
 		expect(config.ttsPlaybackFallbackMarginMs).toBeUndefined();
 	});
+
+	it('threads nativePlaybackGating into VoiceSessionConfig', async () => {
+		const onConfig = await createBodhiSessionConfig({
+			...baseOptions(),
+			nativePlaybackGating: true,
+		});
+		expect(onConfig.nativePlaybackGating).toBe(true);
+		const offConfig = await createBodhiSessionConfig(baseOptions());
+		expect(offConfig.nativePlaybackGating).toBeUndefined();
+	});
 });

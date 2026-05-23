@@ -11,9 +11,10 @@
 
 import { BaseTransportAdapter } from './base-transport-adapter.js';
 
-export class GeminiTransportAdapter extends BaseTransportAdapter {
-	cancelGeneration(): void {
-		// Gemini doesn't support cancel_generation as a distinct command;
-		// interruption is signaled by the client starting to speak.
-	}
-}
+/**
+ * Gemini-specific adapter. The base class's default `cancelGeneration()` —
+ * which calls `transport.cancelResponse?.({})` — resolves to a no-op for
+ * Gemini (no distinct cancel-generation wire command; interruption is
+ * provider-driven via `serverContent.interrupted`), so no override is needed.
+ */
+export class GeminiTransportAdapter extends BaseTransportAdapter {}

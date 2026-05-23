@@ -11,6 +11,7 @@ import type { ToolDefinition } from '../types/tool.js';
 import type {
 	AudioFormatSpec,
 	CacheConfigCommon,
+	CancelResponseOptions,
 	ContentTurn,
 	LLMTransport,
 	LLMTransportConfig,
@@ -113,8 +114,12 @@ export interface OpenAIRealtimeConfig {
 	voice?: string;
 	/** Transcription model (default: 'gpt-4o-mini-transcribe'). Set to null to disable input transcription. */
 	transcriptionModel?: string | null;
-	/** Turn detection configuration. */
-	turnDetection?: Record<string, unknown>;
+	/** Turn detection configuration. Pass `null` to disable VAD entirely
+	 *  (manual turn control via `commitAudio()` — `frameworkOwnsInterrupt`
+	 *  capability is forced `false` and `greetingInterruptGraceMs` to `0` in
+	 *  this mode). When omitted, the framework's defaults are merged in
+	 *  type-aware fashion — see `resolveTurnDetectionConfig`. */
+	turnDetection?: Record<string, unknown> | null;
 	/** Noise reduction configuration. */
 	noiseReduction?: Record<string, unknown>;
 	/** Reasoning effort + optional summary verbosity. Only honoured when the
@@ -297,6 +302,9 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		contextCompression: false,
 		groundingMetadata: false,
 		textResponseModality: true,
+		// `response.done` fires at generation end, not playback end — the native
+		// playback-end gate engages for OpenAI native audio.
+		playbackGatedTurnComplete: false,
 	};
 
 	// --- LLMTransport callback properties ---
@@ -379,6 +387,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	// when_idle scheduling: buffer tool results while model is generating
 	private _isModelGenerating = false;
 	private _pendingWhenIdle: TransportToolResult[] = [];
+	private _interruptToolResultQueue: Promise<void> = Promise.resolve();
 
 	// Text mode: whether the transport is configured for text-mode responses (for TTS)
 	private _textMode = false;
@@ -387,6 +396,25 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	// Cleared on response.created. Distinct from _quiesced (which persists
 	// across responses until unquiesce()).
 	private _suppressAudio = false;
+
+	// Active-response waiter — see dev_docs/framework/design-greeting-interrupt-grace.md §2.
+	// Resolved when the in-flight response terminates (`response.done` any status,
+	// disconnect, or transport error). `cancelResponse({ waitForDone: true })`
+	// returns a promise that races this waiter against a 2000 ms timeout so
+	// callers can sequence cancel → next response.create without
+	// `conversation_already_has_active_response` races.
+	//
+	// Crucially, the waiter is *pre-armed* at every wire site that sends a
+	// `response.create` (`sendContent` with `turnComplete=true`,
+	// `triggerGeneration`, `sendToolResult` non-silent) — NOT only on the
+	// `response.created` server event. Without pre-arming, a second direct
+	// input enqueued microseconds after the first would see
+	// `_activeResponseDone === Promise.resolve()` (the first `response.created`
+	// hasn't arrived yet) and fire its own `response.create` immediately,
+	// producing `conversation_already_has_active_response`. See
+	// `markResponsePending()` below and design-greeting-interrupt-grace.md §7.5.
+	private _activeResponseDone: Promise<void> = Promise.resolve();
+	private _resolveActiveResponseDone: (() => void) | null = null;
 	// Durable suppression: set by quiesce(), cleared by unquiesce(). Audio
 	// is dropped at the wire-event handlers while this is true regardless of
 	// response lifecycle.
@@ -408,6 +436,16 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	/** Compute capability flags from the configured model. */
 	private resolveCapabilities(): TransportCapabilities {
 		const model = this.config.model ?? 'gpt-realtime-2';
+		// Compute framework-owned-interrupt + grace from the single
+		// turn-detection resolver — wire config and capabilities cannot
+		// disagree because they are computed together from one source.
+		// See dev_docs/framework/design-greeting-interrupt-grace.md §3.
+		const { wire, effective } = this.resolveTurnDetectionConfig();
+		// VAD-disabled mode (`turn_detection: null`) means no speech-driven
+		// interrupt machinery runs at all — neither provider nor framework
+		// has anything to actuate from. `frameworkOwnsInterrupt` is forced
+		// false so the grace window does not arm pointlessly.
+		const frameworkOwnsInterrupt = wire !== null && effective.interrupt_response === false;
 		return {
 			...this.staticCapabilities,
 			parallelToolCalls: supports(model, 'parallelToolCalls'),
@@ -416,6 +454,11 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			// proxy because the two ship together on the same model line.
 			automaticPreambles: supports(model, 'reasoning'),
 			quiescible: true,
+			frameworkOwnsInterrupt,
+			// Recommend 1000 ms of greeting interrupt grace ONLY when we own
+			// interruption — provider auto-cancel would defeat the grace, so
+			// advertising > 0 there would mislead VoiceSession's validation.
+			greetingInterruptGraceMs: frameworkOwnsInterrupt ? 1000 : 0,
 		};
 	}
 
@@ -519,6 +562,11 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		this._suppressAudio = false;
 		this.lastAssistantItemId = null;
 		this.audioOutputMs = 0;
+		// Resolve any active-response waiter so callers awaiting
+		// cancelResponse({ waitForDone: true }) don't hang past disconnect.
+		this._resolveActiveResponseDone?.();
+		this._resolveActiveResponseDone = null;
+		this._activeResponseDone = Promise.resolve();
 		if (this.rt) {
 			try {
 				this.rt.close();
@@ -578,6 +626,134 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		this.rt.send({ type: 'input_audio_buffer.clear' });
 	}
 
+	clearInputAudio(): void {
+		// OpenAI's input buffer is server-side and append-then-auto-commit
+		// (see input_audio_buffer.commit semantics). Identical wire effect to
+		// clearAudio() — both send `input_audio_buffer.clear`. The two methods
+		// remain distinct on the interface so VoiceSession can document
+		// "discard pre-arming echo residue" intent at the call site without
+		// coupling to the legacy clearAudio name.
+		// See dev_docs/framework/design-greeting-interrupt-grace.md §8.
+		if (!this.rt || !this._isConnected) return;
+		this.rt.send({ type: 'input_audio_buffer.clear' });
+	}
+
+	/** Cancel the in-flight response — wire-only actuation. See
+	 *  `LLMTransport.cancelResponse` JSDoc on the interface for the contract.
+	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §2, §7.
+	 *
+	 *  Returns Promise<void>. Never rejects — transient send failures are
+	 *  caught and logged internally. */
+	async cancelResponse(opts?: CancelResponseOptions): Promise<void> {
+		// Step 1 (no-op fast path): nothing to cancel AND nothing to truncate.
+		// True no-op — no state mutation, no wire events. Tail-mode case
+		// (post response.done) lands here.
+		//
+		// Exception: if a `response.create` has been sent on the wire but
+		// `response.created` hasn't arrived yet (so `_isModelGenerating` is
+		// still false but `_resolveActiveResponseDone !== null`), and the
+		// caller requested `waitForDone`, we must NOT short-circuit — we
+		// have to wait for that pending response to complete, otherwise the
+		// caller's subsequent `response.create` will race the pending one.
+		// See dev_docs/framework/design-greeting-interrupt-grace.md §7.5.
+		const responsePending = this._resolveActiveResponseDone !== null;
+		if (!this._isModelGenerating && !opts?.truncate && !(opts?.waitForDone && responsePending)) {
+			return;
+		}
+		// Steps 2-5 are shared with internal cancel sites (quiesce,
+		// sendToolResult({scheduling:'interrupt'})) — centralised so
+		// `_suppressAudio` + `_isModelGenerating` state mutation stays in
+		// sync regardless of which path triggers a cancel. Skip the
+		// state-mutation steps if we're only here to wait for a pending
+		// response (no `_isModelGenerating`, no truncate); just race the
+		// waiter at the bottom.
+		if (this._isModelGenerating || opts?.truncate) {
+			this.actuateCancelInternal(opts?.truncate);
+		}
+		// Step 6 (optional): wait for response.done to acknowledge the cancel.
+		// Races with a 2000 ms timeout so a missing/late ack doesn't hang the
+		// direct-input FIFO or tool-result interrupt queue forever. Clear the
+		// timer when the waiter wins — without this, every successful cancel
+		// logs a spurious `cancelResponse waitForDone timed out` 2 s later.
+		if (opts?.waitForDone) {
+			const TIMEOUT_MS = 2000;
+			let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+			let timedOut = false;
+			const timeout = new Promise<void>((resolve) => {
+				timeoutHandle = setTimeout(() => {
+					timedOut = true;
+					resolve();
+				}, TIMEOUT_MS);
+				timeoutHandle.unref?.();
+			});
+			try {
+				await Promise.race([this._activeResponseDone, timeout]);
+			} finally {
+				if (timeoutHandle !== null) clearTimeout(timeoutHandle);
+			}
+			if (timedOut) {
+				console.warn(
+					`[OpenAIRealtimeTransport] cancelResponse waitForDone timed out after ${TIMEOUT_MS}ms — proceeding`,
+				);
+			}
+		}
+	}
+
+	/** Arm `_activeResponseDone` BEFORE sending a wire `response.create` so a
+	 *  follow-up `cancelResponse({ waitForDone: true })` properly waits for
+	 *  the response we're about to start. Idempotent — calling twice without
+	 *  an intervening `response.done` reuses the existing waiter.
+	 *
+	 *  Why this is required: between `rt.send({type:'response.create'})` and
+	 *  the server's `response.created` event there is a network round-trip
+	 *  (~10-100 ms). Without pre-arming, a second direct input enqueued in
+	 *  that gap sees `_activeResponseDone` still resolved (from before),
+	 *  skips the wait, and sends its own `response.create` — producing
+	 *  `conversation_already_has_active_response`. See
+	 *  dev_docs/framework/design-greeting-interrupt-grace.md §7.5. */
+	private markResponsePending(): void {
+		if (this._resolveActiveResponseDone === null) {
+			this._activeResponseDone = new Promise<void>((resolve) => {
+				this._resolveActiveResponseDone = resolve;
+			});
+		}
+	}
+
+	/** Shared cancel-actuation steps used by both public `cancelResponse` and
+	 *  internal sites (`quiesce`, `sendToolResult({scheduling:'interrupt'})`).
+	 *  Runs §2 steps 2-5: suppress late audio, optional truncate, send
+	 *  `response.cancel` if a response is in flight, reset
+	 *  `_isModelGenerating`. No top-level no-op guard — internal callers
+	 *  invoke only when they know a response is in flight (or want the
+	 *  state-mutation parity even when one isn't).
+	 *  Never rejects — wraps wire sends in try/catch + console.warn.
+	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §7. */
+	private actuateCancelInternal(truncate?: CancelResponseOptions['truncate']): void {
+		this._suppressAudio = true;
+		if (truncate && this.lastAssistantItemId) {
+			const rawMs = truncate === 'generated' ? this.audioOutputMs : truncate.audioEndMs;
+			const audioEndMs = Math.max(0, Math.floor(rawMs));
+			try {
+				this.rt?.send({
+					type: 'conversation.item.truncate',
+					item_id: this.lastAssistantItemId,
+					content_index: 0,
+					audio_end_ms: audioEndMs,
+				});
+			} catch (err) {
+				console.warn('[OpenAIRealtimeTransport] truncate send failed:', err);
+			}
+		}
+		if (this._isModelGenerating) {
+			try {
+				this.rt?.send({ type: 'response.cancel' });
+			} catch (err) {
+				console.warn('[OpenAIRealtimeTransport] response.cancel send failed:', err);
+			}
+		}
+		this._isModelGenerating = false;
+	}
+
 	// --- Quiesce / unquiesce (cross-provider transcription-mode contract) ---
 
 	/** Pause the transport without disconnecting. Used by VoiceSession to
@@ -593,17 +769,11 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	async quiesce(): Promise<void> {
 		this._quiesced = true;
 		if (!this.rt || !this._isConnected) return;
-		this._suppressAudio = true;
-		if (this._isModelGenerating) {
-			try {
-				this.rt.send({ type: 'response.cancel' });
-			} catch {
-				// Ignore — server-VAD may have already cancelled, in which case
-				// response.cancel races and produces a benign "no active response"
-				// error. We don't surface it.
-			}
-			this._isModelGenerating = false;
-		}
+		// Route through the shared cancel-actuation helper so quiesce stays
+		// in lockstep with cancelResponse on `_suppressAudio` +
+		// `_isModelGenerating` state mutation. The helper itself logs send
+		// failures and never throws. See design-greeting-interrupt-grace.md §7.
+		this.actuateCancelInternal();
 	}
 
 	/** Resume normal operation. Idempotent. Drains any when_idle tool
@@ -787,6 +957,10 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		}
 
 		if (turnComplete) {
+			// Pre-arm the active-response waiter BEFORE the wire send so a
+			// follow-up cancelResponse({waitForDone:true}) waits for the
+			// response we're starting. See markResponsePending() JSDoc.
+			this.markResponsePending();
 			this.rt.send({ type: 'response.create' });
 		}
 	}
@@ -826,12 +1000,47 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			return;
 		}
 
-		// 'interrupt': cancel in-flight response before delivering
-		if (scheduling === 'interrupt' && this._isModelGenerating) {
-			this.rt.send({ type: 'response.cancel' });
-			this._isModelGenerating = false;
+		// 'interrupt': cancel/wait before delivering, then create the follow-up
+		// response. Public API remains sync; the internal queue serializes
+		// cancel -> response.done(cancelled) -> item/create so OpenAI never sees
+		// a new response.create while the cancelled response is still active.
+		// See dev_docs/framework/design-greeting-interrupt-grace.md §7.
+		if (
+			scheduling === 'interrupt' &&
+			(this._isModelGenerating || this._resolveActiveResponseDone !== null)
+		) {
+			this.enqueueInterruptToolResult(result);
+			return;
 		}
 
+		this.sendToolResultNow(result);
+	}
+
+	private enqueueInterruptToolResult(result: TransportToolResult): void {
+		// Per-item try/catch so a single failure logs its own context
+		// (which tool result id/name failed) and doesn't poison the rest
+		// of the queue. `.then(run, run)` keeps the chain alive across
+		// rejections of prior items; the inner try/catch guarantees this
+		// run resolves regardless of outcome.
+		const run = async () => {
+			try {
+				if (!this.rt || !this._isConnected) return;
+				await this.cancelResponse({ waitForDone: true });
+				if (!this.rt || !this._isConnected) return;
+				this.sendToolResultNow(result);
+			} catch (err) {
+				console.warn(
+					`[OpenAIRealtimeTransport] interrupt tool-result for ${result.id} (${result.name}) failed:`,
+					err,
+				);
+			}
+		};
+		this._interruptToolResultQueue = this._interruptToolResultQueue.then(run, run);
+	}
+
+	private sendToolResultNow(result: TransportToolResult): void {
+		if (!this.rt || !this._isConnected) return;
+		const scheduling = result.scheduling ?? 'immediate';
 		// Send the tool output as a conversation item
 		this.rt.send({
 			type: 'conversation.item.create',
@@ -845,6 +1054,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		// Trigger response generation (OpenAI requires explicit response.create).
 		// 'silent': skip — result is injected without triggering a new turn.
 		if (scheduling !== 'silent') {
+			this.markResponsePending();
 			this.rt.send({ type: 'response.create' });
 		}
 	}
@@ -873,6 +1083,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			}
 		}
 
+		this.markResponsePending();
 		if (Object.keys(response).length > 0) {
 			this.rt.send({
 				type: 'response.create',
@@ -1177,6 +1388,84 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		);
 	}
 
+	/** Single resolver consumed by `buildSessionConfig` (wire),
+	 *  `effectiveInterruptResponse` (capability gating), and
+	 *  `resolveCapabilities` (the runtime `frameworkOwnsInterrupt` /
+	 *  `greetingInterruptGraceMs` values). Keeping all three in sync via one
+	 *  function prevents capability/wire-config drift.
+	 *
+	 *  Type-aware merging:
+	 *   - `null` → wire `null` (manual turn control; no defaults injected;
+	 *     framework-owned interrupt N/A).
+	 *   - `semantic_vad` → injects `eagerness` + `create_response` +
+	 *     `interrupt_response` defaults under the caller's overrides.
+	 *   - `server_vad` → injects only `create_response` +
+	 *     `interrupt_response` (no `eagerness` — that field is semantic-only;
+	 *     server-VAD threshold/padding/duration fields are caller-supplied).
+	 *   - Other / future types → only common defaults under caller overrides.
+	 *
+	 *  Caller spread is always **last**, so caller-explicit fields win
+	 *  (including `interrupt_response: true` for legacy callers).
+	 *
+	 *  Phase B4 keeps `interrupt_response: true` as the default to preserve
+	 *  pre-design behaviour. Phase B8 flips this default to `false` (the
+	 *  framework-owned interrupt mode) and runtime-computes the capability
+	 *  flags from the resolved value.
+	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §3. */
+	private resolveTurnDetectionConfig(): {
+		wire: Record<string, unknown> | null;
+		effective: { interrupt_response: boolean; create_response: boolean };
+	} {
+		const callerTd = this.config.turnDetection;
+
+		// Explicit null: caller is disabling VAD entirely. Frame-by-frame
+		// commit via commitAudio() — no auto-create, no auto-interrupt.
+		if (callerTd === null) {
+			return {
+				wire: null,
+				effective: { interrupt_response: false, create_response: false },
+			};
+		}
+
+		const callerTdObj = (callerTd ?? {}) as Record<string, unknown>;
+		const callerType = (callerTdObj.type as string | undefined) ?? 'semantic_vad';
+
+		// Framework-owned interruption (Phase B8 default flip): the framework
+		// actuates response cancellation via cancelResponse() — the provider
+		// does NOT auto-cancel on speech_started. Required so the
+		// greeting-grace window can suppress echo-driven barge-ins without
+		// being defeated by an unsuppressible provider auto-cancel. Callers
+		// who explicitly pass `interrupt_response: true` keep legacy behavior,
+		// and the connect-time validation in VoiceSession (§5) downgrades the
+		// grace to 0 with a warn for them.
+		const commonDefaults: Record<string, unknown> = {
+			create_response: true,
+			interrupt_response: false,
+		};
+
+		const wire: Record<string, unknown> =
+			callerType === 'semantic_vad'
+				? // `eagerness: 'low'` default — less aggressive server-side speech
+					// detection so under-converged AEC echo (esp. on the 2nd+
+					// response, before AEC has fully settled in this audio context)
+					// doesn't trigger false `speech_started` events. Real
+					// barge-ins still fire; they just need a touch more sustained
+					// speech to register. Callers wanting snappier interrupts can
+					// override `eagerness: 'medium'` or `'high'` in turnDetection.
+					{ type: 'semantic_vad', eagerness: 'low', ...commonDefaults, ...callerTdObj }
+				: callerType === 'server_vad'
+					? { type: 'server_vad', ...commonDefaults, ...callerTdObj }
+					: { ...commonDefaults, ...callerTdObj };
+
+		return {
+			wire,
+			effective: {
+				interrupt_response: wire.interrupt_response === true,
+				create_response: wire.create_response !== false,
+			},
+		};
+	}
+
 	private buildSessionConfig(): RealtimeSessionCreateRequest {
 		const inFmt = this.normaliseAudioFormat(
 			this.config.audioInputFormat ?? { type: 'audio/pcm', rate: 24000 },
@@ -1199,13 +1488,8 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 								},
 							}
 						: {}),
-					turn_detection: (this.config.turnDetection ?? {
-						type: 'semantic_vad',
-						eagerness: 'medium',
-						create_response: true,
-						interrupt_response: true,
-						// biome-ignore lint/suspicious/noExplicitAny: turn detection config passed through from user; SDK type is strict union
-					}) as any,
+					// biome-ignore lint/suspicious/noExplicitAny: SDK type is a strict union; wire is the canonical shape
+					turn_detection: this.resolveTurnDetectionConfig().wire as any,
 					...(this.config.noiseReduction
 						? // biome-ignore lint/suspicious/noExplicitAny: noise reduction config is passed through from user
 							{ noise_reduction: this.config.noiseReduction as any }
@@ -1298,6 +1582,16 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		// --- Response lifecycle: track when a response is active ---
 		rt.on('response.created', () => {
 			this._isModelGenerating = true;
+			// Arm the active-response waiter — idempotent. The waiter may
+			// already be armed by `markResponsePending()` if the framework
+			// sent `response.create` itself (sendContent/triggerGeneration/
+			// tool-result). For server-initiated responses (VAD-driven) we
+			// arm here on first sight.
+			if (this._resolveActiveResponseDone === null) {
+				this._activeResponseDone = new Promise<void>((resolve) => {
+					this._resolveActiveResponseDone = resolve;
+				});
+			}
 			// Only clear per-turn barge-in suppression. The durable _quiesced
 			// flag stays set until unquiesce() — preserves the transcription-mode
 			// dictation-only guarantee even if a response sneaks in.
@@ -1388,6 +1682,12 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		// --- Turn complete: dispatch batched tool calls, normalise usage,
 		//                     flush when_idle queue, signal turn done. ---
 		rt.on('response.done', (event: unknown) => {
+			// Resolve the active-response waiter first — any status (completed,
+			// cancelled, failed) terminates the response and unblocks
+			// `cancelResponse({ waitForDone: true })` callers waiting on us.
+			this._resolveActiveResponseDone?.();
+			this._resolveActiveResponseDone = null;
+
 			const e = event as { response?: { id?: string; usage?: unknown; status?: string } };
 			// A cancelled response is the trailing response.done of a server-VAD
 			// barge-in (or an explicit response.cancel). The framework already
@@ -1434,19 +1734,31 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			if (this.onTurnComplete) this.onTurnComplete();
 		});
 
-		// --- Interruption handling (server VAD mode) ---
-		// In server VAD mode (when speech_started fires), the server automatically
-		// cancels any in-flight response and sends response.done (status: cancelled).
-		// We only need to truncate the audio item to what the user actually heard.
-		// Sending response.cancel here would race with the server's own cancellation
-		// and produce "no active response found" errors.
+		// --- Interruption handling: dual-mode dispatch ---
+		// Framework-owned mode (default — interrupt_response: false): the
+		// handler is signal-only. The framework's wireNativeBargeIn /
+		// wireTtsProvider sites read this signal and decide whether to
+		// actuate via cancelResponse(), gated by the greeting-grace window.
+		// Provider-owned mode (legacy — caller sets interrupt_response: true):
+		// the server auto-cancels the response itself. We still issue the
+		// local truncate so the stored item reflects what was heard, and fire
+		// onInterrupted so the framework can finalize.
+		// See dev_docs/framework/design-greeting-interrupt-grace.md §3.
 		rt.on('input_audio_buffer.speech_started', () => {
-			// Always fire onSpeechStarted — TTS barge-in needs this even when LLM is idle
+			// Always fire onSpeechStarted first — TTS barge-in (and the
+			// framework's wireNativeBargeIn) need it regardless of mode.
 			if (this.onSpeechStarted) this.onSpeechStarted();
 
+			// Framework-owned mode: stop here. cancelResponse() is the
+			// framework's actuation path; the local truncate + onInterrupted
+			// would double-actuate against it.
+			if (this.resolveTurnDetectionConfig().effective.interrupt_response === false) {
+				return;
+			}
+
+			// Provider-owned (legacy) branch — preserved verbatim.
 			if (!this._isModelGenerating) return;
 			this._suppressAudio = true;
-
 			if (this.lastAssistantItemId) {
 				rt.send({
 					type: 'conversation.item.truncate',
@@ -1495,6 +1807,12 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 					(typeof inner?.message === 'string' && inner.message.includes('prompt_cache_key'));
 				if (isProbeError) return;
 			}
+			// Resolve any active-response waiter so a transport error doesn't
+			// leave cancelResponse({ waitForDone: true }) callers blocked. The
+			// waiter resolves rather than rejects (callers should not have to
+			// handle rejections — disconnect already cancels the outer session).
+			this._resolveActiveResponseDone?.();
+			this._resolveActiveResponseDone = null;
 			if (this.onError) {
 				const err = error instanceof Error ? error : new Error(String(error));
 				// OpenAIRealtimeError has .error.type for classification
@@ -1509,6 +1827,10 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		// --- Connection close (via raw WebSocket, not the typed emitter) ---
 		rt.socket.on('close', (code: number, reason: Buffer) => {
 			this._isConnected = false;
+			// Resolve any active-response waiter so a socket close doesn't
+			// leave cancelResponse({ waitForDone: true }) callers blocked.
+			this._resolveActiveResponseDone?.();
+			this._resolveActiveResponseDone = null;
 			if (this.onClose) this.onClose(code, reason.toString());
 		});
 	}
@@ -1533,6 +1855,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			});
 		}
 		// Trigger a single response for all flushed results
+		this.markResponsePending();
 		this.rt.send({ type: 'response.create' });
 	}
 

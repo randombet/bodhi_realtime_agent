@@ -13,5 +13,6 @@ Bodhi Realtime Agent Framework is a TypeScript framework for real-time voice age
 - [Quick Start](/guide/quickstart)
 - [Architecture Overview](/guide/architecture)
 - [Transport (LLM vs client media)](/guide/transport)
+- [Playback Gate](/guide/playback-gate)
 - [Running Examples](/guide/running-examples)
 - [Knowledge base](/guide/knowledge-base)

@@ -697,7 +697,7 @@ describe('TTS playback-aware turn completion', () => {
 			session.feedJsonFromClient({ type: 'playback.ended', playbackId: 1 });
 
 			const logged = logSpy.mock.calls.map((c) => String(c[0]));
-			expect(logged.some((l) => l.includes('TTS turn complete via signal'))).toBe(true);
+			expect(logged.some((l) => l.includes('turn complete via signal'))).toBe(true);
 		} finally {
 			await session?.close();
 			logSpy.mockRestore();
@@ -721,7 +721,7 @@ describe('TTS playback-aware turn completion', () => {
 			vi.advanceTimersByTime(5000); // no signal — fallback timer fires
 
 			const logged = logSpy.mock.calls.map((c) => String(c[0]));
-			expect(logged.some((l) => l.includes('TTS turn complete via fallback'))).toBe(true);
+			expect(logged.some((l) => l.includes('turn complete via fallback'))).toBe(true);
 		} finally {
 			await session?.close();
 			logSpy.mockRestore();

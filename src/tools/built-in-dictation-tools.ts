@@ -44,7 +44,7 @@ export function injectDictationTool(session: VoiceSession): ToolDefinition {
 		async execute(): Promise<{ injected: string }> {
 			const text = session.getDictationBuffer();
 			if (!text) return { injected: '' };
-			session.injectDictationBuffer();
+			await session.injectDictationBuffer();
 			return { injected: text };
 		},
 	};

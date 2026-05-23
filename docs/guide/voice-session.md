@@ -129,8 +129,27 @@ const session = new VoiceSession({
 
 The framework wires PCM rates and inbound PCM delivery when `rtcAudio === 'werift_opus'`; your server still implements **`clientSender`** and relays JSON frames unchanged.
 
+## Playback gate
+
+For client surfaces that can report when audio has actually finished playing,
+`VoiceSession` can enable the playback gate with
+`playbackStateProtocol: 'audio_done'`. The server sends `audio.done` after the
+turn's final audio frame, and the client replies with `playback.ended` after its
+audio buffer drains. This keeps the turn interruptible during buffered playback
+instead of completing as soon as synthesis or generation finishes.
+
+When you provide a server-owned `clientSender`, set
+`supportsPlaybackStateProtocol: true` only if the sender implements ordered
+`sendJsonAfterAudio` and the client renders assistant audio through that same
+buffered PCM path. Surfaces that cannot report playback completion should leave
+the protocol disabled and use the server fallback timer.
+
+See [Playback Gate](/guide/playback-gate) for the wire messages, supported
+surfaces, and client behavior.
+
 ## Related
 
 - [Agents](/guide/agents)
 - [Tools](/guide/tools)
 - [Transport](/guide/transport) — **LLM transport** vs **client media** profiles
+- [Playback Gate](/guide/playback-gate)
