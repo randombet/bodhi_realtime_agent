@@ -822,6 +822,168 @@ describe('OpenAIRealtimeTransport', () => {
 		});
 	});
 
+	describe('cancelResponse + _activeResponseDone waiter', () => {
+		// dev_docs/framework/design-greeting-interrupt-grace.md §2.
+		// `_isModelGenerating` is read/set by these tests via the test mock
+		// access pattern used throughout this file.
+
+		function setGenerating(active: boolean) {
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			(transport as any)._isModelGenerating = active;
+		}
+		function setLastAssistantItemId(id: string | null) {
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			(transport as any).lastAssistantItemId = id;
+		}
+		function setAudioOutputMs(ms: number) {
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			(transport as any).audioOutputMs = ms;
+		}
+		function sentTypes(): string[] {
+			return mockRt.sent.map((m) => String(m.type));
+		}
+
+		it('returns a true no-op when no response in flight and no truncate', async () => {
+			setGenerating(false);
+			mockRt.sent.length = 0;
+			await transport.cancelResponse?.({});
+			expect(mockRt.sent).toHaveLength(0);
+		});
+
+		it('returns a true no-op for waitForDone tail case (already resolved)', async () => {
+			setGenerating(false);
+			mockRt.sent.length = 0;
+			// Should resolve immediately — _activeResponseDone is Promise.resolve()
+			// when no response has been created. Race against a tight timer.
+			const start = Date.now();
+			await transport.cancelResponse?.({ waitForDone: true });
+			expect(Date.now() - start).toBeLessThan(200);
+			expect(mockRt.sent).toHaveLength(0);
+		});
+
+		it('sends response.cancel when _isModelGenerating', async () => {
+			setGenerating(true);
+			mockRt.sent.length = 0;
+			await transport.cancelResponse?.({});
+			expect(sentTypes()).toContain('response.cancel');
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			expect((transport as any)._isModelGenerating).toBe(false);
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			expect((transport as any)._suppressAudio).toBe(true);
+		});
+
+		it('sends conversation.item.truncate with explicit audioEndMs', async () => {
+			setGenerating(true);
+			setLastAssistantItemId('item_123');
+			mockRt.sent.length = 0;
+			await transport.cancelResponse?.({ truncate: { audioEndMs: 250.7 } });
+			const truncate = mockRt.sent.find((m) => m.type === 'conversation.item.truncate');
+			expect(truncate).toEqual({
+				type: 'conversation.item.truncate',
+				item_id: 'item_123',
+				content_index: 0,
+				audio_end_ms: 250, // floored
+			});
+			expect(sentTypes()).toContain('response.cancel');
+		});
+
+		it('sends truncate with audioOutputMs when truncate: "generated"', async () => {
+			setGenerating(true);
+			setLastAssistantItemId('item_xyz');
+			setAudioOutputMs(900);
+			mockRt.sent.length = 0;
+			await transport.cancelResponse?.({ truncate: 'generated' });
+			const truncate = mockRt.sent.find((m) => m.type === 'conversation.item.truncate');
+			expect(truncate).toEqual({
+				type: 'conversation.item.truncate',
+				item_id: 'item_xyz',
+				content_index: 0,
+				audio_end_ms: 900,
+			});
+		});
+
+		it('skips truncate when no lastAssistantItemId', async () => {
+			setGenerating(true);
+			setLastAssistantItemId(null);
+			mockRt.sent.length = 0;
+			await transport.cancelResponse?.({ truncate: 'generated' });
+			expect(sentTypes()).not.toContain('conversation.item.truncate');
+			expect(sentTypes()).toContain('response.cancel');
+		});
+
+		it('floors and clamps negative audioEndMs to 0', async () => {
+			setGenerating(true);
+			setLastAssistantItemId('item_neg');
+			mockRt.sent.length = 0;
+			await transport.cancelResponse?.({ truncate: { audioEndMs: -5 } });
+			const truncate = mockRt.sent.find((m) => m.type === 'conversation.item.truncate');
+			expect(truncate?.audio_end_ms).toBe(0);
+		});
+
+		it('waitForDone resolves when response.done fires', async () => {
+			setGenerating(true);
+			mockRt.sent.length = 0;
+			// Arm the waiter by firing response.created.
+			mockRt.emit('response.created', {});
+			// Now waitForDone should pend until response.done is emitted.
+			const pending = transport.cancelResponse?.({ waitForDone: true });
+			let resolved = false;
+			pending?.then(() => {
+				resolved = true;
+			});
+			await new Promise((r) => setTimeout(r, 5));
+			expect(resolved).toBe(false);
+			// Trigger response.done — waiter resolves.
+			mockRt.emit('response.done', { response: { status: 'cancelled' } });
+			await pending;
+			expect(resolved).toBe(true);
+		});
+
+		it('never rejects when send throws', async () => {
+			setGenerating(true);
+			setLastAssistantItemId('item_err');
+			// Make rt.send throw on truncate
+			const original = mockRt.send.bind(mockRt);
+			mockRt.send = vi.fn((msg) => {
+				if (msg.type === 'conversation.item.truncate') throw new Error('boom');
+				original(msg);
+			}) as typeof mockRt.send;
+			// Should resolve, not reject.
+			await expect(
+				transport.cancelResponse?.({ truncate: { audioEndMs: 100 } }),
+			).resolves.toBeUndefined();
+		});
+
+		it('disconnect resolves a pending waitForDone caller', async () => {
+			setGenerating(true);
+			mockRt.emit('response.created', {});
+			const pending = transport.cancelResponse?.({ waitForDone: true });
+			let resolved = false;
+			pending?.then(() => {
+				resolved = true;
+			});
+			await transport.disconnect();
+			await pending;
+			expect(resolved).toBe(true);
+		});
+	});
+
+	describe('clearInputAudio', () => {
+		it('sends input_audio_buffer.clear', () => {
+			mockRt.sent.length = 0;
+			transport.clearInputAudio?.();
+			expect(mockRt.sent).toContainEqual({ type: 'input_audio_buffer.clear' });
+		});
+
+		it('does not send when disconnected', () => {
+			mockRt.sent.length = 0;
+			// biome-ignore lint/suspicious/noExplicitAny: test mock
+			(transport as any)._isConnected = false;
+			transport.clearInputAudio?.();
+			expect(mockRt.sent).toHaveLength(0);
+		});
+	});
+
 	describe('text-mode responses', () => {
 		it('fires onTextOutput on text delta events', () => {
 			const textOutput = vi.fn();

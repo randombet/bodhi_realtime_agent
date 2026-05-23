@@ -608,6 +608,23 @@ export class GeminiLiveTransport implements LLMTransport {
 	/** No-op for V1 — server VAD only. */
 	clearAudio(): void {}
 
+	/** Resolved-promise no-op. Gemini has no distinct cancel-generation wire
+	 *  command — its interrupts are provider-driven via
+	 *  `serverContent.interrupted`. The optional method exists on the
+	 *  interface so framework barge-in sites can call it uniformly.
+	 *  `greetingInterruptGraceMs` is `0` for Gemini, so this path is not
+	 *  exercised in production today.
+	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §2. */
+	async cancelResponse(): Promise<void> {
+		// Intentionally empty.
+	}
+
+	// Note: `clearInputAudio?` is intentionally not implemented for Gemini —
+	// `sendRealtimeInput({audio})` streams directly with no persistent
+	// server-managed buffer (commitAudio/clearAudio are also no-ops here).
+	// VoiceSession calls `transport.clearInputAudio?.()` via optional chain;
+	// the absence is the no-op.
+
 	/** Update session configuration (applied on next reconnect for Gemini —
 	 *  no in-place mutation, capabilities.inPlaceSessionUpdate is false).
 	 *  Async signature for LLMTransport interface parity; body is synchronous. */

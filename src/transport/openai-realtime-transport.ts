@@ -11,6 +11,7 @@ import type { ToolDefinition } from '../types/tool.js';
 import type {
 	AudioFormatSpec,
 	CacheConfigCommon,
+	CancelResponseOptions,
 	ContentTurn,
 	LLMTransport,
 	LLMTransportConfig,
@@ -390,6 +391,16 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	// Cleared on response.created. Distinct from _quiesced (which persists
 	// across responses until unquiesce()).
 	private _suppressAudio = false;
+
+	// Active-response waiter — see dev_docs/framework/design-greeting-interrupt-grace.md §2.
+	// Resolved when the in-flight response terminates (`response.done` any status,
+	// disconnect, or transport error). `cancelResponse({ waitForDone: true })`
+	// returns a promise that races this waiter against a 2000 ms timeout so
+	// callers can sequence cancel → next response.create without
+	// `conversation_already_has_active_response` races. When no response is
+	// in flight, the waiter is already resolved.
+	private _activeResponseDone: Promise<void> = Promise.resolve();
+	private _resolveActiveResponseDone: (() => void) | null = null;
 	// Durable suppression: set by quiesce(), cleared by unquiesce(). Audio
 	// is dropped at the wire-event handlers while this is true regardless of
 	// response lifecycle.
@@ -522,6 +533,11 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		this._suppressAudio = false;
 		this.lastAssistantItemId = null;
 		this.audioOutputMs = 0;
+		// Resolve any active-response waiter so callers awaiting
+		// cancelResponse({ waitForDone: true }) don't hang past disconnect.
+		this._resolveActiveResponseDone?.();
+		this._resolveActiveResponseDone = null;
+		this._activeResponseDone = Promise.resolve();
 		if (this.rt) {
 			try {
 				this.rt.close();
@@ -579,6 +595,88 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	clearAudio(): void {
 		if (!this.rt || !this._isConnected) return;
 		this.rt.send({ type: 'input_audio_buffer.clear' });
+	}
+
+	clearInputAudio(): void {
+		// OpenAI's input buffer is server-side and append-then-auto-commit
+		// (see input_audio_buffer.commit semantics). Identical wire effect to
+		// clearAudio() — both send `input_audio_buffer.clear`. The two methods
+		// remain distinct on the interface so VoiceSession can document
+		// "discard pre-arming echo residue" intent at the call site without
+		// coupling to the legacy clearAudio name.
+		// See dev_docs/framework/design-greeting-interrupt-grace.md §8.
+		if (!this.rt || !this._isConnected) return;
+		this.rt.send({ type: 'input_audio_buffer.clear' });
+	}
+
+	/** Cancel the in-flight response — wire-only actuation. See
+	 *  `LLMTransport.cancelResponse` JSDoc on the interface for the contract.
+	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §2.
+	 *
+	 *  Returns Promise<void>. Never rejects — transient send failures are
+	 *  caught and logged internally. */
+	async cancelResponse(opts?: CancelResponseOptions): Promise<void> {
+		// Step 1 (no-op fast path): nothing to cancel AND nothing to truncate.
+		// True no-op — no state mutation, no wire events. Tail-mode case
+		// (post response.done) lands here.
+		if (!this._isModelGenerating && !opts?.truncate) {
+			return;
+		}
+
+		// Step 2: suppress any late audio that arrived between our cancel
+		// decision and the server's response.cancel ack.
+		this._suppressAudio = true;
+
+		// Step 3: optional truncate — preserves what the user actually heard
+		// in the stored assistant item. Requires a known item id.
+		if (opts?.truncate && this.lastAssistantItemId) {
+			const rawMs = opts.truncate === 'generated' ? this.audioOutputMs : opts.truncate.audioEndMs;
+			const audioEndMs = Math.max(0, Math.floor(rawMs));
+			try {
+				this.rt?.send({
+					type: 'conversation.item.truncate',
+					item_id: this.lastAssistantItemId,
+					content_index: 0,
+					audio_end_ms: audioEndMs,
+				});
+			} catch (err) {
+				// Never reject — transport-layer send failures are logged but
+				// don't propagate to fire-and-forget barge-in callers.
+				console.warn('[OpenAIRealtimeTransport] truncate send failed:', err);
+			}
+		}
+
+		// Step 4: send the actual cancel wire message if a response is in
+		// flight. Skipped in the truncate-only-no-active-response case
+		// (which is unusual but covered for completeness).
+		if (this._isModelGenerating) {
+			try {
+				this.rt?.send({ type: 'response.cancel' });
+			} catch (err) {
+				console.warn('[OpenAIRealtimeTransport] response.cancel send failed:', err);
+			}
+		}
+
+		// Step 5: update local generation-state. The trailing
+		// response.done(cancelled) handler also sets this to false; doing it
+		// here first prevents a same-tick second cancel from re-sending.
+		this._isModelGenerating = false;
+
+		// Step 6 (optional): wait for response.done to acknowledge the cancel.
+		// Races with a 2000 ms timeout so a missing/late ack doesn't hang the
+		// direct-input FIFO or tool-result interrupt queue forever.
+		if (opts?.waitForDone) {
+			const TIMEOUT_MS = 2000;
+			const timeout = new Promise<void>((resolve) => {
+				setTimeout(() => {
+					console.warn(
+						`[OpenAIRealtimeTransport] cancelResponse waitForDone timed out after ${TIMEOUT_MS}ms — proceeding`,
+					);
+					resolve();
+				}, TIMEOUT_MS).unref?.();
+			});
+			await Promise.race([this._activeResponseDone, timeout]);
+		}
 	}
 
 	// --- Quiesce / unquiesce (cross-provider transcription-mode contract) ---
@@ -1301,6 +1399,11 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		// --- Response lifecycle: track when a response is active ---
 		rt.on('response.created', () => {
 			this._isModelGenerating = true;
+			// Arm the active-response waiter — see _activeResponseDone field.
+			// `response.done` (any status) and disconnect/error resolve it.
+			this._activeResponseDone = new Promise<void>((resolve) => {
+				this._resolveActiveResponseDone = resolve;
+			});
 			// Only clear per-turn barge-in suppression. The durable _quiesced
 			// flag stays set until unquiesce() — preserves the transcription-mode
 			// dictation-only guarantee even if a response sneaks in.
@@ -1391,6 +1494,12 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		// --- Turn complete: dispatch batched tool calls, normalise usage,
 		//                     flush when_idle queue, signal turn done. ---
 		rt.on('response.done', (event: unknown) => {
+			// Resolve the active-response waiter first — any status (completed,
+			// cancelled, failed) terminates the response and unblocks
+			// `cancelResponse({ waitForDone: true })` callers waiting on us.
+			this._resolveActiveResponseDone?.();
+			this._resolveActiveResponseDone = null;
+
 			const e = event as { response?: { id?: string; usage?: unknown; status?: string } };
 			// A cancelled response is the trailing response.done of a server-VAD
 			// barge-in (or an explicit response.cancel). The framework already
@@ -1498,6 +1607,12 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 					(typeof inner?.message === 'string' && inner.message.includes('prompt_cache_key'));
 				if (isProbeError) return;
 			}
+			// Resolve any active-response waiter so a transport error doesn't
+			// leave cancelResponse({ waitForDone: true }) callers blocked. The
+			// waiter resolves rather than rejects (callers should not have to
+			// handle rejections — disconnect already cancels the outer session).
+			this._resolveActiveResponseDone?.();
+			this._resolveActiveResponseDone = null;
 			if (this.onError) {
 				const err = error instanceof Error ? error : new Error(String(error));
 				// OpenAIRealtimeError has .error.type for classification
@@ -1512,6 +1627,10 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		// --- Connection close (via raw WebSocket, not the typed emitter) ---
 		rt.socket.on('close', (code: number, reason: Buffer) => {
 			this._isConnected = false;
+			// Resolve any active-response waiter so a socket close doesn't
+			// leave cancelResponse({ waitForDone: true }) callers blocked.
+			this._resolveActiveResponseDone?.();
+			this._resolveActiveResponseDone = null;
 			if (this.onClose) this.onClose(code, reason.toString());
 		});
 	}
