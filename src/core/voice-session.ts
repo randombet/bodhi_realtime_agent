@@ -2613,20 +2613,31 @@ export class VoiceSession {
 			this.notificationQueue?.resetAudio();
 		}
 
-		// Inject stored memory facts so the LLM knows the user from the first turn
+		// Collapse memory facts + session directives + greeting into ONE
+		// sendContent call. Previously this fired two sendContent calls (memory
+		// first with turnComplete: true, then the greeting), which created two
+		// separate response.create on framework-owned interruption (and also
+		// risked racing two active responses on OpenAI Realtime — see
+		// `conversation_already_has_active_response`). Combining keeps the
+		// grace-window invariant "first audio = greeting" intact.
+		// See dev_docs/framework/design-greeting-interrupt-grace.md §6.
 		const cachedFacts = this.memoryCacheManager?.facts ?? [];
+		const memoryPrefix =
+			cachedFacts.length > 0
+				? `[MEMORY — what you already know about this user from previous sessions]\n${cachedFacts
+						.map((f) => `- ${f.content}`)
+						.join('\n')}\n\n`
+				: '';
 		if (cachedFacts.length > 0) {
-			const summary = cachedFacts.map((f) => `- ${f.content}`).join('\n');
-			const memoryText = `[MEMORY — what you already know about this user from previous sessions]\n${summary}`;
-			this.transport.sendContent([{ role: 'user', text: memoryText }], true);
 			this.log(`Injected ${cachedFacts.length} memory facts`);
 		}
 
 		// Prepend session directives so the greeting response respects user preferences (e.g. pacing)
 		const directiveSuffix = this.directiveManager.getSessionSuffix();
-		const greetingText = directiveSuffix
+		const greetingBody = directiveSuffix
 			? `${directiveSuffix}\n\n${agent.greeting}`
 			: agent.greeting;
+		const greetingText = `${memoryPrefix}${greetingBody}`;
 		this.transport.sendContent([{ role: 'user', text: greetingText }], true);
 	}
 
