@@ -162,6 +162,24 @@ const DEFAULT_CLIENT_AUDIO_VAD: ResolvedClientAudioVadConfig = {
 	bargeInTtsAvgAbsThreshold: 450,
 };
 
+/** Upper bound (ms) for the greeting-interrupt grace window. Anything beyond
+ *  ~5 s starts hiding real misconfigurations, so the resolver clamps and
+ *  treats out-of-range values as `0`. */
+const GRACE_MAX_MS = 5000;
+
+/** Clamp a caller-supplied `greetingInterruptGraceMs` override to a sane
+ *  numeric range. Returns `undefined` when omitted (no caller override —
+ *  inherit transport default at pass 2); returns `0` for `NaN`, negative,
+ *  or non-finite inputs; returns the clamped value otherwise.
+ *  Exported for tests; consumers should not depend on this directly.
+ *  See dev_docs/framework/design-greeting-interrupt-grace.md §5. */
+export function clampGraceMs(raw: number | undefined): number | undefined {
+	if (raw === undefined) return undefined;
+	if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 0) return 0;
+	if (raw > GRACE_MAX_MS) return GRACE_MAX_MS;
+	return raw;
+}
+
 /**
  * Configuration for creating a VoiceSession.
  */
@@ -408,6 +426,17 @@ export class VoiceSession {
 	 *  (`!capabilities.playbackGatedTurnComplete`). Resolved once in the
 	 *  constructor. See design-playback-end-gating-openai-native.md. */
 	private nativePlaybackGatingActive = false;
+	/** Pass-1 of greeting-grace resolution (§5): caller override captured in
+	 *  the constructor. `undefined` means "no caller override — inherit from
+	 *  transport capability at finalize time". Resolved+clamped here so an
+	 *  invalid value doesn't survive to pass 2. */
+	private _overrideGraceMs: number | undefined;
+	/** Pass-2-final greeting interrupt grace window (ms). `0` disables the
+	 *  window. Finalized in `handleSetupComplete()` against the transport's
+	 *  post-connect capabilities; `0` until then. Phase A: only the
+	 *  resolution + validation log; Phase C wires the runtime effects.
+	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §5. */
+	private greetingInterruptGraceMs = 0;
 	/** Native-audio playback cursor — wall-clock (ms) when the current native
 	 *  turn's buffered audio is estimated to finish playing. `0` = the current
 	 *  turn has produced no native audio yet. Reset at each turn boundary. */
@@ -995,6 +1024,12 @@ export class VoiceSession {
 			config.nativePlaybackGating === true &&
 			!this.ttsProvider &&
 			!this.transport.capabilities.playbackGatedTurnComplete;
+
+		// Greeting-grace pass 1: clamp the caller override into the private
+		// field; finalize against transport capabilities + cancelResponse
+		// availability in handleSetupComplete() (pass 2), BEFORE sendGreeting()
+		// can fire. See design-greeting-interrupt-grace.md §5.
+		this._overrideGraceMs = clampGraceMs(config.greetingInterruptGraceMs);
 
 		// Native sessions install the native barge-in path — the !ttsProvider
 		// sibling of wireTtsProvider(). Harmless when gating is off (the handler
@@ -2280,6 +2315,13 @@ export class VoiceSession {
 
 	private handleSetupComplete(_sessionId: string): void {
 		this.log(`LLM transport setup complete (clientConnected=${this.clientConnected})`);
+		// Greeting-grace pass 2: finalize the effective grace window against
+		// the transport's post-connect capabilities, BEFORE any sendGreeting()
+		// call below can request the first audio chunk. Idempotent — safe to
+		// re-run on transfer/reconnect setup-complete callbacks, but in
+		// practice runs once per VoiceSession lifecycle.
+		// See dev_docs/framework/design-greeting-interrupt-grace.md §5.
+		this.finalizeGreetingInterruptGrace();
 		if (this.sessionManager.state === 'CONNECTING') {
 			this.sessionManager.transitionTo('ACTIVE');
 		}
@@ -2294,6 +2336,36 @@ export class VoiceSession {
 		if (this.clientConnected) {
 			this._memoryReadyPromise.then(() => this.sendGreeting());
 		}
+	}
+
+	/** Pass 2 of greeting-grace resolution (§5). Reads the transport's
+	 *  now-finalized capabilities (`greetingInterruptGraceMs`,
+	 *  `frameworkOwnsInterrupt`) and the presence of `cancelResponse`;
+	 *  combines with the caller override stored in pass 1; validates;
+	 *  publishes the effective value to `this.greetingInterruptGraceMs`.
+	 *  Phase A: validation log only — Phase C wires the runtime effects. */
+	private finalizeGreetingInterruptGrace(): void {
+		const transportDefault =
+			clampGraceMs(this.transport.capabilities.greetingInterruptGraceMs) ?? 0;
+		const requestedGraceMs = this._overrideGraceMs ?? transportDefault;
+		if (requestedGraceMs <= 0) {
+			this.greetingInterruptGraceMs = 0;
+			return;
+		}
+		const frameworkOwns = this.transport.capabilities.frameworkOwnsInterrupt === true;
+		const hasCancelResponse = typeof this.transport.cancelResponse === 'function';
+		if (!frameworkOwns || !hasCancelResponse) {
+			const reason = !frameworkOwns
+				? 'frameworkOwnsInterrupt is not true (provider auto-cancel still wins)'
+				: 'cancelResponse is not implemented on the transport';
+			this.log(
+				`[WARN] greetingInterruptGraceMs=${requestedGraceMs}ms requested but ${reason}. Disabling grace for this session.`,
+			);
+			this.greetingInterruptGraceMs = 0;
+			return;
+		}
+		this.greetingInterruptGraceMs = requestedGraceMs;
+		this.log(`[Latency] greetingInterruptGraceMs resolved to ${this.greetingInterruptGraceMs}ms`);
 	}
 
 	/** Start STT when session becomes ACTIVE (agent ready). Fire-and-forget. */
