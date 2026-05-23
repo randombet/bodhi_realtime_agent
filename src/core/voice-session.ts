@@ -316,6 +316,20 @@ export interface VoiceSessionConfig {
 	 * `dev_docs/framework/design-background-notification-actor.md`.
 	 */
 	backgroundAgents?: BackgroundAgent[];
+	/** Override the transport-recommended greeting interrupt grace window.
+	 *  When the session's first assistant audio chunk arrives, the framework
+	 *  suppresses user-driven interrupts and drops outbound mic frames for
+	 *  this many ms so browser AEC can converge before echo events count as
+	 *  barge-in. When omitted, falls back to
+	 *  `transport.capabilities.greetingInterruptGraceMs` (OpenAI Realtime
+	 *  defaults to 1000 ms when framework-owns-interrupt; Gemini defaults to
+	 *  0 ms). Clamped to `[0, 5000]`. A session resolving > 0 against a
+	 *  transport that does not advertise `frameworkOwnsInterrupt` (or does
+	 *  not implement `cancelResponse`) is downgraded to `0` at connect time
+	 *  with a warning log. Phone sessions should pass `0` explicitly (no
+	 *  browser AEC; dropping caller audio would silence real speech).
+	 *  See dev_docs/framework/design-greeting-interrupt-grace.md. */
+	greetingInterruptGraceMs?: number;
 }
 
 /**
