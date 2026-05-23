@@ -672,18 +672,30 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		}
 		// Step 6 (optional): wait for response.done to acknowledge the cancel.
 		// Races with a 2000 ms timeout so a missing/late ack doesn't hang the
-		// direct-input FIFO or tool-result interrupt queue forever.
+		// direct-input FIFO or tool-result interrupt queue forever. Clear the
+		// timer when the waiter wins — without this, every successful cancel
+		// logs a spurious `cancelResponse waitForDone timed out` 2 s later.
 		if (opts?.waitForDone) {
 			const TIMEOUT_MS = 2000;
+			let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+			let timedOut = false;
 			const timeout = new Promise<void>((resolve) => {
-				setTimeout(() => {
-					console.warn(
-						`[OpenAIRealtimeTransport] cancelResponse waitForDone timed out after ${TIMEOUT_MS}ms — proceeding`,
-					);
+				timeoutHandle = setTimeout(() => {
+					timedOut = true;
 					resolve();
-				}, TIMEOUT_MS).unref?.();
+				}, TIMEOUT_MS);
+				timeoutHandle.unref?.();
 			});
-			await Promise.race([this._activeResponseDone, timeout]);
+			try {
+				await Promise.race([this._activeResponseDone, timeout]);
+			} finally {
+				if (timeoutHandle !== null) clearTimeout(timeoutHandle);
+			}
+			if (timedOut) {
+				console.warn(
+					`[OpenAIRealtimeTransport] cancelResponse waitForDone timed out after ${TIMEOUT_MS}ms — proceeding`,
+				);
+			}
 		}
 	}
 

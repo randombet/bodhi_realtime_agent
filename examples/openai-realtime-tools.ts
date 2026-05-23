@@ -182,7 +182,11 @@ const transport = new OpenAIRealtimeTransport({
 	apiKey: OPENAI_API_KEY,
 	model: 'gpt-realtime-2',
 	voice: 'coral',
-	turnDetection: { type: 'semantic_vad', eagerness: 'medium' },
+	// `eagerness` left to framework default ('low') — reduces echo-induced
+	// false-positive barge-ins on the 2nd+ response. Override to 'medium'
+	// or 'high' here if you want snappier interrupts and accept the higher
+	// false-positive rate.
+	turnDetection: { type: 'semantic_vad' },
 	// gpt-realtime-2 supports configurable reasoning (low, medium, high, and xhigh). 'low' is the
 	// documented production default — balances latency vs accuracy.
 	reasoning: { effort: 'high' },

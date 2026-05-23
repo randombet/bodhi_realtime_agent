@@ -1057,6 +1057,54 @@ describe('OpenAIRealtimeTransport', () => {
 			expect(resolved).toBe(true);
 		});
 
+		it('waitForDone clears the 2s timer when the waiter wins the race (no spurious warn)', async () => {
+			// Regression: previously the timeout's setTimeout was not cleared
+			// when _activeResponseDone resolved first, so every successful
+			// cancel logged `cancelResponse waitForDone timed out` 2s later.
+			vi.useFakeTimers();
+			try {
+				setGenerating(true);
+				mockRt.emit('response.created', {});
+				const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+				const pending = transport.cancelResponse?.({ waitForDone: true });
+				// Resolve the waiter immediately.
+				mockRt.emit('response.done', { response: { status: 'cancelled' } });
+				await pending;
+				// Advance well past the 2s timeout — if the timer wasn't
+				// cleared, the warn fires here. Assert it does NOT.
+				await vi.advanceTimersByTimeAsync(3000);
+				const timeoutWarns = warnSpy.mock.calls.filter(
+					(call) =>
+						typeof call[0] === 'string' && call[0].includes('cancelResponse waitForDone timed out'),
+				);
+				expect(timeoutWarns).toHaveLength(0);
+				warnSpy.mockRestore();
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it('waitForDone DOES warn when the 2s timer wins (no resolution arrives)', async () => {
+			vi.useFakeTimers();
+			try {
+				setGenerating(true);
+				mockRt.emit('response.created', {});
+				const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+				const pending = transport.cancelResponse?.({ waitForDone: true });
+				// Don't emit response.done — let the timer win.
+				await vi.advanceTimersByTimeAsync(2001);
+				await pending;
+				const timeoutWarns = warnSpy.mock.calls.filter(
+					(call) =>
+						typeof call[0] === 'string' && call[0].includes('cancelResponse waitForDone timed out'),
+				);
+				expect(timeoutWarns).toHaveLength(1);
+				warnSpy.mockRestore();
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
 		it('never rejects when send throws', async () => {
 			setGenerating(true);
 			setLastAssistantItemId('item_err');
