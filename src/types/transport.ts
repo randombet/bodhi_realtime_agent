@@ -52,6 +52,22 @@ export interface TransportCapabilities {
 	 *  compilation of existing custom transports.
 	 *  See dev_docs/framework/design-playback-end-gating-openai-native.md. */
 	playbackGatedTurnComplete?: boolean;
+	/** Recommended grace window (ms) at session-first-audio during which
+	 *  user-driven interrupts are suppressed and outbound mic frames are
+	 *  dropped. Allows browser AEC to converge before the framework lets
+	 *  echo-triggered events count as barge-in.
+	 *  Defaults: OpenAI Realtime → 1000 (runtime-computed iff
+	 *  `frameworkOwnsInterrupt` is `true`), Gemini Live → 0,
+	 *  unknown → 0. Optional — `undefined` means `0`.
+	 *  See dev_docs/framework/design-greeting-interrupt-grace.md. */
+	greetingInterruptGraceMs?: number;
+	/** True if this transport's interrupt actuation is framework-owned:
+	 *  `cancelResponse()` is the wire path the framework uses to stop
+	 *  generation, and the provider does **not** auto-cancel from
+	 *  server-VAD events. Required for `greetingInterruptGraceMs > 0` to be
+	 *  honoured (otherwise the provider auto-cancel defeats the grace).
+	 *  Optional — `undefined` means `false`. */
+	frameworkOwnsInterrupt?: boolean;
 }
 
 /** Explicit defaults for every flag. Downstream `LLMTransport` implementations
@@ -71,6 +87,8 @@ export const DEFAULT_TRANSPORT_CAPABILITIES: Required<TransportCapabilities> = {
 	automaticPreambles: false,
 	quiescible: false,
 	playbackGatedTurnComplete: false,
+	greetingInterruptGraceMs: 0,
+	frameworkOwnsInterrupt: false,
 };
 
 /** Audio format descriptor passed to an STT provider at configuration time. */
