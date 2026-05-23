@@ -408,6 +408,21 @@ export interface RealtimeLLMUsageEvent {
  * Each provider (Gemini Live, OpenAI Realtime) implements this interface,
  * exposing static capabilities and handling provider-specific wire protocols internally.
  */
+/** Options for `LLMTransport.cancelResponse`. See the method's JSDoc on
+ *  `LLMTransport` for full semantics.
+ *  See dev_docs/framework/design-greeting-interrupt-grace.md §2. */
+export interface CancelResponseOptions {
+	/** Truncate the stored assistant audio item alongside cancelling the
+	 *  response. `{ audioEndMs }` provides an explicit value (floored).
+	 *  `'generated'` asks the transport to use its own per-response
+	 *  generated-audio counter. Omit to skip truncation entirely. */
+	truncate?: { audioEndMs: number } | 'generated';
+	/** When true, the returned promise resolves only after the trailing
+	 *  `response.done(status:'cancelled')` (or a 2000 ms timeout). Use
+	 *  before sending a new `response.create` to avoid races. */
+	waitForDone?: boolean;
+}
+
 export interface LLMTransport {
 	/** Static capabilities — read before connecting, used for orchestrator branching. */
 	readonly capabilities: TransportCapabilities;
@@ -425,6 +440,45 @@ export interface LLMTransport {
 	// --- Turn boundary control (V1: server VAD only — these are no-ops) ---
 	commitAudio(): void;
 	clearAudio(): void;
+
+	// --- Framework-owned interrupt actuation (optional; required when
+	//     `capabilities.frameworkOwnsInterrupt` is true) ---
+	/** Cancel the in-flight response — wire-only actuation. May be called
+	 *  from any framework barge-in path that has decided to interrupt.
+	 *  Idempotent.
+	 *
+	 *  MUST NOT invoke `onInterrupted` or any other framework callback — the
+	 *  caller is responsible for `finalizeTurn(interrupted)`. The
+	 *  implementation only sends wire messages and updates the transport's
+	 *  own state.
+	 *
+	 *  MUST NOT reject. Transient send failures are caught and logged
+	 *  internally; the returned promise still resolves so fire-and-forget
+	 *  callers cannot trigger unhandled-rejection warnings.
+	 *
+	 *  When `truncate.audioEndMs` is supplied and the transport tracks an
+	 *  active assistant audio item, it also sends a per-provider truncate
+	 *  (OpenAI: `conversation.item.truncate`). `truncate: 'generated'` asks
+	 *  the transport to compute `audioEndMs` from its own per-response
+	 *  generated-audio counter (e.g. OpenAI's `audioOutputMs`); transports
+	 *  without such a counter ignore the sentinel. Omitting `truncate` only
+	 *  skips truncation — `cancelResponse` still stops generation if a
+	 *  response is in flight.
+	 *
+	 *  When `waitForDone` is true, the returned promise resolves only after
+	 *  the trailing `response.done(status:'cancelled')` arrives from the
+	 *  provider (or a 2000 ms timeout, whichever comes first). Use this
+	 *  before sending a new `response.create` so cancel and create cannot
+	 *  race. Default `false`. */
+	cancelResponse?(opts?: CancelResponseOptions): Promise<void>;
+
+	/** Clear the provider's pending input-audio buffer (OpenAI Realtime:
+	 *  `input_audio_buffer.clear`). Optional — Gemini and other transports
+	 *  without a server-side append-then-commit input buffer omit this.
+	 *  Called by `VoiceSession` at grace-window arming to discard any
+	 *  pre-arming echo residue; safe to call when the buffer is empty.
+	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §8. */
+	clearInputAudio?(): void;
 
 	// --- Quiesce / unquiesce (optional; advertised via capabilities.quiescible) ---
 	/** Pause the transport without disconnecting:
