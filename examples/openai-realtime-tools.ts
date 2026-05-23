@@ -187,6 +187,7 @@ const transport = new OpenAIRealtimeTransport({
 	// or 'high' here if you want snappier interrupts and accept the higher
 	// false-positive rate.
 	turnDetection: { type: 'semantic_vad' },
+	noiseReduction: { type: 'far_field' },
 	// gpt-realtime-2 supports configurable reasoning (low, medium, high, and xhigh). 'low' is the
 	// documented production default — balances latency vs accuracy.
 	reasoning: { effort: 'high' },
@@ -525,7 +526,8 @@ const videoSubagent: SubagentConfig = {
  */
 const endSession: ToolDefinition = {
 	name: 'end_session',
-	description: `End the voice session gracefully. Call this when the user says goodbye, wants to hang up, or indicates they are done.`,
+	description:
+		'End the voice session gracefully. Call this when the user says goodbye, wants to hang up, or indicates they are done.',
 	parameters: z.object({}),
 	execution: 'inline',
 	execute: async (_args, ctx: ToolContext) => {

@@ -1592,6 +1592,36 @@ describe('OpenAIRealtimeTransport — Phase 1 features (gpt-realtime-2)', () => 
 			});
 		});
 
+		it('uses semantic VAD and far-field input noise reduction by default', () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+			// biome-ignore lint/suspicious/noExplicitAny: probing build-config output
+			const session = (transport as any).buildSessionConfig();
+			expect(session.audio.input.turn_detection).toMatchObject({ type: 'semantic_vad' });
+			expect(session.audio.input.noise_reduction).toEqual({ type: 'far_field' });
+		});
+
+		it('allows near-field input noise reduction override', () => {
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				noiseReduction: { type: 'near_field' },
+			});
+			// biome-ignore lint/suspicious/noExplicitAny: probing build-config output
+			const session = (transport as any).buildSessionConfig();
+			expect(session.audio.input.noise_reduction).toEqual({ type: 'near_field' });
+		});
+
+		it('allows disabling input noise reduction with null', () => {
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				noiseReduction: null,
+			});
+			// biome-ignore lint/suspicious/noExplicitAny: probing build-config output
+			const session = (transport as any).buildSessionConfig();
+			expect(session.audio.input.noise_reduction).toBeNull();
+		});
+
 		it('G.711 mu-law: input rate = 8000, bitDepth = 8, encoding = pcmu', () => {
 			setup({
 				apiKey: 'test',
