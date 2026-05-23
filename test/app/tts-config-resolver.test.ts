@@ -5,6 +5,7 @@ import { resolveTtsForSession } from '../../app/lib/media/tts-config.js';
 
 const OLD_CARTESIA = process.env.CARTESIA_API_KEY;
 const OLD_ELEVENLABS = process.env.ELEVENLABS_API_KEY;
+const OLD_HUME = process.env.HUME_API_KEY;
 const OLD_OVERRIDE = process.env.BODHI_TTS_EMERGENCY_OVERRIDE;
 
 function restoreEnv(name: string, oldValue: string | undefined): void {
@@ -19,6 +20,7 @@ function clearEnv(name: string): void {
 afterEach(() => {
 	restoreEnv('CARTESIA_API_KEY', OLD_CARTESIA);
 	restoreEnv('ELEVENLABS_API_KEY', OLD_ELEVENLABS);
+	restoreEnv('HUME_API_KEY', OLD_HUME);
 	restoreEnv('BODHI_TTS_EMERGENCY_OVERRIDE', OLD_OVERRIDE);
 });
 
@@ -86,5 +88,28 @@ describe('TTS config resolver', () => {
 		});
 
 		expect(resolved).toBeUndefined();
+	});
+
+	it('resolves Hume from user BYOK before server fallback env', () => {
+		process.env.HUME_API_KEY = 'server-hume-key';
+		clearEnv('BODHI_TTS_EMERGENCY_OVERRIDE');
+
+		const resolved = resolveTtsForSession({
+			overrideConfig: {
+				provider: 'hume',
+				voiceName: 'Ava Song',
+				voiceProvider: 'HUME_AI',
+				version: '2',
+			},
+			userKeyMap: new Map([['HUME_API_KEY', 'user-hume-key']]),
+		});
+
+		expect(resolved).toMatchObject({
+			provider: 'hume',
+			apiKey: 'user-hume-key',
+			voiceName: 'Ava Song',
+			voiceProvider: 'HUME_AI',
+			version: '2',
+		});
 	});
 });

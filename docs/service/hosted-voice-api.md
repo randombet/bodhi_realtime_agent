@@ -121,7 +121,7 @@ External TTS:
 }
 ```
 
-Provider credentials still live on the server. For saved Agent Studio agents, user BYOK keys win over server fallback environment keys.
+Provider credentials still live on the server. For saved Agent Studio agents, user BYOK keys win over server fallback environment keys. Native live-model speech does not call an external TTS provider; external TTS calls only happen when `speechOutput.mode` is `tts` or the saved agent/catalog default resolves to external TTS.
 
 ---
 
@@ -179,7 +179,7 @@ Voice-first apps usually send **only binary PCM** on the socket and use **`POST 
 
 This is an **optional** two-message handshake that lets the server know exactly when your device has finished *playing* a turn's audio — not just when it finished *sending* it. The server uses it to keep the barge-in (interrupt) window open precisely while audio is audible, which matters most when the server's text-to-speech runs faster than realtime (it cannot otherwise know your playback clock).
 
-It is **opt-in per deployment**. If your deployment has not enabled it you will simply never receive `audio.done`; ignore this section. If you do not implement it, nothing breaks — see *Fallback* below.
+It is **opt-in per deployment**. The hosted `/ws/mobile` API currently runs with this protocol disabled, so mobile clients should not expect `audio.done` unless your operator explicitly enables a compatible deployment. If you do not implement it, nothing breaks — see *Fallback* below.
 
 **Server → client:**
 

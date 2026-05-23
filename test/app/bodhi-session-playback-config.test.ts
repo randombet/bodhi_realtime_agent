@@ -46,4 +46,15 @@ describe('createBodhiSessionConfig — playback-state config threading', () => {
 		const offConfig = await createBodhiSessionConfig(baseOptions());
 		expect(offConfig.nativePlaybackGating).toBeUndefined();
 	});
+
+	it('threads explicit greetingInterruptGraceMs overrides into VoiceSessionConfig', async () => {
+		const disabledConfig = await createBodhiSessionConfig({
+			...baseOptions(),
+			greetingInterruptGraceMs: 0,
+		});
+		expect(disabledConfig.greetingInterruptGraceMs).toBe(0);
+
+		const inheritedConfig = await createBodhiSessionConfig(baseOptions());
+		expect(inheritedConfig.greetingInterruptGraceMs).toBeUndefined();
+	});
 });
