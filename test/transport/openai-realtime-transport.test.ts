@@ -968,6 +968,93 @@ describe('OpenAIRealtimeTransport', () => {
 		});
 	});
 
+	describe('resolveTurnDetectionConfig (shared resolver)', () => {
+		// dev_docs/framework/design-greeting-interrupt-grace.md §3.
+		// B4 keeps `interrupt_response: true` as the default to preserve
+		// pre-design behaviour; B8 flips it.
+
+		function resolve(t: OpenAIRealtimeTransport) {
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			return (t as any).resolveTurnDetectionConfig();
+		}
+
+		it('returns null wire when caller turnDetection is null', () => {
+			const t = new OpenAIRealtimeTransport({
+				apiKey: 'k',
+				model: 'gpt-realtime',
+				turnDetection: null,
+			});
+			const r = resolve(t);
+			expect(r.wire).toBeNull();
+			expect(r.effective).toEqual({ interrupt_response: false, create_response: false });
+		});
+
+		it('defaults to semantic_vad with eagerness:medium + common defaults', () => {
+			const t = new OpenAIRealtimeTransport({ apiKey: 'k', model: 'gpt-realtime' });
+			const r = resolve(t);
+			expect(r.wire).toEqual({
+				type: 'semantic_vad',
+				eagerness: 'medium',
+				create_response: true,
+				interrupt_response: true, // B4 default; B8 will flip to false
+			});
+			expect(r.effective.interrupt_response).toBe(true);
+		});
+
+		it('caller override wins (interrupt_response: false stays false)', () => {
+			const t = new OpenAIRealtimeTransport({
+				apiKey: 'k',
+				model: 'gpt-realtime',
+				turnDetection: { type: 'semantic_vad', interrupt_response: false },
+			});
+			const r = resolve(t);
+			expect(r.wire?.interrupt_response).toBe(false);
+			expect(r.effective.interrupt_response).toBe(false);
+		});
+
+		it('server_vad branch does NOT inject eagerness', () => {
+			const t = new OpenAIRealtimeTransport({
+				apiKey: 'k',
+				model: 'gpt-realtime',
+				turnDetection: { type: 'server_vad', threshold: 0.6 },
+			});
+			const r = resolve(t);
+			expect(r.wire).toEqual({
+				type: 'server_vad',
+				create_response: true,
+				interrupt_response: true,
+				threshold: 0.6,
+			});
+			expect(r.wire).not.toHaveProperty('eagerness');
+		});
+
+		it('unknown type only gets common defaults', () => {
+			const t = new OpenAIRealtimeTransport({
+				apiKey: 'k',
+				model: 'gpt-realtime',
+				// biome-ignore lint/suspicious/noExplicitAny: test exercises future-type branch
+				turnDetection: { type: 'future_vad' } as any,
+			});
+			const r = resolve(t);
+			expect(r.wire).toEqual({
+				type: 'future_vad',
+				create_response: true,
+				interrupt_response: true,
+			});
+		});
+
+		it('caller create_response:false is preserved', () => {
+			const t = new OpenAIRealtimeTransport({
+				apiKey: 'k',
+				model: 'gpt-realtime',
+				turnDetection: { type: 'semantic_vad', create_response: false },
+			});
+			const r = resolve(t);
+			expect(r.wire?.create_response).toBe(false);
+			expect(r.effective.create_response).toBe(false);
+		});
+	});
+
 	describe('clearInputAudio', () => {
 		it('sends input_audio_buffer.clear', () => {
 			mockRt.sent.length = 0;

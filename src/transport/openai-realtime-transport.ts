@@ -114,8 +114,12 @@ export interface OpenAIRealtimeConfig {
 	voice?: string;
 	/** Transcription model (default: 'gpt-4o-mini-transcribe'). Set to null to disable input transcription. */
 	transcriptionModel?: string | null;
-	/** Turn detection configuration. */
-	turnDetection?: Record<string, unknown>;
+	/** Turn detection configuration. Pass `null` to disable VAD entirely
+	 *  (manual turn control via `commitAudio()` — `frameworkOwnsInterrupt`
+	 *  capability is forced `false` and `greetingInterruptGraceMs` to `0` in
+	 *  this mode). When omitted, the framework's defaults are merged in
+	 *  type-aware fashion — see `resolveTurnDetectionConfig`. */
+	turnDetection?: Record<string, unknown> | null;
 	/** Noise reduction configuration. */
 	noiseReduction?: Record<string, unknown>;
 	/** Reasoning effort + optional summary verbosity. Only honoured when the
@@ -1278,6 +1282,72 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		);
 	}
 
+	/** Single resolver consumed by `buildSessionConfig` (wire),
+	 *  `effectiveInterruptResponse` (capability gating), and
+	 *  `resolveCapabilities` (the runtime `frameworkOwnsInterrupt` /
+	 *  `greetingInterruptGraceMs` values). Keeping all three in sync via one
+	 *  function prevents capability/wire-config drift.
+	 *
+	 *  Type-aware merging:
+	 *   - `null` → wire `null` (manual turn control; no defaults injected;
+	 *     framework-owned interrupt N/A).
+	 *   - `semantic_vad` → injects `eagerness` + `create_response` +
+	 *     `interrupt_response` defaults under the caller's overrides.
+	 *   - `server_vad` → injects only `create_response` +
+	 *     `interrupt_response` (no `eagerness` — that field is semantic-only;
+	 *     server-VAD threshold/padding/duration fields are caller-supplied).
+	 *   - Other / future types → only common defaults under caller overrides.
+	 *
+	 *  Caller spread is always **last**, so caller-explicit fields win
+	 *  (including `interrupt_response: true` for legacy callers).
+	 *
+	 *  Phase B4 keeps `interrupt_response: true` as the default to preserve
+	 *  pre-design behaviour. Phase B8 flips this default to `false` (the
+	 *  framework-owned interrupt mode) and runtime-computes the capability
+	 *  flags from the resolved value.
+	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §3. */
+	private resolveTurnDetectionConfig(): {
+		wire: Record<string, unknown> | null;
+		effective: { interrupt_response: boolean; create_response: boolean };
+	} {
+		const callerTd = this.config.turnDetection;
+
+		// Explicit null: caller is disabling VAD entirely. Frame-by-frame
+		// commit via commitAudio() — no auto-create, no auto-interrupt.
+		if (callerTd === null) {
+			return {
+				wire: null,
+				effective: { interrupt_response: false, create_response: false },
+			};
+		}
+
+		const callerTdObj = (callerTd ?? {}) as Record<string, unknown>;
+		const callerType = (callerTdObj.type as string | undefined) ?? 'semantic_vad';
+
+		// Phase B4 default — preserves pre-design `interrupt_response: true`
+		// so flipping the wire-default to the framework-owned mode lands as
+		// a single atomic change in Phase B8.
+		const commonDefaults: Record<string, unknown> = {
+			create_response: true,
+			interrupt_response: true,
+		};
+
+		const wire: Record<string, unknown> =
+			callerType === 'semantic_vad'
+				? { type: 'semantic_vad', eagerness: 'medium', ...commonDefaults, ...callerTdObj }
+				: callerType === 'server_vad'
+					? { type: 'server_vad', ...commonDefaults, ...callerTdObj }
+					: { ...commonDefaults, ...callerTdObj };
+
+		return {
+			wire,
+			effective: {
+				interrupt_response: wire.interrupt_response === true,
+				create_response: wire.create_response !== false,
+			},
+		};
+	}
+
 	private buildSessionConfig(): RealtimeSessionCreateRequest {
 		const inFmt = this.normaliseAudioFormat(
 			this.config.audioInputFormat ?? { type: 'audio/pcm', rate: 24000 },
@@ -1300,13 +1370,8 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 								},
 							}
 						: {}),
-					turn_detection: (this.config.turnDetection ?? {
-						type: 'semantic_vad',
-						eagerness: 'medium',
-						create_response: true,
-						interrupt_response: true,
-						// biome-ignore lint/suspicious/noExplicitAny: turn detection config passed through from user; SDK type is strict union
-					}) as any,
+					// biome-ignore lint/suspicious/noExplicitAny: SDK type is a strict union; wire is the canonical shape
+					turn_detection: this.resolveTurnDetectionConfig().wire as any,
 					...(this.config.noiseReduction
 						? // biome-ignore lint/suspicious/noExplicitAny: noise reduction config is passed through from user
 							{ noise_reduction: this.config.noiseReduction as any }
