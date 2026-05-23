@@ -109,6 +109,10 @@ describe('OpenAIRealtimeTransport', () => {
 				automaticPreambles: false,
 				quiescible: true,
 				playbackGatedTurnComplete: false,
+				// B8 framework-owned default: interrupt_response: false →
+				// frameworkOwnsInterrupt: true → grace recommendation: 1000ms.
+				frameworkOwnsInterrupt: true,
+				greetingInterruptGraceMs: 1000,
 			});
 		});
 
@@ -564,7 +568,25 @@ describe('OpenAIRealtimeTransport', () => {
 		});
 	});
 
-	describe('interruption handling', () => {
+	describe('interruption handling (legacy provider-owned mode)', () => {
+		// These tests assert the pre-design behaviour preserved when a caller
+		// explicitly opts into `interrupt_response: true`. Re-create the
+		// transport in legacy mode for this block.
+		beforeEach(() => {
+			transport = new OpenAIRealtimeTransport({
+				apiKey: 'test-key',
+				model: 'gpt-realtime',
+				turnDetection: { type: 'semantic_vad', interrupt_response: true },
+			});
+			mockRt = createMockRt();
+			// biome-ignore lint/suspicious/noExplicitAny: test mock injection
+			(transport as any).rt = mockRt;
+			// biome-ignore lint/suspicious/noExplicitAny: test mock injection
+			(transport as any)._isConnected = true;
+			// biome-ignore lint/suspicious/noExplicitAny: test mock injection
+			(transport as any).wireEventListeners();
+		});
+
 		it('sends truncate (but not cancel) on speech_started when model is generating', () => {
 			let interrupted = false;
 			transport.onInterrupted = () => {
@@ -650,7 +672,24 @@ describe('OpenAIRealtimeTransport', () => {
 		});
 	});
 
-	describe('audio suppression after interruption', () => {
+	describe('audio suppression after interruption (legacy provider-owned mode)', () => {
+		// Legacy mode: speech_started sets _suppressAudio. Framework-owned
+		// mode does this via cancelResponse() — covered separately.
+		beforeEach(() => {
+			transport = new OpenAIRealtimeTransport({
+				apiKey: 'test-key',
+				model: 'gpt-realtime',
+				turnDetection: { type: 'semantic_vad', interrupt_response: true },
+			});
+			mockRt = createMockRt();
+			// biome-ignore lint/suspicious/noExplicitAny: test mock injection
+			(transport as any).rt = mockRt;
+			// biome-ignore lint/suspicious/noExplicitAny: test mock injection
+			(transport as any)._isConnected = true;
+			// biome-ignore lint/suspicious/noExplicitAny: test mock injection
+			(transport as any).wireEventListeners();
+		});
+
 		it('suppresses audio output after speech_started until next response.created', () => {
 			const audioChunks: string[] = [];
 			transport.onAudioOutput = (data) => audioChunks.push(data);
@@ -970,8 +1009,7 @@ describe('OpenAIRealtimeTransport', () => {
 
 	describe('resolveTurnDetectionConfig (shared resolver)', () => {
 		// dev_docs/framework/design-greeting-interrupt-grace.md §3.
-		// B4 keeps `interrupt_response: true` as the default to preserve
-		// pre-design behaviour; B8 flips it.
+		// B8 flips the default to `interrupt_response: false` (framework-owned).
 
 		function resolve(t: OpenAIRealtimeTransport) {
 			// biome-ignore lint/suspicious/noExplicitAny: test mock access
@@ -989,27 +1027,27 @@ describe('OpenAIRealtimeTransport', () => {
 			expect(r.effective).toEqual({ interrupt_response: false, create_response: false });
 		});
 
-		it('defaults to semantic_vad with eagerness:medium + common defaults', () => {
+		it('defaults to semantic_vad with eagerness:medium + interrupt_response:false', () => {
 			const t = new OpenAIRealtimeTransport({ apiKey: 'k', model: 'gpt-realtime' });
 			const r = resolve(t);
 			expect(r.wire).toEqual({
 				type: 'semantic_vad',
 				eagerness: 'medium',
 				create_response: true,
-				interrupt_response: true, // B4 default; B8 will flip to false
+				interrupt_response: false, // B8 framework-owned default
 			});
-			expect(r.effective.interrupt_response).toBe(true);
+			expect(r.effective.interrupt_response).toBe(false);
 		});
 
-		it('caller override wins (interrupt_response: false stays false)', () => {
+		it('caller can opt back into provider-owned mode with interrupt_response:true', () => {
 			const t = new OpenAIRealtimeTransport({
 				apiKey: 'k',
 				model: 'gpt-realtime',
-				turnDetection: { type: 'semantic_vad', interrupt_response: false },
+				turnDetection: { type: 'semantic_vad', interrupt_response: true },
 			});
 			const r = resolve(t);
-			expect(r.wire?.interrupt_response).toBe(false);
-			expect(r.effective.interrupt_response).toBe(false);
+			expect(r.wire?.interrupt_response).toBe(true);
+			expect(r.effective.interrupt_response).toBe(true);
 		});
 
 		it('server_vad branch does NOT inject eagerness', () => {
@@ -1022,7 +1060,7 @@ describe('OpenAIRealtimeTransport', () => {
 			expect(r.wire).toEqual({
 				type: 'server_vad',
 				create_response: true,
-				interrupt_response: true,
+				interrupt_response: false,
 				threshold: 0.6,
 			});
 			expect(r.wire).not.toHaveProperty('eagerness');
@@ -1039,7 +1077,7 @@ describe('OpenAIRealtimeTransport', () => {
 			expect(r.wire).toEqual({
 				type: 'future_vad',
 				create_response: true,
-				interrupt_response: true,
+				interrupt_response: false,
 			});
 		});
 
@@ -1052,6 +1090,109 @@ describe('OpenAIRealtimeTransport', () => {
 			const r = resolve(t);
 			expect(r.wire?.create_response).toBe(false);
 			expect(r.effective.create_response).toBe(false);
+		});
+	});
+
+	describe('B8 atomic flip: framework-owned capabilities + speech_started dual-mode', () => {
+		// dev_docs/framework/design-greeting-interrupt-grace.md §1, §3.
+
+		function resolveCaps(t: OpenAIRealtimeTransport) {
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			return (t as any).resolveCapabilities();
+		}
+
+		it('default config: frameworkOwnsInterrupt=true, greetingInterruptGraceMs=1000', () => {
+			const t = new OpenAIRealtimeTransport({ apiKey: 'k', model: 'gpt-realtime' });
+			const caps = resolveCaps(t);
+			expect(caps.frameworkOwnsInterrupt).toBe(true);
+			expect(caps.greetingInterruptGraceMs).toBe(1000);
+		});
+
+		it('caller opt-in to legacy (interrupt_response:true): frameworkOwnsInterrupt=false, grace=0', () => {
+			const t = new OpenAIRealtimeTransport({
+				apiKey: 'k',
+				model: 'gpt-realtime',
+				turnDetection: { type: 'semantic_vad', interrupt_response: true },
+			});
+			const caps = resolveCaps(t);
+			expect(caps.frameworkOwnsInterrupt).toBe(false);
+			expect(caps.greetingInterruptGraceMs).toBe(0);
+		});
+
+		it('turnDetection:null: frameworkOwnsInterrupt=false, grace=0 (manual turn control)', () => {
+			const t = new OpenAIRealtimeTransport({
+				apiKey: 'k',
+				model: 'gpt-realtime',
+				turnDetection: null,
+			});
+			const caps = resolveCaps(t);
+			expect(caps.frameworkOwnsInterrupt).toBe(false);
+			expect(caps.greetingInterruptGraceMs).toBe(0);
+		});
+
+		it('speech_started in framework-owned mode is signal-only (no truncate, no onInterrupted)', () => {
+			// Set up: default config = framework-owned. Simulate an in-flight
+			// response then speech_started.
+			mockRt.sent.length = 0;
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			(transport as any)._isModelGenerating = true;
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			(transport as any).lastAssistantItemId = 'item_abc';
+			const onInterrupted = vi.fn();
+			const onSpeechStarted = vi.fn();
+			transport.onInterrupted = onInterrupted;
+			transport.onSpeechStarted = onSpeechStarted;
+
+			mockRt.emit('input_audio_buffer.speech_started', {});
+
+			expect(onSpeechStarted).toHaveBeenCalledTimes(1);
+			// Framework-owned: no local truncate, no onInterrupted, no
+			// _isModelGenerating reset (that's the framework's job via
+			// cancelResponse).
+			const truncate = mockRt.sent.find((m) => m.type === 'conversation.item.truncate');
+			expect(truncate).toBeUndefined();
+			expect(onInterrupted).not.toHaveBeenCalled();
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			expect((transport as any)._isModelGenerating).toBe(true);
+		});
+
+		it('speech_started in legacy mode (interrupt_response:true) preserves pre-design behavior', () => {
+			// Build a fresh transport in legacy mode and wire it up.
+			const legacy = new OpenAIRealtimeTransport({
+				apiKey: 'k',
+				model: 'gpt-realtime',
+				turnDetection: { type: 'semantic_vad', interrupt_response: true },
+			});
+			const legacyMockRt = createMockRt();
+			// biome-ignore lint/suspicious/noExplicitAny: test mock injection
+			(legacy as any).rt = legacyMockRt;
+			// biome-ignore lint/suspicious/noExplicitAny: test mock injection
+			(legacy as any)._isConnected = true;
+			// biome-ignore lint/suspicious/noExplicitAny: test mock injection
+			(legacy as any).wireEventListeners();
+
+			legacyMockRt.sent.length = 0;
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			(legacy as any)._isModelGenerating = true;
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			(legacy as any).lastAssistantItemId = 'item_legacy';
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			(legacy as any).audioOutputMs = 750;
+			const onInterrupted = vi.fn();
+			legacy.onInterrupted = onInterrupted;
+
+			legacyMockRt.emit('input_audio_buffer.speech_started', {});
+
+			const truncate = legacyMockRt.sent.find((m) => m.type === 'conversation.item.truncate');
+			expect(truncate).toEqual({
+				type: 'conversation.item.truncate',
+				item_id: 'item_legacy',
+				content_index: 0,
+				audio_end_ms: 750,
+			});
+			expect(onInterrupted).toHaveBeenCalledTimes(1);
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			expect((legacy as any)._isModelGenerating).toBe(false);
 		});
 	});
 

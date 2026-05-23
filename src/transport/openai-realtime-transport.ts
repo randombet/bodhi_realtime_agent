@@ -426,6 +426,16 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	/** Compute capability flags from the configured model. */
 	private resolveCapabilities(): TransportCapabilities {
 		const model = this.config.model ?? 'gpt-realtime-2';
+		// Compute framework-owned-interrupt + grace from the single
+		// turn-detection resolver — wire config and capabilities cannot
+		// disagree because they are computed together from one source.
+		// See dev_docs/framework/design-greeting-interrupt-grace.md §3.
+		const { wire, effective } = this.resolveTurnDetectionConfig();
+		// VAD-disabled mode (`turn_detection: null`) means no speech-driven
+		// interrupt machinery runs at all — neither provider nor framework
+		// has anything to actuate from. `frameworkOwnsInterrupt` is forced
+		// false so the grace window does not arm pointlessly.
+		const frameworkOwnsInterrupt = wire !== null && effective.interrupt_response === false;
 		return {
 			...this.staticCapabilities,
 			parallelToolCalls: supports(model, 'parallelToolCalls'),
@@ -434,6 +444,11 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			// proxy because the two ship together on the same model line.
 			automaticPreambles: supports(model, 'reasoning'),
 			quiescible: true,
+			frameworkOwnsInterrupt,
+			// Recommend 1000 ms of greeting interrupt grace ONLY when we own
+			// interruption — provider auto-cancel would defeat the grace, so
+			// advertising > 0 there would mislead VoiceSession's validation.
+			greetingInterruptGraceMs: frameworkOwnsInterrupt ? 1000 : 0,
 		};
 	}
 
@@ -1324,12 +1339,17 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		const callerTdObj = (callerTd ?? {}) as Record<string, unknown>;
 		const callerType = (callerTdObj.type as string | undefined) ?? 'semantic_vad';
 
-		// Phase B4 default — preserves pre-design `interrupt_response: true`
-		// so flipping the wire-default to the framework-owned mode lands as
-		// a single atomic change in Phase B8.
+		// Framework-owned interruption (Phase B8 default flip): the framework
+		// actuates response cancellation via cancelResponse() — the provider
+		// does NOT auto-cancel on speech_started. Required so the
+		// greeting-grace window can suppress echo-driven barge-ins without
+		// being defeated by an unsuppressible provider auto-cancel. Callers
+		// who explicitly pass `interrupt_response: true` keep legacy behavior,
+		// and the connect-time validation in VoiceSession (§5) downgrades the
+		// grace to 0 with a warn for them.
 		const commonDefaults: Record<string, unknown> = {
 			create_response: true,
-			interrupt_response: true,
+			interrupt_response: false,
 		};
 
 		const wire: Record<string, unknown> =
@@ -1611,19 +1631,31 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			if (this.onTurnComplete) this.onTurnComplete();
 		});
 
-		// --- Interruption handling (server VAD mode) ---
-		// In server VAD mode (when speech_started fires), the server automatically
-		// cancels any in-flight response and sends response.done (status: cancelled).
-		// We only need to truncate the audio item to what the user actually heard.
-		// Sending response.cancel here would race with the server's own cancellation
-		// and produce "no active response found" errors.
+		// --- Interruption handling: dual-mode dispatch ---
+		// Framework-owned mode (default — interrupt_response: false): the
+		// handler is signal-only. The framework's wireNativeBargeIn /
+		// wireTtsProvider sites read this signal and decide whether to
+		// actuate via cancelResponse(), gated by the greeting-grace window.
+		// Provider-owned mode (legacy — caller sets interrupt_response: true):
+		// the server auto-cancels the response itself. We still issue the
+		// local truncate so the stored item reflects what was heard, and fire
+		// onInterrupted so the framework can finalize.
+		// See dev_docs/framework/design-greeting-interrupt-grace.md §3.
 		rt.on('input_audio_buffer.speech_started', () => {
-			// Always fire onSpeechStarted — TTS barge-in needs this even when LLM is idle
+			// Always fire onSpeechStarted first — TTS barge-in (and the
+			// framework's wireNativeBargeIn) need it regardless of mode.
 			if (this.onSpeechStarted) this.onSpeechStarted();
 
+			// Framework-owned mode: stop here. cancelResponse() is the
+			// framework's actuation path; the local truncate + onInterrupted
+			// would double-actuate against it.
+			if (this.resolveTurnDetectionConfig().effective.interrupt_response === false) {
+				return;
+			}
+
+			// Provider-owned (legacy) branch — preserved verbatim.
 			if (!this._isModelGenerating) return;
 			this._suppressAudio = true;
-
 			if (this.lastAssistantItemId) {
 				rt.send({
 					type: 'conversation.item.truncate',
