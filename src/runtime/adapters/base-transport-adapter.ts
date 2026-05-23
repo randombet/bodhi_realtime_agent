@@ -101,7 +101,21 @@ export abstract class BaseTransportAdapter implements TransportAdapter {
 		);
 	}
 
-	abstract cancelGeneration(): void;
+	/** Cancel the in-flight model response. Default implementation routes
+	 *  through the LLMTransport's framework-actuated `cancelResponse` when
+	 *  available — works for both OpenAI (sends `response.cancel`) and Gemini
+	 *  (no-op via the resolved-promise stub). Subclasses may override for
+	 *  transports without `cancelResponse`, but the default is correct for
+	 *  the two transports the framework ships today.
+	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §2. */
+	cancelGeneration(): void {
+		// Fire-and-forget — the actor-runtime caller is synchronous. Promise
+		// rejections never occur (cancelResponse contracts to resolve, never
+		// reject), but attach a no-op catch for defensive consistency.
+		void this.transport.cancelResponse?.({})?.catch(() => {
+			/* never rejects */
+		});
+	}
 
 	triggerGeneration(): void {
 		this.transport.triggerGeneration();

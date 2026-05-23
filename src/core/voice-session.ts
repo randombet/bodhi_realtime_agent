@@ -1930,6 +1930,13 @@ export class VoiceSession {
 
 	private handleClientTtsBargeIn(): void {
 		if (this.liveGate()?.pending !== true) return;
+		// In framework-owned mode, the framework is responsible for actually
+		// stopping the in-flight response on the wire. cancelResponse({}) is
+		// a no-op when nothing is generating, so this is safe across both
+		// native and TTS paths. See design-greeting-interrupt-grace.md §4.
+		if (this.transport.capabilities.frameworkOwnsInterrupt === true) {
+			this.transport.cancelResponse?.({});
+		}
 		// The client-side VAD holds the Turn by reference — no server-turn id
 		// needed. A native gate finalizes the captured _nativePlaybackTurn; a
 		// later provider onInterrupted resolves to this same finalized Turn and
@@ -2026,9 +2033,40 @@ export class VoiceSession {
 			} catch (e) {
 				this.log(`pre-attached onSpeechStarted threw: ${(e as Error).message}`);
 			}
-			if (this._nativePlaybackPending) {
-				this.finalizeTurn(this._nativePlaybackTurn, { interrupted: true });
+			// Skip the framework-owned actuation entirely in provider-owned
+			// mode (the transport's speech_started handler already truncates
+			// locally + fires onInterrupted, which the existing handleInterrupted
+			// path drives). Without this guard we'd double-actuate in legacy
+			// mode. See dev_docs/framework/design-greeting-interrupt-grace.md §4.
+			if (this.transport.capabilities.frameworkOwnsInterrupt !== true) {
+				// Legacy: preserve pre-design behaviour — the native gate's tail
+				// path still finalizes the playback-pending turn.
+				if (this._nativePlaybackPending) {
+					this.finalizeTurn(this._nativePlaybackTurn, { interrupted: true });
+				}
+				return;
 			}
+
+			// Framework-owned mode: nothing to interrupt unless there's a live
+			// unfinalized turn.
+			if (!this.currentTurn || this.currentTurn.isFinalized) return;
+
+			if (this._nativePlaybackPending) {
+				// Tail mode (post `response.done`). The transport has cleared
+				// lastAssistantItemId/audioOutputMs — no truncate is meaningful;
+				// cancelResponse({}) is a no-op on the wire (no in-flight
+				// response). The cancel call exists for state-mutation parity
+				// and finalizing the playback gate locally.
+				this.transport.cancelResponse?.({});
+				this.finalizeTurn(this._nativePlaybackTurn ?? this.currentTurn, { interrupted: true });
+				return;
+			}
+
+			// Generation mode (before `response.done`): truncate the in-flight
+			// response using the transport's own per-response generated-audio
+			// counter, then finalize the current turn.
+			this.transport.cancelResponse?.({ truncate: 'generated' });
+			this.finalizeTurn(this.currentTurn, { interrupted: true });
 		};
 	}
 
@@ -2185,9 +2223,31 @@ export class VoiceSession {
 			});
 		};
 
-		// Wire speech-started for TTS barge-in (LLM idle but TTS still playing)
+		// Wire speech-started for TTS barge-in. Two cases:
+		//   tts-tail: `_ttsSpeaking && _ttsLlmTextDone` — LLM text done; only
+		//     TTS audio still playing locally. No LLM response in flight, so
+		//     cancelResponse is a no-op on the wire (framework-owned mode).
+		//   tts-generation: `_ttsSpeaking && !_ttsLlmTextDone` — LLM is still
+		//     streaming text into the TTS provider. In framework-owned mode
+		//     we need to cancel the LLM response so it stops emitting more
+		//     text; in provider-owned mode the server's auto-cancel + the
+		//     transport's own truncate already handle this via onInterrupted.
+		// See dev_docs/framework/design-greeting-interrupt-grace.md §4.
 		this.transport.onSpeechStarted = () => {
+			const frameworkOwns = this.transport.capabilities.frameworkOwnsInterrupt === true;
 			if (this._ttsSpeaking && this._ttsLlmTextDone) {
+				if (frameworkOwns) this.transport.cancelResponse?.({});
+				this.finalizeTurn(this.currentTurn, { interrupted: true });
+				return;
+			}
+			if (
+				frameworkOwns &&
+				this._ttsSpeaking &&
+				!this._ttsLlmTextDone &&
+				this.currentTurn &&
+				!this.currentTurn.isFinalized
+			) {
+				this.transport.cancelResponse?.({});
 				this.finalizeTurn(this.currentTurn, { interrupted: true });
 			}
 		};
