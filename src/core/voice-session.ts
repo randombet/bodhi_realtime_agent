@@ -437,6 +437,15 @@ export class VoiceSession {
 	 *  resolution + validation log; Phase C wires the runtime effects.
 	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §5. */
 	private greetingInterruptGraceMs = 0;
+	/** Per-session single-flight FIFO chaining direct-user-input bodies
+	 *  (`handleTextInput`, `injectTranscript`, `injectDictationBuffer`). Each
+	 *  body awaits `cancelResponse({ waitForDone: true })` then finalizes any
+	 *  unfinalized active turn then sends the new content — and the next
+	 *  enqueued body waits for the previous to fully finish. Prevents two
+	 *  rapid inputs from both calling `response.create` and triggering
+	 *  `conversation_already_has_active_response`.
+	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §7.5. */
+	private _directInputChain: Promise<void> = Promise.resolve();
 	/** Native-audio playback cursor — wall-clock (ms) when the current native
 	 *  turn's buffered audio is estimated to finish playing. `0` = the current
 	 *  turn has produced no native audio yet. Reset at each turn boundary. */
@@ -2839,7 +2848,12 @@ export class VoiceSession {
 			const data = message.data as { base64: string; mimeType: string; fileName?: string };
 			this.handleFileUpload(data.base64, data.mimeType, data.fileName);
 		} else if (message.type === 'text_input' && typeof message.text === 'string') {
-			this.handleTextInput(message.text);
+			// Fire-and-forget — handleTextInput is async (serializes via the
+			// direct-input FIFO). handleJsonFromClient is a dispatcher and
+			// must not block other branches on one text input.
+			this.handleTextInput(message.text).catch((err) =>
+				this.reportError('text_input', err instanceof Error ? err : new Error(String(err))),
+			);
 		} else if (message.type === 'playback.ended' && typeof message.playbackId === 'number') {
 			this.handlePlaybackEnded(message.playbackId);
 		}
@@ -2944,31 +2958,62 @@ export class VoiceSession {
 		}
 	}
 
-	private handleTextInput(text: string): void {
-		if (!this.sessionManager.isActive || !text.trim()) return;
+	/** Single-flight FIFO for direct-input bodies. Each enqueued body runs
+	 *  to completion before the next begins, even across `handleTextInput` /
+	 *  `injectTranscript` / `injectDictationBuffer` interleaving.
+	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §7.5. */
+	private enqueueDirectInput(work: () => Promise<void>): Promise<void> {
+		// `.then(work, work)` lets the chain continue even if a prior body
+		// rejected. We then catch on the chain itself so a rejection does not
+		// poison subsequent enqueues, while still returning the original
+		// promise to the caller so they can `await` and observe failures.
+		const next = this._directInputChain.then(work, work);
+		this._directInputChain = next.catch(() => {});
+		return next;
+	}
 
-		// Direct user input during a native playback-pending window is a
-		// barge-in — interrupt the pending turn before sending the new content.
-		if (this._nativePlaybackPending) {
+	/** Cancel any in-flight response on the wire (framework-owned mode) AND
+	 *  finalize the framework-side active turn as interrupted, before a new
+	 *  direct-input body sends `sendContent`. When the transport implements
+	 *  `cancelResponse`, awaits the trailing `response.done(cancelled)` so the
+	 *  next `response.create` does not race the cancel. Returns when both
+	 *  steps complete.
+	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §7.5. */
+	private async preEmptForDirectInput(): Promise<void> {
+		const turn = this.currentTurn;
+		// Always await the cancel: when no response is in flight, cancelResponse
+		// returns Promise.resolve() (true no-op). When in flight, the
+		// {waitForDone:true} promise races a 2000 ms timeout so we never hang.
+		await this.transport.cancelResponse?.({ waitForDone: true });
+		if (turn && !turn.isFinalized) {
+			this.finalizeTurn(turn, { interrupted: true });
+		} else if (this._nativePlaybackPending) {
+			// Native playback-tail interruption — pre-existing behaviour.
 			this.finalizeTurn(this._nativePlaybackTurn, { interrupted: true });
 		}
+	}
 
+	private handleTextInput(text: string): Promise<void> {
+		if (!this.sessionManager.isActive || !text.trim()) return Promise.resolve();
 		const trimmed = text.trim();
+		return this.enqueueDirectInput(async () => {
+			await this.preEmptForDirectInput();
 
-		// Relay to interactive subagent if one is waiting for input.
-		// Use trySendToSubagent for race safety — a UI button response may
-		// have already resolved the waiting ask_user.
-		const activeId = this.interactionMode.getActiveToolCallId();
-		if (activeId) {
-			const session = this.agentRouter.getSubagentSession(activeId);
-			if (session?.trySendToSubagent(trimmed)) {
-				this.interactionMode.deactivate(activeId);
+			// Relay to interactive subagent if one is waiting for input.
+			// Use trySendToSubagent for race safety — a UI button response may
+			// have already resolved the waiting ask_user.
+			const activeId = this.interactionMode.getActiveToolCallId();
+			if (activeId) {
+				const session = this.agentRouter.getSubagentSession(activeId);
+				if (session?.trySendToSubagent(trimmed)) {
+					this.interactionMode.deactivate(activeId);
+				}
 			}
-		}
 
-		// Always send to main LLM so it stays informed of user messages
-		this.transport.sendContent([{ role: 'user', text: trimmed }], true);
-		this.conversationContext.addUserMessage(trimmed);
+			// Always send to main LLM so it stays informed of user messages
+			this.transport.sendContent([{ role: 'user', text: trimmed }], true);
+			this.conversationContext.addUserMessage(trimmed);
+		});
 	}
 
 	private handleClientConnected(): void {
@@ -3138,12 +3183,12 @@ export class VoiceSession {
 	 *  current mode is not `'agent'`. Mirrors the existing text-input path:
 	 *  writes to the transport AND records the user turn in
 	 *  ConversationContext (so history/memory/subagent context see it). */
-	injectDictationBuffer(): void {
-		if (this.internalMode !== 'agent') return;
+	injectDictationBuffer(): Promise<void> {
+		if (this.internalMode !== 'agent') return Promise.resolve();
 		const text = this.getDictationBuffer();
-		if (!text) return;
-		this.injectTranscript(text);
+		if (!text) return Promise.resolve();
 		this.dictationBuffer = [];
+		return this.injectTranscript(text);
 	}
 
 	/** Send an arbitrary JSON message to the connected client over the
@@ -3156,18 +3201,18 @@ export class VoiceSession {
 		this.clientTransport.sendJsonToClient(message);
 	}
 
-	/** Lower-level: inject an arbitrary user message. */
-	injectTranscript(text: string): void {
-		if (!text) return;
-		// Direct user input during a native playback-pending window is a
-		// barge-in — interrupt the pending turn before sending the new content.
-		if (this._nativePlaybackPending) {
-			this.finalizeTurn(this._nativePlaybackTurn, { interrupted: true });
-		}
-		this.transport.sendContent([{ role: 'user', text }], /* turnComplete */ true);
-		// Mirror the existing text-input path: persist into ConversationContext
-		// so the user turn shows up in history / memory / subagent context.
-		this.conversationContext.addUserMessage(text);
+	/** Lower-level: inject an arbitrary user message. Serialized via the
+	 *  shared direct-input FIFO so back-to-back calls don't race the
+	 *  cancel-then-create sequence. */
+	injectTranscript(text: string): Promise<void> {
+		if (!text) return Promise.resolve();
+		return this.enqueueDirectInput(async () => {
+			await this.preEmptForDirectInput();
+			this.transport.sendContent([{ role: 'user', text }], /* turnComplete */ true);
+			// Mirror the existing text-input path: persist into ConversationContext
+			// so the user turn shows up in history / memory / subagent context.
+			this.conversationContext.addUserMessage(text);
+		});
 	}
 
 	/** Pre-start the whisper session without flipping audio routing. Useful

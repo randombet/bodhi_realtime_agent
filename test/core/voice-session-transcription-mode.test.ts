@@ -379,7 +379,7 @@ describe('VoiceSession — Phase 3 transcription mode', () => {
 			whisper.__triggerTranscript('please respond');
 			await session.setTranscriptionMode('agent');
 
-			session.injectDictationBuffer();
+			await session.injectDictationBuffer();
 
 			expect(t.__sentContent).toHaveLength(1);
 			expect(t.__sentContent[0]).toEqual([{ role: 'user', text: 'please respond' }]);
@@ -400,7 +400,7 @@ describe('VoiceSession — Phase 3 transcription mode', () => {
 
 			await session.setTranscriptionMode('transcription');
 			whisper.__triggerTranscript('dictating');
-			session.injectDictationBuffer();
+			await session.injectDictationBuffer();
 			expect(t.__sentContent).toHaveLength(0);
 			expect(session.getDictationBuffer()).toBe('dictating');
 		});

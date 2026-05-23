@@ -396,6 +396,12 @@ describe('native playback-end gating — deferred completion', () => {
 			s.transport.onTurnComplete?.(1);
 
 			session.feedJsonFromClient({ type: 'text_input', text: 'wait, stop' });
+			// handleTextInput is now async (serializes via the direct-input
+			// FIFO). Flush a few microtask ticks so the queued body runs to
+			// completion under fake timers.
+			await vi.runAllTimersAsync();
+			await Promise.resolve();
+			await Promise.resolve();
 			expect(jsonOfType(s.sendJson, 'turn.interrupted')).toHaveLength(1);
 		} finally {
 			await session?.close();
@@ -410,14 +416,14 @@ describe('native playback-end gating — deferred completion', () => {
 			await session.start();
 
 			// Outside any window — no interrupt.
-			session.injectTranscript('hello there');
+			await session.injectTranscript('hello there');
 			expect(jsonOfType(s.sendJson, 'turn.interrupted')).toHaveLength(0);
 
 			// Inside the playback-pending window — interrupt first.
 			s.transport.onModelTurnStart?.();
 			s.transport.onAudioOutput?.(pcmBase64(1000));
 			s.transport.onTurnComplete?.(1);
-			session.injectTranscript('actually, never mind');
+			await session.injectTranscript('actually, never mind');
 			expect(jsonOfType(s.sendJson, 'turn.interrupted')).toHaveLength(1);
 		} finally {
 			await session?.close();
