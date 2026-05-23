@@ -52,6 +52,7 @@ export default withMermaid(
 							{ text: 'Knowledge base', link: '/guide/knowledge-base' },
 							{ text: 'Events & Hooks', link: '/guide/events' },
 							{ text: 'Transport', link: '/guide/transport' },
+							{ text: 'Known Issues', link: '/guide/known-issues' },
 						],
 					},
 				],
