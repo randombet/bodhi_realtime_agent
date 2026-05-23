@@ -442,6 +442,73 @@ describe('OpenAIRealtimeTransport', () => {
 			expect(responseCreateIdx).toBeGreaterThan(createIdx);
 			expect(mockRt.sent).toContainEqual({ type: 'response.create' });
 		});
+
+		it('serializes two rapid interrupt-scheduled tool results — second waits for first', async () => {
+			// Regression: without the internal queue, two rapid
+			// sendToolResult({scheduling:'interrupt'}) calls would each fire
+			// cancel + item.create + response.create in parallel, producing
+			// `conversation_already_has_active_response`. The internal
+			// `_interruptToolResultQueue` serializes them so each pair of
+			// (cancel → done → item → response.create) completes before the
+			// next pair begins.
+			mockRt.emit('response.created', {});
+
+			transport.sendToolResult({
+				id: 'call_a',
+				name: 'tool_a',
+				result: 'a-result',
+				scheduling: 'interrupt',
+			});
+			transport.sendToolResult({
+				id: 'call_b',
+				name: 'tool_b',
+				result: 'b-result',
+				scheduling: 'interrupt',
+			});
+
+			// Item B must NOT land before A's cancel-done cycle completes.
+			await vi.waitFor(() =>
+				expect(mockRt.sent.some((m) => m.type === 'response.cancel')).toBe(true),
+			);
+			const itemsBefore = mockRt.sent.filter((m) => m.type === 'conversation.item.create');
+			expect(itemsBefore).toHaveLength(0);
+
+			// Acknowledge A's cancel — A's item + response.create should now
+			// land. B's cancel-done cycle then runs.
+			mockRt.emit('response.done', { response: { status: 'cancelled' } });
+			await vi.waitFor(() => {
+				const items = mockRt.sent.filter((m) => m.type === 'conversation.item.create');
+				expect(items).toHaveLength(1);
+				expect(items[0]?.item).toMatchObject({ call_id: 'call_a' });
+			});
+
+			// B's wire dispatch: depending on internal sequencing, B may have
+			// triggered its own response.cancel (because A's response.create
+			// re-armed _activeResponseDone via markResponsePending). In
+			// either case, B's item must land only AFTER A's item.
+			// Emit response.done for whatever waiter B is currently on.
+			mockRt.emit('response.created', {});
+			mockRt.emit('response.done', { response: { status: 'cancelled' } });
+			await vi.waitFor(() => {
+				const items = mockRt.sent.filter((m) => m.type === 'conversation.item.create');
+				expect(items).toHaveLength(2);
+				expect(items[1]?.item).toMatchObject({ call_id: 'call_b' });
+			});
+
+			// Ordering invariant: A's item index < B's item index.
+			const items = mockRt.sent.filter((m) => m.type === 'conversation.item.create');
+			const aIdx = mockRt.sent.findIndex(
+				// biome-ignore lint/suspicious/noExplicitAny: test-only access to runtime-shape item
+				(m) => m.type === 'conversation.item.create' && (m as any).item?.call_id === 'call_a',
+			);
+			const bIdx = mockRt.sent.findIndex(
+				// biome-ignore lint/suspicious/noExplicitAny: test-only access to runtime-shape item
+				(m) => m.type === 'conversation.item.create' && (m as any).item?.call_id === 'call_b',
+			);
+			expect(aIdx).toBeGreaterThanOrEqual(0);
+			expect(bIdx).toBeGreaterThan(aIdx);
+			expect(items).toHaveLength(2);
+		});
 	});
 
 	describe('sendContent', () => {

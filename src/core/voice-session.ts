@@ -2493,14 +2493,12 @@ export class VoiceSession {
 		// Arming happens later, on the first assistant audio chunk.
 		this._grace = new InterruptGraceWindow(this.greetingInterruptGraceMs);
 		this._graceArmingLogged = false;
-		// Begin the pre-audio mic-drop phase. The user might speak between
-		// now and the first audio chunk (e.g. while memory loads or the
-		// greeting response generates); dropping those frames prevents a
-		// real pre-greeting user turn from racing the greeting's own
-		// response.create. Maybe-arming flips this false on the first audio
-		// chunk (handoff to the grace window).
+		// `_greetingInFlight` is set by `sendGreeting()` at the actual send
+		// time, not here. Setting it at session-ready would be wiped by
+		// `handleClientConnected` (which runs between session-ready and
+		// sendGreeting in the common "client connects later" path) — and
+		// before `startMic` runs there are no mic frames to gate anyway.
 		// See dev_docs/framework/design-greeting-interrupt-grace.md §6, §8.
-		this._greetingInFlight = this.greetingInterruptGraceMs > 0;
 	}
 
 	/** Idempotent arming hook called from every assistant-audio chunk site
@@ -2523,11 +2521,14 @@ export class VoiceSession {
 			this._greetingInFlight = false;
 			this.log(`[Latency] Interrupt grace window armed (${this.greetingInterruptGraceMs}ms)`);
 			// Belt-and-suspenders: discard any provider input-buffer residue.
-			// With `_greetingInFlight` active from handleSetupComplete, the
-			// only frames that could be in the buffer at this point are
-			// pre-handleSetupComplete (very narrow window — between WS
-			// connect and session.ready). Safe to discard; the user is not
-			// expected to be speaking before session-ready.
+			// With `_greetingInFlight` set in `sendGreeting()`, the gate has
+			// been active for the entire greeting-send → first-audio window,
+			// so the buffer should already be empty. The only frames that
+			// could still be in the buffer are pre-`sendGreeting` (i.e.
+			// WS-connect → session-ready, plus the brief microtask gap into
+			// sendGreeting via `_memoryReadyPromise.then`) — typically empty
+			// because `startMic` hasn't started capturing yet. Safe to
+			// discard either way.
 			this.transport.clearInputAudio?.();
 		}
 	}

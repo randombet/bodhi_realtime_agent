@@ -1005,16 +1005,25 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	}
 
 	private enqueueInterruptToolResult(result: TransportToolResult): void {
+		// Per-item try/catch so a single failure logs its own context
+		// (which tool result id/name failed) and doesn't poison the rest
+		// of the queue. `.then(run, run)` keeps the chain alive across
+		// rejections of prior items; the inner try/catch guarantees this
+		// run resolves regardless of outcome.
 		const run = async () => {
-			if (!this.rt || !this._isConnected) return;
-			await this.cancelResponse({ waitForDone: true });
-			if (!this.rt || !this._isConnected) return;
-			this.sendToolResultNow(result);
+			try {
+				if (!this.rt || !this._isConnected) return;
+				await this.cancelResponse({ waitForDone: true });
+				if (!this.rt || !this._isConnected) return;
+				this.sendToolResultNow(result);
+			} catch (err) {
+				console.warn(
+					`[OpenAIRealtimeTransport] interrupt tool-result for ${result.id} (${result.name}) failed:`,
+					err,
+				);
+			}
 		};
-		const next = this._interruptToolResultQueue.then(run, run);
-		this._interruptToolResultQueue = next.catch((err) => {
-			console.warn('[OpenAIRealtimeTransport] interrupt tool-result queue failed:', err);
-		});
+		this._interruptToolResultQueue = this._interruptToolResultQueue.then(run, run);
 	}
 
 	private sendToolResultNow(result: TransportToolResult): void {
