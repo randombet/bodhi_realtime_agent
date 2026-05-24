@@ -94,6 +94,14 @@ export interface OpenAIRealtimeCacheConfig extends CacheConfigCommon {
 	};
 }
 
+export type OpenAIRealtimeNoiseReductionConfig = {
+	/** `near_field` for headset/close-talk mics; `far_field` for laptop or room mics. */
+	type: 'near_field' | 'far_field';
+};
+
+const DEFAULT_TURN_DETECTION = { type: 'semantic_vad' } as const;
+const DEFAULT_NOISE_REDUCTION: OpenAIRealtimeNoiseReductionConfig = { type: 'far_field' };
+
 export interface OpenAIRealtimeConfig {
 	/** OpenAI API key. */
 	apiKey: string;
@@ -114,14 +122,15 @@ export interface OpenAIRealtimeConfig {
 	voice?: string;
 	/** Transcription model (default: 'gpt-4o-mini-transcribe'). Set to null to disable input transcription. */
 	transcriptionModel?: string | null;
-	/** Turn detection configuration. Pass `null` to disable VAD entirely
+	/** Turn detection configuration. Defaults to `{ type: 'semantic_vad' }`.
+	 *  Pass `null` to disable VAD entirely
 	 *  (manual turn control via `commitAudio()` — `frameworkOwnsInterrupt`
 	 *  capability is forced `false` and `greetingInterruptGraceMs` to `0` in
 	 *  this mode). When omitted, the framework's defaults are merged in
 	 *  type-aware fashion — see `resolveTurnDetectionConfig`. */
 	turnDetection?: Record<string, unknown> | null;
-	/** Noise reduction configuration. */
-	noiseReduction?: Record<string, unknown>;
+	/** Input-audio noise reduction. Defaults to `far_field`; set `null` to disable. */
+	noiseReduction?: OpenAIRealtimeNoiseReductionConfig | null;
 	/** Reasoning effort + optional summary verbosity. Only honoured when the
 	 *  active model supports reasoning (gated via the FEATURES table). Dropped
 	 *  with a warn — or thrown under `strict: true` — on older models. */
@@ -482,6 +491,12 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			outputBitDepth: outEnc === 'pcmu' ? 8 : 16,
 			outputEncoding: outEnc,
 		};
+	}
+
+	private resolveNoiseReductionConfig(): OpenAIRealtimeNoiseReductionConfig | null {
+		return this.config.noiseReduction === undefined
+			? DEFAULT_NOISE_REDUCTION
+			: this.config.noiseReduction;
 	}
 
 	get isConnected(): boolean {
@@ -1428,7 +1443,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		}
 
 		const callerTdObj = (callerTd ?? {}) as Record<string, unknown>;
-		const callerType = (callerTdObj.type as string | undefined) ?? 'semantic_vad';
+		const callerType = (callerTdObj.type as string | undefined) ?? DEFAULT_TURN_DETECTION.type;
 
 		// Framework-owned interruption (Phase B8 default flip): the framework
 		// actuates response cancellation via cancelResponse() — the provider
@@ -1452,7 +1467,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 					// barge-ins still fire; they just need a touch more sustained
 					// speech to register. Callers wanting snappier interrupts can
 					// override `eagerness: 'medium'` or `'high'` in turnDetection.
-					{ type: 'semantic_vad', eagerness: 'low', ...commonDefaults, ...callerTdObj }
+					{ ...DEFAULT_TURN_DETECTION, eagerness: 'low', ...commonDefaults, ...callerTdObj }
 				: callerType === 'server_vad'
 					? { type: 'server_vad', ...commonDefaults, ...callerTdObj }
 					: { ...commonDefaults, ...callerTdObj };
@@ -1490,10 +1505,8 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 						: {}),
 					// biome-ignore lint/suspicious/noExplicitAny: SDK type is a strict union; wire is the canonical shape
 					turn_detection: this.resolveTurnDetectionConfig().wire as any,
-					...(this.config.noiseReduction
-						? // biome-ignore lint/suspicious/noExplicitAny: noise reduction config is passed through from user
-							{ noise_reduction: this.config.noiseReduction as any }
-						: {}),
+					// biome-ignore lint/suspicious/noExplicitAny: noise_reduction:null is a valid opt-out, SDK type can lag runtime
+					noise_reduction: this.resolveNoiseReductionConfig() as any,
 				},
 				...(!this._textMode
 					? {
