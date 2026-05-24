@@ -57,4 +57,12 @@ describe('createBodhiSessionConfig — playback-state config threading', () => {
 		const inheritedConfig = await createBodhiSessionConfig(baseOptions());
 		expect(inheritedConfig.greetingInterruptGraceMs).toBeUndefined();
 	});
+
+	it('threads explicit clientAudioInputRate overrides into VoiceSessionConfig', async () => {
+		const config = await createBodhiSessionConfig({
+			...baseOptions(),
+			clientAudioInputRate: 16000,
+		});
+		expect(config.clientAudioInputRate).toBe(16000);
+	});
 });
