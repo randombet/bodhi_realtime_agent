@@ -62,7 +62,7 @@ const SUBAGENT_GEMINI_MODEL_ID = 'gemini-3.5-flash';
 const REALTIME_INPUT_CONFIG = {
 	automaticActivityDetection: {
 		endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
-		silenceDurationMs: 500,
+		silenceDurationMs: 200,
 	},
 };
 
@@ -187,7 +187,7 @@ async function main() {
 	console.log(`  Main model:      ${REASONING_MODEL}`);
 	console.log(`  Subagent model:  ${SUBAGENT_GEMINI_MODEL_ID}`);
 	console.log(`  Subagent budget: ${SUBAGENT_THINKING_BUDGET}`);
-	console.log('  Gemini VAD:      end=HIGH silence=500ms');
+	console.log('  Gemini VAD:      end=HIGH silence=200ms');
 	console.log('  Documents:       examples/interviewer/docs/*.md');
 	console.log(`  Transcript:      ${TRANSCRIPT_DIR}/${SESSION_ID}.md`);
 	console.log();
