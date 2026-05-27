@@ -58,7 +58,7 @@ const TRANSCRIPT_DIR = process.env.TRANSCRIPT_DIR || './transcripts';
 const LIVE_MODEL = process.env.GEMINI_LIVE_MODEL || 'gemini-3.1-flash-live-preview';
 const REASONING_MODEL = process.env.INTERVIEWER_REASONING_MODEL || 'gemini-2.5-flash';
 /** Planner / decision `generateObject` model (edit here or wire your own `LanguageModelV1`). */
-const SUBAGENT_GEMINI_MODEL_ID = 'gemini-2.5-flash-lite-preview';
+const SUBAGENT_GEMINI_MODEL_ID = 'gemini-3.5-flash';
 const REALTIME_INPUT_CONFIG = {
 	automaticActivityDetection: {
 		endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
