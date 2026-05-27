@@ -58,11 +58,11 @@ const TRANSCRIPT_DIR = process.env.TRANSCRIPT_DIR || './transcripts';
 const LIVE_MODEL = process.env.GEMINI_LIVE_MODEL || 'gemini-3.1-flash-live-preview';
 const REASONING_MODEL = process.env.INTERVIEWER_REASONING_MODEL || 'gemini-2.5-flash';
 /** Planner / decision `generateObject` model (edit here or wire your own `LanguageModelV1`). */
-const SUBAGENT_GEMINI_MODEL_ID = 'gemini-3.1-flash-lite-preview';
+const SUBAGENT_GEMINI_MODEL_ID = 'gemini-3.5-flash';
 const REALTIME_INPUT_CONFIG = {
 	automaticActivityDetection: {
 		endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
-		silenceDurationMs: 500,
+		silenceDurationMs: 200,
 	},
 };
 
@@ -185,9 +185,9 @@ async function main() {
 	console.log(`  Session:         ${SESSION_ID}`);
 	console.log(`  Voice model:     ${LIVE_MODEL}`);
 	console.log(`  Main model:      ${REASONING_MODEL}`);
-	console.log(`  Subagent model:  ${SUBAGENT_MODEL}`);
+	console.log(`  Subagent model:  ${SUBAGENT_GEMINI_MODEL_ID}`);
 	console.log(`  Subagent budget: ${SUBAGENT_THINKING_BUDGET}`);
-	console.log('  Gemini VAD:      end=HIGH silence=500ms');
+	console.log('  Gemini VAD:      end=HIGH silence=200ms');
 	console.log('  Documents:       examples/interviewer/docs/*.md');
 	console.log(`  Transcript:      ${TRANSCRIPT_DIR}/${SESSION_ID}.md`);
 	console.log();
