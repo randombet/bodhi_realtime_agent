@@ -18,8 +18,8 @@
  *
  * Usage:
  *   QWEN_API_KEY must be set (it's in ~/.zshrc). Then:
- *     pnpm tsx examples/qwen-realtime-demo.ts
- *     pnpm tsx examples/qwen-realtime-demo.ts "What is the capital of France?"
+ *     pnpm tsx examples/qwen-realtime/demo.ts
+ *     pnpm tsx examples/qwen-realtime/demo.ts "What is the capital of France?"
  *
  * Env overrides:
  *   QWEN_API_KEY        (required)  DashScope API key (or DASHSCOPE_API_KEY)

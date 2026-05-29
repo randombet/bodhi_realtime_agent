@@ -12,7 +12,10 @@
  *  - Tools are OpenAI-identical (`response.function_call_arguments.delta/done`,
  *    `function_call` items, `function_call_output` round-trip) → reuse the assembler.
  *  - Text item injection works (`conversation.item.create` with `input_text`).
- *  - Interrupt is PROVIDER-owned (barge-in auto-cancels) → `frameworkOwnsInterrupt: false`.
+ *  - Interrupt is FRAMEWORK-owned (`interrupt_response: false`, VoiceSession
+ *    actuates via cancelResponse) → `frameworkOwnsInterrupt: true`. Qwen generates
+ *    faster than realtime, so barge-in must work through the buffered-playback
+ *    tail — sessions enable `nativePlaybackGating` + `playbackStateProtocol`.
  *  - In-place `session.update` works → `inPlaceSessionUpdate: true`.
  *  - Input transcription final text is in `...completed.transcript`.
  *  - Usage is at `response.done.response.usage`.
@@ -91,6 +94,15 @@ const RESERVED_SESSION_KEYS = new Set([
 	'input_audio_transcription',
 ]);
 
+/** `providerOptions.qwen` keys handled explicitly (mapped onto Qwen wire fields
+ *  or merged elsewhere) — NOT passed through verbatim. */
+const QWEN_ALIAS_KEYS = new Set([
+	'enableSearch',
+	'searchOptions',
+	'inputAudioTranscription',
+	'turnDetection',
+]);
+
 type Ev = { type?: string; [k: string]: unknown };
 
 const CONNECT_TIMEOUT_MS = 15_000;
@@ -108,6 +120,11 @@ export class QwenRealtimeTransport implements LLMTransport {
 	private isGenerating = false;
 	private suppressAudio = false;
 	private inputTranscriptionEnabled = true;
+	// Tool-result scheduling: 'when_idle' results buffered while the model is
+	// generating (flushed on response.done); 'interrupt' results serialized
+	// behind a cancel.
+	private pendingWhenIdle: TransportToolResult[] = [];
+	private interruptToolResultQueue: Promise<void> = Promise.resolve();
 
 	// Serializes post-connect session.update calls; each awaits its session.updated ack.
 	private sessionUpdateQueue: Promise<void> = Promise.resolve();
@@ -157,10 +174,19 @@ export class QwenRealtimeTransport implements LLMTransport {
 			userTranscription: true,
 			inPlaceSessionUpdate: true,
 			textResponseModality: true,
-			// Phase 0: barge-in auto-cancels (provider-owned interrupt).
-			frameworkOwnsInterrupt: false,
+			// Framework-owned interrupt (mirrors OpenAI Realtime): we set
+			// `turn_detection.interrupt_response: false` so Qwen does NOT auto-cancel,
+			// and VoiceSession actuates barge-in via cancelResponse(). Qwen generates
+			// faster than realtime (response.done at generation end), so most barge-ins
+			// land in the buffered-playback TAIL — the framework's nativePlaybackGating
+			// path covers that, and only arms when frameworkOwnsInterrupt is true.
+			frameworkOwnsInterrupt: true,
+			// response.done is generation-gated (like OpenAI) — the session needs
+			// nativePlaybackGating + playbackStateProtocol to arm tail barge-in.
 			playbackGatedTurnComplete: false,
-			greetingInterruptGraceMs: 0,
+			// Grace window after first audio so browser AEC converges before
+			// echo-triggered events count as barge-in (OpenAI default).
+			greetingInterruptGraceMs: 1000,
 		};
 	}
 
@@ -284,6 +310,7 @@ export class QwenRealtimeTransport implements LLMTransport {
 		}
 		this.assembler.clear();
 		this.completedToolCalls = [];
+		this.pendingWhenIdle = [];
 		this.isGenerating = false;
 	}
 
@@ -301,6 +328,7 @@ export class QwenRealtimeTransport implements LLMTransport {
 		this.resolveActiveResponseDone = null;
 		this.assembler.clear();
 		this.completedToolCalls = [];
+		this.pendingWhenIdle = [];
 		this.isGenerating = false;
 	}
 
@@ -349,6 +377,15 @@ export class QwenRealtimeTransport implements LLMTransport {
 		if (config.responseModality) this.config.responseModality = config.responseModality;
 		if (config.instructions !== undefined) this.config.instructions = config.instructions;
 		if (config.tools !== undefined) this.config.tools = config.tools;
+		// Merge incoming provider options so post-connect Qwen knobs (e.g. web search)
+		// take effect on the next session.update.
+		const incomingQwen = (config.providerOptions as { qwen?: Record<string, unknown> } | undefined)
+			?.qwen;
+		if (incomingQwen) {
+			this.config.providerOptions = {
+				qwen: { ...this.config.providerOptions?.qwen, ...incomingQwen },
+			};
+		}
 
 		// Pre-connect: coalesce into the initial session.update (sent at connect).
 		if (!this._connected) return;
@@ -391,7 +428,7 @@ export class QwenRealtimeTransport implements LLMTransport {
 
 	sendContent(turns: ContentTurn[], turnComplete?: boolean): void {
 		for (const turn of turns) {
-			const contentType = turn.role === 'user' ? 'input_text' : 'text';
+			const contentType = turn.role === 'user' ? 'input_text' : 'output_text';
 			this.send({
 				type: 'conversation.item.create',
 				item: {
@@ -415,13 +452,63 @@ export class QwenRealtimeTransport implements LLMTransport {
 		if (!supports(model, 'tools')) {
 			throw new ValidationError(`Qwen Realtime model '${model}' does not support tool calling`);
 		}
+		if (!this._connected) return;
+		const scheduling = result.scheduling ?? 'immediate';
+
+		// 'when_idle': background results wait for the model to finish speaking so
+		// they don't cut off the current response. Buffered, flushed on response.done.
+		if (scheduling === 'when_idle' && this.isGenerating) {
+			this.pendingWhenIdle.push(result);
+			return;
+		}
+
+		// 'interrupt': cancel the active response first, then deliver. Serialized so
+		// the cancel's response.done(cancelled) lands before the new response.create.
+		if (
+			scheduling === 'interrupt' &&
+			(this.isGenerating || this.resolveActiveResponseDone !== null)
+		) {
+			const run = async () => {
+				try {
+					if (!this._connected) return;
+					await this.cancelResponse({ waitForDone: true });
+					if (!this._connected) return;
+					this.sendToolResultNow(result);
+				} catch {
+					/* per-item failure must not poison the queue */
+				}
+			};
+			this.interruptToolResultQueue = this.interruptToolResultQueue.then(run, run);
+			return;
+		}
+
+		this.sendToolResultNow(result);
+	}
+
+	private sendToolResultNow(result: TransportToolResult): void {
 		const output =
 			typeof result.result === 'string' ? result.result : JSON.stringify(result.result);
 		this.send({
 			type: 'conversation.item.create',
 			item: { type: 'function_call_output', call_id: result.id, output },
 		});
+		// 'silent': inject the result without triggering a new response.
 		if (result.scheduling !== 'silent') this.send({ type: 'response.create' });
+	}
+
+	private flushPendingWhenIdle(): void {
+		if (this.pendingWhenIdle.length === 0) return;
+		const queued = this.pendingWhenIdle;
+		this.pendingWhenIdle = [];
+		for (const result of queued) {
+			const output =
+				typeof result.result === 'string' ? result.result : JSON.stringify(result.result);
+			this.send({
+				type: 'conversation.item.create',
+				item: { type: 'function_call_output', call_id: result.id, output },
+			});
+		}
+		this.send({ type: 'response.create' });
 	}
 
 	// --- Generation control ---
@@ -490,11 +577,26 @@ export class QwenRealtimeTransport implements LLMTransport {
 		if (this.config.voice) session.voice = this.config.voice;
 		if (this.config.instructions !== undefined) session.instructions = this.config.instructions;
 
-		// turn_detection: default server_vad; null = manual.
-		session.turn_detection =
-			this.config.turnDetection === null
-				? null
-				: (this.config.turnDetection ?? { type: 'server_vad' });
+		// turn_detection: default server_vad; null = manual. Framework-owned
+		// interrupt sets `interrupt_response: false` so Qwen does NOT auto-cancel
+		// (VoiceSession actuates barge-in via cancelResponse). `prefix_padding_ms`
+		// /`create_response`/`interrupt_response` overrides go via
+		// providerOptions.qwen.turnDetection.
+		if (this.config.turnDetection === null) {
+			session.turn_detection = null;
+		} else {
+			const base = this.config.turnDetection ?? { type: 'server_vad' };
+			const overrides =
+				(this.config.providerOptions?.qwen?.turnDetection as Record<string, unknown> | undefined) ??
+				{};
+			session.turn_detection = {
+				...base,
+				...(this._capabilities.frameworkOwnsInterrupt === true
+					? { interrupt_response: false }
+					: {}),
+				...overrides,
+			};
+		}
 
 		const tools = this.buildToolsArray();
 		if (tools) {
@@ -502,23 +604,38 @@ export class QwenRealtimeTransport implements LLMTransport {
 			session.tool_choice = 'auto';
 		}
 
-		// Input transcription: null to disable; otherwise default-on (omit) or explicit config.
-		if (!this.inputTranscriptionEnabled) session.input_audio_transcription = null;
-		else if (this.config.inputAudioTranscription)
-			session.input_audio_transcription = this.config.inputAudioTranscription;
+		const qwen = this.config.providerOptions?.qwen ?? {};
 
-		// Web search (canonical typed field).
-		if (this.config.webSearch?.enabled) {
-			session.enable_search = true;
-			session.search_options = { enable_source: this.config.webSearch.enableSource ?? false };
+		// Input transcription: null to disable; else typed config wins, then the
+		// providerOptions.qwen.inputAudioTranscription alias, then default-on (omit).
+		if (!this.inputTranscriptionEnabled) {
+			session.input_audio_transcription = null;
+		} else {
+			const iat =
+				this.config.inputAudioTranscription ??
+				(qwen.inputAudioTranscription as Record<string, unknown> | undefined);
+			if (iat) session.input_audio_transcription = iat;
 		}
 
-		// Forward-compat providerOptions.qwen (whitelisted: cannot clobber reserved keys).
-		const qwen = this.config.providerOptions?.qwen;
-		if (qwen) {
-			for (const [k, v] of Object.entries(qwen)) {
-				if (!RESERVED_SESSION_KEYS.has(k)) session[k] = v;
+		// Web search: typed `webSearch` is canonical; `providerOptions.qwen.enableSearch`
+		// / `searchOptions` are lower-precedence aliases. Map both onto the Qwen wire
+		// fields `enable_search` / `search_options`.
+		const searchEnabled = this.config.webSearch?.enabled ?? Boolean(qwen.enableSearch);
+		if (searchEnabled) {
+			session.enable_search = true;
+			if (this.config.webSearch?.enableSource !== undefined) {
+				session.search_options = { enable_source: this.config.webSearch.enableSource };
+			} else if (qwen.searchOptions !== undefined) {
+				session.search_options = qwen.searchOptions;
+			} else {
+				session.search_options = { enable_source: false };
 			}
+		}
+
+		// Forward-compat: pass through remaining providerOptions.qwen keys verbatim
+		// (skipping reserved fields and the aliases mapped above).
+		for (const [k, v] of Object.entries(qwen)) {
+			if (!RESERVED_SESSION_KEYS.has(k) && !QWEN_ALIAS_KEYS.has(k)) session[k] = v;
 		}
 
 		// For a targeted patch, override with the patched fields (still send formats
@@ -535,7 +652,7 @@ export class QwenRealtimeTransport implements LLMTransport {
 	private replayHistory(history: ReplayItem[]): void {
 		for (const item of history) {
 			if (item.type === 'text') {
-				const contentType = item.role === 'user' ? 'input_text' : 'text';
+				const contentType = item.role === 'user' ? 'input_text' : 'output_text';
 				this.send({
 					type: 'conversation.item.create',
 					item: {
@@ -567,9 +684,13 @@ export class QwenRealtimeTransport implements LLMTransport {
 				}
 				break;
 			case 'input_audio_buffer.speech_started':
+				// Always signal speech start (drives the framework's barge-in path).
 				if (this.onSpeechStarted) this.onSpeechStarted();
-				// Provider-owned interrupt: barge-in during generation auto-cancels.
-				if (this.isGenerating) {
+				// Framework-owned mode (default): VoiceSession actuates the interrupt
+				// via cancelResponse() — do NOT fire onInterrupted here (would
+				// double-actuate; the interface forbids callbacks from cancelResponse).
+				// Provider-owned mode only: interrupt locally on barge-in mid-generation.
+				if (this._capabilities.frameworkOwnsInterrupt !== true && this.isGenerating) {
 					this.suppressAudio = true;
 					this.isGenerating = false;
 					if (this.onInterrupted) this.onInterrupted();
@@ -675,6 +796,8 @@ export class QwenRealtimeTransport implements LLMTransport {
 			this.completedToolCalls = [];
 		}
 		this.isGenerating = false;
+		// Model is idle now — deliver any 'when_idle' tool results that were buffered.
+		this.flushPendingWhenIdle();
 		if (this.onTurnComplete) this.onTurnComplete();
 	}
 }

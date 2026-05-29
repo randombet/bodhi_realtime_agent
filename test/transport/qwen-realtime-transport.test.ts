@@ -108,7 +108,10 @@ describe('QwenRealtimeTransport', () => {
 		const su = ws.sentOfType('session.update')[0];
 		expect((su.session as Record<string, unknown>).modalities).toEqual(['text', 'audio']);
 		expect((su.session as Record<string, unknown>).voice).toBe('Tina');
-		expect((su.session as Record<string, unknown>).turn_detection).toEqual({ type: 'server_vad' });
+		expect((su.session as Record<string, unknown>).turn_detection).toEqual({
+			type: 'server_vad',
+			interrupt_response: false,
+		});
 		ws.msg({ type: 'session.created', session: { id: 'sess_abc' } });
 		ws.msg({ type: 'session.updated' });
 		await p;
@@ -164,17 +167,27 @@ describe('QwenRealtimeTransport', () => {
 		expect(got).toEqual(['Hello ', 'world']);
 	});
 
-	it('provider-owned interrupt: speech_started during generation fires onInterrupted + suppresses audio', async () => {
+	it('framework-owned interrupt: speech_started fires only onSpeechStarted (VoiceSession actuates via cancelResponse)', async () => {
 		const [t, ws] = await connect();
 		const events: string[] = [];
 		t.onSpeechStarted = () => events.push('speech');
 		t.onInterrupted = () => events.push('interrupted');
-		t.onAudioOutput = () => events.push('audio');
 		ws.msg({ type: 'response.created' }); // model generating
 		ws.msg({ type: 'input_audio_buffer.speech_started' });
-		ws.msg({ type: 'response.audio.delta', delta: 'late' }); // should be suppressed
-		expect(events).toEqual(['speech', 'interrupted']);
-		expect(events).not.toContain('audio');
+		// Framework-owned: the transport must NOT fire onInterrupted itself.
+		expect(events).toEqual(['speech']);
+		expect(t.capabilities.frameworkOwnsInterrupt).toBe(true);
+	});
+
+	it('cancelResponse sends response.cancel and never fires a callback', async () => {
+		const [t, ws] = await connect();
+		let fired = false;
+		t.onInterrupted = () => {
+			fired = true;
+		};
+		await t.cancelResponse({});
+		expect(ws.sentOfType('response.cancel').length).toBe(1);
+		expect(fired).toBe(false);
 	});
 
 	it('tools: function_call flow assembles args and dispatches onToolCall, then onTurnComplete', async () => {
@@ -347,11 +360,108 @@ describe('QwenRealtimeTransport', () => {
 		expect(t.capabilities.userTranscription).toBe(true);
 		expect(t.capabilities.inPlaceSessionUpdate).toBe(true);
 		expect(t.capabilities.textResponseModality).toBe(true);
-		expect(t.capabilities.frameworkOwnsInterrupt).toBe(false);
+		expect(t.capabilities.frameworkOwnsInterrupt).toBe(true);
+		expect(t.capabilities.greetingInterruptGraceMs).toBe(1000);
 		expect(t.audioFormat).toMatchObject({
 			inputSampleRate: 16000,
 			outputSampleRate: 24000,
 			encoding: 'pcm',
 		});
+	});
+
+	it('sendContent encodes user input_text and assistant output_text (mixed turns)', async () => {
+		const [t, ws] = await connect();
+		t.sendContent(
+			[
+				{ role: 'user', text: 'hi' },
+				{ role: 'assistant', text: 'hello' },
+			],
+			true,
+		);
+		const items = ws.sentOfType('conversation.item.create');
+		const userItem = items[0].item as { role: string; content: { type: string }[] };
+		const asstItem = items[1].item as { role: string; content: { type: string }[] };
+		expect(userItem.role).toBe('user');
+		expect(userItem.content[0].type).toBe('input_text');
+		expect(asstItem.role).toBe('assistant');
+		expect(asstItem.content[0].type).toBe('output_text');
+		expect(ws.sentOfType('response.create').length).toBe(1);
+	});
+
+	it("sendToolResult 'when_idle' buffers while generating, flushes on response.done", async () => {
+		const [t, ws] = await connect();
+		ws.msg({ type: 'response.created' }); // model generating
+		t.sendToolResult({ id: 'call_1', name: 'bg', result: 'done', scheduling: 'when_idle' });
+		// Nothing sent yet — buffered.
+		expect(ws.sentOfType('conversation.item.create').length).toBe(0);
+		ws.msg({ type: 'response.done', response: { id: 'r', status: 'completed' } });
+		// Flushed after the turn finished.
+		const out = ws.sentOfType('conversation.item.create');
+		expect(out.length).toBe(1);
+		expect((out[0].item as { type: string }).type).toBe('function_call_output');
+		expect(ws.sentOfType('response.create').length).toBe(1);
+	});
+
+	it("sendToolResult 'when_idle' batches multiple queued results behind one response.create", async () => {
+		const [t, ws] = await connect();
+		ws.msg({ type: 'response.created' }); // model generating
+		t.sendToolResult({ id: 'call_1', name: 'bg1', result: 'one', scheduling: 'when_idle' });
+		t.sendToolResult({ id: 'call_2', name: 'bg2', result: 'two', scheduling: 'when_idle' });
+
+		expect(ws.sentOfType('conversation.item.create').length).toBe(0);
+		ws.msg({ type: 'response.done', response: { id: 'r', status: 'completed' } });
+
+		const out = ws.sentOfType('conversation.item.create');
+		expect(out.length).toBe(2);
+		expect((out[0].item as { call_id: string }).call_id).toBe('call_1');
+		expect((out[1].item as { call_id: string }).call_id).toBe('call_2');
+		expect(ws.sentOfType('response.create').length).toBe(1);
+	});
+
+	it("sendToolResult 'when_idle' sends immediately when the model is idle", async () => {
+		const [t, ws] = await connect();
+		t.sendToolResult({ id: 'call_1', name: 'bg', result: 'done', scheduling: 'when_idle' });
+		expect(ws.sentOfType('conversation.item.create').length).toBe(1);
+	});
+
+	it("sendToolResult 'interrupt' cancels the active response, then delivers", async () => {
+		const [t, ws] = await connect();
+		ws.msg({ type: 'response.created' }); // generating
+		t.sendToolResult({ id: 'call_1', name: 'x', result: 'r', scheduling: 'interrupt' });
+		// cancel is sent synchronously by the queued task; resolve its waiter.
+		await new Promise((r) => setTimeout(r, 0));
+		expect(ws.sentOfType('response.cancel').length).toBe(1);
+		ws.msg({ type: 'response.done', response: { id: 'r', status: 'cancelled' } });
+		await new Promise((r) => setTimeout(r, 0));
+		expect(ws.sentOfType('conversation.item.create').length).toBe(1);
+	});
+
+	it('webSearch typed field maps to enable_search / search_options', async () => {
+		const [, ws] = await connect({ webSearch: { enabled: true, enableSource: true } });
+		const session = ws.sentOfType('session.update')[0].session as Record<string, unknown>;
+		expect(session.enable_search).toBe(true);
+		expect(session.search_options).toEqual({ enable_source: true });
+	});
+
+	it('providerOptions.qwen.enableSearch/searchOptions aliases map to wire fields', async () => {
+		const [, ws] = await connect({
+			providerOptions: { qwen: { enableSearch: true, searchOptions: { enable_source: true } } },
+		});
+		const session = ws.sentOfType('session.update')[0].session as Record<string, unknown>;
+		expect(session.enable_search).toBe(true);
+		expect(session.search_options).toEqual({ enable_source: true });
+		// Alias keys must NOT leak through verbatim.
+		expect(session.enableSearch).toBeUndefined();
+		expect(session.searchOptions).toBeUndefined();
+	});
+
+	it('updateSession merges providerOptions so post-connect web search takes effect', async () => {
+		const [t, ws] = await connect();
+		const up = t.updateSession({ providerOptions: { qwen: { enableSearch: true } } });
+		await new Promise((r) => setTimeout(r, 0));
+		ws.msg({ type: 'session.updated' });
+		await up;
+		const session = ws.sentOfType('session.update').at(-1)?.session as Record<string, unknown>;
+		expect(session.enable_search).toBe(true);
 	});
 });

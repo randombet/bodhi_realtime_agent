@@ -6,7 +6,7 @@
  * before implementing the transport.
  *
  *   QWEN_API_KEY (or DASHSCOPE_API_KEY) must be set. Then:
- *     pnpm tsx examples/qwen-realtime-probe.ts
+ *     pnpm tsx examples/qwen-realtime/probe.ts
  */
 
 import { execFileSync } from 'node:child_process';
