@@ -25,6 +25,8 @@ export class TranscriptManager {
 	private outputPrefix = '';
 	/** True after the user transcript was finalized early for a tool call. */
 	private inputFinalizedThisTurn = false;
+	/** Display-only accumulation of realtime input deltas on interrupted turns. */
+	private interruptedInputDisplay = '';
 
 	/**
 	 * Optional callback fired when user input is finalized (committed as a non-partial message).
@@ -48,6 +50,25 @@ export class TranscriptManager {
 				partial: true,
 			});
 		}
+	}
+
+	/**
+	 * Show realtime input transcription deltas immediately on an interrupted turn,
+	 * as a display-only partial. Accumulates deltas for the running line but never
+	 * writes `inputBuffer`, so the slower batch STT (`handleInput`) stays
+	 * authoritative for the finalized user message and corrects this display. The
+	 * buffer is reset on `flush()`/`flushInput()`.
+	 */
+	showInterruptedInputPartial(textDelta: string): void {
+		if (this.inputFinalizedThisTurn) return;
+		if (!textDelta.trim()) return;
+		this.interruptedInputDisplay += textDelta;
+		this.sink.sendToClient({
+			type: 'transcript',
+			role: 'user',
+			text: this.interruptedInputDisplay.trim(),
+			partial: true,
+		});
 	}
 
 	/**
@@ -127,6 +148,7 @@ export class TranscriptManager {
 			this.inputFinalizedThisTurn = true;
 			this.onInputFinalized?.(text);
 		}
+		this.interruptedInputDisplay = '';
 	}
 
 	/** Flush all transcript buffers — finalize user and assistant messages. */
@@ -156,6 +178,7 @@ export class TranscriptManager {
 		this.outputBuffer = '';
 		this.outputPrefix = '';
 		this.inputFinalizedThisTurn = false;
+		this.interruptedInputDisplay = '';
 	}
 
 	/**

@@ -212,6 +212,58 @@ describe('TranscriptManager', () => {
 		});
 	});
 
+	describe('showInterruptedInputPartial', () => {
+		it('accumulates realtime deltas into a running partial transcript', () => {
+			const sink = createSink();
+			const mgr = new TranscriptManager(sink);
+
+			mgr.showInterruptedInputPartial('sor');
+			mgr.showInterruptedInputPartial('ry, ');
+			mgr.showInterruptedInputPartial('how are you?');
+
+			const partials = sink.messages.filter((m) => m.role === 'user' && m.partial === true);
+			expect(partials.at(-1)).toEqual({
+				type: 'transcript',
+				role: 'user',
+				text: 'sorry, how are you?',
+				partial: true,
+			});
+		});
+
+		it('is display-only — batch STT (handleInput) remains authoritative for the finalized message', () => {
+			const sink = createSink();
+			const mgr = new TranscriptManager(sink);
+
+			// Realtime transcription shown immediately on an interrupted turn…
+			mgr.showInterruptedInputPartial('sorry, how are you?');
+			// …then the slower batch STT corrects and finalizes it.
+			mgr.handleInput('Oh sorry, how you doing today?');
+			mgr.flush();
+
+			expect(sink.userMessages).toEqual(['Oh sorry, how you doing today?']);
+		});
+
+		it('resets the display buffer on flush so the next turn starts fresh', () => {
+			const sink = createSink();
+			const mgr = new TranscriptManager(sink);
+
+			mgr.showInterruptedInputPartial('first turn');
+			mgr.flush();
+			mgr.showInterruptedInputPartial('second');
+
+			const partials = sink.messages.filter((m) => m.role === 'user' && m.partial === true);
+			expect(partials.at(-1)?.text).toBe('second');
+		});
+
+		it('ignores whitespace-only deltas', () => {
+			const sink = createSink();
+			const mgr = new TranscriptManager(sink);
+
+			mgr.showInterruptedInputPartial('   ');
+			expect(sink.messages).toHaveLength(0);
+		});
+	});
+
 	describe('onInputFinalized', () => {
 		it('fires on flushInput() with finalized text', () => {
 			const sink = createSink();

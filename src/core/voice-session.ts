@@ -940,11 +940,18 @@ export class VoiceSession {
 			};
 
 			// Wire Gemini built-in transcription as authoritative correction.
-			// Skipped on interrupted turns — Gemini may miss audio spoken during
-			// model output, producing incomplete transcripts.
+			// On interrupted (barge-in) turns the realtime transcript can miss
+			// audio spoken over model output, so it is NOT used to finalize the
+			// message. But the batch STT result lags behind (a separate
+			// generateContent call), so we still surface the realtime transcript
+			// immediately as a display-only partial; the batch STT then corrects
+			// and finalizes it via handleInput/flush.
 			this.transport.onInputTranscription = (text) => {
 				this.logInputTranscriptionLatency(text, 'provider-correction');
-				if (this._turnWasInterrupted) return;
+				if (this._turnWasInterrupted) {
+					this.transcriptManager.showInterruptedInputPartial(text);
+					return;
+				}
 				this.transcriptManager.correctInput(text);
 			};
 		} else {
