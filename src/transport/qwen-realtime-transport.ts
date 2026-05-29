@@ -356,13 +356,16 @@ export class QwenRealtimeTransport implements LLMTransport {
 	async cancelResponse(opts?: CancelResponseOptions): Promise<void> {
 		try {
 			if (!this._connected) return;
+			if (!this.isGenerating) return;
 			const wait = opts?.waitForDone
 				? new Promise<void>((resolve) => {
 						this.resolveActiveResponseDone = resolve;
 						setTimeout(resolve, CANCEL_DONE_TIMEOUT_MS);
 					})
 				: null;
+			this.suppressAudio = true;
 			this.send({ type: 'response.cancel' });
+			this.isGenerating = false;
 			if (wait) await wait;
 		} catch {
 			// Never reject — fire-and-forget callers must not see unhandled rejections.
@@ -586,9 +589,10 @@ export class QwenRealtimeTransport implements LLMTransport {
 			session.turn_detection = null;
 		} else {
 			const base = this.config.turnDetection ?? { type: 'server_vad' };
-			const overrides =
+			const rawOverrides =
 				(this.config.providerOptions?.qwen?.turnDetection as Record<string, unknown> | undefined) ??
 				{};
+			const { interrupt_response: _ignoredInterruptResponse, ...overrides } = rawOverrides;
 			session.turn_detection = {
 				...base,
 				...(this._capabilities.frameworkOwnsInterrupt === true

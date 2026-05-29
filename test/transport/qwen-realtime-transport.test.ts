@@ -179,12 +179,19 @@ describe('QwenRealtimeTransport', () => {
 		expect(t.capabilities.frameworkOwnsInterrupt).toBe(true);
 	});
 
-	it('cancelResponse sends response.cancel and never fires a callback', async () => {
+	it('cancelResponse is a no-op when no response is active', async () => {
+		const [t, ws] = await connect();
+		await t.cancelResponse({});
+		expect(ws.sentOfType('response.cancel').length).toBe(0);
+	});
+
+	it('cancelResponse sends response.cancel for an active response and never fires a callback', async () => {
 		const [t, ws] = await connect();
 		let fired = false;
 		t.onInterrupted = () => {
 			fired = true;
 		};
+		ws.msg({ type: 'response.created' });
 		await t.cancelResponse({});
 		expect(ws.sentOfType('response.cancel').length).toBe(1);
 		expect(fired).toBe(false);
@@ -453,6 +460,28 @@ describe('QwenRealtimeTransport', () => {
 		// Alias keys must NOT leak through verbatim.
 		expect(session.enableSearch).toBeUndefined();
 		expect(session.searchOptions).toBeUndefined();
+	});
+
+	it('providerOptions.qwen.turnDetection cannot override framework-owned interrupt_response', async () => {
+		const [, ws] = await connect({
+			providerOptions: {
+				qwen: {
+					turnDetection: {
+						create_response: true,
+						interrupt_response: true,
+						prefix_padding_ms: 300,
+					},
+				},
+			},
+		});
+		const session = ws.sentOfType('session.update')[0].session as Record<string, unknown>;
+		expect(session.turn_detection).toEqual({
+			type: 'server_vad',
+			interrupt_response: false,
+			create_response: true,
+			prefix_padding_ms: 300,
+		});
+		expect(session.turnDetection).toBeUndefined();
 	});
 
 	it('updateSession merges providerOptions so post-connect web search takes effect', async () => {
