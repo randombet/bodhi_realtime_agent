@@ -128,6 +128,41 @@ describe('deriveUsageSource (P4)', () => {
 	it('gemini_live + interim phase → gemini.usage.update', () => {
 		expect(deriveUsageSource(geminiFinal({ phase: 'update' }))).toBe('gemini.usage.update');
 	});
+
+	it('qwen_realtime + response → qwen.response', () => {
+		expect(
+			deriveUsageSource({
+				provider: 'qwen_realtime',
+				kind: 'response',
+				phase: 'final',
+				unit: 'tokens',
+			}),
+		).toBe('qwen.response');
+	});
+
+	it('qwen_realtime + input_transcription → qwen.transcription', () => {
+		expect(
+			deriveUsageSource({
+				provider: 'qwen_realtime',
+				kind: 'input_transcription',
+				phase: 'final',
+				unit: 'tokens',
+			}),
+		).toBe('qwen.transcription');
+	});
+
+	it('qwen sources have no cache-hit ratio and derive provider ids', () => {
+		const ev = {
+			provider: 'qwen_realtime',
+			kind: 'response',
+			phase: 'final',
+			unit: 'tokens',
+			inputTokens: 10,
+			providerResponseId: 'resp_q',
+		} as const;
+		expect(computeCacheHitRatio(ev, 'qwen.response')).toBeUndefined();
+		expect(deriveProviderItemId(ev, 'qwen.response')).toBe('resp_q');
+	});
 });
 
 // Follow-up fix #3: VoiceSession's per-turn sequence Map must NOT clear

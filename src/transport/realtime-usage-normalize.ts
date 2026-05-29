@@ -204,6 +204,57 @@ export function normalizeOpenAIResponseUsage(
  *   collapsing every event in a session into one bucket. Optional for
  *   backward compatibility with callers that don't have it.
  */
+/**
+ * Normalize Qwen Omni Realtime `response.usage` (from `response.done.response.usage`).
+ *
+ * Qwen shape (note plural `*_tokens_details`, unlike OpenAI's singular):
+ *   { total_tokens, input_tokens, output_tokens,
+ *     input_tokens_details: { text_tokens, audio_tokens },
+ *     output_tokens_details: { text_tokens, audio_tokens } }
+ */
+export function normalizeQwenResponseUsage(
+	raw: unknown,
+	providerResponseId?: string,
+): RealtimeLLMUsageEvent | null {
+	if (!isRecord(raw)) return null;
+
+	const input = readNumber(raw, ['input_tokens']);
+	const output = readNumber(raw, ['output_tokens']);
+	const total = readNumber(raw, ['total_tokens']);
+	if (input === undefined && output === undefined && total === undefined) return null;
+
+	const breakdown: RealtimeUsageModalityBreakdown = {};
+	const inDet = raw.input_tokens_details;
+	if (isRecord(inDet)) {
+		const t = readNumber(inDet, ['text_tokens']);
+		const a = readNumber(inDet, ['audio_tokens']);
+		const img = readNumber(inDet, ['image_tokens']);
+		if (t !== undefined) breakdown.inputTextTokens = t;
+		if (a !== undefined) breakdown.inputAudioTokens = a;
+		if (img !== undefined) breakdown.inputImageTokens = img;
+	}
+	const outDet = raw.output_tokens_details;
+	if (isRecord(outDet)) {
+		const t = readNumber(outDet, ['text_tokens']);
+		const a = readNumber(outDet, ['audio_tokens']);
+		if (t !== undefined) breakdown.outputTextTokens = t;
+		if (a !== undefined) breakdown.outputAudioTokens = a;
+	}
+
+	return {
+		provider: 'qwen_realtime',
+		kind: 'response',
+		phase: 'final',
+		unit: 'tokens',
+		inputTokens: input,
+		outputTokens: output,
+		totalTokens: total,
+		modalityBreakdown: Object.keys(breakdown).length > 0 ? breakdown : undefined,
+		...(providerResponseId !== undefined ? { providerResponseId } : {}),
+		providerRaw: raw,
+	};
+}
+
 export function normalizeOpenAITranscriptionUsage(
 	raw: unknown,
 	providerItemId?: string,
