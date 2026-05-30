@@ -1,13 +1,16 @@
-# Qwen3-Omni-MoE realtime overlay — derived from the bundled
-# `vllm_omni/deploy/qwen3_omni_moe.yaml` (verified on 2x H100, stage 0 on
-# cuda:0, stages 1+2 on cuda:1) with the SINGLE change required for
-# `/v1/realtime`: `async_chunk` flipped from `true` → `false`.
+# PROFILE_MARKER: qwen3_omni_realtime_smoke_2026_05_30_v2
+# Qwen3-Omni-MoE realtime smoke overlay — derived from the bundled
+# `vllm_omni/deploy/qwen3_omni_moe.yaml` (2x H100, stage 0 on cuda:0,
+# stages 1+2 on cuda:1), then adjusted for realtime smoke testing.
 #
-# Target: 2× A100-80GB on Modal. Stage 0 (thinker) on GPU 0, stages 1
-# (talker) + 2 (code2wav) co-located on GPU 1.
+# Changes from upstream:
+# - `async_chunk: false` for `/v1/realtime`.
+# - lower stage budgets so the thinker does not OOM on 80GB GPUs during KV
+#   cache allocation / compile profiling. This is a smoke profile, not a
+#   throughput-tuned production profile.
 #
-# DO NOT EDIT FOR FUNCTIONAL CHANGES without re-syncing against the upstream
-# qwen3_omni_moe.yaml — the original is the source of tested defaults.
+# Target: 2× H100/H200-class GPUs for best odds. A100-80GB may work with this
+# reduced profile but remains unverified.
 
 # CHANGED FROM UPSTREAM: was `true`. /v1/realtime is unsupported when
 # async_chunk is enabled (per vLLM-Omni docs).
@@ -22,9 +25,10 @@ connectors:
 
 stages:
   - stage_id: 0           # Thinker: text/reasoning + API server.
-    max_num_batched_tokens: 32768
-    max_num_seqs: 64
-    gpu_memory_utilization: 0.9
+    max_model_len: 8192
+    max_num_batched_tokens: 8192
+    max_num_seqs: 8
+    gpu_memory_utilization: 0.82
     trust_remote_code: true
     enable_prefix_caching: false
     devices: "0"
@@ -37,9 +41,10 @@ stages:
       repetition_penalty: 1.05
 
   - stage_id: 1           # Talker: speech generation.
-    max_num_batched_tokens: 32768
-    max_num_seqs: 64
-    gpu_memory_utilization: 0.6
+    max_model_len: 8192
+    max_num_batched_tokens: 8192
+    max_num_seqs: 8
+    gpu_memory_utilization: 0.45
     trust_remote_code: true
     enable_prefix_caching: false
     devices: "1"
@@ -53,9 +58,10 @@ stages:
       repetition_penalty: 1.05
 
   - stage_id: 2           # Code2wav: audio codec / vocoder.
-    max_num_batched_tokens: 51200
-    max_num_seqs: 64
-    gpu_memory_utilization: 0.1
+    max_model_len: 8192
+    max_num_batched_tokens: 16384
+    max_num_seqs: 8
+    gpu_memory_utilization: 0.08
     enforce_eager: true   # generation loop is cudagraph-incompatible
     trust_remote_code: true
     enable_prefix_caching: false
