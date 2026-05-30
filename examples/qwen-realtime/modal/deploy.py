@@ -118,11 +118,11 @@ def serve():
         )
     print("[serve] deploy config preview:\n" + "\n".join(yaml_text.splitlines()[:90]), flush=True)
     required_config_markers = [
-        "PROFILE_MARKER: qwen3_omni_realtime_smoke_2026_05_30_v2",
+        "PROFILE_MARKER: qwen3_omni_realtime_smoke_2026_05_30_v3",
         "max_model_len: 8192",
         "max_num_batched_tokens: 8192",
         "max_num_seqs: 8",
-        "gpu_memory_utilization: 0.82",
+        "gpu_memory_utilization: 0.15",
         "max_num_batched_tokens: 16384",
     ]
     missing_markers = [marker for marker in required_config_markers if marker not in yaml_text]

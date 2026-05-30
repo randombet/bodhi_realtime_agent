@@ -1,4 +1,4 @@
-# PROFILE_MARKER: qwen3_omni_realtime_smoke_2026_05_30_v2
+# PROFILE_MARKER: qwen3_omni_realtime_smoke_2026_05_30_v3
 # Qwen3-Omni-MoE realtime smoke overlay — derived from the bundled
 # `vllm_omni/deploy/qwen3_omni_moe.yaml` (2x H100, stage 0 on cuda:0,
 # stages 1+2 on cuda:1), then adjusted for realtime smoke testing.
@@ -28,7 +28,11 @@ stages:
     max_model_len: 8192
     max_num_batched_tokens: 8192
     max_num_seqs: 8
-    gpu_memory_utilization: 0.82
+    # In the v2 smoke log, gpu_memory_utilization=0.82 made vLLM-Omni target a
+    # ~65 GiB KV-cache pool after the thinker had already loaded ~59 GiB of
+    # weights, so stage 0 OOMed during KV allocation. For this smoke profile,
+    # target ~12 GiB of KV cache instead (~0.15 of an 80 GiB card).
+    gpu_memory_utilization: 0.15
     trust_remote_code: true
     enable_prefix_caching: false
     devices: "0"
