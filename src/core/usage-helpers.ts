@@ -9,7 +9,9 @@ export type RealtimeUsageSource =
 	| 'openai.response'
 	| 'openai.transcription'
 	| 'gemini.usage.update'
-	| 'gemini.turn.final';
+	| 'gemini.turn.final'
+	| 'qwen.response'
+	| 'qwen.transcription';
 
 /**
  * Provider-aware cache hit ratio. Returns `cachedTokens / inputTokens` ONLY
@@ -43,6 +45,10 @@ export function computeCacheHitRatio(
 			// TokenCount: 0 is "no signal," not a 0% hit. When/if Google enables
 			// Live caching, this branch flips to return the ratio.
 			return undefined;
+		case 'qwen.response':
+		case 'qwen.transcription':
+			// Qwen Omni Realtime exposes no cache-token signal — no cache ratio.
+			return undefined;
 	}
 }
 
@@ -62,6 +68,10 @@ export function deriveProviderItemId(
 			return usage.providerResponseId ?? null;
 		case 'openai.transcription':
 			return usage.providerItemId ?? null;
+		case 'qwen.response':
+			return usage.providerResponseId ?? null;
+		case 'qwen.transcription':
+			return usage.providerItemId ?? null;
 		case 'gemini.usage.update':
 		case 'gemini.turn.final':
 			return null;
@@ -74,6 +84,9 @@ export function deriveProviderItemId(
 export function deriveUsageSource(usage: RealtimeLLMUsageEvent): RealtimeUsageSource {
 	if (usage.provider === 'openai_realtime') {
 		return usage.kind === 'input_transcription' ? 'openai.transcription' : 'openai.response';
+	}
+	if (usage.provider === 'qwen_realtime') {
+		return usage.kind === 'input_transcription' ? 'qwen.transcription' : 'qwen.response';
 	}
 	// gemini_live
 	return usage.phase === 'final' ? 'gemini.turn.final' : 'gemini.usage.update';

@@ -49,8 +49,8 @@ Surface A and Surface B both attach at **Leg 1** (HTTPS + WebSocket or embed). T
 
 **Public bootstrap (no user login on the visitor’s site):**
 
-- `POST /api/embed/widget-sessions` with `{ "widgetId": "wg_..." }`  
-- Server checks **published** state and widget **mode** (`voice` vs `voice_avatar`) against the saved agent.  
+- `POST /api/embed/widget-sessions` with `{ "widgetId": "wg_..." }`
+- Server checks **published** state and widget **mode** (`voice` vs `voice_avatar`) against the saved agent.
 - Response mirrors the short-lived embed intent shape ([widget embed](./widget-embed.md)).
 
 **You do not expose** raw `ua_*`, long-lived `bsk_*`, or manual WS assembly to the **visitor’s browser** for the default widget path—only the short-lived embed intent/token pair.

@@ -53,4 +53,15 @@ export type {
 	ReasoningSummary,
 } from './openai-realtime-models.js';
 export type { ReasoningEffort } from '../types/transport.js';
+export { QwenRealtimeTransport } from './qwen-realtime-transport.js';
+export type { QwenRealtimeConfig, QwenTurnDetection } from './qwen-realtime-transport.js';
+export {
+	DEFAULT_QWEN_REALTIME_MODEL,
+	DEFAULT_QWEN_REALTIME_URL,
+	DEFAULT_QWEN_VOICE,
+	FEATURES as QWEN_REALTIME_FEATURES,
+	QWEN_VOICES,
+	supports as qwenRealtimeSupports,
+} from './qwen-realtime-models.js';
+export type { QwenRealtimeFeature, QwenRealtimeModel } from './qwen-realtime-models.js';
 export { zodToJsonSchema } from './zod-to-schema.js';

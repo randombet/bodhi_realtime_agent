@@ -145,5 +145,5 @@ If nginx already terminates TLS and proxies to your Bodhi **app server** and **w
 
 ## 8. Database
 
-Supabase migration: `app/server/supabase/009_agent_embed_widgets.sql`.  
+Supabase migration: `app/server/supabase/009_agent_embed_widgets.sql`.
 Local dev without Supabase uses JSON files under **`./embed-widgets/`** on the server.
