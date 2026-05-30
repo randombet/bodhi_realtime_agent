@@ -1,0 +1,72 @@
+# Qwen3-Omni-MoE realtime overlay — derived from the bundled
+# `vllm_omni/deploy/qwen3_omni_moe.yaml` (verified on 2x H100, stage 0 on
+# cuda:0, stages 1+2 on cuda:1) with the SINGLE change required for
+# `/v1/realtime`: `async_chunk` flipped from `true` → `false`.
+#
+# Target: 2× A100-80GB on Modal. Stage 0 (thinker) on GPU 0, stages 1
+# (talker) + 2 (code2wav) co-located on GPU 1.
+#
+# DO NOT EDIT FOR FUNCTIONAL CHANGES without re-syncing against the upstream
+# qwen3_omni_moe.yaml — the original is the source of tested defaults.
+
+# CHANGED FROM UPSTREAM: was `true`. /v1/realtime is unsupported when
+# async_chunk is enabled (per vLLM-Omni docs).
+async_chunk: false
+
+connectors:
+  connector_of_shared_memory:
+    name: SharedMemoryConnector
+    extra:
+      codec_chunk_frames: 25
+      codec_left_context_frames: 25
+
+stages:
+  - stage_id: 0           # Thinker: text/reasoning + API server.
+    max_num_batched_tokens: 32768
+    max_num_seqs: 64
+    gpu_memory_utilization: 0.9
+    trust_remote_code: true
+    enable_prefix_caching: false
+    devices: "0"
+    default_sampling_params:
+      temperature: 0.4
+      top_p: 0.9
+      top_k: 1
+      max_tokens: 2048
+      seed: 42
+      repetition_penalty: 1.05
+
+  - stage_id: 1           # Talker: speech generation.
+    max_num_batched_tokens: 32768
+    max_num_seqs: 64
+    gpu_memory_utilization: 0.6
+    trust_remote_code: true
+    enable_prefix_caching: false
+    devices: "1"
+    input_connectors:
+      from_stage_0: connector_of_shared_memory
+    default_sampling_params:
+      temperature: 0.9
+      top_k: 50
+      max_tokens: 4096
+      seed: 42
+      repetition_penalty: 1.05
+
+  - stage_id: 2           # Code2wav: audio codec / vocoder.
+    max_num_batched_tokens: 51200
+    max_num_seqs: 64
+    gpu_memory_utilization: 0.1
+    enforce_eager: true   # generation loop is cudagraph-incompatible
+    trust_remote_code: true
+    enable_prefix_caching: false
+    async_scheduling: false
+    devices: "1"
+    input_connectors:
+      from_stage_1: connector_of_shared_memory
+    default_sampling_params:
+      temperature: 0.0
+      top_p: 1.0
+      top_k: -1
+      max_tokens: 65536
+      seed: 42
+      repetition_penalty: 1.1
