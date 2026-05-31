@@ -53,9 +53,17 @@
       const statusEl = $('status');
       const logEl = $('log');
       const gallery = $('gallery');
-      const log = (msg) => {
-        logEl.textContent += `${new Date().toLocaleTimeString()}  ${msg}\n`;
+      // Mirror to the on-page log AND the devtools console (with level), so you
+      // can debug from either place.
+      const log = (msg, level = 'info') => {
+        const line = `${new Date().toLocaleTimeString()}  ${msg}`;
+        logEl.textContent += `${line}\n`;
         logEl.scrollTop = logEl.scrollHeight;
+        (console[level] ?? console.log)(`[bodhi] ${msg}`);
+      };
+      const logErr = (msg, err) => {
+        log(`${msg}: ${err?.message ?? err}`, 'error');
+        if (err) console.error('[bodhi]', err);
       };
 
       // Per-asset state, correlated by assetId. We render only once BOTH the
@@ -111,38 +119,56 @@
 
         room = new Room();
 
-        room.on(RoomEvent.ConnectionStateChanged, (s) => (statusEl.textContent = s));
-        room.on(RoomEvent.Disconnected, () => { statusEl.textContent = 'disconnected'; $('connect').disabled = false; $('disconnect').disabled = true; });
+        room.on(RoomEvent.ConnectionStateChanged, (s) => { statusEl.textContent = s; log(`connection state: ${s}`); });
+        room.on(RoomEvent.Disconnected, (reason) => {
+          statusEl.textContent = 'disconnected';
+          $('connect').disabled = false; $('disconnect').disabled = true;
+          log(`disconnected (reason code: ${reason ?? 'n/a'})`, 'warn');
+        });
+        room.on(RoomEvent.Reconnecting, () => log('reconnecting…', 'warn'));
+        room.on(RoomEvent.Reconnected, () => log('reconnected'));
+
+        // The agent joining the room is the signal that dispatch worked.
+        room.on(RoomEvent.ParticipantConnected, (p) => log(`participant joined: ${p.identity} (this should be the agent)`));
+        room.on(RoomEvent.ParticipantDisconnected, (p) => log(`participant left: ${p.identity}`, 'warn'));
 
         // Play the agent's audio.
-        room.on(RoomEvent.TrackSubscribed, (track) => {
+        room.on(RoomEvent.TrackSubscribed, (track, _pub, participant) => {
+          log(`subscribed to ${track.kind} track from ${participant.identity}`);
           if (track.kind === Track.Kind.Audio) {
             const el = track.attach();
             el.autoplay = true;
             document.body.appendChild(el);
+            log('agent audio attached — you should hear it now');
           }
         });
+
+        // Local mic publish confirmation.
+        room.on(RoomEvent.LocalTrackPublished, (pub) => log(`mic published: ${pub.trackSid} (${pub.kind})`));
 
         // Live transcripts (STT of you + the agent's spoken text).
         room.on(RoomEvent.TranscriptionReceived, (segments, participant) => {
           for (const s of segments) {
-            if (s.final) log(`[${participant?.identity ?? 'agent'}] ${s.text}`);
+            if (s.final) log(`transcript [${participant?.identity ?? 'agent'}]: ${s.text}`);
           }
         });
 
         // bodhi.gui / bodhi.session JSON control + metadata messages.
         room.on(RoomEvent.DataReceived, (payload, _participant, _kind, topic) => {
           let msg;
-          try { msg = JSON.parse(new TextDecoder().decode(payload)); } catch { return; }
+          try { msg = JSON.parse(new TextDecoder().decode(payload)); }
+          catch (e) { logErr(`data on "${topic}" was not JSON`, e); return; }
+          log(`data on "${topic}": ${JSON.stringify(msg)}`);
           if (topic === 'bodhi.session') {
-            log(`Session ended (${msg.reason ?? ''}).`);
+            log(`session ended (${msg.reason ?? ''}).`);
             return;
           }
           if (topic === 'bodhi.gui') {
-            if (msg.status === 'started') { ensureCard(msg.assetId); log(`Generating ${msg.type}: ${msg.description ?? ''}`); }
+            if (msg.status === 'started') { ensureCard(msg.assetId); log(`generating ${msg.type}: ${msg.description ?? ''}`); }
             else if (msg.status === 'error') {
               const a = ensureCard(msg.assetId);
               a.el.querySelector('.body').innerHTML = `<span class="muted">⚠️ ${msg.error ?? 'generation failed'}</span>`;
+              log(`asset ${msg.assetId} error: ${msg.error ?? ''}`, 'error');
             } else if (msg.status === 'ready') {
               const a = ensureCard(msg.assetId); a.meta = msg; maybeRender(msg.assetId);
             }
@@ -152,24 +178,35 @@
         // bodhi.gui asset BYTES (image/video) arrive as byte streams keyed by assetId.
         room.registerByteStreamHandler('bodhi.gui', async (reader) => {
           const assetId = reader.info.name;
+          log(`byte stream start: ${assetId} (${reader.info.mimeType ?? 'unknown type'})`);
           const a = ensureCard(assetId);
           a.mimeType = reader.info.mimeType;
           const chunks = [];
           for await (const chunk of reader) chunks.push(chunk);
           a.bytes = new Uint8Array(await new Blob(chunks).arrayBuffer());
+          log(`byte stream done: ${assetId} (${a.bytes.byteLength} bytes)`);
           if (!a.meta) a.meta = { type: a.mimeType?.startsWith('video') ? 'video' : 'image', status: 'ready' };
           maybeRender(assetId);
         });
 
-        statusEl.textContent = 'connecting';
-        await room.connect(url, token);
-        await room.localParticipant.setMicrophoneEnabled(true);
-        $('connect').disabled = true;
-        $('disconnect').disabled = false;
-        log('Connected. Say hello!');
+        try {
+          statusEl.textContent = 'connecting';
+          log(`connecting to ${url} …`);
+          await room.connect(url, token);
+          log(`connected to room "${room.name}" as "${room.localParticipant.identity}"`);
+          await room.localParticipant.setMicrophoneEnabled(true);
+          log('microphone enabled');
+          $('connect').disabled = true;
+          $('disconnect').disabled = false;
+          log('ready — say hello! (if no agent joins within a few seconds, check the worker is running)');
+        } catch (e) {
+          logErr('connect failed', e);
+          statusEl.textContent = 'error';
+          $('connect').disabled = false;
+        }
       };
 
-      $('disconnect').onclick = async () => { await room?.disconnect(); };
+      $('disconnect').onclick = async () => { log('leaving…'); await room?.disconnect(); };
     </script>
   </body>
 </html>

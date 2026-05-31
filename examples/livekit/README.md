@@ -85,6 +85,22 @@ pnpm client       # → open http://127.0.0.1:8080, click "Connect & talk"
 > `.env` (copied from `.env.example`) — it is auto-loaded via `dotenv` and does **not**
 > override anything you've already exported.
 
+### How the agent joins your room (dispatch)
+
+This worker uses **explicit dispatch**: it registers under the name **`bodhi`**
+(`ServerOptions.agentName`), and a client's token must *request* that agent — which the
+tokens minted by `pnpm client` / `pnpm mint` do (they embed a `RoomConfiguration` agent
+dispatch). This is deterministic: the agent always joins the room the token names.
+
+Two consequences:
+- **Use the `pnpm client` / `pnpm mint` tokens.** A token from the stock LiveKit Agents
+  Playground does **not** include the dispatch, so the agent won't join (explicit dispatch
+  turns off automatic dispatch).
+- **Order doesn't matter**, but if you `pnpm dev` and connect and hear nothing, the cause is
+  almost always one of: the worker isn't running, or you used a token without the dispatch.
+  When dispatch works you'll see `participant joined: <agent>` in the client log and a job
+  in the worker log.
+
 Then say:
 
 - "What time is it?" · "What is 25 times 17?"

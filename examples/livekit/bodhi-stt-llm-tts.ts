@@ -62,6 +62,8 @@ import { CalculatorError, evaluate } from './calculator.js';
 // Config
 // ---------------------------------------------------------------------------
 
+// Must match RoomAgentDispatch.agentName in mint-token.ts (explicit dispatch).
+const AGENT_NAME = 'bodhi';
 const PROVIDER = process.env.PROVIDER === 'inference' ? 'inference' : 'plugins';
 const CARTESIA_VOICE_ID = process.env.CARTESIA_VOICE_ID ?? '9626c31c-bec5-4cca-baa8-f8ba9e84c8bc';
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY ?? '';
@@ -468,7 +470,9 @@ export default defineAgent({
       llm: sessionLlm,
       tts,
       turnHandling: {
-        turnDetection: new livekit.turnDetector.MultilingualModel(),
+        // English-only EOU model (~63 MB) — lighter + faster cold start than the
+        // multilingual model (~385 MB). Swap to MultilingualModel() for non-English.
+        turnDetection: new livekit.turnDetector.EnglishModel(),
         preemptiveGeneration: { enabled: true },
       },
       userData: { hasGreeted: false },
@@ -476,6 +480,38 @@ export default defineAgent({
 
     session.on(voice.AgentSessionEventTypes.MetricsCollected, (ev) => {
       metrics.logMetrics(ev.metrics);
+    });
+
+    // -- debug logging (pipeline visibility) ---------------------------------
+    // Tracks the conversational state machine and data flowing through the
+    // cascade, so a transcript of a run shows exactly what the agent heard,
+    // thought, said, and called.
+    session.on(voice.AgentSessionEventTypes.UserStateChanged, (ev) => {
+      logger.info(`${ts()} [user] ${ev.oldState} -> ${ev.newState}`);
+    });
+    session.on(voice.AgentSessionEventTypes.AgentStateChanged, (ev) => {
+      logger.info(`${ts()} [agent] ${ev.oldState} -> ${ev.newState}`);
+    });
+    session.on(voice.AgentSessionEventTypes.UserInputTranscribed, (ev) => {
+      if (ev.isFinal) logger.info(`${ts()} [stt] user (final): "${ev.transcript}"`);
+      else logger.debug(`${ts()} [stt] user (interim): "${ev.transcript}"`);
+    });
+    session.on(voice.AgentSessionEventTypes.ConversationItemAdded, (ev) => {
+      const item = ev.item;
+      if (item.type === 'message') {
+        logger.info(`${ts()} [item] ${item.role}: ${item.textContent ?? '(non-text content)'}`);
+      } else if (item.type === 'agent_handoff') {
+        logger.info(`${ts()} [item] handoff ${item.oldAgentId ?? '-'} -> ${item.newAgentId}`);
+      }
+    });
+    session.on(voice.AgentSessionEventTypes.FunctionToolsExecuted, (ev) => {
+      logger.info(`${ts()} [tools] executed: ${ev.functionCalls.map((c) => c.name).join(', ')}`);
+    });
+    session.on(voice.AgentSessionEventTypes.SpeechCreated, (ev) => {
+      logger.debug(`${ts()} [speech] created (source=${ev.source}, userInitiated=${ev.userInitiated})`);
+    });
+    session.on(voice.AgentSessionEventTypes.Error, (ev) => {
+      logger.error({ err: ev.error }, `${ts()} [error] session error`);
     });
 
     // Abort outstanding background tasks when the session closes.
@@ -498,7 +534,13 @@ export default defineAgent({
         noiseCancellation: BackgroundVoiceCancellation(),
       },
     });
+
+    logger.info(`${ts()} [session] started in room "${ctx.room.name}" — waiting for the user to speak`);
   },
 });
 
-cli.runApp(new ServerOptions({ agent: fileURLToPath(import.meta.url) }));
+// Explicit dispatch: the worker registers under a name, and a client's token must
+// request it (see mint-token.ts roomConfig). This is deterministic — the agent always
+// joins the room the token names — and avoids the "worker idle, no job dispatched" trap
+// of relying on automatic dispatch. AGENT_NAME must match RoomAgentDispatch in the token.
+cli.runApp(new ServerOptions({ agent: fileURLToPath(import.meta.url), agentName: AGENT_NAME }));

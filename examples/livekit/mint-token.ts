@@ -18,13 +18,16 @@ import 'dotenv/config';
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { AccessToken } from 'livekit-server-sdk';
+import { AccessToken, RoomAgentDispatch, RoomConfiguration } from 'livekit-server-sdk';
 
 const URL_ = process.env.LIVEKIT_URL ?? '';
 const KEY = process.env.LIVEKIT_API_KEY ?? '';
 const SECRET = process.env.LIVEKIT_API_SECRET ?? '';
 const PORT = Number(process.env.PORT) || 8080;
 const ROOM = process.env.ROOM || 'bodhi';
+// Must match `agentName` in bodhi-stt-llm-tts.ts (ServerOptions) — the token tells the
+// room to dispatch this named agent, so the worker is guaranteed to join.
+const AGENT_NAME = process.env.AGENT_NAME || 'bodhi';
 
 if (!URL_ || !KEY || !SECRET) {
   console.error('Error: LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET must be set.');
@@ -34,6 +37,10 @@ if (!URL_ || !KEY || !SECRET) {
 async function mint(identity: string, room: string): Promise<string> {
   const at = new AccessToken(KEY, SECRET, { identity, ttl: '1h' });
   at.addGrant({ roomJoin: true, room, canPublish: true, canSubscribe: true });
+  // Explicit agent dispatch: tells the room to spin up the named agent on join.
+  at.roomConfig = new RoomConfiguration({
+    agents: [new RoomAgentDispatch({ agentName: AGENT_NAME })],
+  });
   return await at.toJwt();
 }
 
