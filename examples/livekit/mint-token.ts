@@ -3,12 +3,16 @@
  * Tiny helper for the standalone client: serves examples/livekit/client.html
  * and a `/token` endpoint so the page can connect with one click.
  *
- *   pnpm livekit:token            # serves http://localhost:8080
- *   pnpm livekit:token --print    # just print a token + URL and exit
+ *   pnpm token            # serves http://127.0.0.1:8080
+ *   pnpm token --print    # just print a token + URL and exit
  *
  * Uses LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET from the environment.
  * The HTML also works fully standalone — open it from disk and paste a URL +
  * token (e.g. from `lk token create` or the LiveKit Cloud dashboard).
+ *
+ * Security: this is a LOCAL dev helper. It binds to 127.0.0.1 only and mints a
+ * token for a single fixed room with a server-generated identity — it does NOT
+ * expose arbitrary token minting on the network. Do not deploy it as-is.
  */
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
@@ -42,14 +46,17 @@ if (process.argv.includes('--print')) {
 
 const clientHtmlPath = fileURLToPath(new URL('./client.html', import.meta.url));
 
+let identitySeq = 0;
+
 const server = createServer(async (req, res) => {
-  const url = new URL(req.url ?? '/', `http://localhost:${PORT}`);
+  const url = new URL(req.url ?? '/', `http://127.0.0.1:${PORT}`);
   if (url.pathname === '/token') {
-    const identity = url.searchParams.get('identity') ?? `human-${Date.now()}`;
-    const room = url.searchParams.get('room') ?? ROOM;
-    const token = await mint(identity, room);
+    // Fixed room + server-generated identity — the caller does not control either,
+    // so this localhost helper can't be used to mint tokens for arbitrary rooms.
+    const identity = `human-${Date.now()}-${identitySeq++}`;
+    const token = await mint(identity, ROOM);
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ url: URL_, room, token }));
+    res.end(JSON.stringify({ url: URL_, room: ROOM, token }));
     return;
   }
   // serve the client at "/"
@@ -63,9 +70,9 @@ const server = createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`\nBodhi client:  http://localhost:${PORT}`);
+server.listen(PORT, '127.0.0.1', () => {
+  console.log(`\nBodhi client:  http://127.0.0.1:${PORT}`);
   console.log(`  LiveKit:     ${URL_}`);
   console.log(`  Room:        ${ROOM}`);
-  console.log(`\nMake sure the agent worker is running:  pnpm livekit:dev\n`);
+  console.log(`\nMake sure the agent worker is running:  pnpm dev\n`);
 });

@@ -423,21 +423,23 @@ export default defineAgent({
       },
     });
 
+    // NOTE: LiveKit uses the object KEYS as the tool names exposed to the model,
+    // so they must match the snake_case names referenced in the instructions.
     mathExpertAgent = new MathExpertAgent({
       instructions: MATH_INSTRUCTIONS,
-      tools: { calculate, backToMain },
+      tools: { calculate, back_to_main: backToMain },
     });
 
     mainAgent = new MainAgent({
       instructions: MAIN_INSTRUCTIONS,
       tools: {
         calculate,
-        getCurrentTime,
-        slowWebSearch,
-        generateImage: makeAssetTool('image'),
-        generateVideo: makeAssetTool('video'),
-        talkToMathExpert,
-        endSession,
+        get_current_time: getCurrentTime,
+        slow_web_search: slowWebSearch,
+        generate_image: makeAssetTool('image'),
+        generate_video: makeAssetTool('video'),
+        talk_to_math_expert: talkToMathExpert,
+        end_session: endSession,
       },
     });
 
