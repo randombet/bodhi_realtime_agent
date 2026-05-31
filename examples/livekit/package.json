@@ -7,6 +7,7 @@
   "license": "MIT",
   "scripts": {
     "dev": "tsx bodhi-stt-llm-tts.ts dev",
+    "download-files": "tsx bodhi-stt-llm-tts.ts download-files",
     "client": "tsx mint-token.ts",
     "mint": "tsx mint-token.ts --print",
     "typecheck": "tsc --noEmit",

@@ -43,11 +43,16 @@ project. All commands below run from **this directory** (`examples/livekit/`).
 ```bash
 cd examples/livekit
 pnpm install
+pnpm download-files     # one-time: fetch the turn-detector + silero model files
 ```
 
 The first install builds native deps (`sharp`, `onnxruntime-node`, `@livekit/rtc-node`,
 `@ffmpeg-installer`, `esbuild`) — all pre-approved in this package's
 `pnpm.onlyBuiltDependencies`, so the install is warning-free.
+
+`pnpm download-files` is **required once** before the first run: the LiveKit turn detector
+and silero VAD ship ONNX models that are fetched on demand (into `~/.cache/huggingface/`).
+Without it the worker exits with *"Required model files not found locally."*
 
 Provide credentials, either by exporting them (e.g. in `~/.zshrc`) or by copying
 `.env.example` to `.env`:

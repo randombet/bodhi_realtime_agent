@@ -17,6 +17,7 @@
  *
  * Run (from examples/livekit/ — this is a self-contained package):
  *   pnpm install
+ *   pnpm download-files       # one-time: fetch turn-detector + silero ONNX models
  *   pnpm dev                  # inherits exported env;
  *                             # or: tsx --env-file=.env bodhi-stt-llm-tts.ts dev
  *
