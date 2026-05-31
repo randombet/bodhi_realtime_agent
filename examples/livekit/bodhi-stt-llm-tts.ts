@@ -20,12 +20,15 @@
  *   pnpm dev                  # inherits exported env;
  *                             # or: tsx --env-file=.env bodhi-stt-llm-tts.ts dev
  *
- * Connect a client: `pnpm token` then open http://localhost:8080 (see README / client.html).
+ * Connect a client: `pnpm client` then open http://127.0.0.1:8080 (see README / client.html).
  *
  * Env: LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET (always);
  *      DEEPGRAM_API_KEY, OPENAI_API_KEY, CARTESIA_API_KEY (PROVIDER=plugins);
  *      GEMINI_API_KEY (image/video). Optional: CARTESIA_VOICE_ID.
  */
+// Load examples/livekit/.env (from cwd) before anything reads process.env.
+// dotenv does NOT override already-exported vars, so shell exports still win.
+import 'dotenv/config';
 import {
   type JobContext,
   type JobProcess,

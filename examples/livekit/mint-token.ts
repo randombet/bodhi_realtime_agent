@@ -3,8 +3,8 @@
  * Tiny helper for the standalone client: serves examples/livekit/client.html
  * and a `/token` endpoint so the page can connect with one click.
  *
- *   pnpm token            # serves http://127.0.0.1:8080
- *   pnpm token --print    # just print a token + URL and exit
+ *   pnpm client    # serves http://127.0.0.1:8080
+ *   pnpm mint      # just print a token + URL and exit
  *
  * Uses LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET from the environment.
  * The HTML also works fully standalone — open it from disk and paste a URL +
@@ -14,6 +14,7 @@
  * token for a single fixed room with a server-generated identity — it does NOT
  * expose arbitrary token minting on the network. Do not deploy it as-is.
  */
+import 'dotenv/config';
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';

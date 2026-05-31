@@ -26,14 +26,14 @@
     <h1>🪷 Bodhi — LiveKit voice client</h1>
     <p class="muted">
       Talk to the agent (mic), hear it reply, and watch generated images/videos appear.
-      Served via <code>pnpm token</code>, or paste a URL + token to use standalone.
+      Served via <code>pnpm client</code>, or paste a URL + token to use standalone.
     </p>
 
     <div class="row">
       <input id="url" placeholder="wss://your-project.livekit.cloud" />
     </div>
     <div class="row">
-      <input id="token" placeholder="participant access token (from `pnpm token` or `lk token create`)" />
+      <input id="token" placeholder="participant access token (from `pnpm mint` or `lk token create`)" />
       <button id="connect">Connect &amp; talk</button>
       <button id="disconnect" disabled>Leave</button>
     </div>
@@ -89,7 +89,7 @@
         a.el.querySelector('.cap').textContent = a.meta.description ?? '';
       }
 
-      // Try to auto-fill url/token when served by `pnpm token`.
+      // Try to auto-fill url/token when served by `pnpm client`.
       (async () => {
         try {
           const r = await fetch('/token');
@@ -97,7 +97,7 @@
             const { url, token } = await r.json();
             $('url').value = url;
             $('token').value = token;
-            log('Fetched URL + token from `pnpm token` server.');
+            log('Fetched URL + token from `pnpm client` server.');
           }
         } catch { /* standalone: user pastes values */ }
       })();

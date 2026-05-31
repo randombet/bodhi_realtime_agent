@@ -7,12 +7,14 @@
   "license": "MIT",
   "scripts": {
     "dev": "tsx bodhi-stt-llm-tts.ts dev",
-    "token": "tsx mint-token.ts",
+    "client": "tsx mint-token.ts",
+    "mint": "tsx mint-token.ts --print",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
   "dependencies": {
     "@google/genai": "^1.41.0",
+    "dotenv": "^16.4.5",
     "@livekit/agents": "1.4.4",
     "@livekit/agents-plugin-cartesia": "1.4.4",
     "@livekit/agents-plugin-deepgram": "1.4.4",

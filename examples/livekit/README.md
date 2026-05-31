@@ -70,8 +70,15 @@ Two processes (both from `examples/livekit/`): the **agent worker**, and a **cli
 pnpm dev
 
 # 2. In another terminal, serve the client (mints a token for you)
-pnpm token        # → open http://localhost:8080, click "Connect & talk"
+pnpm client       # → open http://127.0.0.1:8080, click "Connect & talk"
 ```
+
+> **Credentials:** `pnpm dev` runs a child process, which only inherits **exported**
+> environment variables. In `~/.zshrc`, make sure the vars use `export` (e.g.
+> `export LIVEKIT_API_KEY=...`) — a bare `LIVEKIT_API_KEY=...` is shell-local and invisible
+> to the worker (you'd get `MissingCredentialsError`). Alternatively, put them in a local
+> `.env` (copied from `.env.example`) — it is auto-loaded via `dotenv` and does **not**
+> override anything you've already exported.
 
 Then say:
 
@@ -86,7 +93,7 @@ Then say:
 Open `client.html` directly and paste your `LIVEKIT_URL` plus a participant token. Mint one with:
 
 ```bash
-pnpm token --print          # prints URL + a 1-hour token
+pnpm mint          # prints URL + a 1-hour token (room "bodhi")
 # or the LiveKit CLI:  lk token create --join --room bodhi --identity human --valid-for 1h
 ```
 
