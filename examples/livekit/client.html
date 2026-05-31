@@ -1,0 +1,175 @@
+<!-- SPDX-License-Identifier: MIT -->
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bodhi — LiveKit STT+LLM+TTS client</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body { font-family: system-ui, sans-serif; max-width: 820px; margin: 1.5rem auto; padding: 0 1rem; }
+      h1 { font-size: 1.25rem; }
+      .row { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; margin: 0.5rem 0; }
+      input { flex: 1; min-width: 240px; padding: 0.4rem; font: inherit; }
+      button { padding: 0.4rem 0.9rem; font: inherit; cursor: pointer; }
+      #status { font-weight: 600; }
+      #log { background: #0001; border-radius: 8px; padding: 0.5rem 0.75rem; min-height: 2rem;
+             max-height: 220px; overflow: auto; white-space: pre-wrap; font-size: 0.9rem; }
+      #gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 0.75rem; margin-top: 1rem; }
+      .asset { border: 1px solid #8884; border-radius: 8px; padding: 0.5rem; }
+      .asset img, .asset video { width: 100%; border-radius: 4px; display: block; }
+      .asset .cap { font-size: 0.8rem; opacity: 0.8; margin-top: 0.4rem; }
+      .muted { opacity: 0.7; }
+    </style>
+  </head>
+  <body>
+    <h1>🪷 Bodhi — LiveKit voice client</h1>
+    <p class="muted">
+      Talk to the agent (mic), hear it reply, and watch generated images/videos appear.
+      Served via <code>pnpm livekit:token</code>, or paste a URL + token to use standalone.
+    </p>
+
+    <div class="row">
+      <input id="url" placeholder="wss://your-project.livekit.cloud" />
+    </div>
+    <div class="row">
+      <input id="token" placeholder="participant access token (from livekit:token or `lk token create`)" />
+      <button id="connect">Connect &amp; talk</button>
+      <button id="disconnect" disabled>Leave</button>
+    </div>
+
+    <p>Status: <span id="status">disconnected</span></p>
+    <div id="log"></div>
+    <div id="gallery"></div>
+
+    <script type="module">
+      import {
+        Room,
+        RoomEvent,
+        Track,
+      } from 'https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.esm.mjs';
+
+      const $ = (id) => document.getElementById(id);
+      const statusEl = $('status');
+      const logEl = $('log');
+      const gallery = $('gallery');
+      const log = (msg) => {
+        logEl.textContent += `${new Date().toLocaleTimeString()}  ${msg}\n`;
+        logEl.scrollTop = logEl.scrollHeight;
+      };
+
+      // Per-asset state, correlated by assetId. We render only once BOTH the
+      // 'ready' metadata and the byte-stream payload have arrived (either order).
+      const assets = new Map(); // assetId -> { meta?, bytes?, mimeType?, el }
+
+      function ensureCard(assetId) {
+        let a = assets.get(assetId);
+        if (!a) {
+          const el = document.createElement('div');
+          el.className = 'asset';
+          el.innerHTML = `<div class="body muted">⏳ generating…</div><div class="cap"></div>`;
+          gallery.appendChild(el);
+          a = { el };
+          assets.set(assetId, a);
+        }
+        return a;
+      }
+
+      function maybeRender(assetId) {
+        const a = assets.get(assetId);
+        if (!a || !a.meta || a.meta.status !== 'ready' || !a.bytes) return;
+        const blob = new Blob([a.bytes], { type: a.mimeType || a.meta.mimeType || 'application/octet-stream' });
+        const objUrl = URL.createObjectURL(blob);
+        const body = a.el.querySelector('.body');
+        if (a.meta.type === 'video') {
+          body.innerHTML = `<video src="${objUrl}" controls autoplay muted loop playsinline></video>`;
+        } else {
+          body.innerHTML = `<img src="${objUrl}" alt="${a.meta.description ?? ''}" />`;
+        }
+        a.el.querySelector('.cap').textContent = a.meta.description ?? '';
+      }
+
+      // Try to auto-fill url/token when served by livekit:token.
+      (async () => {
+        try {
+          const r = await fetch('/token');
+          if (r.ok) {
+            const { url, token } = await r.json();
+            $('url').value = url;
+            $('token').value = token;
+            log('Fetched URL + token from livekit:token server.');
+          }
+        } catch { /* standalone: user pastes values */ }
+      })();
+
+      let room = null;
+
+      $('connect').onclick = async () => {
+        const url = $('url').value.trim();
+        const token = $('token').value.trim();
+        if (!url || !token) { alert('Enter a LiveKit URL and token.'); return; }
+
+        room = new Room();
+
+        room.on(RoomEvent.ConnectionStateChanged, (s) => (statusEl.textContent = s));
+        room.on(RoomEvent.Disconnected, () => { statusEl.textContent = 'disconnected'; $('connect').disabled = false; $('disconnect').disabled = true; });
+
+        // Play the agent's audio.
+        room.on(RoomEvent.TrackSubscribed, (track) => {
+          if (track.kind === Track.Kind.Audio) {
+            const el = track.attach();
+            el.autoplay = true;
+            document.body.appendChild(el);
+          }
+        });
+
+        // Live transcripts (STT of you + the agent's spoken text).
+        room.on(RoomEvent.TranscriptionReceived, (segments, participant) => {
+          for (const s of segments) {
+            if (s.final) log(`[${participant?.identity ?? 'agent'}] ${s.text}`);
+          }
+        });
+
+        // bodhi.gui / bodhi.session JSON control + metadata messages.
+        room.on(RoomEvent.DataReceived, (payload, _participant, _kind, topic) => {
+          let msg;
+          try { msg = JSON.parse(new TextDecoder().decode(payload)); } catch { return; }
+          if (topic === 'bodhi.session') {
+            log(`Session ended (${msg.reason ?? ''}).`);
+            return;
+          }
+          if (topic === 'bodhi.gui') {
+            if (msg.status === 'started') { ensureCard(msg.assetId); log(`Generating ${msg.type}: ${msg.description ?? ''}`); }
+            else if (msg.status === 'error') {
+              const a = ensureCard(msg.assetId);
+              a.el.querySelector('.body').innerHTML = `<span class="muted">⚠️ ${msg.error ?? 'generation failed'}</span>`;
+            } else if (msg.status === 'ready') {
+              const a = ensureCard(msg.assetId); a.meta = msg; maybeRender(msg.assetId);
+            }
+          }
+        });
+
+        // bodhi.gui asset BYTES (image/video) arrive as byte streams keyed by assetId.
+        room.registerByteStreamHandler('bodhi.gui', async (reader) => {
+          const assetId = reader.info.name;
+          const a = ensureCard(assetId);
+          a.mimeType = reader.info.mimeType;
+          const chunks = [];
+          for await (const chunk of reader) chunks.push(chunk);
+          a.bytes = new Uint8Array(await new Blob(chunks).arrayBuffer());
+          if (!a.meta) a.meta = { type: a.mimeType?.startsWith('video') ? 'video' : 'image', status: 'ready' };
+          maybeRender(assetId);
+        });
+
+        statusEl.textContent = 'connecting';
+        await room.connect(url, token);
+        await room.localParticipant.setMicrophoneEnabled(true);
+        $('connect').disabled = true;
+        $('disconnect').disabled = false;
+        log('Connected. Say hello!');
+      };
+
+      $('disconnect').onclick = async () => { await room?.disconnect(); };
+    </script>
+  </body>
+</html>
