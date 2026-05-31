@@ -72,8 +72,11 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY 
 const TOPIC_GUI = 'bodhi.gui'; // asset lifecycle (publishData) + asset bytes (streamBytes)
 const TOPIC_SESSION = 'bodhi.session'; // session-control events (e.g. session_end)
 
-// Video cap (acceptance criterion — enforced in code, not via the prompt).
-const VIDEO_MAX_SECONDS = 5;
+// Video config (enforced in code, not via the prompt).
+// IMPORTANT: Veo 3.1 only accepts durationSeconds of 4, 6, or 8 — NOT arbitrary values
+// in [4,8] (the "between 4 and 8" API error is misleading; 5 is rejected). 720p is the
+// default and works at any of those; 1080p/4k would force durationSeconds=8.
+const VIDEO_DURATION_SECONDS = 4;
 const VIDEO_RESOLUTION = '720p';
 const VIDEO_ASPECT_RATIO = '16:9';
 
@@ -107,7 +110,7 @@ TOOLS:
 - calculate: simple math for the user.
 - get_current_time: the current time/date.
 - generate_image: ALWAYS call this when the user wants any picture, image, card, or illustration. Do not describe an image verbally — call the tool so they can see it.
-- generate_video: call this when the user wants a video or animation. Warn them it takes a minute or two. Videos are limited to about five seconds.
+- generate_video: call this when the user wants a video or animation. Warn them it takes a minute or two. Videos are short — only a few seconds.
 - transfer to math helper: for harder math, say "Let me connect you with our math specialist." then call talk_to_math_expert.
 - end_session: when the user says goodbye or is done, say a warm goodbye and call it.`;
 
@@ -234,7 +237,7 @@ export default defineAgent({
         prompt,
         config: {
           aspectRatio: VIDEO_ASPECT_RATIO,
-          durationSeconds: VIDEO_MAX_SECONDS,
+          durationSeconds: VIDEO_DURATION_SECONDS,
           resolution: VIDEO_RESOLUTION,
         },
       });
@@ -368,7 +371,7 @@ export default defineAgent({
         description:
           type === 'image'
             ? 'Generate an image and display it to the user. ALWAYS call this when the user wants any picture, image, card, or illustration.'
-            : 'Generate a short (~5s) video and display it to the user. Warn them it takes a minute or two.',
+            : 'Generate a short (a few seconds) video and display it to the user. Warn them it takes a minute or two.',
         parameters: z.object({
           prompt: z.string().describe(`Detailed description of the ${type} to generate`),
         }),

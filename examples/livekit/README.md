@@ -106,7 +106,7 @@ Then say:
 - "What time is it?" · "What is 25 times 17?"
 - "I need help with harder math" → transfers to the math helper; "I'm done" → transfers back
 - "Draw me a picture of a sunset" → image appears in the client
-- "Make a short video of a cat" → video appears (capped to ~5s)
+- "Make a short video of a cat" → video appears (4s; Veo 3.1 allows 4/6/8s)
 - "Goodbye" → warm goodbye, then the session ends
 
 ### Connecting without the helper (truly standalone)
