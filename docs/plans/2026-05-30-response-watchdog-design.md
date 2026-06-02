@@ -111,9 +111,19 @@ After reconnect completes **with a resumption handle** (server still holds the
 user's audio), send a **content-less `turnComplete`** to elicit a response from the
 restored context — no transcript needed, no duplication of context.
 
-- Exact wire form (e.g. `sendContent([], turnComplete=true)` vs a direct
-  client-content turnComplete) is an implementation detail to pin down in the plan;
-  it must be a no-op-safe call across transports.
+- Wire form (decided): the generic `LLMTransport.triggerGeneration()` is the
+  neutral "respond now" primitive (OpenAI → `response.create`), but it is a
+  documented **no-op on Gemini** (`gemini-live-transport.ts:601`), and
+  `sendContent([], true)` short-circuits to nothing on Gemini (empty realtime
+  text, `:558-567`). To make the nudge real on the provider that actually stalls,
+  add a dedicated content-less elicit to `GeminiLiveTransport`
+  (`session.sendClientContent({ turns: [], turnComplete: true })`), exposed via a
+  new **optional** `LLMTransport.elicitResponse?()` implemented **on Gemini only**.
+  On a watchdog-driven reconnect, VoiceSession calls
+  `transport.elicitResponse?.()` if present, else falls back to
+  `transport.triggerGeneration()` (covers OpenAI with no transport edit). Normal
+  turn flow is untouched — `triggerGeneration` keeps its existing semantics, so
+  there is no double-generation risk.
 - This depends on Gemini regenerating from a resumed session — **unverified Gemini
   behavior**. It is therefore best-effort and layered *on top of* reconnect.
 - **Floor:** if the nudge elicits nothing, the user simply repeats — exactly the
