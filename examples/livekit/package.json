@@ -1,0 +1,48 @@
+{
+  "name": "bodhi-livekit-example",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Bodhi senior-friendly voice assistant on LiveKit (cascaded STT+LLM+TTS). Self-contained: its dependencies are isolated from the parent repo.",
+  "license": "MIT",
+  "scripts": {
+    "dev": "tsx bodhi-stt-llm-tts.ts dev",
+    "download-files": "tsx bodhi-stt-llm-tts.ts download-files",
+    "client": "tsx mint-token.ts",
+    "mint": "tsx mint-token.ts --print",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@google/genai": "^1.41.0",
+    "dotenv": "^16.4.5",
+    "@livekit/agents": "1.4.4",
+    "@livekit/agents-plugin-cartesia": "1.4.4",
+    "@livekit/agents-plugin-deepgram": "1.4.4",
+    "@livekit/agents-plugin-livekit": "1.4.4",
+    "@livekit/agents-plugin-openai": "1.4.4",
+    "@livekit/agents-plugin-silero": "1.4.4",
+    "@livekit/noise-cancellation-node": "0.1.9",
+    "@livekit/rtc-node": "^0.13.29",
+    "livekit-server-sdk": "^2.14.1",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "sharp",
+      "onnxruntime-node",
+      "@livekit/rtc-node",
+      "@ffmpeg-installer/ffmpeg",
+      "@ffmpeg-installer/darwin-arm64",
+      "esbuild",
+      "protobufjs",
+      "@google/genai"
+    ]
+  }
+}
