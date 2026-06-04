@@ -215,6 +215,9 @@ export interface VoiceSessionConfig {
 	host?: string;
 	/** Listen timeout for local client WebSocket server startup (legacy/local mode). */
 	listenTimeoutMs?: number;
+	/** Model-silence watchdog (ms) after the user's turn ends. If the model emits
+	 *  nothing for this long, force a reconnect. Default 8000; `<= 0` disables. */
+	responseWatchdogMs?: number;
 	/** LLM model name (e.g. "gemini-3.1-flash-live-preview"). */
 	geminiModel?: string;
 	/** Vercel AI SDK model for subagent text generation. */
