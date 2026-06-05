@@ -106,7 +106,7 @@ describe('response watchdog', () => {
 			expect(s.transport.reconnect).not.toHaveBeenCalled();
 
 			vi.advanceTimersByTime(8000); // watchdog fires
-			vi.advanceTimersByTime(1000); // first backoff delay → reconnect()
+			vi.advanceTimersByTime(1000); // RECONNECT_BACKOFF_MS[0] (first backoff delay) → reconnect()
 			expect(s.transport.reconnect).toHaveBeenCalledTimes(1);
 		} finally {
 			await session?.close();
@@ -141,7 +141,7 @@ describe('response watchdog', () => {
 			vi.advanceTimersByTime(3000); // not yet fired
 			completeUserTurn(session); // re-arm (restart timer)
 			vi.advanceTimersByTime(8000); // fires once
-			vi.advanceTimersByTime(1000);
+			vi.advanceTimersByTime(1000); // RECONNECT_BACKOFF_MS[0] (first backoff delay) → reconnect()
 			expect(s.transport.reconnect).toHaveBeenCalledTimes(1);
 		} finally {
 			await session?.close();
@@ -156,6 +156,24 @@ describe('response watchdog', () => {
 			await activate(session, s.transport);
 
 			completeUserTurn(session);
+			vi.advanceTimersByTime(20000);
+			expect(s.transport.reconnect).not.toHaveBeenCalled();
+		} finally {
+			await session?.close();
+		}
+	});
+
+	it('disarms on teardown so a closed session never reconnects', async () => {
+		let session: VoiceSession | undefined;
+		try {
+			const s = setup();
+			session = s.session;
+			await activate(session, s.transport);
+
+			completeUserTurn(session); // arm
+			await session.close(); // teardown → clearResponseWatchdog
+			session = undefined; // already closed; skip the finally double-close
+
 			vi.advanceTimersByTime(20000);
 			expect(s.transport.reconnect).not.toHaveBeenCalled();
 		} finally {

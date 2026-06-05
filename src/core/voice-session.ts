@@ -2427,6 +2427,8 @@ export class VoiceSession {
 	private armResponseWatchdog(): void {
 		if (this.responseWatchdogMs <= 0) return;
 		this.clearResponseWatchdog();
+		// Safe to arm even if the session isn't ACTIVE right now: the fire-time
+		// `state !== 'ACTIVE'` guard below makes a stale timer a no-op.
 		this._responseWatchdogTimer = setTimeout(() => {
 			this._responseWatchdogTimer = undefined;
 			if (this.sessionManager.state !== 'ACTIVE') return;
