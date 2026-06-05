@@ -36,22 +36,17 @@ import type { MemoryStore } from '../types/memory.js';
 import type { IClientChannel } from '../types/session-client.js';
 import type { SessionClientSender } from '../types/session-client.js';
 import type { ToolDefinition } from '../types/tool.js';
-import type {
-	ContentTurn,
-	LLMTransport,
-	LLMTransportError,
-	STTProvider,
-	TransportToolResult,
-} from '../types/transport.js';
+import type { LLMTransport, LLMTransportError, STTProvider } from '../types/transport.js';
 import type { TTSProvider } from '../types/tts.js';
 import type { ArtifactRef, ArtifactStore, SaveArtifactParams } from '../types/workspace.js';
-import { AudioRouter, type InternalTranscriptionMode } from './audio-router.js';
+import { AudioRouter } from './audio-router.js';
 import { BackgroundNotificationQueue } from './background-notification-queue.js';
 import { ClientMessageRouter } from './client-message-router.js';
 import { ClientVadDetector } from './client-vad-detector.js';
 import { DEFAULT_RESPONSE_WATCHDOG_MS } from './constants.js';
 import { ConversationContext } from './conversation-context.js';
 import { ConversationHistoryWriter } from './conversation-history-writer.js';
+import { DictationController } from './dictation-controller.js';
 import { DirectiveManager } from './directive-manager.js';
 import { EventBus } from './event-bus.js';
 import { GreetingController } from './greeting-controller.js';
@@ -462,32 +457,17 @@ export class VoiceSession {
 	 *  (`onModelTurnStart`); read by `handleTurnComplete` so the native gate
 	 *  engages only on a turn's terminal spoken response (audio, no tool call). */
 	private _nativeResponseDispatchedToolCall = false;
-	/** Reference to the transport's original sendToolResult, captured at
-	 *  construction. flushPendingToolResults calls through this to bypass
-	 *  the guard wrapper installed on the transport. */
-	private _rawSendToolResult: (result: TransportToolResult) => void = () => undefined;
-	/** Same as `_rawSendToolResult` but for `sendContent`. Used to drain
-	 *  `pendingContentTurnsAwaitingAgentMode` on entry to agent mode without
-	 *  re-entering the guard wrapper. */
-	private _rawSendContent: (turns: ContentTurn[], turnComplete?: boolean) => void = () => undefined;
-	/** Queue of `transport.sendContent(turns, true)` calls that arrived while
-	 *  not in agent mode. Each `turnComplete:true` would trigger response.create
-	 *  on OpenAI, which violates the §3.5 dictation-only invariant. Drained
-	 *  on entry to 'agent'. */
-	private pendingContentTurnsAwaitingAgentMode: Array<{
-		turns: ContentTurn[];
-		turnComplete?: boolean;
-	}> = [];
-	// --- Phase 3: transcription-mode state ---
-	private whisperProvider?: STTProvider;
-	private internalMode: InternalTranscriptionMode = 'agent';
-	private dictationBuffer: string[] = [];
+	// --- Phase 3: transcription mode + dictation buffer + cross-provider quiesce ---
+	/** Transcription/dictation subsystem: owns `internalMode`, the dictation
+	 *  buffer, the Whisper provider, the §3.5 send-guard wrappers + pending
+	 *  queues, and the mode-flip state machine. VoiceSession delegates the
+	 *  enter/exit transitions (via the serialized `setTranscriptionMode`), the
+	 *  buffer accessors, `prewarmTranscriptionMode`, and `prepareForStart`.
+	 *  Every `internalMode` reader reads through it. See `dictation-controller.ts`. */
+	private dictation!: DictationController;
+	/** Serialises `setTranscriptionMode()` with `transferSession()` — concurrent
+	 *  callers queue rather than race. Stays in VoiceSession. */
 	private mutationQueue = new SessionMutationQueue();
-	/** Tool results that arrived while not in 'agent' mode. Flushed in order on
-	 *  re-entry. Prevents response.create from leaking during transcription mode. */
-	private pendingToolResultsAwaitingAgentMode: Array<
-		Parameters<LLMTransport['sendToolResult']>[0]
-	> = [];
 	private _commitFiredForTurn = false;
 	/** True when the current turn was interrupted — skips Gemini transcript correction. */
 	private _turnWasInterrupted = false;
@@ -787,10 +767,10 @@ export class VoiceSession {
 			vad: this.clientVadDetector,
 			clientAudioInputRate: this.clientAudioInputRate,
 			getSttProvider: () => this.sttProvider,
-			getWhisperProvider: () => this.whisperProvider,
+			getWhisperProvider: () => this.dictation.whisper,
 			isSessionActive: () => this.sessionManager.isActive,
 			isRtcAudioReady: () => this.directRtcChannel?.isRtcAudioReady ?? false,
-			getMode: () => this.internalMode,
+			getMode: () => this.dictation.mode,
 			shouldDropOutbound: () => this.greeting.shouldDropOutbound(),
 			routeExternalAudio: (data) => {
 				if (this.agentRouter.activeAgent.audioMode !== 'external') return false;
@@ -810,47 +790,27 @@ export class VoiceSession {
 			config.ttsPlaybackFallbackMarginMs,
 		);
 
-		// Intercept transport.sendToolResult so BOTH legacy and actor-mode
-		// dispatch paths go through the transcription-mode guard. The actor
-		// adapter calls `transport.sendToolResult(...)` directly (no
-		// VoiceSession reference), so the cleanest single-point fix is to
-		// wrap the method on the transport instance itself.
-		const originalSendToolResult = this.transport.sendToolResult.bind(this.transport);
-		this.transport.sendToolResult = (result: TransportToolResult) => {
-			// `scheduling: 'silent'` doesn't trigger response.create (the OpenAI
-			// transport just inserts the conversation item), so it doesn't
-			// violate the §3.5 invariant. Pass it through immediately even
-			// during transcription mode. Useful for tools whose result is
-			// informational only — e.g. set_transcription_mode itself.
-			if (result.scheduling === 'silent') {
-				originalSendToolResult(result);
-				return;
-			}
-			if (this.internalMode !== 'agent') {
-				this.pendingToolResultsAwaitingAgentMode.push(result);
-				return;
-			}
-			originalSendToolResult(result);
-		};
-		// Keep a reference so flushPendingToolResults can bypass the guard and
-		// call the underlying method directly (draining INTO agent mode).
-		this._rawSendToolResult = originalSendToolResult;
-
-		// Same pattern for sendContent — gate `turnComplete: true` (which fires
-		// response.create on OpenAI) when not in agent mode. `turnComplete: false`
-		// is a passive append (no response trigger) and passes through.
-		// Catches: directive reinforcement, greetings, memory injection, text
-		// input, legacy notifications, and the actor-mode notification path
-		// (transport-actor.ts) — all route through `this.transport.sendContent`.
-		const originalSendContent = this.transport.sendContent.bind(this.transport);
-		this.transport.sendContent = (turns: ContentTurn[], turnComplete?: boolean) => {
-			if (turnComplete === true && this.internalMode !== 'agent') {
-				this.pendingContentTurnsAwaitingAgentMode.push({ turns, turnComplete });
-				return;
-			}
-			originalSendContent(turns, turnComplete);
-		};
-		this._rawSendContent = originalSendContent;
+		// Transcription/dictation subsystem. Owns `internalMode`, the dictation
+		// buffer, the Whisper provider, and the §3.5 send-guard wrappers — its
+		// constructor installs the `transport.sendToolResult` / `sendContent`
+		// interception (BOTH legacy and actor-mode dispatch paths go through the
+		// transcription-mode guard) BEFORE `wireTransportCallbacks` below, and
+		// seeds `internalMode` from `config.transcriptionMode`.
+		this.dictation = new DictationController(
+			{
+				transport: this.transport,
+				getAudioRouter: () => this.audioRouter,
+				eventBus: this.eventBus,
+				getSessionId: () => this.config.sessionId,
+				reportError: (context, error) => this.reportError(context, error),
+				log: (msg) => this.log(msg),
+			},
+			{
+				whisperProvider: config.whisperProvider,
+				sttProvider: config.sttProvider,
+				transcriptionMode: config.transcriptionMode,
+			},
+		);
 
 		// Wire LLMTransport property callbacks — works for both injected and default transports
 		this.wireTransportCallbacks();
@@ -928,41 +888,8 @@ export class VoiceSession {
 			};
 		}
 
-		// Wire the transcription-mode Whisper provider (§Phase 3). Independent
-		// from sttProvider — must be a distinct instance.
-		if (config.whisperProvider) {
-			if (config.whisperProvider === config.sttProvider) {
-				throw new Error(
-					'VoiceSession: whisperProvider must be a distinct instance from sttProvider. ' +
-						'Sharing one instance entangles their lifecycles and causes double-start/premature-stop.',
-				);
-			}
-			this.whisperProvider = config.whisperProvider;
-			// Configure with the format VoiceSession actually FEEDS — Whisper
-			// gets PCM16 @ 24 kHz mono after routeAudioToWhisper resamples.
-			// Not the transport's wire format (which may be 16 kHz Gemini or
-			// 8 kHz pcmu OpenAI telephony).
-			this.whisperProvider.configure({
-				sampleRate: 24000,
-				bitDepth: 16,
-				channels: 1,
-				encoding: 'pcm',
-			});
-			// Whisper transcripts feed the dictation buffer ONLY — never the
-			// TranscriptManager / ConversationContext path (that would
-			// auto-inject and violate the "never auto-inject" guarantee).
-			this.whisperProvider.onTranscript = (text) => {
-				if (text) this.dictationBuffer.push(text);
-			};
-			// Partials are not surfaced here today; subscribers wanting live
-			// dictation preview can wire onPartialTranscript directly.
-		}
-		// Honour an initial transcriptionMode='transcription' by setting the
-		// internal mode now. The actual whisper.start() happens lazily on
-		// session start so it lines up with sttProvider's existing pattern.
-		if (config.transcriptionMode === 'transcription') {
-			this.internalMode = 'transcription';
-		}
+		// (Transcription-mode Whisper wiring + initial-mode seed live in the
+		// DictationController constructed above.)
 
 		// Wire onModelTurnStart for STT commit trigger.
 		// P4: also allocate the eager turn id here. Chain pattern preserves
@@ -997,7 +924,7 @@ export class VoiceSession {
 				ensureCurrentTurn: () => this.turns.ensureCurrent(),
 				getCurrentTurn: () => this.turns.current,
 				handleTranscriptOutput: (text) => this.transcriptManager.handleOutput(text),
-				isAgentMode: () => this.internalMode === 'agent',
+				isAgentMode: () => this.dictation.isAgentMode(),
 				isPlaybackStateProtocolActive: () => this.playbackStateProtocolActive,
 				getCompletionArbiter: () => this.completionArbiter,
 				maybeArmGraceOnFirstAudio: () => this.maybeArmGraceOnFirstAudio(),
@@ -1141,8 +1068,8 @@ export class VoiceSession {
 
 		// Transport reconnect + response-watchdog. GoAway reconnects immediately;
 		// transport-close/watchdog go through the budgeted+backed-off path. The
-		// `isAgentMode` thunk reads VoiceSession's `internalMode` (Unit 4 re-points
-		// it to the DictationController when that field moves).
+		// `isAgentMode` thunk reads the DictationController (gates watchdog arming
+		// and the post-reconnect nudge to agent-mode turns only).
 		this.reconnector = new TransportReconnector(
 			{
 				sessionManager: this.sessionManager,
@@ -1151,7 +1078,7 @@ export class VoiceSession {
 				toReplayContent: () => this.conversationContext.toReplayContent(),
 				eventBus: this.eventBus,
 				getSessionId: () => this.config.sessionId,
-				isAgentMode: () => this.internalMode === 'agent',
+				isAgentMode: () => this.dictation.isAgentMode(),
 				reportError: (context, error) => this.reportError(context, error),
 				log: (msg) => this.log(msg),
 			},
@@ -1614,19 +1541,7 @@ export class VoiceSession {
 		// Phase 3: when constructed with initial transcriptionMode='transcription',
 		// bring Whisper up and quiesce the agent transport before start() resolves.
 		// Audio dropped during these awaits is bounded by clientTransport buffering.
-		if (this.internalMode === 'transcription' && this.whisperProvider) {
-			await this.whisperProvider.start();
-			if (this.transport.capabilities.quiescible && this.transport.quiesce) {
-				try {
-					await this.transport.quiesce();
-				} catch (err) {
-					this.reportError(
-						'transport-quiesce',
-						err instanceof Error ? err : new Error(String(err)),
-					);
-				}
-			}
-		}
+		await this.dictation.prepareForStart();
 		if (this.runtimeOrchestrator) {
 			await this.runtimeOrchestrator.start();
 		}
@@ -1736,7 +1651,7 @@ export class VoiceSession {
 		await this.sttProvider?.stop();
 		// Phase 3: stop the dictation-mode Whisper provider so prewarmed or
 		// active sockets don't survive session close. Idempotent.
-		await this.whisperProvider?.stop().catch(() => undefined);
+		await this.dictation.stopWhisper();
 		this.ttsPipeline?.gate.clearTimers();
 		this.reconnector.disarmResponseWatchdog();
 		// close() bypasses finalizeTurn — tear down the native gate directly so
@@ -1953,7 +1868,7 @@ export class VoiceSession {
 		// audio at this seam. Belt-and-braces backup for transports that don't
 		// implement quiesce(); guarantees no model audio leaks into dictation
 		// mode even if a quiesce race occurs.
-		if (this.internalMode !== 'agent') return;
+		if (!this.dictation.isAgentMode()) return;
 		this.reconnector.disarmResponseWatchdog();
 
 		// Greeting interrupt grace: arm on the first assistant audio chunk.
@@ -2466,7 +2381,7 @@ export class VoiceSession {
 	/** Public stable mode. Transient `starting_*` / `stopping_*` states are
 	 *  collapsed to the closest stable mode so callers never observe them. */
 	getTranscriptionMode(): TranscriptionMode {
-		switch (this.internalMode) {
+		switch (this.dictation.mode) {
 			case 'agent':
 			case 'stopping_transcription':
 				return 'agent';
@@ -2480,12 +2395,12 @@ export class VoiceSession {
 	 *  Useful for built-in tools (e.g. `inject_dictation_as_user_message`)
 	 *  and for ops surfaces that want to preview the buffer. */
 	getDictationBuffer(): string {
-		return this.dictationBuffer.join(' ').trim();
+		return this.dictation.getDictationBuffer();
 	}
 
 	/** Discard buffered dictation without injecting it. */
 	clearDictationBuffer(): void {
-		this.dictationBuffer = [];
+		this.dictation.clearDictationBuffer();
 	}
 
 	/** Inject the dictation buffer as a user message into the agent's
@@ -2494,10 +2409,8 @@ export class VoiceSession {
 	 *  writes to the transport AND records the user turn in
 	 *  ConversationContext (so history/memory/subagent context see it). */
 	injectDictationBuffer(): Promise<void> {
-		if (this.internalMode !== 'agent') return Promise.resolve();
-		const text = this.getDictationBuffer();
+		const text = this.dictation.takeDictationBufferForInjection();
 		if (!text) return Promise.resolve();
-		this.dictationBuffer = [];
 		return this.injectTranscript(text);
 	}
 
@@ -2528,124 +2441,24 @@ export class VoiceSession {
 	/** Pre-start the whisper session without flipping audio routing. Useful
 	 *  for masking the ~150–500 ms whisper-start latency on the first flip. */
 	async prewarmTranscriptionMode(): Promise<void> {
-		if (!this.whisperProvider) return;
-		await this.whisperProvider.start();
+		await this.dictation.prewarmTranscriptionMode();
 	}
 
 	/** Switch between `'agent'` and `'transcription'`. Idempotent. Serialised
 	 *  with `transferSession()` via the SessionMutationQueue — concurrent
-	 *  callers queue rather than race. */
+	 *  callers queue rather than race. The mode-flip mechanics live in the
+	 *  DictationController; the serialization stays here. */
 	async setTranscriptionMode(mode: TranscriptionMode): Promise<void> {
 		return this.mutationQueue.enqueue(async () => {
 			if (mode === this.getTranscriptionMode()) return;
 			if (mode === 'transcription') {
-				if (!this.whisperProvider) {
+				if (!this.dictation.whisper) {
 					throw new Error('setTranscriptionMode: no whisperProvider configured on VoiceSession');
 				}
-				await this.enterTranscriptionMode();
+				await this.dictation.enterTranscriptionMode();
 			} else {
-				await this.exitTranscriptionMode();
+				await this.dictation.exitTranscriptionMode();
 			}
-		});
-	}
-
-	/** Agent → transcription transition. */
-	private async enterTranscriptionMode(): Promise<void> {
-		this.internalMode = 'starting_transcription';
-		// Quiesce the transport so any in-flight response stops emitting.
-		// Optional method — fall back to the framework-layer guard.
-		if (this.transport.capabilities.quiescible && this.transport.quiesce) {
-			try {
-				await this.transport.quiesce();
-			} catch (err) {
-				this.reportError('transport-quiesce', err instanceof Error ? err : new Error(String(err)));
-			}
-		}
-		// Clear unprocessed input audio server-side (mandatory — see design §3.4).
-		// Some transports auto-trigger responses via VAD's create_response:true;
-		// without clearAudio() that response can fire after the mode flip.
-		try {
-			this.transport.clearAudio();
-		} catch {
-			// Best-effort: clearAudio is a no-op when disconnected.
-		}
-		// Bring up whisper. Idempotent — no-op if prewarm already ran.
-		// setTranscriptionMode('transcription') above already verified that
-		// whisperProvider is set, so this is safe.
-		const whisper = this.whisperProvider;
-		if (!whisper) {
-			this.internalMode = 'agent';
-			throw new Error('enterTranscriptionMode: whisperProvider missing');
-		}
-		try {
-			await whisper.start();
-		} catch (err) {
-			// Rollback on failure.
-			this.internalMode = 'agent';
-			if (this.transport.capabilities.quiescible && this.transport.unquiesce) {
-				try {
-					await this.transport.unquiesce();
-				} catch {
-					// Best-effort rollback.
-				}
-			}
-			throw err;
-		}
-		// Flush buffered transition frames in FIFO order through the router's
-		// whisper routing (which handles resampling).
-		this.audioRouter.drainTransitionBufferToWhisper();
-		this.internalMode = 'transcription';
-		this.eventBus.publish('session.transcription_mode_changed', {
-			mode: 'transcription',
-			sessionId: this.config.sessionId,
-		});
-	}
-
-	/** Transcription → agent transition. Asymmetric — audio routing is
-	 *  restored synchronously; the public promise awaits whisper.stop().
-	 *
-	 *  Ordering matters: unquiesce() drains the OpenAI transport's
-	 *  _pendingWhenIdle queue which fires `response.create`. The §3.5
-	 *  invariant says no response.create while not in agent mode, so
-	 *  unquiesce() must run AFTER `internalMode = 'agent'`, not before.
-	 *  The brief `_quiesced` window costs a few ms of audio suppression
-	 *  during stop_transcription, traded for strict invariant compliance. */
-	private async exitTranscriptionMode(): Promise<void> {
-		// Restore audio ROUTING immediately so the user is never silent. The
-		// routing switch's stopping_transcription case (§3.3) feeds mic frames
-		// to the transport from the very next frame; suppression at the
-		// audio-output seam is still on for the brief window below.
-		this.internalMode = 'stopping_transcription';
-		// Tear down whisper FIRST so any in-flight whisper transcripts that
-		// arrived just before "end dictation" finish landing in the buffer.
-		// Idempotent.
-		try {
-			await this.whisperProvider?.stop();
-		} catch (err) {
-			this.reportError('whisper-stop', err instanceof Error ? err : new Error(String(err)));
-		}
-		// Flip to agent BEFORE unquiesce — unquiesce() in OpenAI drains
-		// _pendingWhenIdle, which sends response.create. That has to happen
-		// when internalMode === 'agent' to honour §3.5.
-		this.internalMode = 'agent';
-		// Now unquiesce — drains any when_idle tool results that accumulated.
-		if (this.transport.capabilities.quiescible && this.transport.unquiesce) {
-			try {
-				await this.transport.unquiesce();
-			} catch (err) {
-				this.reportError(
-					'transport-unquiesce',
-					err instanceof Error ? err : new Error(String(err)),
-				);
-			}
-		}
-		// Drain framework-side queues: tool results AND content turns that
-		// arrived while not in agent mode.
-		this.flushPendingToolResults();
-		this.flushPendingContentTurns();
-		this.eventBus.publish('session.transcription_mode_changed', {
-			mode: 'agent',
-			sessionId: this.config.sessionId,
 		});
 	}
 
@@ -2656,34 +2469,11 @@ export class VoiceSession {
 		instructions?: string,
 		overrides?: Parameters<LLMTransport['triggerGeneration']>[1],
 	): void {
-		if (this.internalMode !== 'agent') {
+		if (!this.dictation.isAgentMode()) {
 			throw new Error(
-				`TRANSCRIPTION_MODE_LOCKED: triggerGeneration is blocked while transcription mode is '${this.internalMode}'`,
+				`TRANSCRIPTION_MODE_LOCKED: triggerGeneration is blocked while transcription mode is '${this.dictation.mode}'`,
 			);
 		}
 		this.transport.triggerGeneration(instructions, overrides);
-	}
-
-	/** Flush tool results that arrived during transcription mode. Calls the
-	 *  unguarded sender so we don't re-enter the queue. */
-	private flushPendingToolResults(): void {
-		if (this.pendingToolResultsAwaitingAgentMode.length === 0) return;
-		const queued = this.pendingToolResultsAwaitingAgentMode;
-		this.pendingToolResultsAwaitingAgentMode = [];
-		for (const result of queued) {
-			this._rawSendToolResult(result);
-		}
-	}
-
-	/** Flush content turns (sendContent calls) that arrived with
-	 *  turnComplete=true during transcription mode. Same idempotency story
-	 *  as flushPendingToolResults — drain through the raw sender. */
-	private flushPendingContentTurns(): void {
-		if (this.pendingContentTurnsAwaitingAgentMode.length === 0) return;
-		const queued = this.pendingContentTurnsAwaitingAgentMode;
-		this.pendingContentTurnsAwaitingAgentMode = [];
-		for (const { turns, turnComplete } of queued) {
-			this._rawSendContent(turns, turnComplete);
-		}
 	}
 }
