@@ -59,7 +59,7 @@ function micFrame(amplitude: number): Buffer {
 	return f;
 }
 
-function setup(responseWatchdogMs = 8000) {
+function setup(responseWatchdogMs = 8000, transcriptionMode?: 'agent' | 'transcription') {
 	const transport = createMockTransport();
 	const session = new VoiceSession({
 		sessionId: 'sess_watchdog',
@@ -73,6 +73,7 @@ function setup(responseWatchdogMs = 8000) {
 		clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
 		clientAudioVad: { bargeInConfirmMs: 0 },
 		responseWatchdogMs,
+		transcriptionMode,
 	});
 	return { transport, session };
 }
@@ -217,6 +218,21 @@ describe('response watchdog', () => {
 			await session.close(); // teardown → clearResponseWatchdog
 			session = undefined; // already closed; skip the finally double-close
 
+			vi.advanceTimersByTime(20000);
+			expect(s.transport.reconnect).not.toHaveBeenCalled();
+		} finally {
+			await session?.close();
+		}
+	});
+
+	it('never arms in transcription mode (model intentionally silent)', async () => {
+		let session: VoiceSession | undefined;
+		try {
+			const s = setup(8000, 'transcription');
+			session = s.session;
+			await activate(session, s.transport);
+
+			completeUserTurn(session); // would arm in agent mode; must no-op here
 			vi.advanceTimersByTime(20000);
 			expect(s.transport.reconnect).not.toHaveBeenCalled();
 		} finally {

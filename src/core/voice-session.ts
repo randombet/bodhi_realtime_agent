@@ -2426,6 +2426,7 @@ export class VoiceSession {
 	/** Arm (or re-arm) the response watchdog after the user's turn ends. */
 	private armResponseWatchdog(): void {
 		if (this.responseWatchdogMs <= 0) return;
+		if (this.internalMode !== 'agent') return; // never watch a non-agent (dictation/transcription) turn
 		this.clearResponseWatchdog();
 		// Safe to arm even if the session isn't ACTIVE right now: the fire-time
 		// `state !== 'ACTIVE'` guard below makes a stale timer a no-op.
@@ -2920,6 +2921,7 @@ export class VoiceSession {
 	}
 
 	private handleGoAway(timeLeft: string): void {
+		this.clearResponseWatchdog();
 		this.log(`GoAway from Gemini (timeLeft=${timeLeft})`);
 		this.eventBus.publish('session.goaway', {
 			sessionId: this.config.sessionId,
