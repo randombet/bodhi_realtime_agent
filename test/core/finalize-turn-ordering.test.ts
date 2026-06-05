@@ -224,7 +224,8 @@ async function runTurn(
 			transport.onTurnComplete?.(1);
 			if (gating === 'tts') {
 				// Drive the external-TTS gate to completion: audio then done.
-				const ttsProvider = (session as unknown as { ttsProvider?: TTSProvider }).ttsProvider;
+				const ttsProvider = (session as unknown as { ttsPipeline?: { provider: TTSProvider } })
+					.ttsPipeline?.provider;
 				ttsProvider?.onAudio?.(pcm1s(), 1000, 1);
 				ttsProvider?.onDone?.(1);
 				vi.advanceTimersByTime(5000);

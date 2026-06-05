@@ -67,9 +67,9 @@ export class Turn {
 
 /**
  * What a transport completion/interrupt/usage signal resolves to.
- * See `VoiceSession.resolveTurn()`.
+ * See `TurnManager.resolve()`.
  */
 export type TurnMatch = { kind: 'match'; turn: Turn } | { kind: 'new' } | { kind: 'stale' };
 
-/** Why `resolveTurn()` was called — disambiguates id-less signal handling. */
+/** Why `TurnManager.resolve()` was called — disambiguates id-less signal handling. */
 export type TurnSignalPurpose = 'completion' | 'interrupt' | 'usage';
