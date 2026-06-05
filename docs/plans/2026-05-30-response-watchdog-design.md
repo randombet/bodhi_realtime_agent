@@ -51,6 +51,10 @@ user message" is not reliable. This shaped the re-prompt decision below.
 
 ## Design
 
+> Note: line numbers below are pre-implementation estimates and have since drifted
+> (the file grew during the work). They are approximate locators, not exact;
+> grep the named methods/handlers for the current lines.
+
 ### 1. Where it lives
 
 `VoiceSession` — provider-agnostic. It owns both the "user finished" signal and the
