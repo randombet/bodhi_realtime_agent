@@ -21,7 +21,10 @@ import type { TTSAudioConfig, TTSProvider } from '../../src/types/tts.js';
  * STT (commit / complete / interrupt), external-TTS cancel, transcript flush,
  * the notification sink (legacy queue vs actor runtime), and the EventBus
  * turn.end / turn.interrupted publishes — across the fixture matrix
- * {clean, interrupted} × {neither, native, tts} × {actor, legacy}.
+ * {clean, interrupted} × {neither, native, tts} × {actor, legacy}, minus the
+ * one impossible cell: `tts` is actor-only (ttsProvider requires
+ * orchestrationMode: 'actor'), so legacy+tts does not exist. Native gating IS
+ * reachable in legacy mode, so legacy+native is covered.
  *
  * The recorded sequences are pinned with explicit assertions so that the Step 6
  * extraction of `TurnManager` + `PlaybackCompletionArbiter` can prove it did NOT
@@ -300,6 +303,14 @@ describe('finalizeTurn effect ordering — characterization oracle', () => {
 		['legacy', 'neither', 'interrupted', INTERRUPTED],
 		['actor', 'native', 'clean', CLEAN],
 		['actor', 'native', 'interrupted', INTERRUPTED],
+		// Native gating is NOT actor-only — `nativePlaybackGatingActive` has no
+		// `_isActorMode` guard — so legacy+native is reachable and must be pinned
+		// too (a Step 4 native-gate extraction could otherwise reorder legacy
+		// notification-queue effects undetected).
+		['legacy', 'native', 'clean', CLEAN],
+		['legacy', 'native', 'interrupted', INTERRUPTED],
+		// `tts` is actor-only (ttsProvider requires orchestrationMode: 'actor'),
+		// so legacy+tts is intentionally absent — not a gap.
 		['actor', 'tts', 'clean', CLEAN],
 		['actor', 'tts', 'interrupted', INTERRUPTED_TTS],
 	];
