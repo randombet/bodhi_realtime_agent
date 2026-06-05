@@ -864,42 +864,7 @@ export class VoiceSession {
 		this._rawSendContent = originalSendContent;
 
 		// Wire LLMTransport property callbacks — works for both injected and default transports
-		this.transport.onAudioOutput = (data) => this.handleAudioOutput(data);
-		this.transport.onToolCall = (calls) => {
-			// Native playback-end gate: this response dispatched a tool call, so
-			// it is not the turn's terminal spoken response.
-			this._nativeResponseDispatchedToolCall = true;
-			if (this.runtimeOrchestrator) {
-				const names = calls.map((c) => c.name).join(', ');
-				this.logProviderUserTurnRecognition('tool call received');
-				const sinceVadEnd = this.clientVadDetector.lastSpeechCompletedMs
-					? ` (${Date.now() - this.clientVadDetector.lastSpeechCompletedMs}ms after client audio VAD end)`
-					: '';
-				this.log(`Tool calls from LLM: [${names}]${sinceVadEnd}`);
-				this.transcriptManager.flushInput();
-				this.transcriptManager.saveOutputPrefix();
-			}
-			this.toolCallRouter?.handleToolCalls(calls);
-		};
-		this.transport.onToolCallCancel = (ids) => {
-			if (this.runtimeOrchestrator) {
-				this.toolExecutor.cancel(ids);
-			}
-			this.toolCallRouter?.handleToolCallCancellation(ids);
-		};
-		this.transport.onTurnComplete = (serverTurnId) => this.handleTurnComplete(serverTurnId);
-		this.transport.onInterrupted = (serverTurnId) => this.handleInterrupted(serverTurnId);
-		this.transport.onOutputTranscription = (text) => {
-			this.ensureCurrentTurn();
-			this.transcriptManager.handleOutput(text);
-		};
-		this.transport.onSessionReady = (sessionId) => this.handleSetupComplete(sessionId);
-		this.transport.onError = (error) => this.handleTransportError(error);
-		this.transport.onClose = (code, reason) => this.handleTransportClose(code, reason);
-		this.transport.onGoAway = (timeLeft) => this.handleGoAway(timeLeft);
-		this.transport.onResumptionUpdate = (handle, resumable) =>
-			this.handleResumptionUpdate(handle, resumable);
-		this.transport.onGroundingMetadata = (metadata) => this.handleGroundingMetadata(metadata);
+		this.wireTransportCallbacks();
 
 		// Wire STT: streaming provider for real-time display, Gemini built-in for
 		// post-hoc correction. Both paths can be active simultaneously.
@@ -1122,55 +1087,10 @@ export class VoiceSession {
 			log: (msg) => this.log(msg),
 		});
 
-		// Forward GUI events from EventBus to the client as JSON text frames
-		this.eventBus.subscribe('gui.update', (payload) => {
-			this.clientTransport.sendJsonToClient({ type: 'gui.update', payload });
-		});
-		this.eventBus.subscribe('gui.notification', (payload) => {
-			this.clientTransport.sendJsonToClient({ type: 'gui.notification', payload });
-		});
-		this.eventBus.subscribe('subagent.ui.send', (payload) => {
-			this.clientTransport.sendJsonToClient({ type: 'ui.payload', payload: payload.payload });
-		});
-
-		// Bind STT lifecycle to session state: start when ACTIVE (agent ready), stop when disconnecting
-		this.eventBus.subscribe('session.stateChange', (payload: { toState: string }) => {
-			if (payload.toState === 'ACTIVE') {
-				this.startSttProvider();
-			} else if (payload.toState === 'RECONNECTING' || payload.toState === 'TRANSFERRING') {
-				void this.sttProvider?.stop();
-			}
-		});
-
-		// Route UI button responses back to the waiting SubagentSession
-		this.eventBus.subscribe(
-			'subagent.ui.response',
-			(payload: {
-				sessionId: string;
-				response: { requestId: string; selectedOptionId?: string };
-			}) => {
-				const { requestId, selectedOptionId } = payload.response;
-				if (!requestId || !selectedOptionId) return;
-
-				const session = this.agentRouter.findSessionByRequestId(requestId);
-				if (!session) return;
-
-				const option = session.resolveOption(requestId, selectedOptionId);
-				const answerText = option?.label ?? selectedOptionId;
-				session.trySendToSubagent(answerText);
-			},
-		);
-
-		// Subscribe to async agent transfer requests (from external audio agents like Twilio)
-		this.eventBus.subscribe('agent.transfer_requested', (payload) => {
-			setImmediate(() => {
-				this.transfer(payload.toAgent).catch((err) => {
-					this.log(
-						`Transfer requested to "${payload.toAgent}" failed: ${err instanceof Error ? err.message : String(err)}`,
-					);
-				});
-			});
-		});
+		// Wire EventBus subscriptions (GUI forwarding, STT lifecycle, subagent UI,
+		// async agent transfer). Callbacks capture `this` and fire at runtime, so
+		// they may reference collaborators (e.g. agentRouter) constructed below.
+		this.wireEventBus();
 
 		// Set up tool executor
 		this.toolExecutor = this.createToolExecutor(config.initialAgent);
@@ -1214,78 +1134,9 @@ export class VoiceSession {
 			this.agentRouter.responseModality = 'text';
 		}
 
-		// P4: chain pattern — preserve any pre-attached usage handler on the
-		// transport, then call the framework hook AND publish to the EventBus.
-		// Same chaining pattern is applied to onCacheBust below for symmetry.
-		const prevUsage = this.transport.onRealtimeLLMUsage;
-		this.transport.onRealtimeLLMUsage = (usage) => {
-			try {
-				prevUsage?.(usage);
-			} catch (e) {
-				this.log(`pre-attached onRealtimeLLMUsage threw: ${(e as Error).message}`);
-			}
-			const source = deriveUsageSource(usage);
-			// Derive the turnId for this usage event without creating a Turn.
-			// Input-transcription usage is not turn-bound. Otherwise resolveTurn
-			// maps it to its Turn (a `match` — including trailing winding-down
-			// usage for the just-finalized turn); a `new`/`stale` result means a
-			// turn not yet born, which gets `turn_${turnId+1}` — the id it will
-			// be born with.
-			let turnId: string | null;
-			let agentName: string;
-			if (source === 'openai.transcription') {
-				turnId = null;
-				agentName = this.activeTurn()?.agentName ?? this.agentRouter.activeAgent.name;
-			} else {
-				const r = this.resolveTurn(usage.serverTurnId, 'usage');
-				if (r.kind === 'match') {
-					turnId = r.turn.id;
-					agentName = r.turn.agentName;
-				} else {
-					turnId = `turn_${this.turnId + 1}`;
-					agentName = this.agentRouter.activeAgent.name;
-				}
-			}
-			if (this.hooks.onRealtimeLLMUsage) {
-				this.hooks.onRealtimeLLMUsage({
-					sessionId: this.config.sessionId,
-					agentName,
-					usage,
-				});
-			}
-			const seqKey = `${turnId ?? 'no_turn'}:${source}`;
-			const sequence = (this.currentTurnUsageSequence.get(seqKey) ?? 0) + 1;
-			this.currentTurnUsageSequence.set(seqKey, sequence);
-			const ratio = computeCacheHitRatio(usage, source);
-			this.eventBus.publish('realtime.usage', {
-				sessionId: this.config.sessionId,
-				agentName,
-				turnId,
-				source,
-				providerItemId: deriveProviderItemId(usage, source),
-				sequence,
-				emittedAt: Date.now(),
-				usage,
-				...(ratio !== undefined ? { cacheHitRatio: ratio } : {}),
-			});
-		};
-
-		// P4: chain pattern for onCacheBust + EventBus mirror.
-		const prevCacheBust = this.transport.onCacheBust;
-		this.transport.onCacheBust = (reason) => {
-			try {
-				prevCacheBust?.(reason);
-			} catch (e) {
-				this.log(`pre-attached onCacheBust threw: ${(e as Error).message}`);
-			}
-			const active = this.activeTurn();
-			this.eventBus.publish('realtime.cache.bust', {
-				sessionId: this.config.sessionId,
-				agentName: active?.agentName ?? this.agentRouter.activeAgent.name,
-				turnId: active?.id ?? null,
-				reason,
-			});
-		};
+		// Usage + cache-bust observability — chained over any pre-attached handlers,
+		// fired to the framework hook and mirrored to the EventBus.
+		this.wireUsageCallbacks();
 
 		if (config.orchestrationMode === 'actor') {
 			this.runtimeToolRegistry = this.buildRuntimeToolRegistry([...agentTools, ...behaviorTools]);
@@ -1459,6 +1310,179 @@ export class VoiceSession {
 				log: (msg) => this.log(msg),
 			});
 		}
+	}
+
+	/** Wire the LLMTransport lifecycle property callbacks (audio / tool / turn /
+	 *  error / grounding). Works for both injected and default transports. The
+	 *  TTS and native text/speech-started callbacks are wired separately
+	 *  (`wireTtsProvider` / the native gate's `installBargeIn`). */
+	private wireTransportCallbacks(): void {
+		this.transport.onAudioOutput = (data) => this.handleAudioOutput(data);
+		this.transport.onToolCall = (calls) => {
+			// Native playback-end gate: this response dispatched a tool call, so
+			// it is not the turn's terminal spoken response.
+			this._nativeResponseDispatchedToolCall = true;
+			if (this.runtimeOrchestrator) {
+				const names = calls.map((c) => c.name).join(', ');
+				this.logProviderUserTurnRecognition('tool call received');
+				const sinceVadEnd = this.clientVadDetector.lastSpeechCompletedMs
+					? ` (${Date.now() - this.clientVadDetector.lastSpeechCompletedMs}ms after client audio VAD end)`
+					: '';
+				this.log(`Tool calls from LLM: [${names}]${sinceVadEnd}`);
+				this.transcriptManager.flushInput();
+				this.transcriptManager.saveOutputPrefix();
+			}
+			this.toolCallRouter?.handleToolCalls(calls);
+		};
+		this.transport.onToolCallCancel = (ids) => {
+			if (this.runtimeOrchestrator) {
+				this.toolExecutor.cancel(ids);
+			}
+			this.toolCallRouter?.handleToolCallCancellation(ids);
+		};
+		this.transport.onTurnComplete = (serverTurnId) => this.handleTurnComplete(serverTurnId);
+		this.transport.onInterrupted = (serverTurnId) => this.handleInterrupted(serverTurnId);
+		this.transport.onOutputTranscription = (text) => {
+			this.ensureCurrentTurn();
+			this.transcriptManager.handleOutput(text);
+		};
+		this.transport.onSessionReady = (sessionId) => this.handleSetupComplete(sessionId);
+		this.transport.onError = (error) => this.handleTransportError(error);
+		this.transport.onClose = (code, reason) => this.handleTransportClose(code, reason);
+		this.transport.onGoAway = (timeLeft) => this.handleGoAway(timeLeft);
+		this.transport.onResumptionUpdate = (handle, resumable) =>
+			this.handleResumptionUpdate(handle, resumable);
+		this.transport.onGroundingMetadata = (metadata) => this.handleGroundingMetadata(metadata);
+	}
+
+	/** Wire EventBus subscriptions: GUI event → client forwarding, STT lifecycle
+	 *  binding, subagent UI button responses, and async agent-transfer requests.
+	 *  Callbacks fire at runtime, so referencing collaborators constructed later
+	 *  (e.g. `agentRouter`) is safe. */
+	private wireEventBus(): void {
+		// Forward GUI events from EventBus to the client as JSON text frames
+		this.eventBus.subscribe('gui.update', (payload) => {
+			this.clientTransport.sendJsonToClient({ type: 'gui.update', payload });
+		});
+		this.eventBus.subscribe('gui.notification', (payload) => {
+			this.clientTransport.sendJsonToClient({ type: 'gui.notification', payload });
+		});
+		this.eventBus.subscribe('subagent.ui.send', (payload) => {
+			this.clientTransport.sendJsonToClient({ type: 'ui.payload', payload: payload.payload });
+		});
+
+		// Bind STT lifecycle to session state: start when ACTIVE (agent ready), stop when disconnecting
+		this.eventBus.subscribe('session.stateChange', (payload: { toState: string }) => {
+			if (payload.toState === 'ACTIVE') {
+				this.startSttProvider();
+			} else if (payload.toState === 'RECONNECTING' || payload.toState === 'TRANSFERRING') {
+				void this.sttProvider?.stop();
+			}
+		});
+
+		// Route UI button responses back to the waiting SubagentSession
+		this.eventBus.subscribe(
+			'subagent.ui.response',
+			(payload: {
+				sessionId: string;
+				response: { requestId: string; selectedOptionId?: string };
+			}) => {
+				const { requestId, selectedOptionId } = payload.response;
+				if (!requestId || !selectedOptionId) return;
+
+				const session = this.agentRouter.findSessionByRequestId(requestId);
+				if (!session) return;
+
+				const option = session.resolveOption(requestId, selectedOptionId);
+				const answerText = option?.label ?? selectedOptionId;
+				session.trySendToSubagent(answerText);
+			},
+		);
+
+		// Subscribe to async agent transfer requests (from external audio agents like Twilio)
+		this.eventBus.subscribe('agent.transfer_requested', (payload) => {
+			setImmediate(() => {
+				this.transfer(payload.toAgent).catch((err) => {
+					this.log(
+						`Transfer requested to "${payload.toAgent}" failed: ${err instanceof Error ? err.message : String(err)}`,
+					);
+				});
+			});
+		});
+	}
+
+	/** Wire the realtime usage + cache-bust observability callbacks. Each chains
+	 *  over any handler a pre-configured injected transport already attached, then
+	 *  fires the framework hook and mirrors the event onto the EventBus (P4). */
+	private wireUsageCallbacks(): void {
+		const prevUsage = this.transport.onRealtimeLLMUsage;
+		this.transport.onRealtimeLLMUsage = (usage) => {
+			try {
+				prevUsage?.(usage);
+			} catch (e) {
+				this.log(`pre-attached onRealtimeLLMUsage threw: ${(e as Error).message}`);
+			}
+			const source = deriveUsageSource(usage);
+			// Derive the turnId for this usage event without creating a Turn.
+			// Input-transcription usage is not turn-bound. Otherwise resolveTurn
+			// maps it to its Turn (a `match` — including trailing winding-down
+			// usage for the just-finalized turn); a `new`/`stale` result means a
+			// turn not yet born, which gets `turn_${turnId+1}` — the id it will
+			// be born with.
+			let turnId: string | null;
+			let agentName: string;
+			if (source === 'openai.transcription') {
+				turnId = null;
+				agentName = this.activeTurn()?.agentName ?? this.agentRouter.activeAgent.name;
+			} else {
+				const r = this.resolveTurn(usage.serverTurnId, 'usage');
+				if (r.kind === 'match') {
+					turnId = r.turn.id;
+					agentName = r.turn.agentName;
+				} else {
+					turnId = `turn_${this.turnId + 1}`;
+					agentName = this.agentRouter.activeAgent.name;
+				}
+			}
+			if (this.hooks.onRealtimeLLMUsage) {
+				this.hooks.onRealtimeLLMUsage({
+					sessionId: this.config.sessionId,
+					agentName,
+					usage,
+				});
+			}
+			const seqKey = `${turnId ?? 'no_turn'}:${source}`;
+			const sequence = (this.currentTurnUsageSequence.get(seqKey) ?? 0) + 1;
+			this.currentTurnUsageSequence.set(seqKey, sequence);
+			const ratio = computeCacheHitRatio(usage, source);
+			this.eventBus.publish('realtime.usage', {
+				sessionId: this.config.sessionId,
+				agentName,
+				turnId,
+				source,
+				providerItemId: deriveProviderItemId(usage, source),
+				sequence,
+				emittedAt: Date.now(),
+				usage,
+				...(ratio !== undefined ? { cacheHitRatio: ratio } : {}),
+			});
+		};
+
+		const prevCacheBust = this.transport.onCacheBust;
+		this.transport.onCacheBust = (reason) => {
+			try {
+				prevCacheBust?.(reason);
+			} catch (e) {
+				this.log(`pre-attached onCacheBust threw: ${(e as Error).message}`);
+			}
+			const active = this.activeTurn();
+			this.eventBus.publish('realtime.cache.bust', {
+				sessionId: this.config.sessionId,
+				agentName: active?.agentName ?? this.agentRouter.activeAgent.name,
+				turnId: active?.id ?? null,
+				reason,
+			});
+		};
 	}
 
 	/**
