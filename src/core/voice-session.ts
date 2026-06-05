@@ -57,6 +57,11 @@ import { InteractionModeManager } from './interaction-mode.js';
 import { InterruptGraceWindow } from './interrupt-grace-window.js';
 import { MemoryCacheManager } from './memory-cache-manager.js';
 import { MultiplexConversationHistoryStore } from './multiplex-conversation-history-store.js';
+import {
+	ActorNotificationSink,
+	LegacyNotificationSink,
+	type NotificationSink,
+} from './notification-sink.js';
 import { SessionManager } from './session-manager.js';
 import { ToolCallRouter } from './tool-call-router.js';
 import { TranscriptManager } from './transcript-manager.js';
@@ -558,22 +563,21 @@ export class VoiceSession {
 	private clientConnected = false;
 	/**
 	 * Legacy in-process notification queue. Constructed only when
-	 * `orchestrationMode !== 'actor'`. In actor mode, NotificationActor
-	 * (`src/runtime/actors/notification-actor.ts`) takes over, and every
-	 * legacy call site that touches `this.notificationQueue` is guarded
-	 * with `if (this.notificationQueue)` or branched on `_isActorMode`.
+	 * `orchestrationMode !== 'actor'`; in actor mode NotificationActor
+	 * (`src/runtime/actors/notification-actor.ts`) takes over. Notification
+	 * dispatch now goes exclusively through `notificationSink` (below) — this
+	 * field is only the queue the `LegacyNotificationSink` wraps.
 	 */
 	private notificationQueue?: BackgroundNotificationQueue;
+	/**
+	 * Mode-agnostic notification seam over `notificationQueue` (legacy) and
+	 * `runtime.tell('notification.*')` (actor). Owns the once-per-turn
+	 * `audio_started` debounce in actor mode. See `notification-sink.ts`.
+	 */
+	private notificationSink!: NotificationSink;
 	private interactionMode = new InteractionModeManager();
 	/** True when `config.orchestrationMode === 'actor'`. */
 	private _isActorMode = false;
-	/**
-	 * Per-turn debounce flag for `notification.audio_started` (actor mode only).
-	 * Set on first audio chunk of a turn; cleared on turn-complete, interrupt,
-	 * and pre-greeting. The audio-fast-path contract requires we send the
-	 * debounced control-plane signal once per turn — never per chunk.
-	 */
-	private _audioStartedThisTurn = false;
 	/** Tracks consecutive reconnect attempts to prevent infinite reconnect storms. */
 	private reconnectAttempts = 0;
 	private static readonly MAX_RECONNECT_ATTEMPTS = 3;
@@ -660,6 +664,14 @@ export class VoiceSession {
 				},
 				(msg) => this.log(msg),
 				config.transport?.capabilities?.messageTruncation ?? false,
+			);
+			this.notificationSink = new LegacyNotificationSink(this.notificationQueue);
+		} else {
+			// The `tell` closure defers to `runtimeOrchestrator` at call time — it is
+			// constructed later in this constructor, but no notification fires before
+			// the session is running.
+			this.notificationSink = new ActorNotificationSink((type, payload, to) =>
+				this.runtimeOrchestrator?.runtime.tell(type, payload, to),
 			);
 		}
 
@@ -1437,19 +1449,7 @@ export class VoiceSession {
 	): void {
 		const label = options?.label ?? 'SUBAGENT UPDATE';
 		const priority = options?.priority ?? 'normal';
-		if (this._isActorMode) {
-			this.runtimeOrchestrator?.runtime.tell(
-				'notification.publish',
-				{ label, text, priority },
-				'notification',
-			);
-			return;
-		}
-		this.notificationQueue?.sendOrQueue(
-			[{ role: 'user', parts: [{ text: `[${label}]: ${text}` }] }],
-			true,
-			{ priority },
-		);
+		this.notificationSink.publish(label, text, priority);
 	}
 
 	/**
@@ -1459,11 +1459,10 @@ export class VoiceSession {
 	 * TransportActor wraps it as `[SYSTEM]: text` at the wire-out boundary.
 	 */
 	private publishSystemNotification(text: string): void {
-		this.runtimeOrchestrator?.runtime.tell(
-			'notification.publish',
-			{ label: 'SYSTEM', text, priority: 'normal' },
-			'notification',
-		);
+		// Actor-only callers (the background-tool completion path, guarded by the
+		// actor-construction block). Routed through the sink for uniformity; the
+		// legacy sink is never reached from here.
+		this.notificationSink.publish('SYSTEM', text, 'normal');
 	}
 
 	/** Start the client WebSocket server and connect to the LLM transport. */
@@ -2053,21 +2052,13 @@ export class VoiceSession {
 	}
 
 	/**
-	 * Signal that the model has begun producing audio this turn. In legacy
-	 * mode this calls `notificationQueue.markAudioReceived()`. In actor mode
-	 * this debounces (once per turn) and sends `notification.audio_started`
-	 * through the runtime — keeping audio chunks themselves off the actor
-	 * mailbox per the audio fast-path contract.
+	 * Signal that the model has begun producing audio this turn. The sink routes
+	 * to `notificationQueue.markAudioReceived()` (legacy) or a once-per-turn
+	 * debounced `notification.audio_started` (actor) — keeping audio chunks off
+	 * the actor mailbox per the audio fast-path contract.
 	 */
 	private signalAudioStarted(): void {
-		if (this._isActorMode) {
-			if (!this._audioStartedThisTurn) {
-				this._audioStartedThisTurn = true;
-				this.runtimeOrchestrator?.runtime.tell('notification.audio_started', {}, 'notification');
-			}
-			return;
-		}
-		this.notificationQueue?.markAudioReceived();
+		this.notificationSink.audioStarted();
 	}
 
 	// --- TTS wiring (actor-mode only) ---
@@ -2682,18 +2673,8 @@ export class VoiceSession {
 			}
 			// Order matters: reset_audio FIRST (clears the gate), then interrupted
 			// (suppresses the next flush).
-			if (this._isActorMode) {
-				this._audioStartedThisTurn = false;
-				safeStep('notif.reset_audio', () =>
-					this.runtimeOrchestrator?.runtime.tell('notification.reset_audio', {}, 'notification'),
-				);
-				safeStep('notif.interrupted', () =>
-					this.runtimeOrchestrator?.runtime.tell('notification.interrupted', {}, 'notification'),
-				);
-			} else {
-				safeStep('notif.reset_audio', () => this.notificationQueue?.resetAudio());
-				safeStep('notif.interrupted', () => this.notificationQueue?.markInterrupted());
-			}
+			safeStep('notif.reset_audio', () => this.notificationSink.resetAudio());
+			safeStep('notif.interrupted', () => this.notificationSink.interrupted());
 			// Flush BEFORE turn.interrupted — as the former handleInterrupted() did.
 			safeStep('transcript.flush', () => this.transcriptManager.flush());
 			safeStep('publish.interrupted', () => {
@@ -2767,14 +2748,7 @@ export class VoiceSession {
 
 		// notification.turn_complete from the effective turn boundary. On an
 		// interrupted turn the prior notification.interrupted suppresses the flush.
-		if (this._isActorMode) {
-			this._audioStartedThisTurn = false;
-			safeStep('notif.turn_complete', () =>
-				this.runtimeOrchestrator?.runtime.tell('notification.turn_complete', {}, 'notification'),
-			);
-		} else {
-			safeStep('notif.turn_complete', () => this.notificationQueue?.onTurnComplete());
-		}
+		safeStep('notif.turn_complete', () => this.notificationSink.turnComplete());
 	}
 
 	/** Inject all active directives into the LLM's context to prevent behavioral drift. */
@@ -2800,14 +2774,8 @@ export class VoiceSession {
 		if (this.greetingInterruptGraceMs > 0 && !this._graceArmingLogged) {
 			this._greetingInFlight = true;
 		}
-		// Pre-greeting audio-gate reset: legacy queue.resetAudio() vs actor
-		// notification.reset_audio. In actor mode also clear the debounce flag.
-		if (this._isActorMode) {
-			this._audioStartedThisTurn = false;
-			this.runtimeOrchestrator?.runtime.tell('notification.reset_audio', {}, 'notification');
-		} else {
-			this.notificationQueue?.resetAudio();
-		}
+		// Pre-greeting audio-gate reset (clears the actor debounce too, via the sink).
+		this.notificationSink.resetAudio();
 
 		// Collapse memory facts + session directives + greeting into ONE
 		// sendContent call. Previously this fired two sendContent calls (memory
@@ -2858,19 +2826,7 @@ export class VoiceSession {
 
 		const label = msg.type === 'question' ? 'SUBAGENT QUESTION' : 'SUBAGENT UPDATE';
 		const priority = msg.blocking ? 'high' : 'normal';
-		if (this._isActorMode) {
-			this.runtimeOrchestrator?.runtime.tell(
-				'notification.publish',
-				{ label, text: msg.text, priority },
-				'notification',
-			);
-			return;
-		}
-		this.notificationQueue?.sendOrQueue(
-			[{ role: 'user', parts: [{ text: `[${label}]: ${msg.text}` }] }],
-			true,
-			{ priority },
-		);
+		this.notificationSink.publish(label, msg.text, priority);
 	}
 
 	private handleGroundingMetadata(metadata: Record<string, unknown>): void {
