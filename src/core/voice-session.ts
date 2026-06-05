@@ -73,8 +73,8 @@ import {
 import { SessionManager } from './session-manager.js';
 import { ToolCallRouter } from './tool-call-router.js';
 import { TranscriptManager } from './transcript-manager.js';
-import { Turn } from './turn.js';
-import type { TurnMatch, TurnSignalPurpose } from './turn.js';
+import { TurnManager } from './turn-manager.js';
+import type { Turn } from './turn.js';
 import { computeCacheHitRatio, deriveProviderItemId, deriveUsageSource } from './usage-helpers.js';
 
 /**
@@ -400,17 +400,14 @@ export class VoiceSession {
 	private memoryCacheManager?: MemoryCacheManager;
 	/** Latest `processKnowledgeBase` result for the active main agent (prompt slice + optional search tool metadata). */
 	private processedKnowledgeBase: ProcessedKnowledgeBase | null = null;
-	private turnId = 0;
-	/** Turn-lifecycle entity — the most recent framework turn (active or
-	 *  finalized). See dev_docs/framework/design-turn-lifecycle-refactor.md.
-	 *  Maintained in parallel with the legacy fields during the refactor;
-	 *  not yet read on the hot path. */
-	private currentTurn: Turn | null = null;
-	/** The turn before `currentTurn` — kept so late id-bearing signals for a
-	 *  just-finalized turn can still correlate after the next turn is born. */
-	private previousTurn: Turn | null = null;
-	/** Per-source monotonic sequence within the current model turn. */
-	private currentTurnUsageSequence: Map<string, number> = new Map();
+	/** Turn lifecycle — numeric counter, current/previous `Turn` pointers,
+	 *  per-turn usage sequence, finalized-input-turn set. `finalizeTurn` stays
+	 *  here but drives the counter through this unit. See
+	 *  dev_docs/framework/design-turn-lifecycle-refactor.md. */
+	private readonly turns = new TurnManager({
+		getActiveAgentName: () => this.agentRouter.activeAgent.name,
+		getActiveServerTurnId: () => this.transport.getActiveServerTurnId?.(),
+	});
 	private sttProvider?: STTProvider;
 	/** Resolved post-transport-construction from config.clientAudioInputRate
 	 *  (default: transport.audioFormat.inputSampleRate — the rate the
@@ -564,7 +561,6 @@ export class VoiceSession {
 	private readonly clientVad: ResolvedClientAudioVadConfig;
 	private lastGeminiRecognitionLoggedForSpeechEndMs = 0;
 	private lastInputTranscriptionLogText = '';
-	private finalizedInputTurnIds = new Set<number>();
 	private ownsClientTransport: boolean;
 	/** Margin (ms) added to the VAD-defer force-completion timeout. */
 	/** Default and floor (ms) for the TTS fallback-completion margin — estimate
@@ -594,7 +590,7 @@ export class VoiceSession {
 		// waiting for input. The callback captures `this` via closure and is only
 		// invoked at runtime (agentRouter is initialized before any transcript fires).
 		this.transcriptManager.onInputFinalized = (text) => {
-			this.finalizedInputTurnIds.add(this.turnId);
+			this.turns.markInputFinalized();
 			const activeId = this.interactionMode.getActiveToolCallId();
 			if (activeId) {
 				const session = this.agentRouter.getSubagentSession(activeId);
@@ -900,12 +896,12 @@ export class VoiceSession {
 			// Wire callbacks — turn-aware ordering protection.
 			// Accept results from the current turn or the immediately preceding turn.
 			// Batch STT providers fire results asynchronously (e.g., generateContent API call)
-			// which may complete after handleTurnComplete increments this.turnId. Using
-			// `turnId < this.turnId - 1` prevents dropping valid late results while still
-			// rejecting truly stale transcripts from 2+ turns ago.
+			// which may complete after handleTurnComplete advances the turn counter. Using
+			// `turnId < turns.staleInputCutoff` prevents dropping valid late results while
+			// still rejecting truly stale transcripts from 2+ turns ago.
 			this.sttProvider.onTranscript = (text, turnId) => {
-				if (turnId !== undefined && turnId < this.turnId - 1) return; // Drop stale results (2+ turns old)
-				if (turnId !== undefined && this.finalizedInputTurnIds.has(turnId)) return;
+				if (turnId !== undefined && turnId < this.turns.staleInputCutoff) return; // Drop stale results (2+ turns old)
+				if (turnId !== undefined && this.turns.isInputFinalized(turnId)) return;
 				// New user input ends the post-interrupt correction-skip window:
 				// the interrupted turn's trailing turnComplete is now a structural
 				// no-op, so it no longer clears _turnWasInterrupted.
@@ -987,11 +983,11 @@ export class VoiceSession {
 			}
 			// Native playback-end gate: a new model response begins clean.
 			this._nativeResponseDispatchedToolCall = false;
-			this.ensureCurrentTurn();
+			this.turns.ensureCurrent();
 			this.logProviderUserTurnRecognition('model/tool processing started');
 			if (this.sttProvider && !this._commitFiredForTurn) {
 				this._commitFiredForTurn = true;
-				this.sttProvider.commit(this.turnId);
+				this.sttProvider.commit(this.turns.numericId);
 			}
 		};
 
@@ -1000,7 +996,7 @@ export class VoiceSession {
 			this.ttsProvider = config.ttsProvider;
 			this.ttsGate = new ExternalTtsPlaybackGate({
 				onComplete: (turn, opts) => this.finalizeTurn(turn, opts),
-				getCurrentTurn: () => this.currentTurn,
+				getCurrentTurn: () => this.turns.current,
 				log: (msg) => this.log(msg),
 			});
 			this.wireTtsProvider();
@@ -1064,7 +1060,7 @@ export class VoiceSession {
 				minPlaybackRate: VoiceSession.MIN_PLAYBACK_RATE,
 				cancelResponse: (opts) => this.transport.cancelResponse?.(opts),
 				requestInterrupt: (source) => this.requestInterrupt(source),
-				getCurrentTurn: () => this.currentTurn,
+				getCurrentTurn: () => this.turns.current,
 				onComplete: (turn, opts) => this.finalizeTurn(turn, opts),
 				log: (msg) => this.log(msg),
 			});
@@ -1343,7 +1339,7 @@ export class VoiceSession {
 		this.transport.onTurnComplete = (serverTurnId) => this.handleTurnComplete(serverTurnId);
 		this.transport.onInterrupted = (serverTurnId) => this.handleInterrupted(serverTurnId);
 		this.transport.onOutputTranscription = (text) => {
-			this.ensureCurrentTurn();
+			this.turns.ensureCurrent();
 			this.transcriptManager.handleOutput(text);
 		};
 		this.transport.onSessionReady = (sessionId) => this.handleSetupComplete(sessionId);
@@ -1433,14 +1429,14 @@ export class VoiceSession {
 			let agentName: string;
 			if (source === 'openai.transcription') {
 				turnId = null;
-				agentName = this.activeTurn()?.agentName ?? this.agentRouter.activeAgent.name;
+				agentName = this.turns.active()?.agentName ?? this.agentRouter.activeAgent.name;
 			} else {
-				const r = this.resolveTurn(usage.serverTurnId, 'usage');
+				const r = this.turns.resolve(usage.serverTurnId, 'usage');
 				if (r.kind === 'match') {
 					turnId = r.turn.id;
 					agentName = r.turn.agentName;
 				} else {
-					turnId = `turn_${this.turnId + 1}`;
+					turnId = this.turns.nextLabel;
 					agentName = this.agentRouter.activeAgent.name;
 				}
 			}
@@ -1452,8 +1448,7 @@ export class VoiceSession {
 				});
 			}
 			const seqKey = `${turnId ?? 'no_turn'}:${source}`;
-			const sequence = (this.currentTurnUsageSequence.get(seqKey) ?? 0) + 1;
-			this.currentTurnUsageSequence.set(seqKey, sequence);
+			const sequence = this.turns.nextUsageSequence(seqKey);
 			const ratio = computeCacheHitRatio(usage, source);
 			this.eventBus.publish('realtime.usage', {
 				sessionId: this.config.sessionId,
@@ -1475,7 +1470,7 @@ export class VoiceSession {
 			} catch (e) {
 				this.log(`pre-attached onCacheBust threw: ${(e as Error).message}`);
 			}
-			const active = this.activeTurn();
+			const active = this.turns.active();
 			this.eventBus.publish('realtime.cache.bust', {
 				sessionId: this.config.sessionId,
 				agentName: active?.agentName ?? this.agentRouter.activeAgent.name,
@@ -1639,10 +1634,11 @@ export class VoiceSession {
 		// Fire turn end if a turn is still active. Teardown only does the
 		// lifecycle transition — NOT finalizeTurn (its completion effects, e.g.
 		// reinforceDirectives, must not run against a closing transport).
-		if (this.currentTurn?.finalize()) {
+		const teardownTurn = this.turns.current;
+		if (teardownTurn?.finalize()) {
 			this.eventBus.publish('turn.end', {
 				sessionId: this.config.sessionId,
-				turnId: this.currentTurn.id,
+				turnId: teardownTurn.id,
 			});
 		}
 
@@ -1854,7 +1850,7 @@ export class VoiceSession {
 		// needed. A native gate finalizes the captured _nativePlaybackTurn; a
 		// later provider onInterrupted resolves to this same finalized Turn and
 		// no-ops structurally.
-		this.finalizeTurn(this.nativeGate?.capturedTurn ?? this.currentTurn, { interrupted: true });
+		this.finalizeTurn(this.nativeGate?.capturedTurn ?? this.turns.current, { interrupted: true });
 	}
 
 	private logProviderUserTurnRecognition(reason: string): void {
@@ -1882,7 +1878,7 @@ export class VoiceSession {
 		// Idempotent — subsequent chunks no-op inside the class.
 		this.maybeArmGraceOnFirstAudio();
 
-		this.ensureCurrentTurn();
+		this.turns.ensureCurrent();
 		this.signalAudioStarted();
 		const raw = Buffer.from(data, 'base64');
 		if (this.nativePlaybackGatingActive) this.nativeGate?.noteAudioChunk(raw.length);
@@ -1925,7 +1921,7 @@ export class VoiceSession {
 
 		// Wire LLM text output → TTS provider + transcript
 		this.transport.onTextOutput = (text) => {
-			this.ensureCurrentTurn();
+			this.turns.ensureCurrent();
 			this.transcriptManager.handleOutput(text);
 			// Phase 3 dictation guard: when not in agent mode, drop model text
 			// before it reaches the TTS provider. Belt-and-braces backup for
@@ -2063,22 +2059,17 @@ export class VoiceSession {
 		// See dev_docs/framework/design-greeting-interrupt-grace.md §4.
 		this.transport.onSpeechStarted = () => {
 			const frameworkOwns = this.transport.capabilities.frameworkOwnsInterrupt === true;
+			const turn = this.turns.current;
 			if (gate.isSpeaking && gate.isLlmTextDone) {
 				if (!this.requestInterrupt('tts-onSpeechStarted-tail')) return;
 				if (frameworkOwns) this.transport.cancelResponse?.({});
-				this.finalizeTurn(this.currentTurn, { interrupted: true });
+				this.finalizeTurn(turn, { interrupted: true });
 				return;
 			}
-			if (
-				frameworkOwns &&
-				gate.isSpeaking &&
-				!gate.isLlmTextDone &&
-				this.currentTurn &&
-				!this.currentTurn.isFinalized
-			) {
+			if (frameworkOwns && gate.isSpeaking && !gate.isLlmTextDone && turn && !turn.isFinalized) {
 				if (!this.requestInterrupt('tts-onSpeechStarted-generation')) return;
 				this.transport.cancelResponse?.({});
-				this.finalizeTurn(this.currentTurn, { interrupted: true });
+				this.finalizeTurn(turn, { interrupted: true });
 			}
 		};
 
@@ -2226,11 +2217,11 @@ export class VoiceSession {
 
 		// Correlate the completion to its Turn. `stale` → a long-gone turn,
 		// ignore; `new` → a turn that produced no model output, birth it.
-		const r = this.resolveTurn(serverTurnId, 'completion');
+		const r = this.turns.resolve(serverTurnId, 'completion');
 		if (r.kind === 'stale') return;
-		const turn = r.kind === 'new' ? this.ensureCurrentTurn(serverTurnId) : r.turn;
+		const turn = r.kind === 'new' ? this.turns.ensureCurrent(serverTurnId) : r.turn;
 		// Drop a trailing / superseded completion before touching any gate state.
-		if (!turn || turn.isFinalized || turn !== this.currentTurn) return;
+		if (!turn || turn.isFinalized || turn !== this.turns.current) return;
 
 		// TTS turn gating: when TTS is active, defer turn completion until TTS finishes
 		if (this.ttsProvider && this.ttsGate) {
@@ -2339,7 +2330,7 @@ export class VoiceSession {
 		// uses the turn being completed and stale-drop rejects prior-turn results.
 		if (this.sttProvider) {
 			if (!this._commitFiredForTurn) {
-				safeStep('stt.commit', () => this.sttProvider?.commit(this.turnId));
+				safeStep('stt.commit', () => this.sttProvider?.commit(this.turns.numericId));
 			}
 			safeStep('stt.complete', () => this.sttProvider?.handleTurnComplete());
 			this._commitFiredForTurn = false;
@@ -2347,12 +2338,7 @@ export class VoiceSession {
 		this._turnWasInterrupted = opts.interrupted;
 
 		safeStep('transcript.flush', () => this.transcriptManager.flush());
-		this.turnId++;
-		for (const finalizedTurnId of this.finalizedInputTurnIds) {
-			if (finalizedTurnId < this.turnId - 1) {
-				this.finalizedInputTurnIds.delete(finalizedTurnId);
-			}
-		}
+		this.turns.advance();
 		this.log(`Turn complete: ${turn.id}`);
 		safeStep('publish.turn_end', () => {
 			this.eventBus.publish('turn.end', {
@@ -2364,9 +2350,7 @@ export class VoiceSession {
 
 		// Turn-bound usage sources reset per turn; non-turn-bound (`no_turn:*`)
 		// keep their session-scoped counter.
-		for (const k of [...this.currentTurnUsageSequence.keys()]) {
-			if (!k.startsWith('no_turn:')) this.currentTurnUsageSequence.delete(k);
-		}
+		this.turns.resetTurnScopedUsage();
 
 		// Notify the active agent (the agent active at finalization, as today).
 		const agent = this.agentRouter.activeAgent;
@@ -2458,9 +2442,9 @@ export class VoiceSession {
 		// long-gone turn is ignored; `new` (no turn / interrupt before any model
 		// output) births one via the no-turn net. The structural idempotency of
 		// finalizeTurn replaces the old trailing-interrupt / dedup-set guards.
-		const r = this.resolveTurn(serverTurnId, 'interrupt');
+		const r = this.turns.resolve(serverTurnId, 'interrupt');
 		if (r.kind === 'stale') return;
-		const turn = r.kind === 'new' ? this.ensureCurrentTurn(serverTurnId) : r.turn;
+		const turn = r.kind === 'new' ? this.turns.ensureCurrent(serverTurnId) : r.turn;
 		this.finalizeTurn(turn, { interrupted: true });
 	}
 
@@ -2513,87 +2497,6 @@ export class VoiceSession {
 					this.sessionManager.transitionTo('CLOSED');
 				});
 		}
-	}
-
-	/**
-	 * The current framework `Turn` only while it is *active* — `null` between
-	 * turns (`currentTurn` itself keeps pointing at the finalized turn for
-	 * late-signal correlation, so it must not be used for active-turn readers).
-	 */
-	private activeTurn(): Turn | null {
-		return this.currentTurn && !this.currentTurn.isFinalized ? this.currentTurn : null;
-	}
-
-	/**
-	 * Birth or return the current framework `Turn`. Called from every
-	 * model-output path; the first one to fire births and binds the turn, the
-	 * rest get the existing `currentTurn`. A `null` return means the signal is
-	 * trailing content of an already-finalized turn — the caller drops it.
-	 *
-	 * `explicitServerId` (a transport callback's own id) wins over the live
-	 * `getActiveServerTurnId()` accessor, which may have moved on.
-	 *
-	 * See dev_docs/framework/design-turn-lifecycle-refactor.md § Turn birth.
-	 */
-	private ensureCurrentTurn(explicitServerId?: number): Turn | null {
-		const cur = this.currentTurn;
-		const serverId = explicitServerId ?? this.transport.getActiveServerTurnId?.();
-
-		if (cur && !cur.isFinalized) {
-			if (serverId !== undefined) cur.bindServerTurnId(serverId);
-			return cur;
-		}
-
-		// currentTurn is finalized (or null): trailing content of the
-		// just-finalized turn, or a genuinely new server turn?
-		if (cur?.isFinalized && serverId !== undefined && cur.ownsServerTurn(serverId)) {
-			return null;
-		}
-
-		this.previousTurn = cur;
-		this.currentTurn = new Turn(`turn_${this.turnId + 1}`, this.agentRouter.activeAgent.name);
-		if (serverId !== undefined) this.currentTurn.bindServerTurnId(serverId);
-		return this.currentTurn;
-	}
-
-	/**
-	 * Map a transport completion/interrupt/usage signal to the `Turn` it
-	 * concerns — `match` (an existing turn), `new` (newer than any known, the
-	 * caller may birth one), or `stale` (already gone, ignore).
-	 *
-	 * See dev_docs/framework/design-turn-lifecycle-refactor.md
-	 * § Transport-signal correlation.
-	 */
-	private resolveTurn(serverTurnId: number | undefined, purpose: TurnSignalPurpose): TurnMatch {
-		const cur = this.currentTurn;
-		// Rule 1 — no turn yet.
-		if (cur === null) return { kind: 'new' };
-		// Rule 2 — id-less transports (OpenAI Realtime, mocks).
-		if (serverTurnId === undefined) {
-			if (purpose === 'usage') return { kind: 'match', turn: cur };
-			if (!cur.isFinalized) return { kind: 'match', turn: cur };
-			// A lifecycle signal that survives after the current turn finalized is
-			// the first sign of a new no-model-output response (id-less adapters
-			// must suppress stale cancelled callbacks).
-			return { kind: 'new' };
-		}
-		// Rule 3 — the current turn owns this id.
-		if (cur.ownsServerTurn(serverTurnId)) return { kind: 'match', turn: cur };
-		// Rule 4 — a late signal for the just-finalized turn.
-		if (this.previousTurn?.ownsServerTurn(serverTurnId)) {
-			return { kind: 'match', turn: this.previousTurn };
-		}
-		// Rule 5 — active turn that owns no id yet: bind and claim it.
-		if (!cur.isFinalized && !cur.hasServerTurnId) {
-			cur.bindServerTurnId(serverTurnId);
-			return { kind: 'match', turn: cur };
-		}
-		// Rule 6 — finalized turn that owns no id: a no-model-output turn, so an
-		// incoming id-bearing signal is the first sign of a newer turn.
-		if (cur.isFinalized && !cur.hasServerTurnId) return { kind: 'new' };
-		// Rules 7/8 — newer than any known id → new; otherwise stale.
-		const latest = cur.latestServerTurnId;
-		return latest !== null && serverTurnId > latest ? { kind: 'new' } : { kind: 'stale' };
 	}
 
 	private handleResumptionUpdate(handle: string, resumable: boolean): void {
@@ -2743,7 +2646,7 @@ export class VoiceSession {
 	 *  steps complete.
 	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §7.5. */
 	private async preEmptForDirectInput(): Promise<void> {
-		const turn = this.currentTurn;
+		const turn = this.turns.current;
 		// Always await the cancel: when no response is in flight, cancelResponse
 		// returns Promise.resolve() (true no-op). When in flight, the
 		// {waitForDone:true} promise races a 2000 ms timeout so we never hang.
