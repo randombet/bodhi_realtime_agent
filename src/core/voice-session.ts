@@ -3288,48 +3288,60 @@ export class VoiceSession {
 		this.reportError('llm-transport', err);
 	}
 
+	/** Force a reconnect using the proven resumption-handle + buffering path.
+	 *  Shared by the transport-close handler and the response watchdog.
+	 *  @param reason short tag for logs
+	 *  @param elicit when true, after a successful reconnect, nudge the model to
+	 *    respond (used by the watchdog — a stalled turn has no pending generation). */
+	private triggerReconnect(reason: string, elicit = false): void {
+		if (this.sessionManager.state !== 'ACTIVE') return;
+		const handle = this.sessionManager.resumptionHandle;
+		if (handle && this.reconnectAttempts < VoiceSession.MAX_RECONNECT_ATTEMPTS) {
+			const attempt = this.reconnectAttempts++;
+			const delay = VoiceSession.RECONNECT_BACKOFF_MS[attempt] ?? 4000;
+			this.log(
+				`Reconnect attempt ${attempt + 1}/${VoiceSession.MAX_RECONNECT_ATTEMPTS} in ${delay}ms (reason=${reason})`,
+			);
+			this.sessionManager.transitionTo('RECONNECTING');
+			this.clientTransport.startBuffering();
+			setTimeout(() => {
+				this.transport
+					.reconnect({
+						resumptionHandle: handle,
+						conversationHistory: this.conversationContext.toReplayContent(),
+					})
+					.then(() => {
+						const buffered = this.clientTransport.stopBuffering();
+						for (const chunk of buffered) {
+							this.transport.sendAudio(chunk.toString('base64'));
+						}
+						this.sessionManager.transitionTo('ACTIVE');
+						this.log('Reconnect complete; session ACTIVE');
+						if (elicit) this.elicitModelResponse(reason);
+					})
+					.catch((err) => {
+						this.clientTransport.stopBuffering();
+						this.reportError('reconnect', err);
+						this.sessionManager.transitionTo('CLOSED');
+					});
+			}, delay);
+		} else {
+			if (this.reconnectAttempts >= VoiceSession.MAX_RECONNECT_ATTEMPTS) {
+				this.log(
+					`Reconnect limit reached (${VoiceSession.MAX_RECONNECT_ATTEMPTS} attempts), giving up`,
+				);
+			}
+			this.sessionManager.transitionTo('CLOSED');
+		}
+	}
+
+	/** Best-effort post-reconnect generation nudge. Filled in Task 4. */
+	private elicitModelResponse(_reason: string): void {}
+
 	private handleTransportClose(code?: number, reason?: string): void {
 		const detail = code != null ? ` code=${code}${reason ? ` reason="${reason}"` : ''}` : '';
 		this.log(`Transport closed (state=${this.sessionManager.state}${detail})`);
-		if (this.sessionManager.state === 'ACTIVE') {
-			const handle = this.sessionManager.resumptionHandle;
-			if (handle && this.reconnectAttempts < VoiceSession.MAX_RECONNECT_ATTEMPTS) {
-				const attempt = this.reconnectAttempts++;
-				const delay = VoiceSession.RECONNECT_BACKOFF_MS[attempt] ?? 4000;
-				this.log(
-					`Reconnect attempt ${attempt + 1}/${VoiceSession.MAX_RECONNECT_ATTEMPTS} in ${delay}ms`,
-				);
-				this.sessionManager.transitionTo('RECONNECTING');
-				this.clientTransport.startBuffering();
-				setTimeout(() => {
-					this.transport
-						.reconnect({
-							resumptionHandle: handle,
-							conversationHistory: this.conversationContext.toReplayContent(),
-						})
-						.then(() => {
-							const buffered = this.clientTransport.stopBuffering();
-							for (const chunk of buffered) {
-								this.transport.sendAudio(chunk.toString('base64'));
-							}
-							this.sessionManager.transitionTo('ACTIVE');
-							this.log('Reconnect complete; session ACTIVE');
-						})
-						.catch((err) => {
-							this.clientTransport.stopBuffering();
-							this.reportError('reconnect', err);
-							this.sessionManager.transitionTo('CLOSED');
-						});
-				}, delay);
-			} else {
-				if (this.reconnectAttempts >= VoiceSession.MAX_RECONNECT_ATTEMPTS) {
-					this.log(
-						`Reconnect limit reached (${VoiceSession.MAX_RECONNECT_ATTEMPTS} attempts), giving up`,
-					);
-				}
-				this.sessionManager.transitionTo('CLOSED');
-			}
-		}
+		this.triggerReconnect('transport-close');
 	}
 
 	private reportError(component: string, error: unknown): void {
