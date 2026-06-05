@@ -27,6 +27,10 @@ export interface VadEvents {
 	/** A speech segment ended (outcome ≠ `'none'`), after its state was torn
 	 *  down. (Session resolves any deferred playback completion.) */
 	onSegmentResolved(): void;
+	/** A speech segment completed with a real `'completed'` outcome (≥ min
+	 *  speech) — the user finished a turn. Fires only on `'completed'`, never on
+	 *  `'ignored'`. Optional. (Session arms the response watchdog.) */
+	onUserTurnCompleted?(): void;
 }
 
 /**
@@ -145,6 +149,7 @@ export class ClientVadDetector {
 		this.log(
 			`[Latency] User voice input completed (client audio VAD; reason=${reason}; speechDuration=${this._lastSpeechDurationMs}ms; silenceObserved=${silenceObservedMs}ms)`,
 		);
+		this.events.onUserTurnCompleted?.();
 		return 'completed';
 	}
 

@@ -46,6 +46,7 @@ describe('ClientVadDetector', () => {
 			onSpeechStart: vi.fn(),
 			onVoicedFrame: vi.fn(),
 			onSegmentResolved: vi.fn(),
+			onUserTurnCompleted: vi.fn(),
 		};
 		detector = new ClientVadDetector(events, vi.fn(), () => now);
 	});
@@ -71,6 +72,7 @@ describe('ClientVadDetector', () => {
 
 		expect(detector.isSpeechActive).toBe(false);
 		expect(events.onSegmentResolved).toHaveBeenCalledTimes(1);
+		expect(events.onUserTurnCompleted).toHaveBeenCalledTimes(1); // fires on 'completed'
 		expect(detector.lastSpeechCompletedMs).toBe(200);
 		expect(detector.lastSpeechDurationMs).toBe(200);
 	});
@@ -84,6 +86,7 @@ describe('ClientVadDetector', () => {
 
 		expect(detector.isSpeechActive).toBe(false);
 		expect(events.onSegmentResolved).toHaveBeenCalledTimes(1); // fires regardless
+		expect(events.onUserTurnCompleted).not.toHaveBeenCalled(); // never on 'ignored'
 		expect(detector.lastSpeechCompletedMs).toBe(0); // not recorded on 'ignored'
 	});
 

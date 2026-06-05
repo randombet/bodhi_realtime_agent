@@ -602,6 +602,14 @@ export class GeminiLiveTransport implements LLMTransport {
 		// Gemini auto-generates after sendToolResponse and sendClientContent
 	}
 
+	/** Re-elicit a response from the resumed/existing server context with no new
+	 *  content — a bare `turnComplete`. Used by the framework's response watchdog
+	 *  after a reconnect. No-op if the session is not connected. */
+	elicitResponse(): void {
+		if (!this.session) return;
+		this.session.sendClientContent({ turns: [], turnComplete: true });
+	}
+
 	/** No-op for V1 — server VAD only. */
 	commitAudio(): void {}
 
