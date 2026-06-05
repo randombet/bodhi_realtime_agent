@@ -54,9 +54,9 @@ import { ConversationContext } from './conversation-context.js';
 import { ConversationHistoryWriter } from './conversation-history-writer.js';
 import { DirectiveManager } from './directive-manager.js';
 import { EventBus } from './event-bus.js';
+import { GreetingController } from './greeting-controller.js';
 import { HooksManager } from './hooks.js';
 import { InteractionModeManager } from './interaction-mode.js';
-import { InterruptGraceWindow } from './interrupt-grace-window.js';
 import { MemoryCacheManager } from './memory-cache-manager.js';
 import { MultiplexConversationHistoryStore } from './multiplex-conversation-history-store.js';
 import {
@@ -437,17 +437,12 @@ export class VoiceSession {
 	 *  (`!capabilities.playbackGatedTurnComplete`). Resolved once in the
 	 *  constructor. See design-playback-end-gating-openai-native.md. */
 	private nativePlaybackGatingActive = false;
-	/** Pass-1 of greeting-grace resolution (§5): caller override captured in
-	 *  the constructor. `undefined` means "no caller override — inherit from
-	 *  transport capability at finalize time". Resolved+clamped here so an
-	 *  invalid value doesn't survive to pass 2. */
-	private _overrideGraceMs: number | undefined;
-	/** Pass-2-final greeting interrupt grace window (ms). `0` disables the
-	 *  window. Finalized in `handleSetupComplete()` against the transport's
-	 *  post-connect capabilities; `0` until then. Phase A: only the
-	 *  resolution + validation log; Phase C wires the runtime effects.
-	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §5. */
-	private greetingInterruptGraceMs = 0;
+	/** Greeting send + greeting interrupt-grace state (grace window,
+	 *  greeting-in-flight gate, first-audio arming, per-client reset).
+	 *  VoiceSession delegates `sendGreeting`, `finalizeGreetingInterruptGrace`,
+	 *  `maybeArmGraceOnFirstAudio`, `requestInterrupt`, `shouldDropOutbound`,
+	 *  and `resetForClientConnected` to it. See `greeting-controller.ts`. */
+	private greeting!: GreetingController;
 	/** Per-session single-flight FIFO chaining direct-user-input bodies
 	 *  (`handleTextInput`, `injectTranscript`, `injectDictationBuffer`). Each
 	 *  body awaits `cancelResponse({ waitForDone: true })` then finalizes any
@@ -457,29 +452,6 @@ export class VoiceSession {
 	 *  `conversation_already_has_active_response`.
 	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §7.5. */
 	private _directInputChain: Promise<void> = Promise.resolve();
-	/** Per-session interrupt grace window. Constructed in
-	 *  `handleSetupComplete()` once pass-2 validation finalizes
-	 *  `this.greetingInterruptGraceMs`. Until then, holds a windowMs=0
-	 *  placeholder whose `isActive()` always returns `false`, so the gate
-	 *  is structurally inert before connect resolution. Re-armed by
-	 *  `maybeArmGraceOnFirstAudio()` on the first assistant audio chunk;
-	 *  reset on `handleClientConnected()`.
-	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §4, §6. */
-	private _grace: InterruptGraceWindow = new InterruptGraceWindow(0);
-	/** One-shot gate for the `[Latency] Interrupt grace window armed (Nms)`
-	 *  log line — only fires on the arming audio chunk, not on subsequent
-	 *  idempotent `onAudioStart()` calls. Cleared in `handleClientConnected`
-	 *  alongside `_grace.reset()`. */
-	private _graceArmingLogged = false;
-	/** True between session-ready (`handleSetupComplete`) and the first
-	 *  assistant-audio chunk (where `_grace` then takes over). Extends the
-	 *  mic-drop window backwards in time so user speech sent in the gap
-	 *  between session-ready and first-audio doesn't (a) accumulate in the
-	 *  provider's input buffer and (b) get auto-committed by server VAD
-	 *  before the greeting response completes. Only set when the resolved
-	 *  `greetingInterruptGraceMs > 0`.
-	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §6, §8. */
-	private _greetingInFlight = false;
 	/** Native-audio playback-end gate (the OpenAI native path). Present for every
 	 *  native (non-TTS) session — its barge-in runs regardless of gating — but
 	 *  only *arms* when `nativePlaybackGatingActive`. Owns the former `_native*`
@@ -819,7 +791,7 @@ export class VoiceSession {
 			isSessionActive: () => this.sessionManager.isActive,
 			isRtcAudioReady: () => this.directRtcChannel?.isRtcAudioReady ?? false,
 			getMode: () => this.internalMode,
-			shouldDropOutbound: () => this._greetingInFlight || this._grace.isActive(),
+			shouldDropOutbound: () => this.greeting.shouldDropOutbound(),
 			routeExternalAudio: (data) => {
 				if (this.agentRouter.activeAgent.audioMode !== 'external') return false;
 				if (this.externalAudioHandler) {
@@ -1096,11 +1068,22 @@ export class VoiceSession {
 			!this.ttsPipeline &&
 			!this.transport.capabilities.playbackGatedTurnComplete;
 
-		// Greeting-grace pass 1: clamp the caller override into the private
-		// field; finalize against transport capabilities + cancelResponse
-		// availability in handleSetupComplete() (pass 2), BEFORE sendGreeting()
-		// can fire. See design-greeting-interrupt-grace.md §5.
-		this._overrideGraceMs = clampGraceMs(config.greetingInterruptGraceMs);
+		// Greeting send + greeting interrupt-grace controller. Pass 1 clamps the
+		// caller override here; pass 2 (finalizeGreetingInterruptGrace) finalizes
+		// against transport capabilities + cancelResponse availability in
+		// handleSetupComplete(), BEFORE sendGreeting() can fire.
+		// See design-greeting-interrupt-grace.md §5.
+		this.greeting = new GreetingController(
+			{
+				transport: this.transport,
+				getActiveAgent: () => this.agentRouter.activeAgent,
+				getMemoryFacts: () => this.memoryCacheManager?.facts ?? [],
+				getSessionSuffix: () => this.directiveManager.getSessionSuffix(),
+				resetNotificationAudio: () => this.notificationSink.resetAudio(),
+				log: (msg) => this.log(msg),
+			},
+			{ overrideGraceMs: clampGraceMs(config.greetingInterruptGraceMs) },
+		);
 
 		// Native (non-TTS) sessions get the native playback gate. Its barge-in is
 		// installed for every native session (the !ttsProvider sibling of
@@ -1817,7 +1800,7 @@ export class VoiceSession {
 
 		// Send the new agent's greeting if configured
 		if (this.clientConnected) {
-			this.sendGreeting();
+			this.greeting.sendGreeting();
 		}
 	}
 
@@ -2038,94 +2021,30 @@ export class VoiceSession {
 		}
 		// Send greeting after memory/directives are loaded (no blocking of connect)
 		if (this.clientConnected) {
-			this._memoryReadyPromise.then(() => this.sendGreeting());
+			this._memoryReadyPromise.then(() => this.greeting.sendGreeting());
 		}
 	}
 
-	/** Pass 2 of greeting-grace resolution (§5). Reads the transport's
-	 *  now-finalized capabilities (`greetingInterruptGraceMs`,
-	 *  `frameworkOwnsInterrupt`) and the presence of `cancelResponse`;
-	 *  combines with the caller override stored in pass 1; validates;
-	 *  publishes the effective value to `this.greetingInterruptGraceMs`.
-	 *  Phase A: validation log only — Phase C wires the runtime effects. */
+	/** Pass 2 of greeting-grace resolution (§5). Thin delegator —
+	 *  see `GreetingController.finalizeGreetingInterruptGrace`. */
 	private finalizeGreetingInterruptGrace(): void {
-		const transportDefault =
-			clampGraceMs(this.transport.capabilities.greetingInterruptGraceMs) ?? 0;
-		const requestedGraceMs = this._overrideGraceMs ?? transportDefault;
-		if (requestedGraceMs <= 0) {
-			this.greetingInterruptGraceMs = 0;
-			return;
-		}
-		const frameworkOwns = this.transport.capabilities.frameworkOwnsInterrupt === true;
-		const hasCancelResponse = typeof this.transport.cancelResponse === 'function';
-		if (!frameworkOwns || !hasCancelResponse) {
-			const reason = !frameworkOwns
-				? 'frameworkOwnsInterrupt is not true (provider auto-cancel still wins)'
-				: 'cancelResponse is not implemented on the transport';
-			this.log(
-				`[WARN] greetingInterruptGraceMs=${requestedGraceMs}ms requested but ${reason}. Disabling grace for this session.`,
-			);
-			this.greetingInterruptGraceMs = 0;
-			return;
-		}
-		this.greetingInterruptGraceMs = requestedGraceMs;
-		this.log(`[Latency] greetingInterruptGraceMs resolved to ${this.greetingInterruptGraceMs}ms`);
-		// Construct the runtime grace window with the finalized length.
-		// Arming happens later, on the first assistant audio chunk.
-		this._grace = new InterruptGraceWindow(this.greetingInterruptGraceMs);
-		this._graceArmingLogged = false;
-		// `_greetingInFlight` is set by `sendGreeting()` at the actual send
-		// time, not here. Setting it at session-ready would be wiped by
-		// `handleClientConnected` (which runs between session-ready and
-		// sendGreeting in the common "client connects later" path) — and
-		// before `startMic` runs there are no mic frames to gate anyway.
-		// See dev_docs/framework/design-greeting-interrupt-grace.md §6, §8.
+		this.greeting.finalizeGreetingInterruptGrace();
 	}
 
-	/** Idempotent arming hook called from every assistant-audio chunk site
-	 *  (native `handleAudioOutput`, external TTS `tts.onAudio`). Arms the
-	 *  window on the first chunk via the class's own idempotency; emits the
-	 *  one-shot armed-log; and asks the transport to clear any pre-arming
-	 *  echo residue from its input buffer (no-op on transports without
-	 *  `clearInputAudio`).
-	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §6, §8. */
+	/** Idempotent first-audio grace arming. Thin delegator — see
+	 *  `GreetingController.maybeArmGraceOnFirstAudio`. Called from every
+	 *  assistant-audio chunk site (native `handleAudioOutput`, external TTS). */
 	private maybeArmGraceOnFirstAudio(): void {
-		if (this.greetingInterruptGraceMs <= 0) return;
-		const wasActive = this._grace.isActive();
-		this._grace.onAudioStart();
-		if (!wasActive && this._grace.isActive() && !this._graceArmingLogged) {
-			this._graceArmingLogged = true;
-			// Hand off pre-audio mic-drop to the grace window. (The two flags
-			// are deliberately overlapped during the same call: the gate in
-			// routeAudioToAgent ORs them, and the order of assignment doesn't
-			// matter — mic frames sent in this tick are still dropped.)
-			this._greetingInFlight = false;
-			this.log(`[Latency] Interrupt grace window armed (${this.greetingInterruptGraceMs}ms)`);
-			// Belt-and-suspenders: discard any provider input-buffer residue.
-			// With `_greetingInFlight` set in `sendGreeting()`, the gate has
-			// been active for the entire greeting-send → first-audio window,
-			// so the buffer should already be empty. The only frames that
-			// could still be in the buffer are pre-`sendGreeting` (i.e.
-			// WS-connect → session-ready, plus the brief microtask gap into
-			// sendGreeting via `_memoryReadyPromise.then`) — typically empty
-			// because `startMic` hasn't started capturing yet. Safe to
-			// discard either way.
-			this.transport.clearInputAudio?.();
-		}
+		this.greeting.maybeArmGraceOnFirstAudio();
 	}
 
-	/** Returns `true` if the caller should proceed with the interrupt;
-	 *  `false` (and logs) if the grace is currently suppressing it. Wraps
-	 *  `_grace.isActive()` with the session's log channel.
-	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §4. */
+	/** Returns `true` if the caller should proceed with the interrupt; `false`
+	 *  (and logs) if the greeting grace is currently suppressing it. Thin
+	 *  delegator — see `GreetingController.requestInterrupt`. Kept on
+	 *  VoiceSession so its many injection sites (gates, tts, vad) are
+	 *  untouched. */
 	private requestInterrupt(source: string): boolean {
-		if (this._grace.isActive()) {
-			this.log(
-				`[Latency] interrupt suppressed (grace, ${this._grace.remainingMs()}ms remaining; src=${source})`,
-			);
-			return false;
-		}
-		return true;
+		return this.greeting.requestInterrupt(source);
 	}
 
 	/** Start STT when session becomes ACTIVE (agent ready). Fire-and-forget. */
@@ -2316,52 +2235,6 @@ export class VoiceSession {
 		this.transport.sendContent([{ role: 'user', text }], true);
 	}
 
-	/** Send the active agent's greeting prompt to the LLM to trigger a spoken greeting. */
-	private sendGreeting(): void {
-		const agent = this.agentRouter.activeAgent;
-		if (!agent.greeting) {
-			this._greetingInFlight = false;
-			return;
-		}
-		this.log(`Sending greeting for agent "${agent.name}"`);
-		// The effective pre-audio gate must start at the actual greeting send,
-		// not only at setup-complete: in the common ordering where the LLM is
-		// ready before the browser connects, handleClientConnected resets the
-		// per-client grace state immediately before scheduling this greeting.
-		if (this.greetingInterruptGraceMs > 0 && !this._graceArmingLogged) {
-			this._greetingInFlight = true;
-		}
-		// Pre-greeting audio-gate reset (clears the actor debounce too, via the sink).
-		this.notificationSink.resetAudio();
-
-		// Collapse memory facts + session directives + greeting into ONE
-		// sendContent call. Previously this fired two sendContent calls (memory
-		// first with turnComplete: true, then the greeting), which created two
-		// separate response.create on framework-owned interruption (and also
-		// risked racing two active responses on OpenAI Realtime — see
-		// `conversation_already_has_active_response`). Combining keeps the
-		// grace-window invariant "first audio = greeting" intact.
-		// See dev_docs/framework/design-greeting-interrupt-grace.md §6.
-		const cachedFacts = this.memoryCacheManager?.facts ?? [];
-		const memoryPrefix =
-			cachedFacts.length > 0
-				? `[MEMORY — what you already know about this user from previous sessions]\n${cachedFacts
-						.map((f) => `- ${f.content}`)
-						.join('\n')}\n\n`
-				: '';
-		if (cachedFacts.length > 0) {
-			this.log(`Injected ${cachedFacts.length} memory facts`);
-		}
-
-		// Prepend session directives so the greeting response respects user preferences (e.g. pacing)
-		const directiveSuffix = this.directiveManager.getSessionSuffix();
-		const greetingBody = directiveSuffix
-			? `${directiveSuffix}\n\n${agent.greeting}`
-			: agent.greeting;
-		const greetingText = `${memoryPrefix}${greetingBody}`;
-		this.transport.sendContent([{ role: 'user', text: greetingText }], true);
-	}
-
 	private handleInterrupted(serverTurnId?: number): void {
 		this.reconnector.disarmResponseWatchdog();
 		// Correlate the interrupt to its Turn. A `stale` interrupt for a
@@ -2493,11 +2366,7 @@ export class VoiceSession {
 		// audio chunk armed — leaking the prior session's grace into a
 		// different audio context.
 		// See dev_docs/framework/design-greeting-interrupt-grace.md §6.
-		this._grace.reset();
-		this._graceArmingLogged = false;
-		// Don't leak greeting-in-flight state into the new client session.
-		// The next sendGreeting (if any) will re-set it.
-		this._greetingInFlight = false;
+		this.greeting.resetForClientConnected();
 		const transportInfo = describeClientTransport(this.config.clientMedia);
 
 		// Send audio format config so the client can negotiate correct sample rates
@@ -2523,7 +2392,7 @@ export class VoiceSession {
 
 		this.behaviorManager?.sendCatalog();
 		if (this.sessionManager.isActive) {
-			this._memoryReadyPromise.then(() => this.sendGreeting());
+			this._memoryReadyPromise.then(() => this.greeting.sendGreeting());
 		}
 	}
 
