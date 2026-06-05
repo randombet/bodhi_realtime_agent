@@ -64,6 +64,7 @@ import {
 	LegacyNotificationSink,
 	type NotificationSink,
 } from './notification-sink.js';
+import { NativeAudioPlaybackGate } from './playback-gate.js';
 import { SessionManager } from './session-manager.js';
 import { ToolCallRouter } from './tool-call-router.js';
 import { TranscriptManager } from './transcript-manager.js';
@@ -466,22 +467,11 @@ export class VoiceSession {
 	 *  `greetingInterruptGraceMs > 0`.
 	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §6, §8. */
 	private _greetingInFlight = false;
-	/** Native-audio playback cursor — wall-clock (ms) when the current native
-	 *  turn's buffered audio is estimated to finish playing. `0` = the current
-	 *  turn has produced no native audio yet. Reset at each turn boundary. */
-	private _nativeEstimatedPlaybackEndMs = 0;
-	/** Per-turn `playbackId` for native `audio.done` / `playback.ended`
-	 *  correlation. Session-monotonic — incremented on the first native audio
-	 *  chunk of a turn and on gate teardown; never reset to `0`. */
-	private _nativePlaybackId = 0;
-	/** True while a native turn's completion is deferred pending playback end. */
-	private _nativePlaybackPending = false;
-	/** Native playback fallback timer — armed at `handleTurnComplete`. */
-	private _nativePlaybackTimer?: ReturnType<typeof setTimeout>;
-	/** The `Turn` captured when the native gate is armed — finalized when the
-	 *  gate completes (clean or interrupted), so a later `currentTurn` change
-	 *  cannot misdirect the completion. */
-	private _nativePlaybackTurn: Turn | null = null;
+	/** Native-audio playback-end gate (the OpenAI native path). Present for every
+	 *  native (non-TTS) session — its barge-in runs regardless of gating — but
+	 *  only *arms* when `nativePlaybackGatingActive`. Owns the former `_native*`
+	 *  timer/pending/turn/cursor/id state. See `playback-gate.ts`. */
+	private nativeGate?: NativeAudioPlaybackGate;
 	/** Per-response flag: true once the framework dispatches tool calls for the
 	 *  current model response. Cleared at each response start
 	 *  (`onModelTurnStart`); read by `handleTurnComplete` so the native gate
@@ -1105,11 +1095,22 @@ export class VoiceSession {
 		// can fire. See design-greeting-interrupt-grace.md §5.
 		this._overrideGraceMs = clampGraceMs(config.greetingInterruptGraceMs);
 
-		// Native sessions install the native barge-in path — the !ttsProvider
-		// sibling of wireTtsProvider(). Harmless when gating is off (the handler
-		// only acts while _nativePlaybackPending, which the gate alone sets).
+		// Native (non-TTS) sessions get the native playback gate. Its barge-in is
+		// installed for every native session (the !ttsProvider sibling of
+		// wireTtsProvider); it only *arms* when nativePlaybackGatingActive.
 		if (!this.ttsProvider) {
-			this.wireNativeBargeIn();
+			this.nativeGate = new NativeAudioPlaybackGate({
+				audioFormat: this.transport.audioFormat,
+				frameworkOwnsInterrupt: this.transport.capabilities.frameworkOwnsInterrupt === true,
+				fallbackMarginMs: this.ttsPlaybackFallbackMarginMs,
+				minPlaybackRate: VoiceSession.MIN_PLAYBACK_RATE,
+				cancelResponse: (opts) => this.transport.cancelResponse?.(opts),
+				requestInterrupt: (source) => this.requestInterrupt(source),
+				getCurrentTurn: () => this.currentTurn,
+				onComplete: (turn, opts) => this.finalizeTurn(turn, opts),
+				log: (msg) => this.log(msg),
+			});
+			this.nativeGate.installBargeIn(this.transport);
 		}
 
 		// Forward GUI events from EventBus to the client as JSON text frames
@@ -1629,8 +1630,11 @@ export class VoiceSession {
 		await this.whisperProvider?.stop().catch(() => undefined);
 		this.ttsClearTimers();
 		// close() bypasses finalizeTurn — tear down the native gate directly so
-		// no _nativePlaybackTimer outlives the session.
-		if (this.nativePlaybackGatingActive) this.clearNativePlaybackGate();
+		// no native playback timer outlives the session.
+		if (this.nativePlaybackGatingActive) {
+			this.nativeGate?.clear();
+			this._ttsPlaybackEndedPending = null;
+		}
 		await this.ttsProvider?.stop();
 		if (this.runtimeOrchestrator) {
 			await this.runtimeOrchestrator.stop();
@@ -1834,7 +1838,7 @@ export class VoiceSession {
 		// needed. A native gate finalizes the captured _nativePlaybackTurn; a
 		// later provider onInterrupted resolves to this same finalized Turn and
 		// no-ops structurally.
-		this.finalizeTurn(this._nativePlaybackTurn ?? this.currentTurn, { interrupted: true });
+		this.finalizeTurn(this.nativeGate?.capturedTurn ?? this.currentTurn, { interrupted: true });
 	}
 
 	private logProviderUserTurnRecognition(reason: string): void {
@@ -1865,7 +1869,7 @@ export class VoiceSession {
 		this.ensureCurrentTurn();
 		this.signalAudioStarted();
 		const raw = Buffer.from(data, 'base64');
-		if (this.nativePlaybackGatingActive) this.noteNativeAudioChunk(raw.length);
+		if (this.nativePlaybackGatingActive) this.nativeGate?.noteAudioChunk(raw.length);
 		// Telephony mode: transport emits G.711 μ-law on the wire; client
 		// transports (web RTC, mic playback) expect PCM. Decode at this seam
 		// using the OUTPUT-side encoding (input encoding may differ on mixed
@@ -1874,27 +1878,6 @@ export class VoiceSession {
 		const outEnc = this.transport.audioFormat.outputEncoding ?? this.transport.audioFormat.encoding;
 		const buffer: Buffer = outEnc === 'pcmu' ? decodeMulawToPcm(raw) : raw;
 		this.clientTransport.sendAudioToClient(buffer);
-	}
-
-	/**
-	 * Advance the native-audio playback cursor by one chunk and bump the
-	 * `playbackId` on the turn's first chunk. `byteLength` is the transport's
-	 * pre-decode output byte count; duration is derived from the output-side
-	 * `audioFormat`. The `max(cursor, now)` recurrence absorbs any mid-turn
-	 * stall (the cursor cannot run ahead of wall-clock); `/ MIN_PLAYBACK_RATE`
-	 * widens the estimate so a slightly-slow client cannot have the fallback
-	 * pre-empt its real `playback.ended`.
-	 * See dev_docs/framework/design-playback-end-gating-openai-native.md.
-	 */
-	private noteNativeAudioChunk(byteLength: number): void {
-		const fmt = this.transport.audioFormat;
-		const bytesPerSample = (fmt.outputBitDepth ?? fmt.bitDepth) === 8 ? 1 : 2;
-		const channels = fmt.channels ?? 1;
-		const chunkMs = (byteLength / (fmt.outputSampleRate * channels * bytesPerSample)) * 1000;
-		if (this._nativeEstimatedPlaybackEndMs === 0) this._nativePlaybackId++;
-		this._nativeEstimatedPlaybackEndMs =
-			Math.max(this._nativeEstimatedPlaybackEndMs, Date.now()) +
-			chunkMs / VoiceSession.MIN_PLAYBACK_RATE;
 	}
 
 	/**
@@ -1910,59 +1893,6 @@ export class VoiceSession {
 	// --- TTS wiring (actor-mode only) ---
 
 	/** Wire TTSProvider callbacks and override transport callbacks for text mode. */
-	/**
-	 * Native-session barge-in setup — the `!ttsProvider` sibling of
-	 * `wireTtsProvider()`. Installs a chained `onSpeechStarted` that interrupts a
-	 * playback-pending native turn (the post-`response.done` window the
-	 * provider's own interrupt path no longer covers). Chaining preserves any
-	 * handler a pre-configured injected transport already attached.
-	 * See dev_docs/framework/design-playback-end-gating-openai-native.md §7.
-	 */
-	private wireNativeBargeIn(): void {
-		const prevSpeechStarted = this.transport.onSpeechStarted;
-		this.transport.onSpeechStarted = () => {
-			try {
-				prevSpeechStarted?.();
-			} catch (e) {
-				this.log(`pre-attached onSpeechStarted threw: ${(e as Error).message}`);
-			}
-			// Skip the framework-owned actuation entirely in provider-owned
-			// mode (the transport's speech_started handler already truncates
-			// locally + fires onInterrupted, which the existing handleInterrupted
-			// path drives). Without this guard we'd double-actuate in legacy
-			// mode. See dev_docs/framework/design-greeting-interrupt-grace.md §4.
-			if (this.transport.capabilities.frameworkOwnsInterrupt !== true) {
-				// Legacy: preserve pre-design behaviour — the native gate's tail
-				// path still finalizes the playback-pending turn.
-				if (this._nativePlaybackPending) {
-					this.finalizeTurn(this._nativePlaybackTurn, { interrupted: true });
-				}
-				return;
-			}
-
-			// Framework-owned mode: nothing to interrupt unless there's a live
-			// unfinalized turn.
-			if (!this.currentTurn || this.currentTurn.isFinalized) return;
-
-			if (this._nativePlaybackPending) {
-				// Tail mode (post `response.done`). Guarded by the grace window:
-				// the gate denies → early return, no cancelResponse, no
-				// finalize. See design §4.
-				if (!this.requestInterrupt('native-onSpeechStarted-tail')) return;
-				this.transport.cancelResponse?.({});
-				this.finalizeTurn(this._nativePlaybackTurn ?? this.currentTurn, { interrupted: true });
-				return;
-			}
-
-			// Generation mode (before `response.done`): truncate the in-flight
-			// response using the transport's own per-response generated-audio
-			// counter, then finalize the current turn. Also grace-guarded.
-			if (!this.requestInterrupt('native-onSpeechStarted-generation')) return;
-			this.transport.cancelResponse?.({ truncate: 'generated' });
-			this.finalizeTurn(this.currentTurn, { interrupted: true });
-		};
-	}
-
 	private wireTtsProvider(): void {
 		const tts = this.ttsProvider;
 		if (!tts) return;
@@ -2177,8 +2107,8 @@ export class VoiceSession {
 	private completePlayback(): void {
 		// Native playback-end gate: finalize the turn captured when the gate was
 		// armed, not whatever `currentTurn` is now.
-		if (this.nativePlaybackGatingActive && this._nativePlaybackPending) {
-			this.finalizeTurn(this._nativePlaybackTurn, { interrupted: false });
+		if (this.nativePlaybackGatingActive && this.nativeGate?.pending) {
+			this.finalizeTurn(this.nativeGate.capturedTurn, { interrupted: false });
 			return;
 		}
 		this._ttsAudioDone = true;
@@ -2241,28 +2171,6 @@ export class VoiceSession {
 			this.ttsClearTimers();
 			this.finalizeTurn(this.currentTurn, { interrupted: false });
 		}
-	}
-
-	/** Clear just the native playback fallback timer (timer-only — the
-	 *  counterpart of `ttsClearTimers`; used by the VAD-defer re-arm). */
-	private clearNativePlaybackTimer(): void {
-		if (this._nativePlaybackTimer) {
-			clearTimeout(this._nativePlaybackTimer);
-			this._nativePlaybackTimer = undefined;
-		}
-	}
-
-	/** Full native playback-end gate teardown — clears the timer, pending flag,
-	 *  captured turn, cursor, and the shared defer flag, and bumps
-	 *  `_nativePlaybackId` so a late signal for the finalized turn cannot match
-	 *  a later turn. Called from `finalizeTurn` and `close()`. */
-	private clearNativePlaybackGate(): void {
-		this.clearNativePlaybackTimer();
-		this._nativePlaybackPending = false;
-		this._nativePlaybackTurn = null;
-		this._nativeEstimatedPlaybackEndMs = 0;
-		this._nativePlaybackId++;
-		this._ttsPlaybackEndedPending = null;
 	}
 
 	/** Clear all TTS timers. */
@@ -2436,26 +2344,14 @@ export class VoiceSession {
 		// See dev_docs/framework/design-playback-end-gating-openai-native.md.
 		if (
 			this.nativePlaybackGatingActive &&
-			this._nativeEstimatedPlaybackEndMs !== 0 &&
+			this.nativeGate?.hasAudio &&
 			!this._nativeResponseDispatchedToolCall
 		) {
 			// Arm the gate fully BEFORE sendJsonAfterAudio so a sender that
 			// synchronously echoes audio.done back as playback.ended meets an
-			// armed gate rather than a premature-rejected signal.
-			const armedId = this._nativePlaybackId;
-			this._nativePlaybackPending = true;
-			this._nativePlaybackTurn = turn;
-			const delayMs =
-				Math.max(this._nativeEstimatedPlaybackEndMs - Date.now(), 0) +
-				this.ttsPlaybackFallbackMarginMs;
-			this._nativePlaybackTimer = setTimeout(() => {
-				this._nativePlaybackTimer = undefined;
-				// The captured-id guard makes a callback already queued when the
-				// turn was interrupted a guaranteed no-op.
-				if (this._nativePlaybackPending && armedId === this._nativePlaybackId) {
-					this.finishOrDeferForVad('fallback');
-				}
-			}, delayMs);
+			// armed gate rather than a premature-rejected signal. The gate's
+			// fallback timer is id-guarded internally.
+			const armedId = this.nativeGate.arm(turn, () => this.finishOrDeferForVad('fallback'));
 			this.clientTransport.sendJsonAfterAudio?.({ type: 'audio.done', playbackId: armedId });
 			return; // Defer — completion runs via playback.ended / the fallback.
 		}
@@ -2487,10 +2383,12 @@ export class VoiceSession {
 		};
 
 		// Native playback-end gate teardown — runs on both the clean and the
-		// interrupted path. clearNativePlaybackGate bumps _nativePlaybackId so a
-		// late playback.ended / fallback for this turn cannot match a later one.
+		// interrupted path. gate.clear() bumps the playback id so a late
+		// playback.ended / fallback for this turn cannot match a later one; the
+		// shared playback-defer flag is reset alongside.
 		if (this.nativePlaybackGatingActive) {
-			this.clearNativePlaybackGate();
+			this.nativeGate?.clear();
+			this._ttsPlaybackEndedPending = null;
 		}
 
 		if (opts.interrupted) {
@@ -2875,18 +2773,7 @@ export class VoiceSession {
 			};
 		}
 		if (this.nativePlaybackGatingActive) {
-			return {
-				pending: this._nativePlaybackPending,
-				timerArmed: this._nativePlaybackTimer !== undefined,
-				id: this._nativePlaybackId,
-				armTimer: (ms, cb) => {
-					this._nativePlaybackTimer = setTimeout(() => {
-						this._nativePlaybackTimer = undefined;
-						cb();
-					}, ms);
-				},
-				clearTimer: () => this.clearNativePlaybackTimer(),
-			};
+			return this.nativeGate ?? null;
 		}
 		return null;
 	}
@@ -2975,9 +2862,9 @@ export class VoiceSession {
 		await this.transport.cancelResponse?.({ waitForDone: true });
 		if (turn && !turn.isFinalized) {
 			this.finalizeTurn(turn, { interrupted: true });
-		} else if (this._nativePlaybackPending) {
+		} else if (this.nativeGate?.pending) {
 			// Native playback-tail interruption — pre-existing behaviour.
-			this.finalizeTurn(this._nativePlaybackTurn, { interrupted: true });
+			this.finalizeTurn(this.nativeGate.capturedTurn, { interrupted: true });
 		}
 	}
 
