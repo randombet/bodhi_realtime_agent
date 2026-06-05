@@ -379,11 +379,13 @@ export class VoiceSession {
 	readonly conversationContext: ConversationContext;
 	readonly hooks: HooksManager;
 	private transport: LLMTransport;
-	private clientTransport: IClientChannel;
+	/** Assigned in `buildClientChannelAndGating`, called unconditionally from the constructor. */
+	private clientTransport!: IClientChannel;
 	/** Set when `clientMedia.kind === 'direct_rtc'` for WebSocket JSON signaling routing. */
 	private directRtcChannel: DirectRtcClientChannel | null = null;
-	private agentRouter: AgentRouter;
-	private toolExecutor: ToolExecutor;
+	/** Assigned in `buildAgentRouter`, called unconditionally from the constructor. */
+	private agentRouter!: AgentRouter;
+	private toolExecutor!: ToolExecutor;
 	private toolCallRouter?: ToolCallRouter;
 	private runtimeOrchestrator?: RuntimeOrchestrator;
 	private runtimeToolRegistry?: Map<string, ToolRoutingInfo>;
@@ -1011,6 +1013,23 @@ export class VoiceSession {
 			this.ttsPipeline.wire();
 		}
 
+		this.buildClientChannelAndGating(config);
+
+		// Wire EventBus subscriptions (GUI forwarding, STT lifecycle, subagent UI,
+		// async agent transfer). Callbacks capture `this` and fire at runtime, so
+		// they may reference collaborators (e.g. agentRouter) constructed below.
+		this.wireEventBus();
+
+		this.buildAgentRouter(config, allInitialTools, behaviorTools);
+
+		// Usage + cache-bust observability — chained over any pre-attached handlers,
+		// fired to the framework hook and mirrored to the EventBus.
+		this.wireUsageCallbacks();
+
+		this.buildOrchestration(config, agentTools, behaviorTools);
+	}
+
+	private buildClientChannelAndGating(config: VoiceSessionConfig): void {
 		const clientMedia = config.clientMedia ?? DEFAULT_CLIENT_MEDIA_PROFILE;
 		const directRtcMedia =
 			clientMedia.kind === 'direct_rtc' && clientMedia.rtcAudio === 'werift_opus'
@@ -1091,12 +1110,13 @@ export class VoiceSession {
 			finalizeTurn: (turn, opts) => this.finalizeTurn(turn, opts),
 			log: (msg) => this.log(msg),
 		});
+	}
 
-		// Wire EventBus subscriptions (GUI forwarding, STT lifecycle, subagent UI,
-		// async agent transfer). Callbacks capture `this` and fire at runtime, so
-		// they may reference collaborators (e.g. agentRouter) constructed below.
-		this.wireEventBus();
-
+	private buildAgentRouter(
+		config: VoiceSessionConfig,
+		allInitialTools: ToolDefinition[],
+		behaviorTools: ToolDefinition[],
+	): void {
 		// Set up tool executor
 		this.toolExecutor = this.createToolExecutor(config.initialAgent);
 
@@ -1138,11 +1158,13 @@ export class VoiceSession {
 		if (this.ttsPipeline) {
 			this.agentRouter.responseModality = 'text';
 		}
+	}
 
-		// Usage + cache-bust observability — chained over any pre-attached handlers,
-		// fired to the framework hook and mirrored to the EventBus.
-		this.wireUsageCallbacks();
-
+	private buildOrchestration(
+		config: VoiceSessionConfig,
+		agentTools: ToolDefinition[],
+		behaviorTools: ToolDefinition[],
+	): void {
 		if (config.orchestrationMode === 'actor') {
 			this.runtimeToolRegistry = this.buildRuntimeToolRegistry([...agentTools, ...behaviorTools]);
 
