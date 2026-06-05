@@ -13,7 +13,7 @@ import type { ToolRoutingInfo } from '../runtime/actors/tool-router-actor.js';
 import { GeminiTransportAdapter } from '../runtime/adapters/gemini-transport-adapter.js';
 import type { KnownNotificationLabel } from '../runtime/messages.js';
 import { RuntimeOrchestrator } from '../runtime/runtime-orchestrator.js';
-import { decodeMulawToPcm, encodePcmToMulaw } from '../telephony/audio-codec.js';
+import { decodeMulawToPcm } from '../telephony/audio-codec.js';
 import { ToolExecutor } from '../tools/tool-executor.js';
 import { createClientChannel } from '../transport/client-channel-factory.js';
 import { DirectRtcClientChannel } from '../transport/direct-rtc-client-channel.js';
@@ -47,6 +47,7 @@ import type {
 } from '../types/transport.js';
 import type { TTSAudioConfig, TTSProvider } from '../types/tts.js';
 import type { ArtifactRef, ArtifactStore, SaveArtifactParams } from '../types/workspace.js';
+import { AudioRouter, type InternalTranscriptionMode } from './audio-router.js';
 import { BackgroundNotificationQueue } from './background-notification-queue.js';
 import { CLIENT_VAD_SILENCE_MS, ClientVadDetector } from './client-vad-detector.js';
 import { ConversationContext } from './conversation-context.js';
@@ -77,17 +78,6 @@ import { computeCacheHitRatio, deriveProviderItemId, deriveUsageSource } from '.
  * when read via `getTranscriptionMode()`.
  */
 export type TranscriptionMode = 'agent' | 'transcription';
-
-/** Internal mode used by the audio routing switch. */
-type InternalTranscriptionMode =
-	| 'agent'
-	| 'starting_transcription'
-	| 'transcription'
-	| 'stopping_transcription';
-
-/** Bounded buffer cap for mic audio held during a mode transition.
- *  Roughly 2 seconds of 24 kHz PCM16 mono (48 000 B/s × 2). */
-const MAX_TRANSITION_BUFFER_BYTES = 96_000;
 
 /**
  * Single-writer FIFO over async session mutations. Both `transferSession()`
@@ -517,8 +507,6 @@ export class VoiceSession {
 	private whisperProvider?: STTProvider;
 	private internalMode: InternalTranscriptionMode = 'agent';
 	private dictationBuffer: string[] = [];
-	private transitionBuffer: Buffer[] = [];
-	private transitionBufferBytes = 0;
 	private mutationQueue = new SessionMutationQueue();
 	/** Tool results that arrived while not in 'agent' mode. Flushed in order on
 	 *  re-entry. Prevents response.create from leaking during transcription mode. */
@@ -590,6 +578,9 @@ export class VoiceSession {
 	 *  `lastClientSpeech*` state; barge-in policy stays here (see the
 	 *  `onVoicedFrame` handler wired at construction). */
 	private clientVadDetector!: ClientVadDetector;
+	/** Inbound client-audio fast path (mode dispatch + transition buffer + μ-law
+	 *  encode). Constructed after the VAD detector. */
+	private audioRouter!: AudioRouter;
 	/** Resolved client-VAD barge-in tuning (config + defaults). */
 	private readonly clientVad: ResolvedClientAudioVadConfig;
 	private lastGeminiRecognitionLoggedForSpeechEndMs = 0;
@@ -820,6 +811,33 @@ export class VoiceSession {
 			(msg) => this.log(msg),
 		);
 
+		// Inbound client-audio fast path. Dependencies are read through
+		// getters/predicates so the router observes the same call-time values the
+		// former inline `handleAudioFromClient` did (providers, mode, gate, and
+		// the late-bound external-audio handler are all wired after this point).
+		this.audioRouter = new AudioRouter({
+			transport: this.transport,
+			vad: this.clientVadDetector,
+			clientAudioInputRate: this.clientAudioInputRate,
+			getSttProvider: () => this.sttProvider,
+			getWhisperProvider: () => this.whisperProvider,
+			isSessionActive: () => this.sessionManager.isActive,
+			isRtcAudioReady: () => this.directRtcChannel?.isRtcAudioReady ?? false,
+			getMode: () => this.internalMode,
+			shouldDropOutbound: () => this._greetingInFlight || this._grace.isActive(),
+			routeExternalAudio: (data) => {
+				if (this.agentRouter.activeAgent.audioMode !== 'external') return false;
+				if (this.externalAudioHandler) {
+					try {
+						this.externalAudioHandler(data);
+					} catch (err) {
+						this.reportError('external-audio', err instanceof Error ? err : new Error(String(err)));
+					}
+				}
+				return true;
+			},
+		});
+
 		// Resolve the TTS fallback-completion margin: validate, clamp to the floor.
 		this.ttsPlaybackFallbackMarginMs = this.resolveTtsPlaybackFallbackMarginMs(
 			config.ttsPlaybackFallbackMarginMs,
@@ -1046,7 +1064,7 @@ export class VoiceSession {
 				? {
 						inputPcmSampleRate: this.transport.audioFormat.inputSampleRate,
 						outputPcmSampleRate: this.transport.audioFormat.outputSampleRate,
-						onInboundPcm: (pcm: Buffer) => this.handleAudioFromClient(pcm, 'rtc'),
+						onInboundPcm: (pcm: Buffer) => this.audioRouter.handleFromClient(pcm, 'rtc'),
 					}
 				: undefined;
 		this.clientTransport = createClientChannel({
@@ -1057,7 +1075,7 @@ export class VoiceSession {
 			host: config.host,
 			listenTimeoutMs: config.listenTimeoutMs,
 			callbacks: {
-				onAudioFromClient: (data) => this.handleAudioFromClient(data, 'websocket'),
+				onAudioFromClient: (data) => this.audioRouter.handleFromClient(data, 'websocket'),
 				onJsonFromClient: (message) => this.handleJsonFromClient(message),
 				onClientConnected: () => this.handleClientConnected(),
 				onClientDisconnected: () => this.handleClientDisconnected(),
@@ -1734,127 +1752,7 @@ export class VoiceSession {
 		return registry;
 	}
 
-	// --- Audio fast-path (no EventBus) ---
-
-	private handleAudioFromClient(data: Buffer, source: 'websocket' | 'rtc' = 'websocket'): void {
-		if (source === 'websocket' && this.directRtcChannel?.isRtcAudioReady) {
-			return;
-		}
-		if (!this.sessionManager.isActive) return;
-
-		this.clientVadDetector.process(data);
-
-		// When active agent uses external audio, don't forward to LLM transport.
-		// Route mic frames to the active external audio handler (e.g., TwilioBridge).
-		if (this.agentRouter.activeAgent.audioMode === 'external') {
-			if (this.externalAudioHandler) {
-				try {
-					this.externalAudioHandler(data);
-				} catch (err) {
-					this.reportError('external-audio', err instanceof Error ? err : new Error(String(err)));
-				}
-			}
-			return;
-		}
-
-		// Phase 3: route by transcription mode.
-		switch (this.internalMode) {
-			case 'agent':
-				this.routeAudioToAgent(data);
-				break;
-			case 'starting_transcription':
-				// Whisper not ready yet — buffer (bounded, oldest evicted on overflow).
-				this.transitionBuffer.push(data);
-				this.transitionBufferBytes += data.length;
-				while (
-					this.transitionBufferBytes > MAX_TRANSITION_BUFFER_BYTES &&
-					this.transitionBuffer.length > 1
-				) {
-					const dropped = this.transitionBuffer.shift();
-					if (dropped) this.transitionBufferBytes -= dropped.length;
-				}
-				break;
-			case 'transcription':
-				this.routeAudioToWhisper(data);
-				break;
-			case 'stopping_transcription':
-				// Transport already authoritative; route to it immediately so the
-				// user is never silent. Whisper stop is still in flight on the
-				// public promise but the audio path is restored.
-				this.routeAudioToAgent(data);
-				break;
-		}
-	}
-
-	/** Forward PCM frame to the agent transport + optional sttProvider. */
-	private routeAudioToAgent(data: Buffer): void {
-		// Greeting interrupt grace + pre-audio greeting-in-flight gate: drop
-		// both LLM-transport and STT-provider audio. The gate spans two
-		// phases:
-		//   (1) `_greetingInFlight`: from session-ready (handleSetupComplete)
-		//       to the first assistant audio chunk. Prevents real pre-audio
-		//       user speech from auto-committing via OpenAI's server VAD
-		//       while the greeting response is in flight — would otherwise
-		//       race the greeting's own response.create.
-		//   (2) `_grace.isActive()`: from first-audio through grace expiry.
-		//       Prevents AEC echo from accumulating in the provider buffer
-		//       and from being recorded by external STT as a fake user turn.
-		// The local client-VAD in handleAudioFromClient still processes —
-		// only the downstream consumers are gated.
-		// See dev_docs/framework/design-greeting-interrupt-grace.md §6, §8.
-		if (this._greetingInFlight || this._grace.isActive()) return;
-		// PCM is the source of truth at this layer. Two consumers fork off:
-		// (a) the transport: G.711 μ-law (telephony) requires resample to
-		//     8 kHz THEN encode. PCM transports just need rate-matching to
-		//     transport.audioFormat.inputSampleRate.
-		// (b) the STT provider: pass raw client PCM at its native rate
-		//     (the rate the provider was configured with).
-		const clientRate = this.clientAudioInputRate;
-		const transportRate = this.transport.audioFormat.inputSampleRate;
-		const transportPcm =
-			clientRate === transportRate ? data : resamplePcm(data, clientRate, transportRate, 16);
-		const transportAudio =
-			this.transport.audioFormat.encoding === 'pcmu'
-				? this.encodePcmToMulawBase64(transportPcm) // already at 8 kHz from resample above
-				: transportPcm.toString('base64');
-		this.transport.sendAudio(transportAudio);
-
-		if (this.sttProvider) {
-			const sttSupportsPcmu = this.sttProvider.supportedEncodings?.includes('pcmu');
-			const sttSupportsPcm = (this.sttProvider.supportedEncodings ?? ['pcm']).includes('pcm');
-			if (sttSupportsPcm) {
-				// Pass PCM at the client's native rate — that's what STT was
-				// configured for in the constructor.
-				this.sttProvider.feedAudio(data.toString('base64'));
-			} else if (sttSupportsPcmu) {
-				// μ-law-only STT: same path as the transport above.
-				const stt8k = clientRate === 8000 ? data : resamplePcm(data, clientRate, 8000, 16);
-				this.sttProvider.feedAudio(this.encodePcmToMulawBase64(stt8k));
-			}
-		}
-	}
-
-	/** Forward PCM frame to the whisperProvider. Whisper accepts only PCM @ 24 kHz;
-	 *  VoiceSession resamples here. */
-	private routeAudioToWhisper(data: Buffer): void {
-		if (!this.whisperProvider) return;
-		// Cross-provider mode: e.g. Gemini Live transport (16 kHz client PCM) +
-		// Whisper (24 kHz). One resample at this seam keeps Whisper single-rate.
-		const clientRate = this.clientAudioInputRate;
-		const pcm = clientRate === 24000 ? data : resamplePcm(data, clientRate, 24000, 16);
-		this.whisperProvider.feedAudio(pcm.toString('base64'));
-	}
-
-	/** Encode a PCM16 Buffer to G.711 μ-law and return as base64. */
-	private encodePcmToMulawBase64(pcm: Buffer): string {
-		return encodePcmToMulaw(pcm).toString('base64');
-	}
-
-	/** Decode a G.711 μ-law Buffer to PCM16. Used on transport-side audio output
-	 *  when the transport is in telephony mode and the client expects PCM. */
-	private decodeMulawToPcm(mulaw: Buffer): Buffer {
-		return decodeMulawToPcm(mulaw);
-	}
+	// --- Audio fast-path (no EventBus) — inbound routing lives in AudioRouter ---
 
 	/**
 	 * Barge-in policy for the in-progress client-VAD segment — run on every
@@ -1974,7 +1872,7 @@ export class VoiceSession {
 		// telephony configs). The TwilioBridge code path bypasses this fork;
 		// it consumes the transport's audioFormat directly via its own bridge.
 		const outEnc = this.transport.audioFormat.outputEncoding ?? this.transport.audioFormat.encoding;
-		const buffer: Buffer = outEnc === 'pcmu' ? this.decodeMulawToPcm(raw) : raw;
+		const buffer: Buffer = outEnc === 'pcmu' ? decodeMulawToPcm(raw) : raw;
 		this.clientTransport.sendAudioToClient(buffer);
 	}
 
@@ -3157,7 +3055,7 @@ export class VoiceSession {
 
 	/** Feed client audio into the session (LLM + STT). Used when the server owns the socket (multi-user). */
 	feedAudioFromClient(data: Buffer): void {
-		this.handleAudioFromClient(data, 'websocket');
+		this.audioRouter.handleFromClient(data, 'websocket');
 	}
 
 	/** Feed client JSON (text_input, file_upload, etc.) into the session. Used when the server owns the socket. */
@@ -3383,14 +3281,9 @@ export class VoiceSession {
 			}
 			throw err;
 		}
-		// Flush buffered transition frames in FIFO order through the normal
+		// Flush buffered transition frames in FIFO order through the router's
 		// whisper routing (which handles resampling).
-		const buffered = this.transitionBuffer;
-		this.transitionBuffer = [];
-		this.transitionBufferBytes = 0;
-		for (const chunk of buffered) {
-			this.routeAudioToWhisper(chunk);
-		}
+		this.audioRouter.drainTransitionBufferToWhisper();
 		this.internalMode = 'transcription';
 		this.eventBus.publish('session.transcription_mode_changed', {
 			mode: 'transcription',
