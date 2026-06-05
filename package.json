@@ -40,6 +40,7 @@
     "lint:fix": "biome check --fix src/",
     "typecheck": "tsc --noEmit",
     "typecheck:tests": "tsc -p tsconfig.test.json",
+    "typecheck:examples": "tsc -p tsconfig.examples.json",
     "docs:dev": "vitepress dev docs",
     "docs:build": "typedoc && vitepress build docs",
     "docs:preview": "vitepress preview docs",

@@ -8,7 +8,7 @@ import {
 	askWorkAgentTool,
 	createOpenClawSubagentConfig,
 	createPersistentOpenClawSubagentConfig,
-} from '../../app/lib/openclaw-tools.js';
+} from '../lib/openclaw-tools.js';
 
 const TINY_PNG_B64 =
 	'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';

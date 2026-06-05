@@ -3,7 +3,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ArtifactRegistry } from '../../app/lib/media/artifact-registry.js';
 import type { ChatEvent, OpenClawClient } from '../../app/lib/integrations/openclaw/openclaw-client.js';
-import { PersistentOpenClawSubagent } from '../../app/lib/persistent-openclaw-subagent.js';
+import { PersistentOpenClawSubagent } from '../lib/persistent-openclaw-subagent.js';
 
 const TINY_PNG_B64 =
 	'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
