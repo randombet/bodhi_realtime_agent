@@ -69,6 +69,7 @@ import { NativeAudioPlaybackGate, type PlaybackGate } from './playback-gate.js';
 import { SessionManager } from './session-manager.js';
 import { ToolCallRouter } from './tool-call-router.js';
 import { TranscriptManager } from './transcript-manager.js';
+import { TransportReconnector } from './transport-reconnector.js';
 import { TtsPipeline } from './tts-pipeline.js';
 import { TurnManager } from './turn-manager.js';
 import type { Turn } from './turn.js';
@@ -532,8 +533,10 @@ export class VoiceSession {
 	 *  ui.response, file_upload, text_input, playback.ended). Constructed after
 	 *  the client channel + arbiter. See `client-message-router.ts`. */
 	private clientMessageRouter!: ClientMessageRouter;
-	/** Pending response-watchdog timer (model-silence-after-user-turn). */
-	private _responseWatchdogTimer?: ReturnType<typeof setTimeout>;
+	/** Transport reconnect + response-watchdog liveness timer. Owns
+	 *  `triggerReconnect`, GoAway/transport-close handling, resumption updates,
+	 *  the reconnect budget, and the watchdog. See `transport-reconnector.ts`. */
+	private reconnector!: TransportReconnector;
 	/** Resolved watchdog timeout (ms); `<= 0` disables. Set in the constructor. */
 	private readonly responseWatchdogMs: number;
 	// --- Server-turn finalization dedup (external-TTS turn completion).
@@ -560,10 +563,6 @@ export class VoiceSession {
 	private interactionMode = new InteractionModeManager();
 	/** True when `config.orchestrationMode === 'actor'`. */
 	private _isActorMode = false;
-	/** Tracks consecutive reconnect attempts to prevent infinite reconnect storms. */
-	private reconnectAttempts = 0;
-	private static readonly MAX_RECONNECT_ATTEMPTS = 3;
-	private static readonly RECONNECT_BACKOFF_MS = [1000, 2000, 4000];
 	/** Resolves when memory/directives are loaded; used so greeting is sent after load without blocking connect. */
 	private _memoryReadyPromise: Promise<void> = Promise.resolve();
 	private externalAudioHandler: ((data: Buffer) => void) | null = null;
@@ -802,7 +801,7 @@ export class VoiceSession {
 				onSegmentResolved: () => this.completionArbiter.resolveDeferredPlayback(),
 				// User finished a turn → arm the response watchdog (the model now
 				// owes a reply; silence past the timeout forces a reconnect).
-				onUserTurnCompleted: () => this.armResponseWatchdog(),
+				onUserTurnCompleted: () => this.reconnector.armResponseWatchdog(),
 			},
 			(msg) => this.log(msg),
 		);
@@ -998,7 +997,7 @@ export class VoiceSession {
 		// any pre-attached handler on injected transports.
 		const prevModelTurnStart = this.transport.onModelTurnStart;
 		this.transport.onModelTurnStart = () => {
-			this.clearResponseWatchdog();
+			this.reconnector.disarmResponseWatchdog();
 			try {
 				prevModelTurnStart?.();
 			} catch (e) {
@@ -1156,6 +1155,25 @@ export class VoiceSession {
 			reportError: (context, error) => this.reportError(context, error),
 			log: (msg) => this.log(msg),
 		});
+
+		// Transport reconnect + response-watchdog. GoAway reconnects immediately;
+		// transport-close/watchdog go through the budgeted+backed-off path. The
+		// `isAgentMode` thunk reads VoiceSession's `internalMode` (Unit 4 re-points
+		// it to the DictationController when that field moves).
+		this.reconnector = new TransportReconnector(
+			{
+				sessionManager: this.sessionManager,
+				clientTransport: this.clientTransport,
+				transport: this.transport,
+				toReplayContent: () => this.conversationContext.toReplayContent(),
+				eventBus: this.eventBus,
+				getSessionId: () => this.config.sessionId,
+				isAgentMode: () => this.internalMode === 'agent',
+				reportError: (context, error) => this.reportError(context, error),
+				log: (msg) => this.log(msg),
+			},
+			this.responseWatchdogMs,
+		);
 	}
 
 	private buildAgentRouter(
@@ -1392,7 +1410,7 @@ export class VoiceSession {
 	private wireTransportCallbacks(): void {
 		this.transport.onAudioOutput = (data) => this.handleAudioOutput(data);
 		this.transport.onToolCall = (calls) => {
-			this.clearResponseWatchdog();
+			this.reconnector.disarmResponseWatchdog();
 			// Native playback-end gate: this response dispatched a tool call, so
 			// it is not the turn's terminal spoken response.
 			this._nativeResponseDispatchedToolCall = true;
@@ -1417,7 +1435,7 @@ export class VoiceSession {
 		this.transport.onTurnComplete = (serverTurnId) => this.handleTurnComplete(serverTurnId);
 		this.transport.onInterrupted = (serverTurnId) => this.handleInterrupted(serverTurnId);
 		this.transport.onOutputTranscription = (text) => {
-			this.clearResponseWatchdog();
+			this.reconnector.disarmResponseWatchdog();
 			this.turns.ensureCurrent();
 			this.transcriptManager.handleOutput(text);
 		};
@@ -1426,7 +1444,7 @@ export class VoiceSession {
 		this.transport.onClose = (code, reason) => this.handleTransportClose(code, reason);
 		this.transport.onGoAway = (timeLeft) => this.handleGoAway(timeLeft);
 		this.transport.onResumptionUpdate = (handle, resumable) =>
-			this.handleResumptionUpdate(handle, resumable);
+			this.reconnector.handleResumptionUpdate(handle, resumable);
 		this.transport.onGroundingMetadata = (metadata) => this.handleGroundingMetadata(metadata);
 	}
 
@@ -1737,7 +1755,7 @@ export class VoiceSession {
 		// active sockets don't survive session close. Idempotent.
 		await this.whisperProvider?.stop().catch(() => undefined);
 		this.ttsPipeline?.gate.clearTimers();
-		this.clearResponseWatchdog();
+		this.reconnector.disarmResponseWatchdog();
 		// close() bypasses finalizeTurn — tear down the native gate directly so
 		// no native playback timer outlives the session.
 		if (this.nativePlaybackGatingActive) {
@@ -1953,7 +1971,7 @@ export class VoiceSession {
 		// implement quiesce(); guarantees no model audio leaks into dictation
 		// mode even if a quiesce race occurs.
 		if (this.internalMode !== 'agent') return;
-		this.clearResponseWatchdog();
+		this.reconnector.disarmResponseWatchdog();
 
 		// Greeting interrupt grace: arm on the first assistant audio chunk.
 		// Idempotent — subsequent chunks no-op inside the class.
@@ -1995,31 +2013,6 @@ export class VoiceSession {
 			return VoiceSession.TTS_PLAYBACK_FALLBACK_MARGIN_DEFAULT_MS;
 		}
 		return Math.max(raw, VoiceSession.TTS_PLAYBACK_FALLBACK_MARGIN_FLOOR_MS);
-	}
-
-	/** Arm (or re-arm) the response watchdog after the user's turn ends. */
-	private armResponseWatchdog(): void {
-		if (this.responseWatchdogMs <= 0) return;
-		if (this.internalMode !== 'agent') return; // never watch a non-agent (dictation/transcription) turn
-		this.clearResponseWatchdog();
-		// Safe to arm even if the session isn't ACTIVE right now: the fire-time
-		// `state !== 'ACTIVE'` guard below makes a stale timer a no-op.
-		this._responseWatchdogTimer = setTimeout(() => {
-			this._responseWatchdogTimer = undefined;
-			if (this.sessionManager.state !== 'ACTIVE') return;
-			this.log(
-				`[Watchdog] Model silent ${this.responseWatchdogMs}ms after user turn — forcing reconnect`,
-			);
-			this.triggerReconnect('response-watchdog', true);
-		}, this.responseWatchdogMs);
-	}
-
-	/** Cancel the response watchdog (model showed activity, or teardown). */
-	private clearResponseWatchdog(): void {
-		if (this._responseWatchdogTimer) {
-			clearTimeout(this._responseWatchdogTimer);
-			this._responseWatchdogTimer = undefined;
-		}
 	}
 
 	// --- Gemini event handlers ---
@@ -2142,9 +2135,9 @@ export class VoiceSession {
 	}
 
 	private handleTurnComplete(serverTurnId?: number): void {
-		this.clearResponseWatchdog();
+		this.reconnector.disarmResponseWatchdog();
 		// A completed turn means the connection is healthy — reset reconnect counter
-		this.reconnectAttempts = 0;
+		this.reconnector.resetAttempts();
 
 		// Correlate the completion to its Turn. `stale` → a long-gone turn,
 		// ignore; `new` → a turn that produced no model output, birth it.
@@ -2370,7 +2363,7 @@ export class VoiceSession {
 	}
 
 	private handleInterrupted(serverTurnId?: number): void {
-		this.clearResponseWatchdog();
+		this.reconnector.disarmResponseWatchdog();
 		// Correlate the interrupt to its Turn. A `stale` interrupt for a
 		// long-gone turn is ignored; `new` (no turn / interrupt before any model
 		// output) births one via the no-turn net. The structural idempotency of
@@ -2398,52 +2391,11 @@ export class VoiceSession {
 		this.clientTransport.sendJsonToClient({ type: 'grounding', payload: metadata });
 	}
 
+	/** Thin delegator — kept for parity with the other transport-callback intercept
+	 *  points. The immediate (unbudgeted) GoAway reconnect lives in
+	 *  {@link TransportReconnector}. */
 	private handleGoAway(timeLeft: string): void {
-		this.clearResponseWatchdog();
-		this.log(`GoAway from Gemini (timeLeft=${timeLeft})`);
-		this.eventBus.publish('session.goaway', {
-			sessionId: this.config.sessionId,
-			timeLeft,
-		});
-
-		// Initiate reconnection
-		const handle = this.sessionManager.resumptionHandle;
-		if (handle) {
-			this.sessionManager.transitionTo('RECONNECTING');
-			this.clientTransport.startBuffering();
-
-			this.transport
-				.reconnect({
-					resumptionHandle: handle,
-					conversationHistory: this.conversationContext.toReplayContent(),
-				})
-				.then(() => {
-					const buffered = this.clientTransport.stopBuffering();
-					for (const chunk of buffered) {
-						this.transport.sendAudio(chunk.toString('base64'));
-					}
-					this.sessionManager.transitionTo('ACTIVE');
-					this.log('Reconnect complete; session ACTIVE');
-				})
-				.catch((err) => {
-					this.clientTransport.stopBuffering();
-					this.reportError('reconnect', err);
-					this.sessionManager.transitionTo('CLOSED');
-				});
-		}
-	}
-
-	private handleResumptionUpdate(handle: string, resumable: boolean): void {
-		// On resumable updates, cache the handle so a later reconnect can resume.
-		// On non-resumable updates, CLEAR the cache so reconnect-with-state
-		// cannot attempt a resume from a stale handle (Google's docs warn that
-		// resuming after non-resumable can lose data — fresh-session-with-replay
-		// is safer; the GeminiLiveTransport applies the same policy internally).
-		if (resumable) {
-			this.sessionManager.updateResumptionHandle(handle);
-		} else {
-			this.sessionManager.clearResumptionHandle();
-		}
+		this.reconnector.handleGoAway(timeLeft);
 	}
 
 	// --- Client transport handlers ---
@@ -2613,74 +2565,10 @@ export class VoiceSession {
 		this.reportError('llm-transport', err);
 	}
 
-	/** Force a reconnect using the proven resumption-handle + buffering path.
-	 *  Shared by the transport-close handler and the response watchdog.
-	 *  @param reason short tag for logs
-	 *  @param elicit when true, after a successful reconnect, nudge the model to
-	 *    respond (used by the watchdog — a stalled turn has no pending generation). */
-	private triggerReconnect(reason: string, elicit = false): void {
-		if (this.sessionManager.state !== 'ACTIVE') return;
-		const handle = this.sessionManager.resumptionHandle;
-		if (handle && this.reconnectAttempts < VoiceSession.MAX_RECONNECT_ATTEMPTS) {
-			const attempt = this.reconnectAttempts++;
-			const delay = VoiceSession.RECONNECT_BACKOFF_MS[attempt] ?? 4000;
-			this.log(
-				`Reconnect attempt ${attempt + 1}/${VoiceSession.MAX_RECONNECT_ATTEMPTS} in ${delay}ms (reason=${reason})`,
-			);
-			this.sessionManager.transitionTo('RECONNECTING');
-			this.clientTransport.startBuffering();
-			setTimeout(() => {
-				this.transport
-					.reconnect({
-						resumptionHandle: handle,
-						conversationHistory: this.conversationContext.toReplayContent(),
-					})
-					.then(() => {
-						const buffered = this.clientTransport.stopBuffering();
-						for (const chunk of buffered) {
-							this.transport.sendAudio(chunk.toString('base64'));
-						}
-						this.sessionManager.transitionTo('ACTIVE');
-						this.log('Reconnect complete; session ACTIVE');
-						if (elicit) this.elicitModelResponse(reason);
-					})
-					.catch((err) => {
-						this.clientTransport.stopBuffering();
-						this.reportError('reconnect', err);
-						this.sessionManager.transitionTo('CLOSED');
-					});
-			}, delay);
-		} else {
-			if (this.reconnectAttempts >= VoiceSession.MAX_RECONNECT_ATTEMPTS) {
-				this.log(
-					`Reconnect limit reached (${VoiceSession.MAX_RECONNECT_ATTEMPTS} attempts), giving up`,
-				);
-			}
-			this.sessionManager.transitionTo('CLOSED');
-		}
-	}
-
-	/** Best-effort post-reconnect generation nudge: prefer the transport's
-	 *  content-less elicit (Gemini), else fall back to triggerGeneration (OpenAI).
-	 *  Agent mode only — never nudge while in transcription/dictation mode. */
-	private elicitModelResponse(reason: string): void {
-		if (this.internalMode !== 'agent') return;
-		this.log(`[Watchdog] Re-eliciting model response after reconnect (reason=${reason})`);
-		try {
-			if (this.transport.elicitResponse) {
-				this.transport.elicitResponse();
-			} else {
-				this.transport.triggerGeneration();
-			}
-		} catch (e) {
-			this.log(`[Watchdog] Re-elicit nudge failed (best-effort): ${(e as Error).message}`);
-		}
-	}
-
+	/** Thin delegator — a test invokes this private method directly. The reconnect
+	 *  logic lives in {@link TransportReconnector}. */
 	private handleTransportClose(code?: number, reason?: string): void {
-		const detail = code != null ? ` code=${code}${reason ? ` reason="${reason}"` : ''}` : '';
-		this.log(`Transport closed (state=${this.sessionManager.state}${detail})`);
-		this.triggerReconnect('transport-close');
+		this.reconnector.handleTransportClose(code, reason);
 	}
 
 	private reportError(component: string, error: unknown): void {
