@@ -33,7 +33,6 @@ import type { ConversationHistoryStore } from '../types/history.js';
 import type { FrameworkHooks } from '../types/hooks.js';
 import type { ProcessedKnowledgeBase } from '../types/knowledge-base.js';
 import type { MemoryStore } from '../types/memory.js';
-import { tryParseRtcClientSignaling } from '../types/rtc-signaling.js';
 import type { IClientChannel } from '../types/session-client.js';
 import type { SessionClientSender } from '../types/session-client.js';
 import type { ToolDefinition } from '../types/tool.js';
@@ -48,6 +47,7 @@ import type { TTSProvider } from '../types/tts.js';
 import type { ArtifactRef, ArtifactStore, SaveArtifactParams } from '../types/workspace.js';
 import { AudioRouter, type InternalTranscriptionMode } from './audio-router.js';
 import { BackgroundNotificationQueue } from './background-notification-queue.js';
+import { ClientMessageRouter } from './client-message-router.js';
 import { ClientVadDetector } from './client-vad-detector.js';
 import { DEFAULT_RESPONSE_WATCHDOG_MS } from './constants.js';
 import { ConversationContext } from './conversation-context.js';
@@ -203,6 +203,14 @@ export interface VoiceSessionConfig {
 	 * via feedAudioFromClient / feedJsonFromClient and notifyClientConnected / notifyClientDisconnected.
 	 */
 	clientSender?: SessionClientSender;
+	/**
+	 * Supported seam for handling custom inbound JSON message types. Fired ONLY
+	 * for an unrecognized `type` — it does **not** override built-in types
+	 * (`behavior.set`, `ui.response`, `file_upload`, `text_input`,
+	 * `playback.ended`, RTC signaling), and a *malformed* built-in type is dropped
+	 * (not forwarded here). Without it wired, inbound JSON behavior is unchanged.
+	 */
+	onClientJson?: (message: Record<string, unknown>) => void;
 	/**
 	 * Client media plane profile (`websocket` PCM+JSON, or `direct_rtc` split plane: JSON on WS, RTC audio later).
 	 * Defaults to WebSocket when omitted. See {@link createClientChannel}.
@@ -520,6 +528,10 @@ export class VoiceSession {
 	 *  and the completePlayback / finishOrDeferForVad routing. Constructed after
 	 *  the gates. See `playback-completion-arbiter.ts`. */
 	private completionArbiter!: PlaybackCompletionArbiter;
+	/** Inbound client→server JSON dispatch (RTC signaling, behavior.set,
+	 *  ui.response, file_upload, text_input, playback.ended). Constructed after
+	 *  the client channel + arbiter. See `client-message-router.ts`. */
+	private clientMessageRouter!: ClientMessageRouter;
 	/** Pending response-watchdog timer (model-silence-after-user-turn). */
 	private _responseWatchdogTimer?: ReturnType<typeof setTimeout>;
 	/** Resolved watchdog timeout (ms); `<= 0` disables. Set in the constructor. */
@@ -1122,6 +1134,26 @@ export class VoiceSession {
 				bargeInConfirmMs: this.clientVad.bargeInConfirmMs,
 			}),
 			finalizeTurn: (turn, opts) => this.finalizeTurn(turn, opts),
+			log: (msg) => this.log(msg),
+		});
+
+		// Inbound client→server JSON dispatch. `handleJsonFromClient` stays the
+		// thin VoiceSession entry/intercept point and delegates here.
+		this.clientMessageRouter = new ClientMessageRouter({
+			getDirectRtcChannel: () => this.directRtcChannel,
+			getBehaviorManager: () => this.behaviorManager,
+			eventBus: this.eventBus,
+			getSessionActive: () => this.sessionManager.isActive,
+			conversationContext: this.conversationContext,
+			sendFile: (base64, mimeType) => this.transport.sendFile(base64, mimeType),
+			getArbiter: () => this.completionArbiter,
+			getLiveGate: () => this.liveGate(),
+			getPlaybackStateProtocolActive: () => this.playbackStateProtocolActive,
+			sessionId: this.config.sessionId,
+			getArtifactRegistry: () => this.config.artifactRegistry,
+			handleTextInput: (text) => this.handleTextInput(text),
+			onClientJson: config.onClientJson,
+			reportError: (context, error) => this.reportError(context, error),
 			log: (msg) => this.log(msg),
 		});
 	}
@@ -2416,43 +2448,13 @@ export class VoiceSession {
 
 	// --- Client transport handlers ---
 
+	/**
+	 * Thin entry/intercept point for inbound client→server JSON. Stays on
+	 * VoiceSession because an example monkey-patches it (and external consumers
+	 * may too); the actual dispatch lives in {@link ClientMessageRouter}.
+	 */
 	private handleJsonFromClient(message: Record<string, unknown>): void {
-		if (this.directRtcChannel) {
-			const rtc = tryParseRtcClientSignaling(message);
-			if (rtc) {
-				this.directRtcChannel.feedSignaling(rtc);
-				return;
-			}
-		}
-
-		if (
-			message.type === 'behavior.set' &&
-			typeof message.key === 'string' &&
-			typeof message.preset === 'string'
-		) {
-			this.behaviorManager?.handleClientSet(message.key, message.preset);
-		} else if (message.type === 'ui.response' && message.payload) {
-			this.eventBus.publish('subagent.ui.response', {
-				sessionId: this.config.sessionId,
-				response: message.payload as {
-					requestId: string;
-					selectedOptionId?: string;
-					formData?: Record<string, unknown>;
-				},
-			});
-		} else if (message.type === 'file_upload' && message.data) {
-			const data = message.data as { base64: string; mimeType: string; fileName?: string };
-			this.handleFileUpload(data.base64, data.mimeType, data.fileName);
-		} else if (message.type === 'text_input' && typeof message.text === 'string') {
-			// Fire-and-forget — handleTextInput is async (serializes via the
-			// direct-input FIFO). handleJsonFromClient is a dispatcher and
-			// must not block other branches on one text input.
-			this.handleTextInput(message.text).catch((err) =>
-				this.reportError('text_input', err instanceof Error ? err : new Error(String(err))),
-			);
-		} else if (message.type === 'playback.ended' && typeof message.playbackId === 'number') {
-			this.handlePlaybackEnded(message.playbackId);
-		}
+		this.clientMessageRouter.dispatch(message);
 	}
 
 	/**
@@ -2469,61 +2471,6 @@ export class VoiceSession {
 			return this.nativeGate ?? null;
 		}
 		return null;
-	}
-
-	/**
-	 * Client→server playback-state signal: the client's audio buffer for
-	 * `playbackId` has drained. Completes the turn (or defers it for an
-	 * in-progress potential barge-in via `finishOrDeferForVad`). The guards
-	 * reject every signal that does not concern the live, post-synthesis turn —
-	 * source-agnostic via `liveGate()` (external TTS or native audio).
-	 * See dev_docs/framework/design-playback-end-gating-openai-native.md §5.
-	 */
-	private handlePlaybackEnded(playbackId: number): void {
-		if (!this.playbackStateProtocolActive) return;
-		// A signal was already accepted and deferred this turn — ignore further
-		// ones so a client cannot keep re-arming the defer timeout.
-		if (this.completionArbiter.hasDeferred) return;
-		const gate = this.liveGate();
-		if (!gate) return;
-		// Timer armed ⇒ the audio-done point has passed — rejects a premature
-		// signal that would otherwise complete the turn mid-synthesis.
-		if (!gate.timerArmed) return;
-		// Not pending ⇒ the turn already finished or was interrupted.
-		if (!gate.pending) return;
-		// Stale: a signal for a turn superseded by an interrupt (bumps the id).
-		if (playbackId !== gate.id) return;
-		this.completionArbiter.finishOrDeferForVad('signal');
-	}
-
-	private handleFileUpload(base64: string, mimeType: string, fileName?: string): void {
-		if (!this.sessionManager.isActive) return;
-
-		// Send image/document to the LLM as inline data
-		this.transport.sendFile(base64, mimeType);
-
-		// Record in conversation context
-		this.conversationContext.addUserMessage(`[Uploaded file: ${fileName ?? 'file'}]`);
-
-		// Store in artifact registry for cross-tool access (supported binary image types only).
-		if (this.config.artifactRegistry && mimeType.startsWith('image/')) {
-			try {
-				this.config.artifactRegistry.store(
-					base64,
-					mimeType,
-					fileName ?? `upload_${Date.now()}`,
-					'uploaded',
-					fileName,
-				);
-			} catch (err) {
-				const msg = err instanceof Error ? err.message : String(err);
-				this.log(`Failed to store artifact: ${msg}`);
-				this.eventBus.publish('gui.notification', {
-					sessionId: this.config.sessionId,
-					message: `File uploaded to voice session but cannot be forwarded to agents: ${msg}`,
-				});
-			}
-		}
 	}
 
 	/** Single-flight FIFO for direct-input bodies. Each enqueued body runs
