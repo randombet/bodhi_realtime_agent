@@ -3374,8 +3374,18 @@ export class VoiceSession {
 		}
 	}
 
-	/** Best-effort post-reconnect generation nudge. Filled in Task 4. */
-	private elicitModelResponse(_reason: string): void {}
+	/** Best-effort post-reconnect generation nudge: prefer the transport's
+	 *  content-less elicit (Gemini), else fall back to triggerGeneration (OpenAI).
+	 *  Agent mode only — never nudge while in transcription/dictation mode. */
+	private elicitModelResponse(reason: string): void {
+		if (this.internalMode !== 'agent') return;
+		this.log(`[Watchdog] Re-eliciting model response after reconnect (reason=${reason})`);
+		if (this.transport.elicitResponse) {
+			this.transport.elicitResponse();
+		} else {
+			this.transport.triggerGeneration();
+		}
+	}
 
 	private handleTransportClose(code?: number, reason?: string): void {
 		const detail = code != null ? ` code=${code}${reason ? ` reason="${reason}"` : ''}` : '';

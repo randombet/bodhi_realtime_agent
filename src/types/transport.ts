@@ -530,6 +530,14 @@ export interface LLMTransport {
 		overrides?: { reasoning?: { effort: ReasoningEffort } },
 	): void;
 
+	/** Best-effort re-elicit of a model response from existing/restored context,
+	 *  without injecting new content. Used after a watchdog-driven reconnect to
+	 *  recover a turn the model silently dropped. Optional — transports that
+	 *  auto-generate (or cannot elicit without content) may omit it; callers fall
+	 *  back to `triggerGeneration()`. Gemini implements it as a content-less
+	 *  `turnComplete`. */
+	elicitResponse?(): void;
+
 	// --- Turn correlation (optional) ---
 	/** The transport's currently-active server-turn id, or `undefined` when no
 	 *  server turn is active (idle/closed) or the transport does not model

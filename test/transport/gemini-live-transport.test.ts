@@ -65,6 +65,17 @@ describe('GeminiLiveTransport', () => {
 			expect(config.inputAudioTranscription).toEqual({});
 		});
 
+		it('elicitResponse sends a content-less turnComplete', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			mockSession.sendClientContent.mockClear();
+			transport.elicitResponse?.();
+			expect(mockSession.sendClientContent).toHaveBeenCalledWith({
+				turns: [],
+				turnComplete: true,
+			});
+		});
+
 		it('includes system instruction when provided', async () => {
 			const transport = new GeminiLiveTransport(
 				{ apiKey: 'test-key', systemInstruction: 'Be helpful' },

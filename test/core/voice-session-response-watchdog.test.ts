@@ -48,6 +48,7 @@ function createMockTransport(): LLMTransport {
 		sendFile: vi.fn(),
 		sendToolResult: vi.fn(),
 		triggerGeneration: vi.fn(),
+		elicitResponse: vi.fn(),
 	};
 }
 
@@ -108,6 +109,23 @@ describe('response watchdog', () => {
 			vi.advanceTimersByTime(8000); // watchdog fires
 			vi.advanceTimersByTime(1000); // RECONNECT_BACKOFF_MS[0] (first backoff delay) → reconnect()
 			expect(s.transport.reconnect).toHaveBeenCalledTimes(1);
+		} finally {
+			await session?.close();
+		}
+	});
+
+	it('re-elicits a response after a watchdog-driven reconnect', async () => {
+		let session: VoiceSession | undefined;
+		try {
+			const s = setup();
+			session = s.session;
+			await activate(session, s.transport);
+
+			completeUserTurn(session);
+			vi.advanceTimersByTime(8000); // fire
+			vi.advanceTimersByTime(1000); // backoff → reconnect resolves
+			await vi.runAllTimersAsync(); // let the reconnect().then() microtasks flush
+			expect(s.transport.elicitResponse).toHaveBeenCalledTimes(1);
 		} finally {
 			await session?.close();
 		}
