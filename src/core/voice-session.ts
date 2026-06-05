@@ -48,6 +48,7 @@ import type {
 import type { TTSAudioConfig, TTSProvider } from '../types/tts.js';
 import type { ArtifactRef, ArtifactStore, SaveArtifactParams } from '../types/workspace.js';
 import { BackgroundNotificationQueue } from './background-notification-queue.js';
+import { CLIENT_VAD_SILENCE_MS, ClientVadDetector } from './client-vad-detector.js';
 import { ConversationContext } from './conversation-context.js';
 import { ConversationHistoryWriter } from './conversation-history-writer.js';
 import { DirectiveManager } from './directive-manager.js';
@@ -585,30 +586,18 @@ export class VoiceSession {
 	/** Resolves when memory/directives are loaded; used so greeting is sent after load without blocking connect. */
 	private _memoryReadyPromise: Promise<void> = Promise.resolve();
 	private externalAudioHandler: ((data: Buffer) => void) | null = null;
-	private audioVadSpeechActive = false;
-	private audioVadSpeechStartMs = 0;
-	private audioVadLastVoiceMs = 0;
-	/** True once a barge-in has fired for the current client speech segment —
-	 *  the barge-in fires at most once per segment. Reset when a new segment begins. */
-	private audioVadBargeInFired = false;
-	/** True once the current client speech segment has had a frame loud enough
-	 *  to clear the in-TTS barge-in energy floor — a *potential* barge-in.
-	 *  Reset when a new segment begins. */
-	private audioVadBargeInEligible = false;
+	/** Client-side energy-VAD segment tracker. Owns the `audioVad*` /
+	 *  `lastClientSpeech*` state; barge-in policy stays here (see the
+	 *  `onVoicedFrame` handler wired at construction). */
+	private clientVadDetector!: ClientVadDetector;
 	/** Resolved client-VAD barge-in tuning (config + defaults). */
 	private readonly clientVad: ResolvedClientAudioVadConfig;
-	private lastClientSpeechCompletedMs = 0;
-	private lastClientSpeechDurationMs = 0;
 	private lastGeminiRecognitionLoggedForSpeechEndMs = 0;
 	private lastInputTranscriptionLogText = '';
 	private finalizedInputTurnIds = new Set<number>();
 	private ownsClientTransport: boolean;
-	private static readonly AUDIO_VAD_SILENCE_MS = 500;
 	/** Margin (ms) added to the VAD-defer force-completion timeout. */
 	private static readonly VAD_DEFER_FORCE_MARGIN_MS = 50;
-	private static readonly AUDIO_VAD_MIN_SPEECH_MS = 120;
-	private static readonly AUDIO_VAD_PEAK_THRESHOLD = 1200;
-	private static readonly AUDIO_VAD_AVG_ABS_THRESHOLD = 220;
 	/** Default and floor (ms) for the TTS fallback-completion margin — estimate
 	 *  padding before the server force-completes a turn with no playback signal.
 	 *  See dev_docs/framework/design-playback-state-protocol.md. */
@@ -816,6 +805,21 @@ export class VoiceSession {
 		// Resolve client-VAD barge-in tuning over the defaults.
 		this.clientVad = { ...DEFAULT_CLIENT_AUDIO_VAD, ...config.clientAudioVad };
 
+		// Client-VAD segment tracker. The detector owns the segment state and
+		// energy math; the barge-in *policy* (gate-pending + grace + actuation)
+		// and the playback-defer resolution stay here via these event handlers.
+		this.clientVadDetector = new ClientVadDetector(
+			{
+				onSpeechStart: () => {
+					// New segment ends the input-transcription log-dedup window.
+					this.lastInputTranscriptionLogText = '';
+				},
+				onVoicedFrame: (now, maxAbs, avgAbs) => this.runClientVadBargeInPolicy(now, maxAbs, avgAbs),
+				onSegmentResolved: () => this.resolveVadDeferredPlayback(),
+			},
+			(msg) => this.log(msg),
+		);
+
 		// Resolve the TTS fallback-completion margin: validate, clamp to the floor.
 		this.ttsPlaybackFallbackMarginMs = this.resolveTtsPlaybackFallbackMarginMs(
 			config.ttsPlaybackFallbackMarginMs,
@@ -872,8 +876,8 @@ export class VoiceSession {
 			if (this.runtimeOrchestrator) {
 				const names = calls.map((c) => c.name).join(', ');
 				this.logProviderUserTurnRecognition('tool call received');
-				const sinceVadEnd = this.lastClientSpeechCompletedMs
-					? ` (${Date.now() - this.lastClientSpeechCompletedMs}ms after client audio VAD end)`
+				const sinceVadEnd = this.clientVadDetector.lastSpeechCompletedMs
+					? ` (${Date.now() - this.clientVadDetector.lastSpeechCompletedMs}ms after client audio VAD end)`
 					: '';
 				this.log(`Tool calls from LLM: [${names}]${sinceVadEnd}`);
 				this.transcriptManager.flushInput();
@@ -1738,7 +1742,7 @@ export class VoiceSession {
 		}
 		if (!this.sessionManager.isActive) return;
 
-		this.updateClientAudioVad(data);
+		this.clientVadDetector.process(data);
 
 		// When active agent uses external audio, don't forward to LLM transport.
 		// Route mic frames to the active external audio handler (e.g., TwilioBridge).
@@ -1852,97 +1856,49 @@ export class VoiceSession {
 		return decodeMulawToPcm(mulaw);
 	}
 
-	private updateClientAudioVad(data: Buffer): void {
-		if (data.length < 2) return;
-
-		let maxAbs = 0;
-		let sumAbs = 0;
-		let samples = 0;
-		for (let i = 0; i + 1 < data.length; i += 2) {
-			const abs = Math.abs(data.readInt16LE(i));
-			if (abs > maxAbs) maxAbs = abs;
-			sumAbs += abs;
-			samples += 1;
-		}
-		if (samples === 0) return;
-
-		const now = Date.now();
-		const avgAbs = sumAbs / samples;
-		const hasVoice =
-			maxAbs >= VoiceSession.AUDIO_VAD_PEAK_THRESHOLD ||
-			avgAbs >= VoiceSession.AUDIO_VAD_AVG_ABS_THRESHOLD;
-
-		if (hasVoice) {
-			if (!this.audioVadSpeechActive) {
-				this.audioVadSpeechActive = true;
-				this.audioVadSpeechStartMs = now;
-				this.audioVadBargeInFired = false;
-				this.audioVadBargeInEligible = false;
-				this.lastInputTranscriptionLogText = '';
-				this.log(
-					`[Latency] User voice input started (client audio VAD; peak=${maxAbs}; avgAbs=${Math.round(avgAbs)})`,
-				);
-			}
-			this.audioVadLastVoiceMs = now;
-			this.maybeClientTtsBargeIn(now, maxAbs, avgAbs);
-			return;
-		}
-
-		if (
-			this.audioVadSpeechActive &&
-			this.audioVadLastVoiceMs > 0 &&
-			now - this.audioVadLastVoiceMs >= VoiceSession.AUDIO_VAD_SILENCE_MS
-		) {
-			this.completeClientAudioVad(now, 'silence');
-		}
-	}
-
 	/**
-	 * Fire a client-VAD barge-in for the in-progress speech segment if it is a
-	 * genuine barge-in — sustained past the confirmation window and loud enough
-	 * to clear the TTS-echo floor (see `clientVadBargeInAllowed`). Fires at most
-	 * once per segment. Evaluated on every voiced frame so a quiet onset still
-	 * barges in once it gets loud. Meaningful while a playback gate is pending —
-	 * external TTS or native audio (see liveGate()).
+	 * Barge-in policy for the in-progress client-VAD segment — run on every
+	 * voiced frame (the detector's `onVoicedFrame`). Fires a barge-in when the
+	 * segment is genuine (sustained past the confirmation window, loud enough to
+	 * clear the TTS-echo floor) AND a playback gate is pending AND the grace
+	 * window allows it. Fires at most once per segment. See `clientVadBargeInAllowed`.
 	 */
-	private maybeClientTtsBargeIn(now: number, maxAbs: number, avgAbs: number): void {
+	private runClientVadBargeInPolicy(now: number, maxAbs: number, avgAbs: number): void {
 		// Mark the segment a *potential* barge-in once a frame clears the in-TTS
 		// energy floor — UNCONDITIONALLY, even before a playback gate is armed,
 		// so a segment that begins just before `handleTurnComplete` arms the
 		// native gate is still recognised. `finishOrDeferForVad` keys on this.
 		if (clientVadBargeInEnergyEligible(this.clientVad, maxAbs, avgAbs)) {
-			this.audioVadBargeInEligible = true;
+			this.clientVadDetector.markBargeInEligible();
 		}
 		// The interrupt itself fires only while a playback gate is pending.
 		if (this.liveGate()?.pending !== true) return;
-		if (this.audioVadBargeInFired) return;
+		if (this.clientVadDetector.hasBargeInFired) return;
 		if (
-			!clientVadBargeInAllowed(this.clientVad, now - this.audioVadSpeechStartMs, maxAbs, avgAbs)
+			!clientVadBargeInAllowed(
+				this.clientVad,
+				now - this.clientVadDetector.speechStartedAtMs,
+				maxAbs,
+				avgAbs,
+			)
 		) {
 			return;
 		}
-		// Grace check goes BEFORE setting audioVadBargeInFired — otherwise a
-		// frame at t=500ms within a 1s grace would set the "fired" flag, and
-		// the existing `if (this.audioVadBargeInFired) return` guard above
-		// would skip the next loud frame at t=1100ms (post-grace), defeating
-		// real barge-ins. See dev_docs/framework/design-greeting-interrupt-grace.md §4.
+		// Grace check goes BEFORE marking fired — otherwise a frame at t=500ms
+		// within a 1s grace would set the "fired" flag, and the `hasBargeInFired`
+		// guard above would skip the next loud frame at t=1100ms (post-grace),
+		// defeating real barge-ins. See dev_docs/framework/design-greeting-interrupt-grace.md §4.
 		if (!this.requestInterrupt('client-vad')) return;
-		this.audioVadBargeInFired = true;
+		this.clientVadDetector.markBargeInFired();
 		this.handleClientTtsBargeIn();
 	}
 
-	private completeClientAudioVad(now: number, reason: string): 'completed' | 'ignored' | 'none' {
-		if (!this.audioVadSpeechActive || this.audioVadLastVoiceMs <= 0) return 'none';
-		const speechEndMs = this.audioVadLastVoiceMs;
-		const speechDurationMs = Math.max(0, speechEndMs - this.audioVadSpeechStartMs);
-		const silenceObservedMs = now - speechEndMs;
-		this.audioVadSpeechActive = false;
-		this.audioVadSpeechStartMs = 0;
-		this.audioVadLastVoiceMs = 0;
-		this.audioVadBargeInEligible = false;
-		// VAD-resolution hook: the segment ended without a barge-in (a barge-in
-		// would have torn the gate down via finalizeTurn). If a completion was
-		// deferred for this potential barge-in, finish the turn now.
+	/**
+	 * VAD-resolution hook (the detector's `onSegmentResolved`): a client speech
+	 * segment ended without a barge-in tearing the gate down. If a playback
+	 * completion was deferred for this potential barge-in, finish it now.
+	 */
+	private resolveVadDeferredPlayback(): void {
 		const deferGate = this.liveGate();
 		if (this._ttsPlaybackEndedPending !== null && deferGate?.pending === true) {
 			this.log(
@@ -1952,26 +1908,14 @@ export class VoiceSession {
 			deferGate.clearTimer();
 			this.completePlayback();
 		}
-		if (speechDurationMs < VoiceSession.AUDIO_VAD_MIN_SPEECH_MS) {
-			this.log(
-				`[Latency] User voice input ignored (client audio VAD; reason=${reason}; speechDuration=${speechDurationMs}ms; silenceObserved=${silenceObservedMs}ms; minSpeechDuration=${VoiceSession.AUDIO_VAD_MIN_SPEECH_MS}ms)`,
-			);
-			return 'ignored';
-		}
-		this.lastClientSpeechCompletedMs = speechEndMs;
-		this.lastClientSpeechDurationMs = speechDurationMs;
-		this.log(
-			`[Latency] User voice input completed (client audio VAD; reason=${reason}; speechDuration=${this.lastClientSpeechDurationMs}ms; silenceObserved=${silenceObservedMs}ms)`,
-		);
-		return 'completed';
 	}
 
 	private logInputTranscriptionLatency(text: string, source: string): void {
 		const trimmed = text.trim();
 		if (!trimmed || trimmed === this.lastInputTranscriptionLogText) return;
 		this.lastInputTranscriptionLogText = trimmed;
-		const sinceVadEnd = this.lastClientSpeechCompletedMs
-			? `; ${Date.now() - this.lastClientSpeechCompletedMs}ms after client audio VAD end`
+		const sinceVadEnd = this.clientVadDetector.lastSpeechCompletedMs
+			? `; ${Date.now() - this.clientVadDetector.lastSpeechCompletedMs}ms after client audio VAD end`
 			: '';
 		const preview = trimmed.replace(/\s+/g, ' ').slice(0, 120);
 		this.log(
@@ -1996,12 +1940,16 @@ export class VoiceSession {
 	}
 
 	private logProviderUserTurnRecognition(reason: string): void {
-		this.completeClientAudioVad(Date.now(), 'provider-recognition');
-		if (!this.lastClientSpeechCompletedMs) return;
-		if (this.lastGeminiRecognitionLoggedForSpeechEndMs === this.lastClientSpeechCompletedMs) return;
-		this.lastGeminiRecognitionLoggedForSpeechEndMs = this.lastClientSpeechCompletedMs;
+		this.clientVadDetector.complete('provider-recognition');
+		if (!this.clientVadDetector.lastSpeechCompletedMs) return;
+		if (
+			this.lastGeminiRecognitionLoggedForSpeechEndMs ===
+			this.clientVadDetector.lastSpeechCompletedMs
+		)
+			return;
+		this.lastGeminiRecognitionLoggedForSpeechEndMs = this.clientVadDetector.lastSpeechCompletedMs;
 		this.log(
-			`[Latency] Provider recognized user input completed (${reason}; ${Date.now() - this.lastClientSpeechCompletedMs}ms after client audio VAD end; clientSpeechDuration=${this.lastClientSpeechDurationMs}ms)`,
+			`[Latency] Provider recognized user input completed (${reason}; ${Date.now() - this.clientVadDetector.lastSpeechCompletedMs}ms after client audio VAD end; clientSpeechDuration=${this.clientVadDetector.lastSpeechDurationMs}ms)`,
 		);
 	}
 
@@ -2345,7 +2293,7 @@ export class VoiceSession {
 	 * signal and the fallback timer route through it. Completes the turn unless
 	 * a *potential barge-in* is in progress, in which case completion is
 	 * deferred until that VAD segment resolves (a barge-in interrupts the turn;
-	 * silence completes it via the `completeClientAudioVad` hook).
+	 * silence completes it via the detector's `onSegmentResolved` hook).
 	 * See dev_docs/framework/design-playback-state-protocol.md.
 	 */
 	private finishOrDeferForVad(reason: 'signal' | 'fallback'): void {
@@ -2353,7 +2301,9 @@ export class VoiceSession {
 		// and a frame already past the in-TTS energy floor. Gating on the energy
 		// floor is essential — residual echo below it would defer every turn.
 		const potentialBargeIn =
-			this.audioVadSpeechActive && this.clientVad.bargeInEnabled && this.audioVadBargeInEligible;
+			this.clientVadDetector.isSpeechActive &&
+			this.clientVad.bargeInEnabled &&
+			this.clientVadDetector.isBargeInEligible;
 		// Operate on the live gate's timer (external TTS or native audio).
 		const gate = this.liveGate();
 		gate?.clearTimer();
@@ -2363,7 +2313,7 @@ export class VoiceSession {
 			// high `bargeInConfirmMs`. The callback force-completes (no re-defer,
 			// so it cannot loop) and resets the stale VAD segment.
 			const deferMs =
-				Math.max(VoiceSession.AUDIO_VAD_SILENCE_MS, this.clientVad.bargeInConfirmMs) +
+				Math.max(CLIENT_VAD_SILENCE_MS, this.clientVad.bargeInConfirmMs) +
 				VoiceSession.VAD_DEFER_FORCE_MARGIN_MS;
 			gate?.armTimer(deferMs, () => this.forceCompleteAfterVadDefer());
 			return;
@@ -2380,10 +2330,7 @@ export class VoiceSession {
 			`[Latency] TTS turn complete via ${this._ttsPlaybackEndedPending ?? 'fallback'} (forced after VAD defer)`,
 		);
 		this._ttsPlaybackEndedPending = null;
-		this.audioVadSpeechActive = false;
-		this.audioVadSpeechStartMs = 0;
-		this.audioVadLastVoiceMs = 0;
-		this.audioVadBargeInEligible = false;
+		this.clientVadDetector.resetSegment();
 		this.completePlayback();
 	}
 
