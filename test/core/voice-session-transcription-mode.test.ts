@@ -433,8 +433,7 @@ describe('VoiceSession — Phase 3 transcription mode', () => {
 			(session as any).sessionManager.transitionTo('CONNECTING');
 			// biome-ignore lint/suspicious/noExplicitAny: invoke private state machine for routing test
 			(session as any).sessionManager.transitionTo('ACTIVE');
-			// biome-ignore lint/suspicious/noExplicitAny: invoke private handler for routing test
-			(session as any).handleAudioFromClient(Buffer.from([0, 0, 0, 0]));
+			session.feedAudioFromClient(Buffer.from([0, 0, 0, 0]));
 
 			expect(t.__sentAudio).toHaveLength(1);
 		});
@@ -449,15 +448,13 @@ describe('VoiceSession — Phase 3 transcription mode', () => {
 			(session as any).sessionManager.transitionTo('CONNECTING');
 			// biome-ignore lint/suspicious/noExplicitAny: invoke private state machine for routing test
 			(session as any).sessionManager.transitionTo('ACTIVE');
-			// biome-ignore lint/suspicious/noExplicitAny: invoke private handler for routing test
-			(session as any).handleAudioFromClient(Buffer.from([0, 0, 0, 0]));
+			session.feedAudioFromClient(Buffer.from([0, 0, 0, 0]));
 
 			expect(whisper.__fed).toHaveLength(1);
 			// Transport should not see new audio (it might have received earlier session-setup audio,
 			// but the just-fed frame should not have landed there).
 			const audioBefore = t.__sentAudio.length;
-			// biome-ignore lint/suspicious/noExplicitAny: re-route
-			(session as any).handleAudioFromClient(Buffer.from([1, 1, 1, 1]));
+			session.feedAudioFromClient(Buffer.from([1, 1, 1, 1]));
 			expect(t.__sentAudio).toHaveLength(audioBefore);
 			expect(whisper.__fed).toHaveLength(2);
 		});
@@ -484,8 +481,7 @@ describe('VoiceSession — Phase 3 transcription mode', () => {
 			(session as any).sessionManager.transitionTo('CONNECTING');
 			// biome-ignore lint/suspicious/noExplicitAny: invoke private state machine for routing test
 			(session as any).sessionManager.transitionTo('ACTIVE');
-			// biome-ignore lint/suspicious/noExplicitAny: invoke private handler
-			(session as any).handleAudioFromClient(pcm16k);
+			session.feedAudioFromClient(pcm16k);
 
 			expect(whisper.__fed).toHaveLength(1);
 			// At 24 kHz, 100 ms = 2400 samples = 4800 bytes. base64 length ≈ 4 * ceil(4800/3) = 6400.

@@ -172,7 +172,8 @@ async function main() {
 			onSessionStart: (e) => console.log(`${ts()} [Session] Started: ${e.sessionId}`),
 			onSessionEnd: (e) => console.log(`${ts()} [Session] Ended: ${e.sessionId}`),
 			onToolCall: (e) => console.log(`${ts()} [Hook] Tool called: ${e.toolName} (${e.execution})`),
-			onToolResult: (e) => console.log(`${ts()} [Hook] Tool result: ${e.toolName} (${e.durationMs}ms)`),
+			onToolResult: (e) =>
+				console.log(`${ts()} [Hook] Tool result: ${e.toolCallId} (${e.durationMs}ms)`),
 			onAgentTransfer: (e) =>
 				console.log(`${ts()} [Transfer] ${e.fromAgent} → ${e.toAgent}`),
 			onError: (e) =>

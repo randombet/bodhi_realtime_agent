@@ -11,7 +11,10 @@ export default defineConfig({
 				execArgv: ["--import", "tsx/esm"],
 			},
 		},
-		include: ["test/**/*.test.ts"],
+		// `examples/test/**` are hermetic (no live keys/network) demo-lib tests;
+		// including them here makes the examples regression net part of the single
+		// `pnpm test` invocation (modularization plan migration step M3).
+		include: ["test/**/*.test.ts", "examples/test/**/*.test.ts"],
 		coverage: {
 			provider: "v8",
 			include: ["src/**/*.ts"],

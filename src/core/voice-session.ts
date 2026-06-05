@@ -13,7 +13,7 @@ import type { ToolRoutingInfo } from '../runtime/actors/tool-router-actor.js';
 import { GeminiTransportAdapter } from '../runtime/adapters/gemini-transport-adapter.js';
 import type { KnownNotificationLabel } from '../runtime/messages.js';
 import { RuntimeOrchestrator } from '../runtime/runtime-orchestrator.js';
-import { decodeMulawToPcm, encodePcmToMulaw } from '../telephony/audio-codec.js';
+import { decodeMulawToPcm } from '../telephony/audio-codec.js';
 import { ToolExecutor } from '../tools/tool-executor.js';
 import { createClientChannel } from '../transport/client-channel-factory.js';
 import { DirectRtcClientChannel } from '../transport/direct-rtc-client-channel.js';
@@ -47,7 +47,9 @@ import type {
 } from '../types/transport.js';
 import type { TTSAudioConfig, TTSProvider } from '../types/tts.js';
 import type { ArtifactRef, ArtifactStore, SaveArtifactParams } from '../types/workspace.js';
+import { AudioRouter, type InternalTranscriptionMode } from './audio-router.js';
 import { BackgroundNotificationQueue } from './background-notification-queue.js';
+import { ClientVadDetector } from './client-vad-detector.js';
 import { ConversationContext } from './conversation-context.js';
 import { ConversationHistoryWriter } from './conversation-history-writer.js';
 import { DirectiveManager } from './directive-manager.js';
@@ -57,6 +59,17 @@ import { InteractionModeManager } from './interaction-mode.js';
 import { InterruptGraceWindow } from './interrupt-grace-window.js';
 import { MemoryCacheManager } from './memory-cache-manager.js';
 import { MultiplexConversationHistoryStore } from './multiplex-conversation-history-store.js';
+import {
+	ActorNotificationSink,
+	LegacyNotificationSink,
+	type NotificationSink,
+} from './notification-sink.js';
+import { PlaybackCompletionArbiter } from './playback-completion-arbiter.js';
+import {
+	ExternalTtsPlaybackGate,
+	NativeAudioPlaybackGate,
+	type PlaybackGate,
+} from './playback-gate.js';
 import { SessionManager } from './session-manager.js';
 import { ToolCallRouter } from './tool-call-router.js';
 import { TranscriptManager } from './transcript-manager.js';
@@ -71,17 +84,6 @@ import { computeCacheHitRatio, deriveProviderItemId, deriveUsageSource } from '.
  * when read via `getTranscriptionMode()`.
  */
 export type TranscriptionMode = 'agent' | 'transcription';
-
-/** Internal mode used by the audio routing switch. */
-type InternalTranscriptionMode =
-	| 'agent'
-	| 'starting_transcription'
-	| 'transcription'
-	| 'stopping_transcription';
-
-/** Bounded buffer cap for mic audio held during a mode transition.
- *  Roughly 2 seconds of 24 kHz PCM16 mono (48 000 B/s × 2). */
-const MAX_TRANSITION_BUFFER_BYTES = 96_000;
 
 /**
  * Single-writer FIFO over async session mutations. Both `transferSession()`
@@ -470,22 +472,11 @@ export class VoiceSession {
 	 *  `greetingInterruptGraceMs > 0`.
 	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §6, §8. */
 	private _greetingInFlight = false;
-	/** Native-audio playback cursor — wall-clock (ms) when the current native
-	 *  turn's buffered audio is estimated to finish playing. `0` = the current
-	 *  turn has produced no native audio yet. Reset at each turn boundary. */
-	private _nativeEstimatedPlaybackEndMs = 0;
-	/** Per-turn `playbackId` for native `audio.done` / `playback.ended`
-	 *  correlation. Session-monotonic — incremented on the first native audio
-	 *  chunk of a turn and on gate teardown; never reset to `0`. */
-	private _nativePlaybackId = 0;
-	/** True while a native turn's completion is deferred pending playback end. */
-	private _nativePlaybackPending = false;
-	/** Native playback fallback timer — armed at `handleTurnComplete`. */
-	private _nativePlaybackTimer?: ReturnType<typeof setTimeout>;
-	/** The `Turn` captured when the native gate is armed — finalized when the
-	 *  gate completes (clean or interrupted), so a later `currentTurn` change
-	 *  cannot misdirect the completion. */
-	private _nativePlaybackTurn: Turn | null = null;
+	/** Native-audio playback-end gate (the OpenAI native path). Present for every
+	 *  native (non-TTS) session — its barge-in runs regardless of gating — but
+	 *  only *arms* when `nativePlaybackGatingActive`. Owns the former `_native*`
+	 *  timer/pending/turn/cursor/id state. See `playback-gate.ts`. */
+	private nativeGate?: NativeAudioPlaybackGate;
 	/** Per-response flag: true once the framework dispatches tool calls for the
 	 *  current model response. Cleared at each response start
 	 *  (`onModelTurnStart`); read by `handleTurnComplete` so the native gate
@@ -511,8 +502,6 @@ export class VoiceSession {
 	private whisperProvider?: STTProvider;
 	private internalMode: InternalTranscriptionMode = 'agent';
 	private dictationBuffer: string[] = [];
-	private transitionBuffer: Buffer[] = [];
-	private transitionBufferBytes = 0;
 	private mutationQueue = new SessionMutationQueue();
 	/** Tool results that arrived while not in 'agent' mode. Flushed in order on
 	 *  re-entry. Prevents response.create from leaking during transcription mode. */
@@ -524,31 +513,15 @@ export class VoiceSession {
 	private _turnWasInterrupted = false;
 	// --- TTS state (actor-mode only) ---
 	private ttsProvider?: TTSProvider;
-	private _ttsCurrentRequestId = 0;
-	private _ttsTurnHasText = false;
-	private _ttsLlmTextDone = false;
-	private _ttsAudioDone = false;
-	private _ttsSpeaking = false;
-	private _ttsFormat?: TTSAudioConfig;
-	private _ttsHardTimer?: ReturnType<typeof setTimeout>;
-	private _ttsFirstTextMs = 0;
-	private _ttsFirstAudioMs = 0;
-	private _ttsTextLength = 0;
-	/** Sum of durationMs across the current turn's TTS audio chunks. Synthesis
-	 *  finishes far faster than realtime playback; this estimates how long the
-	 *  client is still draining audio after the provider reports done. */
-	private _ttsAudioDurationMs = 0;
-	/** Defers turn completion from synthesis-done to estimated client
-	 *  playback-done, keeping the turn interruptible through the audio tail. */
-	private _ttsPlaybackTimer?: ReturnType<typeof setTimeout>;
-	/** Non-null when a completion (the `playback.ended` signal or the fallback
-	 *  timer) was deferred pending an in-progress potential barge-in; the value
-	 *  records which source triggered it (for the completion-source log). */
-	private _ttsPlaybackEndedPending: 'signal' | 'fallback' | null = null;
-	/** Estimated client playback-end (ms epoch) for the current turn — set in
-	 *  `tts.onDone`, used only to classify a barge-in as before/after the
-	 *  estimate for observability. */
-	private _ttsEstimatedPlaybackEndMs: number | null = null;
+	/** External-TTS playback gate — owns the former `_tts*` state machine
+	 *  (request id, done/speaking flags, format, timers, counters) and the
+	 *  completion logic. Constructed when `ttsProvider` is set; the wiring in
+	 *  `wireTtsProvider` drives it. See `playback-gate.ts`. */
+	private ttsGate?: ExternalTtsPlaybackGate;
+	/** Playback-completion arbiter — owns the source-neutral playback-defer flag
+	 *  and the completePlayback / finishOrDeferForVad routing. Constructed after
+	 *  the gates. See `playback-completion-arbiter.ts`. */
+	private completionArbiter!: PlaybackCompletionArbiter;
 	// --- Server-turn finalization dedup (external-TTS turn completion).
 	//     See dev_docs/framework/design-external-tts-turn-completion.md. ---
 	private config: VoiceSessionConfig;
@@ -558,22 +531,21 @@ export class VoiceSession {
 	private clientConnected = false;
 	/**
 	 * Legacy in-process notification queue. Constructed only when
-	 * `orchestrationMode !== 'actor'`. In actor mode, NotificationActor
-	 * (`src/runtime/actors/notification-actor.ts`) takes over, and every
-	 * legacy call site that touches `this.notificationQueue` is guarded
-	 * with `if (this.notificationQueue)` or branched on `_isActorMode`.
+	 * `orchestrationMode !== 'actor'`; in actor mode NotificationActor
+	 * (`src/runtime/actors/notification-actor.ts`) takes over. Notification
+	 * dispatch now goes exclusively through `notificationSink` (below) — this
+	 * field is only the queue the `LegacyNotificationSink` wraps.
 	 */
 	private notificationQueue?: BackgroundNotificationQueue;
+	/**
+	 * Mode-agnostic notification seam over `notificationQueue` (legacy) and
+	 * `runtime.tell('notification.*')` (actor). Owns the once-per-turn
+	 * `audio_started` debounce in actor mode. See `notification-sink.ts`.
+	 */
+	private notificationSink!: NotificationSink;
 	private interactionMode = new InteractionModeManager();
 	/** True when `config.orchestrationMode === 'actor'`. */
 	private _isActorMode = false;
-	/**
-	 * Per-turn debounce flag for `notification.audio_started` (actor mode only).
-	 * Set on first audio chunk of a turn; cleared on turn-complete, interrupt,
-	 * and pre-greeting. The audio-fast-path contract requires we send the
-	 * debounced control-plane signal once per turn — never per chunk.
-	 */
-	private _audioStartedThisTurn = false;
 	/** Tracks consecutive reconnect attempts to prevent infinite reconnect storms. */
 	private reconnectAttempts = 0;
 	private static readonly MAX_RECONNECT_ATTEMPTS = 3;
@@ -581,30 +553,20 @@ export class VoiceSession {
 	/** Resolves when memory/directives are loaded; used so greeting is sent after load without blocking connect. */
 	private _memoryReadyPromise: Promise<void> = Promise.resolve();
 	private externalAudioHandler: ((data: Buffer) => void) | null = null;
-	private audioVadSpeechActive = false;
-	private audioVadSpeechStartMs = 0;
-	private audioVadLastVoiceMs = 0;
-	/** True once a barge-in has fired for the current client speech segment —
-	 *  the barge-in fires at most once per segment. Reset when a new segment begins. */
-	private audioVadBargeInFired = false;
-	/** True once the current client speech segment has had a frame loud enough
-	 *  to clear the in-TTS barge-in energy floor — a *potential* barge-in.
-	 *  Reset when a new segment begins. */
-	private audioVadBargeInEligible = false;
+	/** Client-side energy-VAD segment tracker. Owns the `audioVad*` /
+	 *  `lastClientSpeech*` state; barge-in policy stays here (see the
+	 *  `onVoicedFrame` handler wired at construction). */
+	private clientVadDetector!: ClientVadDetector;
+	/** Inbound client-audio fast path (mode dispatch + transition buffer + μ-law
+	 *  encode). Constructed after the VAD detector. */
+	private audioRouter!: AudioRouter;
 	/** Resolved client-VAD barge-in tuning (config + defaults). */
 	private readonly clientVad: ResolvedClientAudioVadConfig;
-	private lastClientSpeechCompletedMs = 0;
-	private lastClientSpeechDurationMs = 0;
 	private lastGeminiRecognitionLoggedForSpeechEndMs = 0;
 	private lastInputTranscriptionLogText = '';
 	private finalizedInputTurnIds = new Set<number>();
 	private ownsClientTransport: boolean;
-	private static readonly AUDIO_VAD_SILENCE_MS = 500;
 	/** Margin (ms) added to the VAD-defer force-completion timeout. */
-	private static readonly VAD_DEFER_FORCE_MARGIN_MS = 50;
-	private static readonly AUDIO_VAD_MIN_SPEECH_MS = 120;
-	private static readonly AUDIO_VAD_PEAK_THRESHOLD = 1200;
-	private static readonly AUDIO_VAD_AVG_ABS_THRESHOLD = 220;
 	/** Default and floor (ms) for the TTS fallback-completion margin — estimate
 	 *  padding before the server force-completes a turn with no playback signal.
 	 *  See dev_docs/framework/design-playback-state-protocol.md. */
@@ -660,6 +622,14 @@ export class VoiceSession {
 				},
 				(msg) => this.log(msg),
 				config.transport?.capabilities?.messageTruncation ?? false,
+			);
+			this.notificationSink = new LegacyNotificationSink(this.notificationQueue);
+		} else {
+			// The `tell` closure defers to `runtimeOrchestrator` at call time — it is
+			// constructed later in this constructor, but no notification fires before
+			// the session is running.
+			this.notificationSink = new ActorNotificationSink((type, payload, to) =>
+				this.runtimeOrchestrator?.runtime.tell(type, payload, to),
 			);
 		}
 
@@ -804,6 +774,48 @@ export class VoiceSession {
 		// Resolve client-VAD barge-in tuning over the defaults.
 		this.clientVad = { ...DEFAULT_CLIENT_AUDIO_VAD, ...config.clientAudioVad };
 
+		// Client-VAD segment tracker. The detector owns the segment state and
+		// energy math; the barge-in *policy* (gate-pending + grace + actuation)
+		// and the playback-defer resolution stay here via these event handlers.
+		this.clientVadDetector = new ClientVadDetector(
+			{
+				onSpeechStart: () => {
+					// New segment ends the input-transcription log-dedup window.
+					this.lastInputTranscriptionLogText = '';
+				},
+				onVoicedFrame: (now, maxAbs, avgAbs) => this.runClientVadBargeInPolicy(now, maxAbs, avgAbs),
+				onSegmentResolved: () => this.completionArbiter.resolveDeferredPlayback(),
+			},
+			(msg) => this.log(msg),
+		);
+
+		// Inbound client-audio fast path. Dependencies are read through
+		// getters/predicates so the router observes the same call-time values the
+		// former inline `handleAudioFromClient` did (providers, mode, gate, and
+		// the late-bound external-audio handler are all wired after this point).
+		this.audioRouter = new AudioRouter({
+			transport: this.transport,
+			vad: this.clientVadDetector,
+			clientAudioInputRate: this.clientAudioInputRate,
+			getSttProvider: () => this.sttProvider,
+			getWhisperProvider: () => this.whisperProvider,
+			isSessionActive: () => this.sessionManager.isActive,
+			isRtcAudioReady: () => this.directRtcChannel?.isRtcAudioReady ?? false,
+			getMode: () => this.internalMode,
+			shouldDropOutbound: () => this._greetingInFlight || this._grace.isActive(),
+			routeExternalAudio: (data) => {
+				if (this.agentRouter.activeAgent.audioMode !== 'external') return false;
+				if (this.externalAudioHandler) {
+					try {
+						this.externalAudioHandler(data);
+					} catch (err) {
+						this.reportError('external-audio', err instanceof Error ? err : new Error(String(err)));
+					}
+				}
+				return true;
+			},
+		});
+
 		// Resolve the TTS fallback-completion margin: validate, clamp to the floor.
 		this.ttsPlaybackFallbackMarginMs = this.resolveTtsPlaybackFallbackMarginMs(
 			config.ttsPlaybackFallbackMarginMs,
@@ -852,42 +864,7 @@ export class VoiceSession {
 		this._rawSendContent = originalSendContent;
 
 		// Wire LLMTransport property callbacks — works for both injected and default transports
-		this.transport.onAudioOutput = (data) => this.handleAudioOutput(data);
-		this.transport.onToolCall = (calls) => {
-			// Native playback-end gate: this response dispatched a tool call, so
-			// it is not the turn's terminal spoken response.
-			this._nativeResponseDispatchedToolCall = true;
-			if (this.runtimeOrchestrator) {
-				const names = calls.map((c) => c.name).join(', ');
-				this.logProviderUserTurnRecognition('tool call received');
-				const sinceVadEnd = this.lastClientSpeechCompletedMs
-					? ` (${Date.now() - this.lastClientSpeechCompletedMs}ms after client audio VAD end)`
-					: '';
-				this.log(`Tool calls from LLM: [${names}]${sinceVadEnd}`);
-				this.transcriptManager.flushInput();
-				this.transcriptManager.saveOutputPrefix();
-			}
-			this.toolCallRouter?.handleToolCalls(calls);
-		};
-		this.transport.onToolCallCancel = (ids) => {
-			if (this.runtimeOrchestrator) {
-				this.toolExecutor.cancel(ids);
-			}
-			this.toolCallRouter?.handleToolCallCancellation(ids);
-		};
-		this.transport.onTurnComplete = (serverTurnId) => this.handleTurnComplete(serverTurnId);
-		this.transport.onInterrupted = (serverTurnId) => this.handleInterrupted(serverTurnId);
-		this.transport.onOutputTranscription = (text) => {
-			this.ensureCurrentTurn();
-			this.transcriptManager.handleOutput(text);
-		};
-		this.transport.onSessionReady = (sessionId) => this.handleSetupComplete(sessionId);
-		this.transport.onError = (error) => this.handleTransportError(error);
-		this.transport.onClose = (code, reason) => this.handleTransportClose(code, reason);
-		this.transport.onGoAway = (timeLeft) => this.handleGoAway(timeLeft);
-		this.transport.onResumptionUpdate = (handle, resumable) =>
-			this.handleResumptionUpdate(handle, resumable);
-		this.transport.onGroundingMetadata = (metadata) => this.handleGroundingMetadata(metadata);
+		this.wireTransportCallbacks();
 
 		// Wire STT: streaming provider for real-time display, Gemini built-in for
 		// post-hoc correction. Both paths can be active simultaneously.
@@ -1021,6 +998,11 @@ export class VoiceSession {
 		// Wire TTS provider (actor-mode only)
 		if (config.ttsProvider && config.orchestrationMode === 'actor') {
 			this.ttsProvider = config.ttsProvider;
+			this.ttsGate = new ExternalTtsPlaybackGate({
+				onComplete: (turn, opts) => this.finalizeTurn(turn, opts),
+				getCurrentTurn: () => this.currentTurn,
+				log: (msg) => this.log(msg),
+			});
 			this.wireTtsProvider();
 		}
 
@@ -1030,7 +1012,7 @@ export class VoiceSession {
 				? {
 						inputPcmSampleRate: this.transport.audioFormat.inputSampleRate,
 						outputPcmSampleRate: this.transport.audioFormat.outputSampleRate,
-						onInboundPcm: (pcm: Buffer) => this.handleAudioFromClient(pcm, 'rtc'),
+						onInboundPcm: (pcm: Buffer) => this.audioRouter.handleFromClient(pcm, 'rtc'),
 					}
 				: undefined;
 		this.clientTransport = createClientChannel({
@@ -1041,7 +1023,7 @@ export class VoiceSession {
 			host: config.host,
 			listenTimeoutMs: config.listenTimeoutMs,
 			callbacks: {
-				onAudioFromClient: (data) => this.handleAudioFromClient(data, 'websocket'),
+				onAudioFromClient: (data) => this.audioRouter.handleFromClient(data, 'websocket'),
 				onJsonFromClient: (message) => this.handleJsonFromClient(message),
 				onClientConnected: () => this.handleClientConnected(),
 				onClientDisconnected: () => this.handleClientDisconnected(),
@@ -1071,62 +1053,44 @@ export class VoiceSession {
 		// can fire. See design-greeting-interrupt-grace.md §5.
 		this._overrideGraceMs = clampGraceMs(config.greetingInterruptGraceMs);
 
-		// Native sessions install the native barge-in path — the !ttsProvider
-		// sibling of wireTtsProvider(). Harmless when gating is off (the handler
-		// only acts while _nativePlaybackPending, which the gate alone sets).
+		// Native (non-TTS) sessions get the native playback gate. Its barge-in is
+		// installed for every native session (the !ttsProvider sibling of
+		// wireTtsProvider); it only *arms* when nativePlaybackGatingActive.
 		if (!this.ttsProvider) {
-			this.wireNativeBargeIn();
+			this.nativeGate = new NativeAudioPlaybackGate({
+				audioFormat: this.transport.audioFormat,
+				frameworkOwnsInterrupt: this.transport.capabilities.frameworkOwnsInterrupt === true,
+				fallbackMarginMs: this.ttsPlaybackFallbackMarginMs,
+				minPlaybackRate: VoiceSession.MIN_PLAYBACK_RATE,
+				cancelResponse: (opts) => this.transport.cancelResponse?.(opts),
+				requestInterrupt: (source) => this.requestInterrupt(source),
+				getCurrentTurn: () => this.currentTurn,
+				onComplete: (turn, opts) => this.finalizeTurn(turn, opts),
+				log: (msg) => this.log(msg),
+			});
+			this.nativeGate.installBargeIn(this.transport);
 		}
 
-		// Forward GUI events from EventBus to the client as JSON text frames
-		this.eventBus.subscribe('gui.update', (payload) => {
-			this.clientTransport.sendJsonToClient({ type: 'gui.update', payload });
-		});
-		this.eventBus.subscribe('gui.notification', (payload) => {
-			this.clientTransport.sendJsonToClient({ type: 'gui.notification', payload });
-		});
-		this.eventBus.subscribe('subagent.ui.send', (payload) => {
-			this.clientTransport.sendJsonToClient({ type: 'ui.payload', payload: payload.payload });
-		});
-
-		// Bind STT lifecycle to session state: start when ACTIVE (agent ready), stop when disconnecting
-		this.eventBus.subscribe('session.stateChange', (payload: { toState: string }) => {
-			if (payload.toState === 'ACTIVE') {
-				this.startSttProvider();
-			} else if (payload.toState === 'RECONNECTING' || payload.toState === 'TRANSFERRING') {
-				void this.sttProvider?.stop();
-			}
+		// Playback-completion arbiter — owns the defer flag + completion routing
+		// across the (mutually exclusive) TTS and native gates.
+		this.completionArbiter = new PlaybackCompletionArbiter({
+			getLiveGate: () => this.liveGate(),
+			nativePlaybackGatingActive: this.nativePlaybackGatingActive,
+			getNativeGate: () => this.nativeGate,
+			getTtsGate: () => this.ttsGate,
+			vad: this.clientVadDetector,
+			getBargeInConfig: () => ({
+				bargeInEnabled: this.clientVad.bargeInEnabled,
+				bargeInConfirmMs: this.clientVad.bargeInConfirmMs,
+			}),
+			finalizeTurn: (turn, opts) => this.finalizeTurn(turn, opts),
+			log: (msg) => this.log(msg),
 		});
 
-		// Route UI button responses back to the waiting SubagentSession
-		this.eventBus.subscribe(
-			'subagent.ui.response',
-			(payload: {
-				sessionId: string;
-				response: { requestId: string; selectedOptionId?: string };
-			}) => {
-				const { requestId, selectedOptionId } = payload.response;
-				if (!requestId || !selectedOptionId) return;
-
-				const session = this.agentRouter.findSessionByRequestId(requestId);
-				if (!session) return;
-
-				const option = session.resolveOption(requestId, selectedOptionId);
-				const answerText = option?.label ?? selectedOptionId;
-				session.trySendToSubagent(answerText);
-			},
-		);
-
-		// Subscribe to async agent transfer requests (from external audio agents like Twilio)
-		this.eventBus.subscribe('agent.transfer_requested', (payload) => {
-			setImmediate(() => {
-				this.transfer(payload.toAgent).catch((err) => {
-					this.log(
-						`Transfer requested to "${payload.toAgent}" failed: ${err instanceof Error ? err.message : String(err)}`,
-					);
-				});
-			});
-		});
+		// Wire EventBus subscriptions (GUI forwarding, STT lifecycle, subagent UI,
+		// async agent transfer). Callbacks capture `this` and fire at runtime, so
+		// they may reference collaborators (e.g. agentRouter) constructed below.
+		this.wireEventBus();
 
 		// Set up tool executor
 		this.toolExecutor = this.createToolExecutor(config.initialAgent);
@@ -1170,78 +1134,9 @@ export class VoiceSession {
 			this.agentRouter.responseModality = 'text';
 		}
 
-		// P4: chain pattern — preserve any pre-attached usage handler on the
-		// transport, then call the framework hook AND publish to the EventBus.
-		// Same chaining pattern is applied to onCacheBust below for symmetry.
-		const prevUsage = this.transport.onRealtimeLLMUsage;
-		this.transport.onRealtimeLLMUsage = (usage) => {
-			try {
-				prevUsage?.(usage);
-			} catch (e) {
-				this.log(`pre-attached onRealtimeLLMUsage threw: ${(e as Error).message}`);
-			}
-			const source = deriveUsageSource(usage);
-			// Derive the turnId for this usage event without creating a Turn.
-			// Input-transcription usage is not turn-bound. Otherwise resolveTurn
-			// maps it to its Turn (a `match` — including trailing winding-down
-			// usage for the just-finalized turn); a `new`/`stale` result means a
-			// turn not yet born, which gets `turn_${turnId+1}` — the id it will
-			// be born with.
-			let turnId: string | null;
-			let agentName: string;
-			if (source === 'openai.transcription') {
-				turnId = null;
-				agentName = this.activeTurn()?.agentName ?? this.agentRouter.activeAgent.name;
-			} else {
-				const r = this.resolveTurn(usage.serverTurnId, 'usage');
-				if (r.kind === 'match') {
-					turnId = r.turn.id;
-					agentName = r.turn.agentName;
-				} else {
-					turnId = `turn_${this.turnId + 1}`;
-					agentName = this.agentRouter.activeAgent.name;
-				}
-			}
-			if (this.hooks.onRealtimeLLMUsage) {
-				this.hooks.onRealtimeLLMUsage({
-					sessionId: this.config.sessionId,
-					agentName,
-					usage,
-				});
-			}
-			const seqKey = `${turnId ?? 'no_turn'}:${source}`;
-			const sequence = (this.currentTurnUsageSequence.get(seqKey) ?? 0) + 1;
-			this.currentTurnUsageSequence.set(seqKey, sequence);
-			const ratio = computeCacheHitRatio(usage, source);
-			this.eventBus.publish('realtime.usage', {
-				sessionId: this.config.sessionId,
-				agentName,
-				turnId,
-				source,
-				providerItemId: deriveProviderItemId(usage, source),
-				sequence,
-				emittedAt: Date.now(),
-				usage,
-				...(ratio !== undefined ? { cacheHitRatio: ratio } : {}),
-			});
-		};
-
-		// P4: chain pattern for onCacheBust + EventBus mirror.
-		const prevCacheBust = this.transport.onCacheBust;
-		this.transport.onCacheBust = (reason) => {
-			try {
-				prevCacheBust?.(reason);
-			} catch (e) {
-				this.log(`pre-attached onCacheBust threw: ${(e as Error).message}`);
-			}
-			const active = this.activeTurn();
-			this.eventBus.publish('realtime.cache.bust', {
-				sessionId: this.config.sessionId,
-				agentName: active?.agentName ?? this.agentRouter.activeAgent.name,
-				turnId: active?.id ?? null,
-				reason,
-			});
-		};
+		// Usage + cache-bust observability — chained over any pre-attached handlers,
+		// fired to the framework hook and mirrored to the EventBus.
+		this.wireUsageCallbacks();
 
 		if (config.orchestrationMode === 'actor') {
 			this.runtimeToolRegistry = this.buildRuntimeToolRegistry([...agentTools, ...behaviorTools]);
@@ -1417,6 +1312,179 @@ export class VoiceSession {
 		}
 	}
 
+	/** Wire the LLMTransport lifecycle property callbacks (audio / tool / turn /
+	 *  error / grounding). Works for both injected and default transports. The
+	 *  TTS and native text/speech-started callbacks are wired separately
+	 *  (`wireTtsProvider` / the native gate's `installBargeIn`). */
+	private wireTransportCallbacks(): void {
+		this.transport.onAudioOutput = (data) => this.handleAudioOutput(data);
+		this.transport.onToolCall = (calls) => {
+			// Native playback-end gate: this response dispatched a tool call, so
+			// it is not the turn's terminal spoken response.
+			this._nativeResponseDispatchedToolCall = true;
+			if (this.runtimeOrchestrator) {
+				const names = calls.map((c) => c.name).join(', ');
+				this.logProviderUserTurnRecognition('tool call received');
+				const sinceVadEnd = this.clientVadDetector.lastSpeechCompletedMs
+					? ` (${Date.now() - this.clientVadDetector.lastSpeechCompletedMs}ms after client audio VAD end)`
+					: '';
+				this.log(`Tool calls from LLM: [${names}]${sinceVadEnd}`);
+				this.transcriptManager.flushInput();
+				this.transcriptManager.saveOutputPrefix();
+			}
+			this.toolCallRouter?.handleToolCalls(calls);
+		};
+		this.transport.onToolCallCancel = (ids) => {
+			if (this.runtimeOrchestrator) {
+				this.toolExecutor.cancel(ids);
+			}
+			this.toolCallRouter?.handleToolCallCancellation(ids);
+		};
+		this.transport.onTurnComplete = (serverTurnId) => this.handleTurnComplete(serverTurnId);
+		this.transport.onInterrupted = (serverTurnId) => this.handleInterrupted(serverTurnId);
+		this.transport.onOutputTranscription = (text) => {
+			this.ensureCurrentTurn();
+			this.transcriptManager.handleOutput(text);
+		};
+		this.transport.onSessionReady = (sessionId) => this.handleSetupComplete(sessionId);
+		this.transport.onError = (error) => this.handleTransportError(error);
+		this.transport.onClose = (code, reason) => this.handleTransportClose(code, reason);
+		this.transport.onGoAway = (timeLeft) => this.handleGoAway(timeLeft);
+		this.transport.onResumptionUpdate = (handle, resumable) =>
+			this.handleResumptionUpdate(handle, resumable);
+		this.transport.onGroundingMetadata = (metadata) => this.handleGroundingMetadata(metadata);
+	}
+
+	/** Wire EventBus subscriptions: GUI event → client forwarding, STT lifecycle
+	 *  binding, subagent UI button responses, and async agent-transfer requests.
+	 *  Callbacks fire at runtime, so referencing collaborators constructed later
+	 *  (e.g. `agentRouter`) is safe. */
+	private wireEventBus(): void {
+		// Forward GUI events from EventBus to the client as JSON text frames
+		this.eventBus.subscribe('gui.update', (payload) => {
+			this.clientTransport.sendJsonToClient({ type: 'gui.update', payload });
+		});
+		this.eventBus.subscribe('gui.notification', (payload) => {
+			this.clientTransport.sendJsonToClient({ type: 'gui.notification', payload });
+		});
+		this.eventBus.subscribe('subagent.ui.send', (payload) => {
+			this.clientTransport.sendJsonToClient({ type: 'ui.payload', payload: payload.payload });
+		});
+
+		// Bind STT lifecycle to session state: start when ACTIVE (agent ready), stop when disconnecting
+		this.eventBus.subscribe('session.stateChange', (payload: { toState: string }) => {
+			if (payload.toState === 'ACTIVE') {
+				this.startSttProvider();
+			} else if (payload.toState === 'RECONNECTING' || payload.toState === 'TRANSFERRING') {
+				void this.sttProvider?.stop();
+			}
+		});
+
+		// Route UI button responses back to the waiting SubagentSession
+		this.eventBus.subscribe(
+			'subagent.ui.response',
+			(payload: {
+				sessionId: string;
+				response: { requestId: string; selectedOptionId?: string };
+			}) => {
+				const { requestId, selectedOptionId } = payload.response;
+				if (!requestId || !selectedOptionId) return;
+
+				const session = this.agentRouter.findSessionByRequestId(requestId);
+				if (!session) return;
+
+				const option = session.resolveOption(requestId, selectedOptionId);
+				const answerText = option?.label ?? selectedOptionId;
+				session.trySendToSubagent(answerText);
+			},
+		);
+
+		// Subscribe to async agent transfer requests (from external audio agents like Twilio)
+		this.eventBus.subscribe('agent.transfer_requested', (payload) => {
+			setImmediate(() => {
+				this.transfer(payload.toAgent).catch((err) => {
+					this.log(
+						`Transfer requested to "${payload.toAgent}" failed: ${err instanceof Error ? err.message : String(err)}`,
+					);
+				});
+			});
+		});
+	}
+
+	/** Wire the realtime usage + cache-bust observability callbacks. Each chains
+	 *  over any handler a pre-configured injected transport already attached, then
+	 *  fires the framework hook and mirrors the event onto the EventBus (P4). */
+	private wireUsageCallbacks(): void {
+		const prevUsage = this.transport.onRealtimeLLMUsage;
+		this.transport.onRealtimeLLMUsage = (usage) => {
+			try {
+				prevUsage?.(usage);
+			} catch (e) {
+				this.log(`pre-attached onRealtimeLLMUsage threw: ${(e as Error).message}`);
+			}
+			const source = deriveUsageSource(usage);
+			// Derive the turnId for this usage event without creating a Turn.
+			// Input-transcription usage is not turn-bound. Otherwise resolveTurn
+			// maps it to its Turn (a `match` — including trailing winding-down
+			// usage for the just-finalized turn); a `new`/`stale` result means a
+			// turn not yet born, which gets `turn_${turnId+1}` — the id it will
+			// be born with.
+			let turnId: string | null;
+			let agentName: string;
+			if (source === 'openai.transcription') {
+				turnId = null;
+				agentName = this.activeTurn()?.agentName ?? this.agentRouter.activeAgent.name;
+			} else {
+				const r = this.resolveTurn(usage.serverTurnId, 'usage');
+				if (r.kind === 'match') {
+					turnId = r.turn.id;
+					agentName = r.turn.agentName;
+				} else {
+					turnId = `turn_${this.turnId + 1}`;
+					agentName = this.agentRouter.activeAgent.name;
+				}
+			}
+			if (this.hooks.onRealtimeLLMUsage) {
+				this.hooks.onRealtimeLLMUsage({
+					sessionId: this.config.sessionId,
+					agentName,
+					usage,
+				});
+			}
+			const seqKey = `${turnId ?? 'no_turn'}:${source}`;
+			const sequence = (this.currentTurnUsageSequence.get(seqKey) ?? 0) + 1;
+			this.currentTurnUsageSequence.set(seqKey, sequence);
+			const ratio = computeCacheHitRatio(usage, source);
+			this.eventBus.publish('realtime.usage', {
+				sessionId: this.config.sessionId,
+				agentName,
+				turnId,
+				source,
+				providerItemId: deriveProviderItemId(usage, source),
+				sequence,
+				emittedAt: Date.now(),
+				usage,
+				...(ratio !== undefined ? { cacheHitRatio: ratio } : {}),
+			});
+		};
+
+		const prevCacheBust = this.transport.onCacheBust;
+		this.transport.onCacheBust = (reason) => {
+			try {
+				prevCacheBust?.(reason);
+			} catch (e) {
+				this.log(`pre-attached onCacheBust threw: ${(e as Error).message}`);
+			}
+			const active = this.activeTurn();
+			this.eventBus.publish('realtime.cache.bust', {
+				sessionId: this.config.sessionId,
+				agentName: active?.agentName ?? this.agentRouter.activeAgent.name,
+				turnId: active?.id ?? null,
+				reason,
+			});
+		};
+	}
+
 	/**
 	 * Queue a short spoken update for the user.
 	 * Delivered immediately when possible, otherwise after the current turn.
@@ -1437,19 +1505,7 @@ export class VoiceSession {
 	): void {
 		const label = options?.label ?? 'SUBAGENT UPDATE';
 		const priority = options?.priority ?? 'normal';
-		if (this._isActorMode) {
-			this.runtimeOrchestrator?.runtime.tell(
-				'notification.publish',
-				{ label, text, priority },
-				'notification',
-			);
-			return;
-		}
-		this.notificationQueue?.sendOrQueue(
-			[{ role: 'user', parts: [{ text: `[${label}]: ${text}` }] }],
-			true,
-			{ priority },
-		);
+		this.notificationSink.publish(label, text, priority);
 	}
 
 	/**
@@ -1459,11 +1515,10 @@ export class VoiceSession {
 	 * TransportActor wraps it as `[SYSTEM]: text` at the wire-out boundary.
 	 */
 	private publishSystemNotification(text: string): void {
-		this.runtimeOrchestrator?.runtime.tell(
-			'notification.publish',
-			{ label: 'SYSTEM', text, priority: 'normal' },
-			'notification',
-		);
+		// Actor-only callers (the background-tool completion path, guarded by the
+		// actor-construction block). Routed through the sink for uniformity; the
+		// legacy sink is never reached from here.
+		this.notificationSink.publish('SYSTEM', text, 'normal');
 	}
 
 	/** Start the client WebSocket server and connect to the LLM transport. */
@@ -1606,10 +1661,13 @@ export class VoiceSession {
 		// Phase 3: stop the dictation-mode Whisper provider so prewarmed or
 		// active sockets don't survive session close. Idempotent.
 		await this.whisperProvider?.stop().catch(() => undefined);
-		this.ttsClearTimers();
+		this.ttsGate?.clearTimers();
 		// close() bypasses finalizeTurn — tear down the native gate directly so
-		// no _nativePlaybackTimer outlives the session.
-		if (this.nativePlaybackGatingActive) this.clearNativePlaybackGate();
+		// no native playback timer outlives the session.
+		if (this.nativePlaybackGatingActive) {
+			this.nativeGate?.clear();
+			this.completionArbiter.clearDefer();
+		}
 		await this.ttsProvider?.stop();
 		if (this.runtimeOrchestrator) {
 			await this.runtimeOrchestrator.stop();
@@ -1731,248 +1789,51 @@ export class VoiceSession {
 		return registry;
 	}
 
-	// --- Audio fast-path (no EventBus) ---
-
-	private handleAudioFromClient(data: Buffer, source: 'websocket' | 'rtc' = 'websocket'): void {
-		if (source === 'websocket' && this.directRtcChannel?.isRtcAudioReady) {
-			return;
-		}
-		if (!this.sessionManager.isActive) return;
-
-		this.updateClientAudioVad(data);
-
-		// When active agent uses external audio, don't forward to LLM transport.
-		// Route mic frames to the active external audio handler (e.g., TwilioBridge).
-		if (this.agentRouter.activeAgent.audioMode === 'external') {
-			if (this.externalAudioHandler) {
-				try {
-					this.externalAudioHandler(data);
-				} catch (err) {
-					this.reportError('external-audio', err instanceof Error ? err : new Error(String(err)));
-				}
-			}
-			return;
-		}
-
-		// Phase 3: route by transcription mode.
-		switch (this.internalMode) {
-			case 'agent':
-				this.routeAudioToAgent(data);
-				break;
-			case 'starting_transcription':
-				// Whisper not ready yet — buffer (bounded, oldest evicted on overflow).
-				this.transitionBuffer.push(data);
-				this.transitionBufferBytes += data.length;
-				while (
-					this.transitionBufferBytes > MAX_TRANSITION_BUFFER_BYTES &&
-					this.transitionBuffer.length > 1
-				) {
-					const dropped = this.transitionBuffer.shift();
-					if (dropped) this.transitionBufferBytes -= dropped.length;
-				}
-				break;
-			case 'transcription':
-				this.routeAudioToWhisper(data);
-				break;
-			case 'stopping_transcription':
-				// Transport already authoritative; route to it immediately so the
-				// user is never silent. Whisper stop is still in flight on the
-				// public promise but the audio path is restored.
-				this.routeAudioToAgent(data);
-				break;
-		}
-	}
-
-	/** Forward PCM frame to the agent transport + optional sttProvider. */
-	private routeAudioToAgent(data: Buffer): void {
-		// Greeting interrupt grace + pre-audio greeting-in-flight gate: drop
-		// both LLM-transport and STT-provider audio. The gate spans two
-		// phases:
-		//   (1) `_greetingInFlight`: from session-ready (handleSetupComplete)
-		//       to the first assistant audio chunk. Prevents real pre-audio
-		//       user speech from auto-committing via OpenAI's server VAD
-		//       while the greeting response is in flight — would otherwise
-		//       race the greeting's own response.create.
-		//   (2) `_grace.isActive()`: from first-audio through grace expiry.
-		//       Prevents AEC echo from accumulating in the provider buffer
-		//       and from being recorded by external STT as a fake user turn.
-		// The local client-VAD in handleAudioFromClient still processes —
-		// only the downstream consumers are gated.
-		// See dev_docs/framework/design-greeting-interrupt-grace.md §6, §8.
-		if (this._greetingInFlight || this._grace.isActive()) return;
-		// PCM is the source of truth at this layer. Two consumers fork off:
-		// (a) the transport: G.711 μ-law (telephony) requires resample to
-		//     8 kHz THEN encode. PCM transports just need rate-matching to
-		//     transport.audioFormat.inputSampleRate.
-		// (b) the STT provider: pass raw client PCM at its native rate
-		//     (the rate the provider was configured with).
-		const clientRate = this.clientAudioInputRate;
-		const transportRate = this.transport.audioFormat.inputSampleRate;
-		const transportPcm =
-			clientRate === transportRate ? data : resamplePcm(data, clientRate, transportRate, 16);
-		const transportAudio =
-			this.transport.audioFormat.encoding === 'pcmu'
-				? this.encodePcmToMulawBase64(transportPcm) // already at 8 kHz from resample above
-				: transportPcm.toString('base64');
-		this.transport.sendAudio(transportAudio);
-
-		if (this.sttProvider) {
-			const sttSupportsPcmu = this.sttProvider.supportedEncodings?.includes('pcmu');
-			const sttSupportsPcm = (this.sttProvider.supportedEncodings ?? ['pcm']).includes('pcm');
-			if (sttSupportsPcm) {
-				// Pass PCM at the client's native rate — that's what STT was
-				// configured for in the constructor.
-				this.sttProvider.feedAudio(data.toString('base64'));
-			} else if (sttSupportsPcmu) {
-				// μ-law-only STT: same path as the transport above.
-				const stt8k = clientRate === 8000 ? data : resamplePcm(data, clientRate, 8000, 16);
-				this.sttProvider.feedAudio(this.encodePcmToMulawBase64(stt8k));
-			}
-		}
-	}
-
-	/** Forward PCM frame to the whisperProvider. Whisper accepts only PCM @ 24 kHz;
-	 *  VoiceSession resamples here. */
-	private routeAudioToWhisper(data: Buffer): void {
-		if (!this.whisperProvider) return;
-		// Cross-provider mode: e.g. Gemini Live transport (16 kHz client PCM) +
-		// Whisper (24 kHz). One resample at this seam keeps Whisper single-rate.
-		const clientRate = this.clientAudioInputRate;
-		const pcm = clientRate === 24000 ? data : resamplePcm(data, clientRate, 24000, 16);
-		this.whisperProvider.feedAudio(pcm.toString('base64'));
-	}
-
-	/** Encode a PCM16 Buffer to G.711 μ-law and return as base64. */
-	private encodePcmToMulawBase64(pcm: Buffer): string {
-		return encodePcmToMulaw(pcm).toString('base64');
-	}
-
-	/** Decode a G.711 μ-law Buffer to PCM16. Used on transport-side audio output
-	 *  when the transport is in telephony mode and the client expects PCM. */
-	private decodeMulawToPcm(mulaw: Buffer): Buffer {
-		return decodeMulawToPcm(mulaw);
-	}
-
-	private updateClientAudioVad(data: Buffer): void {
-		if (data.length < 2) return;
-
-		let maxAbs = 0;
-		let sumAbs = 0;
-		let samples = 0;
-		for (let i = 0; i + 1 < data.length; i += 2) {
-			const abs = Math.abs(data.readInt16LE(i));
-			if (abs > maxAbs) maxAbs = abs;
-			sumAbs += abs;
-			samples += 1;
-		}
-		if (samples === 0) return;
-
-		const now = Date.now();
-		const avgAbs = sumAbs / samples;
-		const hasVoice =
-			maxAbs >= VoiceSession.AUDIO_VAD_PEAK_THRESHOLD ||
-			avgAbs >= VoiceSession.AUDIO_VAD_AVG_ABS_THRESHOLD;
-
-		if (hasVoice) {
-			if (!this.audioVadSpeechActive) {
-				this.audioVadSpeechActive = true;
-				this.audioVadSpeechStartMs = now;
-				this.audioVadBargeInFired = false;
-				this.audioVadBargeInEligible = false;
-				this.lastInputTranscriptionLogText = '';
-				this.log(
-					`[Latency] User voice input started (client audio VAD; peak=${maxAbs}; avgAbs=${Math.round(avgAbs)})`,
-				);
-			}
-			this.audioVadLastVoiceMs = now;
-			this.maybeClientTtsBargeIn(now, maxAbs, avgAbs);
-			return;
-		}
-
-		if (
-			this.audioVadSpeechActive &&
-			this.audioVadLastVoiceMs > 0 &&
-			now - this.audioVadLastVoiceMs >= VoiceSession.AUDIO_VAD_SILENCE_MS
-		) {
-			this.completeClientAudioVad(now, 'silence');
-		}
-	}
+	// --- Audio fast-path (no EventBus) — inbound routing lives in AudioRouter ---
 
 	/**
-	 * Fire a client-VAD barge-in for the in-progress speech segment if it is a
-	 * genuine barge-in — sustained past the confirmation window and loud enough
-	 * to clear the TTS-echo floor (see `clientVadBargeInAllowed`). Fires at most
-	 * once per segment. Evaluated on every voiced frame so a quiet onset still
-	 * barges in once it gets loud. Meaningful while a playback gate is pending —
-	 * external TTS or native audio (see liveGate()).
+	 * Barge-in policy for the in-progress client-VAD segment — run on every
+	 * voiced frame (the detector's `onVoicedFrame`). Fires a barge-in when the
+	 * segment is genuine (sustained past the confirmation window, loud enough to
+	 * clear the TTS-echo floor) AND a playback gate is pending AND the grace
+	 * window allows it. Fires at most once per segment. See `clientVadBargeInAllowed`.
 	 */
-	private maybeClientTtsBargeIn(now: number, maxAbs: number, avgAbs: number): void {
+	private runClientVadBargeInPolicy(now: number, maxAbs: number, avgAbs: number): void {
 		// Mark the segment a *potential* barge-in once a frame clears the in-TTS
 		// energy floor — UNCONDITIONALLY, even before a playback gate is armed,
 		// so a segment that begins just before `handleTurnComplete` arms the
 		// native gate is still recognised. `finishOrDeferForVad` keys on this.
 		if (clientVadBargeInEnergyEligible(this.clientVad, maxAbs, avgAbs)) {
-			this.audioVadBargeInEligible = true;
+			this.clientVadDetector.markBargeInEligible();
 		}
 		// The interrupt itself fires only while a playback gate is pending.
 		if (this.liveGate()?.pending !== true) return;
-		if (this.audioVadBargeInFired) return;
+		if (this.clientVadDetector.hasBargeInFired) return;
 		if (
-			!clientVadBargeInAllowed(this.clientVad, now - this.audioVadSpeechStartMs, maxAbs, avgAbs)
+			!clientVadBargeInAllowed(
+				this.clientVad,
+				now - this.clientVadDetector.speechStartedAtMs,
+				maxAbs,
+				avgAbs,
+			)
 		) {
 			return;
 		}
-		// Grace check goes BEFORE setting audioVadBargeInFired — otherwise a
-		// frame at t=500ms within a 1s grace would set the "fired" flag, and
-		// the existing `if (this.audioVadBargeInFired) return` guard above
-		// would skip the next loud frame at t=1100ms (post-grace), defeating
-		// real barge-ins. See dev_docs/framework/design-greeting-interrupt-grace.md §4.
+		// Grace check goes BEFORE marking fired — otherwise a frame at t=500ms
+		// within a 1s grace would set the "fired" flag, and the `hasBargeInFired`
+		// guard above would skip the next loud frame at t=1100ms (post-grace),
+		// defeating real barge-ins. See dev_docs/framework/design-greeting-interrupt-grace.md §4.
 		if (!this.requestInterrupt('client-vad')) return;
-		this.audioVadBargeInFired = true;
+		this.clientVadDetector.markBargeInFired();
 		this.handleClientTtsBargeIn();
-	}
-
-	private completeClientAudioVad(now: number, reason: string): 'completed' | 'ignored' | 'none' {
-		if (!this.audioVadSpeechActive || this.audioVadLastVoiceMs <= 0) return 'none';
-		const speechEndMs = this.audioVadLastVoiceMs;
-		const speechDurationMs = Math.max(0, speechEndMs - this.audioVadSpeechStartMs);
-		const silenceObservedMs = now - speechEndMs;
-		this.audioVadSpeechActive = false;
-		this.audioVadSpeechStartMs = 0;
-		this.audioVadLastVoiceMs = 0;
-		this.audioVadBargeInEligible = false;
-		// VAD-resolution hook: the segment ended without a barge-in (a barge-in
-		// would have torn the gate down via finalizeTurn). If a completion was
-		// deferred for this potential barge-in, finish the turn now.
-		const deferGate = this.liveGate();
-		if (this._ttsPlaybackEndedPending !== null && deferGate?.pending === true) {
-			this.log(
-				`[Latency] turn complete via ${this._ttsPlaybackEndedPending} (after VAD-resolution defer)`,
-			);
-			this._ttsPlaybackEndedPending = null;
-			deferGate.clearTimer();
-			this.completePlayback();
-		}
-		if (speechDurationMs < VoiceSession.AUDIO_VAD_MIN_SPEECH_MS) {
-			this.log(
-				`[Latency] User voice input ignored (client audio VAD; reason=${reason}; speechDuration=${speechDurationMs}ms; silenceObserved=${silenceObservedMs}ms; minSpeechDuration=${VoiceSession.AUDIO_VAD_MIN_SPEECH_MS}ms)`,
-			);
-			return 'ignored';
-		}
-		this.lastClientSpeechCompletedMs = speechEndMs;
-		this.lastClientSpeechDurationMs = speechDurationMs;
-		this.log(
-			`[Latency] User voice input completed (client audio VAD; reason=${reason}; speechDuration=${this.lastClientSpeechDurationMs}ms; silenceObserved=${silenceObservedMs}ms)`,
-		);
-		return 'completed';
 	}
 
 	private logInputTranscriptionLatency(text: string, source: string): void {
 		const trimmed = text.trim();
 		if (!trimmed || trimmed === this.lastInputTranscriptionLogText) return;
 		this.lastInputTranscriptionLogText = trimmed;
-		const sinceVadEnd = this.lastClientSpeechCompletedMs
-			? `; ${Date.now() - this.lastClientSpeechCompletedMs}ms after client audio VAD end`
+		const sinceVadEnd = this.clientVadDetector.lastSpeechCompletedMs
+			? `; ${Date.now() - this.clientVadDetector.lastSpeechCompletedMs}ms after client audio VAD end`
 			: '';
 		const preview = trimmed.replace(/\s+/g, ' ').slice(0, 120);
 		this.log(
@@ -1993,16 +1854,20 @@ export class VoiceSession {
 		// needed. A native gate finalizes the captured _nativePlaybackTurn; a
 		// later provider onInterrupted resolves to this same finalized Turn and
 		// no-ops structurally.
-		this.finalizeTurn(this._nativePlaybackTurn ?? this.currentTurn, { interrupted: true });
+		this.finalizeTurn(this.nativeGate?.capturedTurn ?? this.currentTurn, { interrupted: true });
 	}
 
 	private logProviderUserTurnRecognition(reason: string): void {
-		this.completeClientAudioVad(Date.now(), 'provider-recognition');
-		if (!this.lastClientSpeechCompletedMs) return;
-		if (this.lastGeminiRecognitionLoggedForSpeechEndMs === this.lastClientSpeechCompletedMs) return;
-		this.lastGeminiRecognitionLoggedForSpeechEndMs = this.lastClientSpeechCompletedMs;
+		this.clientVadDetector.complete('provider-recognition');
+		if (!this.clientVadDetector.lastSpeechCompletedMs) return;
+		if (
+			this.lastGeminiRecognitionLoggedForSpeechEndMs ===
+			this.clientVadDetector.lastSpeechCompletedMs
+		)
+			return;
+		this.lastGeminiRecognitionLoggedForSpeechEndMs = this.clientVadDetector.lastSpeechCompletedMs;
 		this.log(
-			`[Latency] Provider recognized user input completed (${reason}; ${Date.now() - this.lastClientSpeechCompletedMs}ms after client audio VAD end; clientSpeechDuration=${this.lastClientSpeechDurationMs}ms)`,
+			`[Latency] Provider recognized user input completed (${reason}; ${Date.now() - this.clientVadDetector.lastSpeechCompletedMs}ms after client audio VAD end; clientSpeechDuration=${this.clientVadDetector.lastSpeechDurationMs}ms)`,
 		);
 	}
 
@@ -2020,115 +1885,34 @@ export class VoiceSession {
 		this.ensureCurrentTurn();
 		this.signalAudioStarted();
 		const raw = Buffer.from(data, 'base64');
-		if (this.nativePlaybackGatingActive) this.noteNativeAudioChunk(raw.length);
+		if (this.nativePlaybackGatingActive) this.nativeGate?.noteAudioChunk(raw.length);
 		// Telephony mode: transport emits G.711 μ-law on the wire; client
 		// transports (web RTC, mic playback) expect PCM. Decode at this seam
 		// using the OUTPUT-side encoding (input encoding may differ on mixed
 		// telephony configs). The TwilioBridge code path bypasses this fork;
 		// it consumes the transport's audioFormat directly via its own bridge.
 		const outEnc = this.transport.audioFormat.outputEncoding ?? this.transport.audioFormat.encoding;
-		const buffer: Buffer = outEnc === 'pcmu' ? this.decodeMulawToPcm(raw) : raw;
+		const buffer: Buffer = outEnc === 'pcmu' ? decodeMulawToPcm(raw) : raw;
 		this.clientTransport.sendAudioToClient(buffer);
 	}
 
 	/**
-	 * Advance the native-audio playback cursor by one chunk and bump the
-	 * `playbackId` on the turn's first chunk. `byteLength` is the transport's
-	 * pre-decode output byte count; duration is derived from the output-side
-	 * `audioFormat`. The `max(cursor, now)` recurrence absorbs any mid-turn
-	 * stall (the cursor cannot run ahead of wall-clock); `/ MIN_PLAYBACK_RATE`
-	 * widens the estimate so a slightly-slow client cannot have the fallback
-	 * pre-empt its real `playback.ended`.
-	 * See dev_docs/framework/design-playback-end-gating-openai-native.md.
-	 */
-	private noteNativeAudioChunk(byteLength: number): void {
-		const fmt = this.transport.audioFormat;
-		const bytesPerSample = (fmt.outputBitDepth ?? fmt.bitDepth) === 8 ? 1 : 2;
-		const channels = fmt.channels ?? 1;
-		const chunkMs = (byteLength / (fmt.outputSampleRate * channels * bytesPerSample)) * 1000;
-		if (this._nativeEstimatedPlaybackEndMs === 0) this._nativePlaybackId++;
-		this._nativeEstimatedPlaybackEndMs =
-			Math.max(this._nativeEstimatedPlaybackEndMs, Date.now()) +
-			chunkMs / VoiceSession.MIN_PLAYBACK_RATE;
-	}
-
-	/**
-	 * Signal that the model has begun producing audio this turn. In legacy
-	 * mode this calls `notificationQueue.markAudioReceived()`. In actor mode
-	 * this debounces (once per turn) and sends `notification.audio_started`
-	 * through the runtime — keeping audio chunks themselves off the actor
-	 * mailbox per the audio fast-path contract.
+	 * Signal that the model has begun producing audio this turn. The sink routes
+	 * to `notificationQueue.markAudioReceived()` (legacy) or a once-per-turn
+	 * debounced `notification.audio_started` (actor) — keeping audio chunks off
+	 * the actor mailbox per the audio fast-path contract.
 	 */
 	private signalAudioStarted(): void {
-		if (this._isActorMode) {
-			if (!this._audioStartedThisTurn) {
-				this._audioStartedThisTurn = true;
-				this.runtimeOrchestrator?.runtime.tell('notification.audio_started', {}, 'notification');
-			}
-			return;
-		}
-		this.notificationQueue?.markAudioReceived();
+		this.notificationSink.audioStarted();
 	}
 
 	// --- TTS wiring (actor-mode only) ---
 
 	/** Wire TTSProvider callbacks and override transport callbacks for text mode. */
-	/**
-	 * Native-session barge-in setup — the `!ttsProvider` sibling of
-	 * `wireTtsProvider()`. Installs a chained `onSpeechStarted` that interrupts a
-	 * playback-pending native turn (the post-`response.done` window the
-	 * provider's own interrupt path no longer covers). Chaining preserves any
-	 * handler a pre-configured injected transport already attached.
-	 * See dev_docs/framework/design-playback-end-gating-openai-native.md §7.
-	 */
-	private wireNativeBargeIn(): void {
-		const prevSpeechStarted = this.transport.onSpeechStarted;
-		this.transport.onSpeechStarted = () => {
-			try {
-				prevSpeechStarted?.();
-			} catch (e) {
-				this.log(`pre-attached onSpeechStarted threw: ${(e as Error).message}`);
-			}
-			// Skip the framework-owned actuation entirely in provider-owned
-			// mode (the transport's speech_started handler already truncates
-			// locally + fires onInterrupted, which the existing handleInterrupted
-			// path drives). Without this guard we'd double-actuate in legacy
-			// mode. See dev_docs/framework/design-greeting-interrupt-grace.md §4.
-			if (this.transport.capabilities.frameworkOwnsInterrupt !== true) {
-				// Legacy: preserve pre-design behaviour — the native gate's tail
-				// path still finalizes the playback-pending turn.
-				if (this._nativePlaybackPending) {
-					this.finalizeTurn(this._nativePlaybackTurn, { interrupted: true });
-				}
-				return;
-			}
-
-			// Framework-owned mode: nothing to interrupt unless there's a live
-			// unfinalized turn.
-			if (!this.currentTurn || this.currentTurn.isFinalized) return;
-
-			if (this._nativePlaybackPending) {
-				// Tail mode (post `response.done`). Guarded by the grace window:
-				// the gate denies → early return, no cancelResponse, no
-				// finalize. See design §4.
-				if (!this.requestInterrupt('native-onSpeechStarted-tail')) return;
-				this.transport.cancelResponse?.({});
-				this.finalizeTurn(this._nativePlaybackTurn ?? this.currentTurn, { interrupted: true });
-				return;
-			}
-
-			// Generation mode (before `response.done`): truncate the in-flight
-			// response using the transport's own per-response generated-audio
-			// counter, then finalize the current turn. Also grace-guarded.
-			if (!this.requestInterrupt('native-onSpeechStarted-generation')) return;
-			this.transport.cancelResponse?.({ truncate: 'generated' });
-			this.finalizeTurn(this.currentTurn, { interrupted: true });
-		};
-	}
-
 	private wireTtsProvider(): void {
 		const tts = this.ttsProvider;
-		if (!tts) return;
+		const gate = this.ttsGate;
+		if (!tts || !gate) return;
 
 		// Configure TTS with preferred output format
 		const preferredFormat: TTSAudioConfig = {
@@ -2137,7 +1921,7 @@ export class VoiceSession {
 			channels: 1,
 			encoding: 'pcm',
 		};
-		this._ttsFormat = tts.configure(preferredFormat);
+		gate.setFormat(tts.configure(preferredFormat));
 
 		// Wire LLM text output → TTS provider + transcript
 		this.transport.onTextOutput = (text) => {
@@ -2153,31 +1937,25 @@ export class VoiceSession {
 				return;
 			}
 
-			if (!this._ttsTurnHasText) {
-				this._ttsCurrentRequestId++;
-				this._ttsTurnHasText = true;
-				this._ttsFirstTextMs = Date.now();
-				this._ttsFirstAudioMs = 0;
-				this._ttsTextLength = 0;
-				this._ttsAudioDurationMs = 0;
-				this._ttsPlaybackEndedPending = null;
-				this._ttsEstimatedPlaybackEndMs = null;
+			if (!gate.hasTurnText) {
+				gate.beginRequest();
+				this.completionArbiter.clearDefer();
 			}
-			this._ttsTextLength += text.length;
-			tts.synthesize(text, this._ttsCurrentRequestId);
+			gate.addTextLength(text.length);
+			tts.synthesize(text, gate.currentRequestId);
 		};
 
 		// When the LLM text stream ends — flush is end-of-input for this requestId;
 		// the provider must then finalize and emit onDone (see TTSProvider.synthesize).
 		this.transport.onTextDone = () => {
-			if (this._ttsTurnHasText) {
-				tts.synthesize('', this._ttsCurrentRequestId, { flush: true });
+			if (gate.hasTurnText) {
+				tts.synthesize('', gate.currentRequestId, { flush: true });
 			}
 		};
 
 		// Wire TTS audio output → client (fast-path, with stale filtering + resampling)
 		tts.onAudio = (base64Pcm, durationMs, requestId) => {
-			if (requestId !== this._ttsCurrentRequestId) return; // stale
+			if (requestId !== gate.currentRequestId) return; // stale
 			// Phase 3 dictation guard: silence the TTS path when not in agent
 			// mode. Queued synthesis can complete after a transcription-mode
 			// flip; without this guard the client would hear stale agent
@@ -2187,40 +1965,34 @@ export class VoiceSession {
 			// chunk (idempotent — subsequent chunks no-op inside the class).
 			this.maybeArmGraceOnFirstAudio();
 			let buffer: Buffer = Buffer.from(base64Pcm, 'base64');
-			if (
-				this._ttsFormat &&
-				this._ttsFormat.sampleRate !== this.transport.audioFormat.outputSampleRate
-			) {
+			const fmt = gate.format;
+			if (fmt && fmt.sampleRate !== this.transport.audioFormat.outputSampleRate) {
 				buffer = resamplePcm(
 					buffer,
-					this._ttsFormat.sampleRate,
+					fmt.sampleRate,
 					this.transport.audioFormat.outputSampleRate,
-					this._ttsFormat.bitDepth,
+					fmt.bitDepth,
 				);
 			}
 			this.clientTransport.sendAudioToClient(buffer);
 			this.signalAudioStarted();
-			this._ttsSpeaking = true;
-			this._ttsAudioDurationMs += durationMs;
-			if (this._ttsFirstAudioMs === 0) {
-				this._ttsFirstAudioMs = Date.now();
-			}
+			gate.noteAudio(durationMs);
 		};
 
 		// Wire TTS done → turn gating + hook
 		tts.onDone = (requestId) => {
-			if (requestId !== this._ttsCurrentRequestId) return; // stale
-			this.ttsClearTimers();
+			if (requestId !== gate.currentRequestId) return; // stale
+			gate.clearTimers();
 			// Fire TTS synthesis hook with timing metrics
-			if (this.hooks.onTTSSynthesis && this._ttsFirstTextMs > 0) {
+			if (this.hooks.onTTSSynthesis && gate.firstTextAtMs > 0) {
 				const now = Date.now();
 				this.hooks.onTTSSynthesis({
 					sessionId: this.config.sessionId,
 					provider: tts.constructor.name,
-					textLength: this._ttsTextLength,
-					durationMs: now - this._ttsFirstTextMs,
+					textLength: gate.textLength,
+					durationMs: now - gate.firstTextAtMs,
 					audioMs: 0, // Would require tracking total audio duration
-					ttfbMs: this._ttsFirstAudioMs > 0 ? this._ttsFirstAudioMs - this._ttsFirstTextMs : 0,
+					ttfbMs: gate.firstAudioAtMs > 0 ? gate.firstAudioAtMs - gate.firstTextAtMs : 0,
 					requestId,
 				});
 			}
@@ -2230,28 +2002,25 @@ export class VoiceSession {
 			// fallback timer (never completes synchronously, even when synthesis
 			// ran slower than realtime), so a barge-in during the tail works and
 			// a healthy client has room to answer with a playback signal.
-			if (this._ttsFirstAudioMs === 0) {
-				this.completePlayback();
+			if (gate.firstAudioAtMs === 0) {
+				this.completionArbiter.completePlayback();
 				return;
 			}
 			// When the protocol is active the client may slow playback (it
 			// schedules at audioBuf.duration / playbackRate); divide by the
 			// slowest rate so the fallback cannot pre-empt a healthy client.
 			const rateDivisor = this.playbackStateProtocolActive ? VoiceSession.MIN_PLAYBACK_RATE : 1;
-			const estimatedEndMs = this._ttsFirstAudioMs + this._ttsAudioDurationMs / rateDivisor;
-			this._ttsEstimatedPlaybackEndMs = estimatedEndMs;
+			const estimatedEndMs = gate.firstAudioAtMs + gate.totalAudioDurationMs / rateDivisor;
+			gate.setEstimatedEnd(estimatedEndMs);
 			const remainingMs =
 				Math.max(estimatedEndMs - Date.now(), 0) + this.ttsPlaybackFallbackMarginMs;
-			this._ttsPlaybackTimer = setTimeout(() => {
-				this._ttsPlaybackTimer = undefined;
-				this.finishOrDeferForVad('fallback');
-			}, remainingMs);
+			gate.armTimer(remainingMs, () => this.completionArbiter.finishOrDeferForVad('fallback'));
 			// Tell the client "no more audio for this turn" — it answers with
 			// `playback.ended` once its buffer drains. Ordered after the audio.
 			if (this.playbackStateProtocolActive) {
 				this.clientTransport.sendJsonAfterAudio?.({
 					type: 'audio.done',
-					playbackId: this._ttsCurrentRequestId,
+					playbackId: gate.currentRequestId,
 				});
 			}
 		};
@@ -2273,7 +2042,7 @@ export class VoiceSession {
 
 		// Wire word boundaries to client
 		tts.onWordBoundary = (word, offsetMs, requestId) => {
-			if (requestId !== this._ttsCurrentRequestId) return;
+			if (requestId !== gate.currentRequestId) return;
 			this.clientTransport.sendJsonToClient({
 				type: 'word_boundary',
 				word,
@@ -2294,7 +2063,7 @@ export class VoiceSession {
 		// See dev_docs/framework/design-greeting-interrupt-grace.md §4.
 		this.transport.onSpeechStarted = () => {
 			const frameworkOwns = this.transport.capabilities.frameworkOwnsInterrupt === true;
-			if (this._ttsSpeaking && this._ttsLlmTextDone) {
+			if (gate.isSpeaking && gate.isLlmTextDone) {
 				if (!this.requestInterrupt('tts-onSpeechStarted-tail')) return;
 				if (frameworkOwns) this.transport.cancelResponse?.({});
 				this.finalizeTurn(this.currentTurn, { interrupted: true });
@@ -2302,8 +2071,8 @@ export class VoiceSession {
 			}
 			if (
 				frameworkOwns &&
-				this._ttsSpeaking &&
-				!this._ttsLlmTextDone &&
+				gate.isSpeaking &&
+				!gate.isLlmTextDone &&
 				this.currentTurn &&
 				!this.currentTurn.isFinalized
 			) {
@@ -2330,115 +2099,6 @@ export class VoiceSession {
 			return VoiceSession.TTS_PLAYBACK_FALLBACK_MARGIN_DEFAULT_MS;
 		}
 		return Math.max(raw, VoiceSession.TTS_PLAYBACK_FALLBACK_MARGIN_FLOOR_MS);
-	}
-
-	/**
-	 * Finalize the TTS audio side of a turn — synthesis is done AND the client
-	 * has (estimated) finished draining the buffered audio. Split out of
-	 * `onDone` so the turn stays interruptible through the playback tail.
-	 */
-	private completePlayback(): void {
-		// Native playback-end gate: finalize the turn captured when the gate was
-		// armed, not whatever `currentTurn` is now.
-		if (this.nativePlaybackGatingActive && this._nativePlaybackPending) {
-			this.finalizeTurn(this._nativePlaybackTurn, { interrupted: false });
-			return;
-		}
-		this._ttsAudioDone = true;
-		this._ttsSpeaking = false;
-		this.ttsMaybeCompleteTurn();
-	}
-
-	/**
-	 * The single VAD-aware completion entry point — both the `playback.ended`
-	 * signal and the fallback timer route through it. Completes the turn unless
-	 * a *potential barge-in* is in progress, in which case completion is
-	 * deferred until that VAD segment resolves (a barge-in interrupts the turn;
-	 * silence completes it via the `completeClientAudioVad` hook).
-	 * See dev_docs/framework/design-playback-state-protocol.md.
-	 */
-	private finishOrDeferForVad(reason: 'signal' | 'fallback'): void {
-		// A potential barge-in: an active VAD segment, client barge-in enabled,
-		// and a frame already past the in-TTS energy floor. Gating on the energy
-		// floor is essential — residual echo below it would defer every turn.
-		const potentialBargeIn =
-			this.audioVadSpeechActive && this.clientVad.bargeInEnabled && this.audioVadBargeInEligible;
-		// Operate on the live gate's timer (external TTS or native audio).
-		const gate = this.liveGate();
-		gate?.clearTimer();
-		if (potentialBargeIn) {
-			this._ttsPlaybackEndedPending = reason;
-			// Bounded defer — long enough for the barge-in to confirm even with a
-			// high `bargeInConfirmMs`. The callback force-completes (no re-defer,
-			// so it cannot loop) and resets the stale VAD segment.
-			const deferMs =
-				Math.max(VoiceSession.AUDIO_VAD_SILENCE_MS, this.clientVad.bargeInConfirmMs) +
-				VoiceSession.VAD_DEFER_FORCE_MARGIN_MS;
-			gate?.armTimer(deferMs, () => this.forceCompleteAfterVadDefer());
-			return;
-		}
-		this.log(`[Latency] turn complete via ${reason}`);
-		this.completePlayback();
-	}
-
-	/** Force-complete a VAD-deferred turn whose segment never resolved (mic
-	 *  frames stopped). Resets the stale VAD segment so it cannot leak into the
-	 *  next turn. */
-	private forceCompleteAfterVadDefer(): void {
-		this.log(
-			`[Latency] TTS turn complete via ${this._ttsPlaybackEndedPending ?? 'fallback'} (forced after VAD defer)`,
-		);
-		this._ttsPlaybackEndedPending = null;
-		this.audioVadSpeechActive = false;
-		this.audioVadSpeechStartMs = 0;
-		this.audioVadLastVoiceMs = 0;
-		this.audioVadBargeInEligible = false;
-		this.completePlayback();
-	}
-
-	/** Turn gating: check if both LLM and TTS are done. */
-	private ttsMaybeCompleteTurn(): void {
-		if (this._ttsLlmTextDone && this._ttsAudioDone) {
-			this._ttsLlmTextDone = false;
-			this._ttsAudioDone = false;
-			this._ttsTurnHasText = false;
-			this.ttsClearTimers();
-			this.finalizeTurn(this.currentTurn, { interrupted: false });
-		}
-	}
-
-	/** Clear just the native playback fallback timer (timer-only — the
-	 *  counterpart of `ttsClearTimers`; used by the VAD-defer re-arm). */
-	private clearNativePlaybackTimer(): void {
-		if (this._nativePlaybackTimer) {
-			clearTimeout(this._nativePlaybackTimer);
-			this._nativePlaybackTimer = undefined;
-		}
-	}
-
-	/** Full native playback-end gate teardown — clears the timer, pending flag,
-	 *  captured turn, cursor, and the shared defer flag, and bumps
-	 *  `_nativePlaybackId` so a late signal for the finalized turn cannot match
-	 *  a later turn. Called from `finalizeTurn` and `close()`. */
-	private clearNativePlaybackGate(): void {
-		this.clearNativePlaybackTimer();
-		this._nativePlaybackPending = false;
-		this._nativePlaybackTurn = null;
-		this._nativeEstimatedPlaybackEndMs = 0;
-		this._nativePlaybackId++;
-		this._ttsPlaybackEndedPending = null;
-	}
-
-	/** Clear all TTS timers. */
-	private ttsClearTimers(): void {
-		if (this._ttsHardTimer) {
-			clearTimeout(this._ttsHardTimer);
-			this._ttsHardTimer = undefined;
-		}
-		if (this._ttsPlaybackTimer) {
-			clearTimeout(this._ttsPlaybackTimer);
-			this._ttsPlaybackTimer = undefined;
-		}
 	}
 
 	// --- Gemini event handlers ---
@@ -2573,25 +2233,20 @@ export class VoiceSession {
 		if (!turn || turn.isFinalized || turn !== this.currentTurn) return;
 
 		// TTS turn gating: when TTS is active, defer turn completion until TTS finishes
-		if (this.ttsProvider) {
-			this._ttsLlmTextDone = true;
-			if (!this._ttsTurnHasText) {
+		if (this.ttsProvider && this.ttsGate) {
+			this.ttsGate.markLlmTextDone();
+			if (!this.ttsGate.hasTurnText) {
 				// Tool-call-only turn — no text synthesized, TTS won't fire onDone
-				this._ttsAudioDone = true;
-			} else if (!this._ttsHardTimer) {
-				// Start hard cap timer (60s) to prevent stuck turns
-				this._ttsHardTimer = setTimeout(() => {
-					this.log('TTS hard cap timer fired — forcing turn completion');
-					this._ttsAudioDone = true;
-					this._ttsSpeaking = false;
-					this._ttsPlaybackEndedPending = null;
-					this._ttsEstimatedPlaybackEndMs = null;
-					this._ttsCurrentRequestId++; // Invalidate late-arriving chunks
-					this.ttsMaybeCompleteTurn();
-				}, 60000);
+				this.ttsGate.markNoTextTurnAudioDone();
+			} else {
+				// Hard cap (60s) prevents a stuck turn. onClearDefer resets the
+				// session-owned playback-defer flag (not owned by the gate).
+				this.ttsGate.armHardCapIfNeeded(() => {
+					this.completionArbiter.clearDefer();
+				});
 			}
-			this.ttsMaybeCompleteTurn();
-			return; // Defer — actual turn-end runs via ttsMaybeCompleteTurn → finalizeTurn
+			this.ttsGate.maybeComplete();
+			return; // Defer — actual turn-end runs via gate.maybeComplete → finalizeTurn
 		}
 
 		// Native playback-end gate: when this terminal response produced audio
@@ -2600,26 +2255,16 @@ export class VoiceSession {
 		// See dev_docs/framework/design-playback-end-gating-openai-native.md.
 		if (
 			this.nativePlaybackGatingActive &&
-			this._nativeEstimatedPlaybackEndMs !== 0 &&
+			this.nativeGate?.hasAudio &&
 			!this._nativeResponseDispatchedToolCall
 		) {
 			// Arm the gate fully BEFORE sendJsonAfterAudio so a sender that
 			// synchronously echoes audio.done back as playback.ended meets an
-			// armed gate rather than a premature-rejected signal.
-			const armedId = this._nativePlaybackId;
-			this._nativePlaybackPending = true;
-			this._nativePlaybackTurn = turn;
-			const delayMs =
-				Math.max(this._nativeEstimatedPlaybackEndMs - Date.now(), 0) +
-				this.ttsPlaybackFallbackMarginMs;
-			this._nativePlaybackTimer = setTimeout(() => {
-				this._nativePlaybackTimer = undefined;
-				// The captured-id guard makes a callback already queued when the
-				// turn was interrupted a guaranteed no-op.
-				if (this._nativePlaybackPending && armedId === this._nativePlaybackId) {
-					this.finishOrDeferForVad('fallback');
-				}
-			}, delayMs);
+			// armed gate rather than a premature-rejected signal. The gate's
+			// fallback timer is id-guarded internally.
+			const armedId = this.nativeGate.arm(turn, () =>
+				this.completionArbiter.finishOrDeferForVad('fallback'),
+			);
 			this.clientTransport.sendJsonAfterAudio?.({ type: 'audio.done', playbackId: armedId });
 			return; // Defer — completion runs via playback.ended / the fallback.
 		}
@@ -2651,18 +2296,18 @@ export class VoiceSession {
 		};
 
 		// Native playback-end gate teardown — runs on both the clean and the
-		// interrupted path. clearNativePlaybackGate bumps _nativePlaybackId so a
-		// late playback.ended / fallback for this turn cannot match a later one.
+		// interrupted path. gate.clear() bumps the playback id so a late
+		// playback.ended / fallback for this turn cannot match a later one; the
+		// shared playback-defer flag is reset alongside.
 		if (this.nativePlaybackGatingActive) {
-			this.clearNativePlaybackGate();
+			this.nativeGate?.clear();
+			this.completionArbiter.clearDefer();
 		}
 
 		if (opts.interrupted) {
 			this.log('Interrupted by user');
-			if (
-				this._ttsEstimatedPlaybackEndMs !== null &&
-				Date.now() > this._ttsEstimatedPlaybackEndMs
-			) {
+			const estEnd = this.ttsGate?.estimatedPlaybackEndMs ?? null;
+			if (estEnd !== null && Date.now() > estEnd) {
 				this.log('[Latency] barge-in finalized after the estimated playback end');
 			}
 			// Hazard-2 order: invalidate TTS gate state and bump the requestId
@@ -2670,30 +2315,14 @@ export class VoiceSession {
 			// the turn mid-interrupt.
 			safeStep('stt.interrupt', () => this.sttProvider?.handleInterrupted());
 			if (this.ttsProvider) {
-				this._ttsSpeaking = false;
-				this._ttsLlmTextDone = false;
-				this._ttsAudioDone = false;
-				this._ttsTurnHasText = false;
-				this._ttsPlaybackEndedPending = null;
-				this._ttsEstimatedPlaybackEndMs = null;
-				this._ttsCurrentRequestId++;
-				this.ttsClearTimers();
+				this.ttsGate?.resetForInterrupt();
+				this.completionArbiter.clearDefer();
 				safeStep('tts.cancel', () => this.ttsProvider?.cancel());
 			}
 			// Order matters: reset_audio FIRST (clears the gate), then interrupted
 			// (suppresses the next flush).
-			if (this._isActorMode) {
-				this._audioStartedThisTurn = false;
-				safeStep('notif.reset_audio', () =>
-					this.runtimeOrchestrator?.runtime.tell('notification.reset_audio', {}, 'notification'),
-				);
-				safeStep('notif.interrupted', () =>
-					this.runtimeOrchestrator?.runtime.tell('notification.interrupted', {}, 'notification'),
-				);
-			} else {
-				safeStep('notif.reset_audio', () => this.notificationQueue?.resetAudio());
-				safeStep('notif.interrupted', () => this.notificationQueue?.markInterrupted());
-			}
+			safeStep('notif.reset_audio', () => this.notificationSink.resetAudio());
+			safeStep('notif.interrupted', () => this.notificationSink.interrupted());
 			// Flush BEFORE turn.interrupted — as the former handleInterrupted() did.
 			safeStep('transcript.flush', () => this.transcriptManager.flush());
 			safeStep('publish.interrupted', () => {
@@ -2767,14 +2396,7 @@ export class VoiceSession {
 
 		// notification.turn_complete from the effective turn boundary. On an
 		// interrupted turn the prior notification.interrupted suppresses the flush.
-		if (this._isActorMode) {
-			this._audioStartedThisTurn = false;
-			safeStep('notif.turn_complete', () =>
-				this.runtimeOrchestrator?.runtime.tell('notification.turn_complete', {}, 'notification'),
-			);
-		} else {
-			safeStep('notif.turn_complete', () => this.notificationQueue?.onTurnComplete());
-		}
+		safeStep('notif.turn_complete', () => this.notificationSink.turnComplete());
 	}
 
 	/** Inject all active directives into the LLM's context to prevent behavioral drift. */
@@ -2800,14 +2422,8 @@ export class VoiceSession {
 		if (this.greetingInterruptGraceMs > 0 && !this._graceArmingLogged) {
 			this._greetingInFlight = true;
 		}
-		// Pre-greeting audio-gate reset: legacy queue.resetAudio() vs actor
-		// notification.reset_audio. In actor mode also clear the debounce flag.
-		if (this._isActorMode) {
-			this._audioStartedThisTurn = false;
-			this.runtimeOrchestrator?.runtime.tell('notification.reset_audio', {}, 'notification');
-		} else {
-			this.notificationQueue?.resetAudio();
-		}
+		// Pre-greeting audio-gate reset (clears the actor debounce too, via the sink).
+		this.notificationSink.resetAudio();
 
 		// Collapse memory facts + session directives + greeting into ONE
 		// sendContent call. Previously this fired two sendContent calls (memory
@@ -2858,19 +2474,7 @@ export class VoiceSession {
 
 		const label = msg.type === 'question' ? 'SUBAGENT QUESTION' : 'SUBAGENT UPDATE';
 		const priority = msg.blocking ? 'high' : 'normal';
-		if (this._isActorMode) {
-			this.runtimeOrchestrator?.runtime.tell(
-				'notification.publish',
-				{ label, text: msg.text, priority },
-				'notification',
-			);
-			return;
-		}
-		this.notificationQueue?.sendOrQueue(
-			[{ role: 'user', parts: [{ text: `[${label}]: ${msg.text}` }] }],
-			true,
-			{ priority },
-		);
+		this.notificationSink.publish(label, msg.text, priority);
 	}
 
 	private handleGroundingMetadata(metadata: Record<string, unknown>): void {
@@ -3052,40 +2656,12 @@ export class VoiceSession {
 	 * gating is active, else `null`. A session is TTS *or* native, never both.
 	 * See dev_docs/framework/design-playback-end-gating-openai-native.md §6.
 	 */
-	private liveGate(): {
-		pending: boolean;
-		timerArmed: boolean;
-		id: number;
-		armTimer: (delayMs: number, cb: () => void) => void;
-		clearTimer: () => void;
-	} | null {
+	private liveGate(): PlaybackGate | null {
 		if (this.ttsProvider) {
-			return {
-				pending: this._ttsSpeaking,
-				timerArmed: this._ttsPlaybackTimer !== undefined,
-				id: this._ttsCurrentRequestId,
-				armTimer: (ms, cb) => {
-					this._ttsPlaybackTimer = setTimeout(() => {
-						this._ttsPlaybackTimer = undefined;
-						cb();
-					}, ms);
-				},
-				clearTimer: () => this.ttsClearTimers(),
-			};
+			return this.ttsGate ?? null;
 		}
 		if (this.nativePlaybackGatingActive) {
-			return {
-				pending: this._nativePlaybackPending,
-				timerArmed: this._nativePlaybackTimer !== undefined,
-				id: this._nativePlaybackId,
-				armTimer: (ms, cb) => {
-					this._nativePlaybackTimer = setTimeout(() => {
-						this._nativePlaybackTimer = undefined;
-						cb();
-					}, ms);
-				},
-				clearTimer: () => this.clearNativePlaybackTimer(),
-			};
+			return this.nativeGate ?? null;
 		}
 		return null;
 	}
@@ -3102,7 +2678,7 @@ export class VoiceSession {
 		if (!this.playbackStateProtocolActive) return;
 		// A signal was already accepted and deferred this turn — ignore further
 		// ones so a client cannot keep re-arming the defer timeout.
-		if (this._ttsPlaybackEndedPending !== null) return;
+		if (this.completionArbiter.hasDeferred) return;
 		const gate = this.liveGate();
 		if (!gate) return;
 		// Timer armed ⇒ the audio-done point has passed — rejects a premature
@@ -3112,7 +2688,7 @@ export class VoiceSession {
 		if (!gate.pending) return;
 		// Stale: a signal for a turn superseded by an interrupt (bumps the id).
 		if (playbackId !== gate.id) return;
-		this.finishOrDeferForVad('signal');
+		this.completionArbiter.finishOrDeferForVad('signal');
 	}
 
 	private handleFileUpload(base64: string, mimeType: string, fileName?: string): void {
@@ -3174,9 +2750,9 @@ export class VoiceSession {
 		await this.transport.cancelResponse?.({ waitForDone: true });
 		if (turn && !turn.isFinalized) {
 			this.finalizeTurn(turn, { interrupted: true });
-		} else if (this._nativePlaybackPending) {
+		} else if (this.nativeGate?.pending) {
 			// Native playback-tail interruption — pre-existing behaviour.
-			this.finalizeTurn(this._nativePlaybackTurn, { interrupted: true });
+			this.finalizeTurn(this.nativeGate.capturedTurn, { interrupted: true });
 		}
 	}
 
@@ -3254,7 +2830,7 @@ export class VoiceSession {
 
 	/** Feed client audio into the session (LLM + STT). Used when the server owns the socket (multi-user). */
 	feedAudioFromClient(data: Buffer): void {
-		this.handleAudioFromClient(data, 'websocket');
+		this.audioRouter.handleFromClient(data, 'websocket');
 	}
 
 	/** Feed client JSON (text_input, file_upload, etc.) into the session. Used when the server owns the socket. */
@@ -3480,14 +3056,9 @@ export class VoiceSession {
 			}
 			throw err;
 		}
-		// Flush buffered transition frames in FIFO order through the normal
+		// Flush buffered transition frames in FIFO order through the router's
 		// whisper routing (which handles resampling).
-		const buffered = this.transitionBuffer;
-		this.transitionBuffer = [];
-		this.transitionBufferBytes = 0;
-		for (const chunk of buffered) {
-			this.routeAudioToWhisper(chunk);
-		}
+		this.audioRouter.drainTransitionBufferToWhisper();
 		this.internalMode = 'transcription';
 		this.eventBus.publish('session.transcription_mode_changed', {
 			mode: 'transcription',
