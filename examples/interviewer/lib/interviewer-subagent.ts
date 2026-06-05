@@ -95,7 +95,8 @@ function thinkingBudgetLabel(providerOptions: SubagentProviderOptions): string {
 	const googleOptions = providerOptions.google;
 	if (!googleOptions || typeof googleOptions !== 'object') return 'default';
 	const thinkingConfig = googleOptions.thinkingConfig;
-	if (!thinkingConfig || typeof thinkingConfig !== 'object') return 'default';
+	if (!thinkingConfig || typeof thinkingConfig !== 'object' || Array.isArray(thinkingConfig))
+		return 'default';
 	const thinkingBudget = thinkingConfig.thinkingBudget;
 	return typeof thinkingBudget === 'number' ? String(thinkingBudget) : 'default';
 }

@@ -47,7 +47,10 @@ export class TimingReminderBackgroundAgent implements BackgroundAgent {
 	private readonly intervalMs: number;
 
 	constructor(
-		private readonly state: InterviewState,
+		// Only `state.phase` is read (see onStart), so accept any state that
+		// exposes it — lets demos with their own state shape (e.g. project-deepdive)
+		// reuse this agent without a type cast.
+		private readonly state: Pick<InterviewState, 'phase'>,
 		options: TimingReminderOptions = {},
 	) {
 		this.totalBudgetMs = options.totalBudgetMs ?? DEFAULT_TOTAL_BUDGET_MS;

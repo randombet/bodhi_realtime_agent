@@ -5,7 +5,7 @@ import { CancelledError } from '../../src/agent/subagent-session.js';
 import type { SubagentSession } from '../../src/agent/subagent-session.js';
 import type { SubagentResult } from '../../src/types/conversation.js';
 import { mergeText, type ChatEvent } from './openclaw-client.js';
-import type { OpenClawTransport } from './openclaw-transport.js';
+import type { OpenClawTransport } from '../../app/lib/integrations/openclaw/openclaw-transport.js';
 
 /** Tagged user input for Promise.race() discriminated union. */
 type TaggedUserInput = { source: 'user_input'; text: string };
