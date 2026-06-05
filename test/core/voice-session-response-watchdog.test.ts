@@ -131,6 +131,31 @@ describe('response watchdog', () => {
 		}
 	});
 
+	it('stays recovered when the re-elicit nudge throws (best-effort)', async () => {
+		let session: VoiceSession | undefined;
+		try {
+			const s = setup();
+			session = s.session;
+			// Simulate a half-open SDK session whose nudge throws synchronously.
+			s.transport.elicitResponse = vi.fn(() => {
+				throw new Error('half-open');
+			});
+			await activate(session, s.transport);
+
+			completeUserTurn(session);
+			vi.advanceTimersByTime(8000); // fire
+			vi.advanceTimersByTime(1000); // backoff → reconnect resolves
+			await vi.runAllTimersAsync(); // flush reconnect().then() → nudge throws + is swallowed
+
+			expect(s.transport.reconnect).toHaveBeenCalledTimes(1);
+			expect(s.transport.elicitResponse).toHaveBeenCalledTimes(1);
+			// A throwing nudge must NOT undo a successful reconnect.
+			expect(session.sessionManager.state).toBe('ACTIVE');
+		} finally {
+			await session?.close();
+		}
+	});
+
 	it('does not reconnect when the model responds before the timeout', async () => {
 		let session: VoiceSession | undefined;
 		try {

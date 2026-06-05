@@ -3380,10 +3380,14 @@ export class VoiceSession {
 	private elicitModelResponse(reason: string): void {
 		if (this.internalMode !== 'agent') return;
 		this.log(`[Watchdog] Re-eliciting model response after reconnect (reason=${reason})`);
-		if (this.transport.elicitResponse) {
-			this.transport.elicitResponse();
-		} else {
-			this.transport.triggerGeneration();
+		try {
+			if (this.transport.elicitResponse) {
+				this.transport.elicitResponse();
+			} else {
+				this.transport.triggerGeneration();
+			}
+		} catch (e) {
+			this.log(`[Watchdog] Re-elicit nudge failed (best-effort): ${(e as Error).message}`);
 		}
 	}
 
