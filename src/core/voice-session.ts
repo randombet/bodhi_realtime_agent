@@ -48,6 +48,7 @@ import type {
 import type { TTSAudioConfig, TTSProvider } from '../types/tts.js';
 import type { ArtifactRef, ArtifactStore, SaveArtifactParams } from '../types/workspace.js';
 import { BackgroundNotificationQueue } from './background-notification-queue.js';
+import { DEFAULT_RESPONSE_WATCHDOG_MS } from './constants.js';
 import { ConversationContext } from './conversation-context.js';
 import { ConversationHistoryWriter } from './conversation-history-writer.js';
 import { DirectiveManager } from './directive-manager.js';
@@ -534,6 +535,10 @@ export class VoiceSession {
 	private _ttsSpeaking = false;
 	private _ttsFormat?: TTSAudioConfig;
 	private _ttsHardTimer?: ReturnType<typeof setTimeout>;
+	/** Pending response-watchdog timer (model-silence-after-user-turn). */
+	private _responseWatchdogTimer?: ReturnType<typeof setTimeout>;
+	/** Resolved watchdog timeout (ms); `<= 0` disables. Set in the constructor. */
+	private readonly responseWatchdogMs: number;
 	private _ttsFirstTextMs = 0;
 	private _ttsFirstAudioMs = 0;
 	private _ttsTextLength = 0;
@@ -681,6 +686,8 @@ export class VoiceSession {
 		);
 
 		this.subagentConfigs = config.subagentConfigs ?? {};
+
+		this.responseWatchdogMs = config.responseWatchdogMs ?? DEFAULT_RESPONSE_WATCHDOG_MS;
 
 		const initialForLive = config.agents.find((a) => a.name === config.initialAgent);
 		const liveResolved = initialForLive
@@ -857,6 +864,7 @@ export class VoiceSession {
 		// Wire LLMTransport property callbacks — works for both injected and default transports
 		this.transport.onAudioOutput = (data) => this.handleAudioOutput(data);
 		this.transport.onToolCall = (calls) => {
+			this.clearResponseWatchdog();
 			// Native playback-end gate: this response dispatched a tool call, so
 			// it is not the turn's terminal spoken response.
 			this._nativeResponseDispatchedToolCall = true;
@@ -881,6 +889,7 @@ export class VoiceSession {
 		this.transport.onTurnComplete = (serverTurnId) => this.handleTurnComplete(serverTurnId);
 		this.transport.onInterrupted = (serverTurnId) => this.handleInterrupted(serverTurnId);
 		this.transport.onOutputTranscription = (text) => {
+			this.clearResponseWatchdog();
 			this.ensureCurrentTurn();
 			this.transcriptManager.handleOutput(text);
 		};
@@ -1006,6 +1015,7 @@ export class VoiceSession {
 		// any pre-attached handler on injected transports.
 		const prevModelTurnStart = this.transport.onModelTurnStart;
 		this.transport.onModelTurnStart = () => {
+			this.clearResponseWatchdog();
 			try {
 				prevModelTurnStart?.();
 			} catch (e) {
@@ -1610,6 +1620,7 @@ export class VoiceSession {
 		// active sockets don't survive session close. Idempotent.
 		await this.whisperProvider?.stop().catch(() => undefined);
 		this.ttsClearTimers();
+		this.clearResponseWatchdog();
 		// close() bypasses finalizeTurn — tear down the native gate directly so
 		// no _nativePlaybackTimer outlives the session.
 		if (this.nativePlaybackGatingActive) this.clearNativePlaybackGate();
@@ -1967,6 +1978,7 @@ export class VoiceSession {
 		this.log(
 			`[Latency] User voice input completed (client audio VAD; reason=${reason}; speechDuration=${this.lastClientSpeechDurationMs}ms; silenceObserved=${silenceObservedMs}ms)`,
 		);
+		this.armResponseWatchdog();
 		return 'completed';
 	}
 
@@ -2015,6 +2027,7 @@ export class VoiceSession {
 		// implement quiesce(); guarantees no model audio leaks into dictation
 		// mode even if a quiesce race occurs.
 		if (this.internalMode !== 'agent') return;
+		this.clearResponseWatchdog();
 
 		// Greeting interrupt grace: arm on the first assistant audio chunk.
 		// Idempotent — subsequent chunks no-op inside the class.
@@ -2410,6 +2423,28 @@ export class VoiceSession {
 		}
 	}
 
+	/** Arm (or re-arm) the response watchdog after the user's turn ends. */
+	private armResponseWatchdog(): void {
+		if (this.responseWatchdogMs <= 0) return;
+		this.clearResponseWatchdog();
+		this._responseWatchdogTimer = setTimeout(() => {
+			this._responseWatchdogTimer = undefined;
+			if (this.sessionManager.state !== 'ACTIVE') return;
+			this.log(
+				`[Watchdog] Model silent ${this.responseWatchdogMs}ms after user turn — forcing reconnect`,
+			);
+			this.triggerReconnect('response-watchdog', true);
+		}, this.responseWatchdogMs);
+	}
+
+	/** Cancel the response watchdog (model showed activity, or teardown). */
+	private clearResponseWatchdog(): void {
+		if (this._responseWatchdogTimer) {
+			clearTimeout(this._responseWatchdogTimer);
+			this._responseWatchdogTimer = undefined;
+		}
+	}
+
 	/** Clear just the native playback fallback timer (timer-only — the
 	 *  counterpart of `ttsClearTimers`; used by the VAD-defer re-arm). */
 	private clearNativePlaybackTimer(): void {
@@ -2564,6 +2599,7 @@ export class VoiceSession {
 	}
 
 	private handleTurnComplete(serverTurnId?: number): void {
+		this.clearResponseWatchdog();
 		// A completed turn means the connection is healthy — reset reconnect counter
 		this.reconnectAttempts = 0;
 
@@ -2841,6 +2877,7 @@ export class VoiceSession {
 	}
 
 	private handleInterrupted(serverTurnId?: number): void {
+		this.clearResponseWatchdog();
 		// Correlate the interrupt to its Turn. A `stale` interrupt for a
 		// long-gone turn is ignored; `new` (no turn / interrupt before any model
 		// output) births one via the no-turn net. The structural idempotency of
