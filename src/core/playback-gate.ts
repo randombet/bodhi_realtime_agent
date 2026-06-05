@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 import type { AudioFormatSpec, LLMTransport } from '../types/transport.js';
+import type { TTSAudioConfig } from '../types/tts.js';
 import type { Turn } from './turn.js';
 
 /**
@@ -171,5 +172,199 @@ export class NativeAudioPlaybackGate implements PlaybackGate {
 			this.d.cancelResponse({ truncate: 'generated' });
 			this.d.onComplete(cur, { interrupted: true });
 		};
+	}
+}
+
+/** Dependencies for {@link ExternalTtsPlaybackGate} — only turn finalization
+ *  callbacks, never the session. The wiring (provider/transport callbacks, the
+ *  audio I/O, hooks, grace) stays in `VoiceSession.wireTtsProvider`, which drives
+ *  the gate through its methods and getters. */
+export interface TtsGateDeps {
+	/** Finalize a turn — wraps `VoiceSession.finalizeTurn`. */
+	onComplete: (turn: Turn | null, opts: { interrupted: boolean }) => void;
+	/** The session's current framework turn. */
+	getCurrentTurn: () => Turn | null;
+	log: (msg: string) => void;
+	/** Injectable wall clock (tests). Defaults to `Date.now`. */
+	clock?: () => number;
+}
+
+/**
+ * External-TTS playback gate, extracted from `VoiceSession` (Step 4–5). Owns the
+ * former `_tts*` state machine (request id, the LLM-text-done / audio-done /
+ * speaking flags, the format, the hard-cap + playback timers, and the timing
+ * counters) and the completion logic (`maybeComplete`, `completeAudio`, the hard
+ * cap, interrupt teardown). It does NOT own the source-neutral playback-defer
+ * flag (`_ttsPlaybackEndedPending`) — that stays in the session until Step 6.
+ */
+export class ExternalTtsPlaybackGate implements PlaybackGate {
+	private requestId = 0;
+	private turnHasText = false;
+	private llmTextDone = false;
+	private audioDone = false;
+	private speaking = false;
+	private _format?: TTSAudioConfig;
+	private hardTimer?: ReturnType<typeof setTimeout>;
+	private firstTextMs = 0;
+	private firstAudioMs = 0;
+	private _textLength = 0;
+	private audioDurationMs = 0;
+	private playbackTimer?: ReturnType<typeof setTimeout>;
+	private estimatedEndMs: number | null = null;
+	private readonly clock: () => number;
+
+	constructor(private readonly d: TtsGateDeps) {
+		this.clock = d.clock ?? Date.now;
+	}
+
+	// --- PlaybackGate ---
+	get pending(): boolean {
+		return this.speaking;
+	}
+	get timerArmed(): boolean {
+		return this.playbackTimer !== undefined;
+	}
+	get id(): number {
+		return this.requestId;
+	}
+	armTimer(delayMs: number, cb: () => void): void {
+		this.playbackTimer = setTimeout(() => {
+			this.playbackTimer = undefined;
+			cb();
+		}, delayMs);
+	}
+	/** liveGate's clearTimer clears BOTH TTS timers (hard cap + playback). */
+	clearTimer(): void {
+		this.clearTimers();
+	}
+
+	// --- Read surface for the wiring in VoiceSession.wireTtsProvider ---
+	get isSpeaking(): boolean {
+		return this.speaking;
+	}
+	get isLlmTextDone(): boolean {
+		return this.llmTextDone;
+	}
+	get hasTurnText(): boolean {
+		return this.turnHasText;
+	}
+	get format(): TTSAudioConfig | undefined {
+		return this._format;
+	}
+	get currentRequestId(): number {
+		return this.requestId;
+	}
+	get firstTextAtMs(): number {
+		return this.firstTextMs;
+	}
+	get firstAudioAtMs(): number {
+		return this.firstAudioMs;
+	}
+	get textLength(): number {
+		return this._textLength;
+	}
+	get totalAudioDurationMs(): number {
+		return this.audioDurationMs;
+	}
+	get estimatedPlaybackEndMs(): number | null {
+		return this.estimatedEndMs;
+	}
+
+	setFormat(fmt: TTSAudioConfig): void {
+		this._format = fmt;
+	}
+
+	/** First text chunk of a turn — bump the request id and reset per-turn
+	 *  counters. (The session resets the shared playback-defer flag alongside.) */
+	beginRequest(): void {
+		this.requestId++;
+		this.turnHasText = true;
+		this.firstTextMs = this.clock();
+		this.firstAudioMs = 0;
+		this._textLength = 0;
+		this.audioDurationMs = 0;
+		this.estimatedEndMs = null;
+	}
+
+	addTextLength(n: number): void {
+		this._textLength += n;
+	}
+
+	/** An audio chunk reached the client. */
+	noteAudio(durationMs: number): void {
+		this.speaking = true;
+		this.audioDurationMs += durationMs;
+		if (this.firstAudioMs === 0) this.firstAudioMs = this.clock();
+	}
+
+	setEstimatedEnd(ms: number): void {
+		this.estimatedEndMs = ms;
+	}
+
+	clearTimers(): void {
+		if (this.hardTimer) {
+			clearTimeout(this.hardTimer);
+			this.hardTimer = undefined;
+		}
+		if (this.playbackTimer) {
+			clearTimeout(this.playbackTimer);
+			this.playbackTimer = undefined;
+		}
+	}
+
+	/** Turn gating: when both the LLM text stream and TTS audio are done, finalize. */
+	maybeComplete(): void {
+		if (this.llmTextDone && this.audioDone) {
+			this.llmTextDone = false;
+			this.audioDone = false;
+			this.turnHasText = false;
+			this.clearTimers();
+			this.d.onComplete(this.d.getCurrentTurn(), { interrupted: false });
+		}
+	}
+
+	/** `completePlayback`'s TTS arm — audio has drained; attempt completion. */
+	completeAudio(): void {
+		this.audioDone = true;
+		this.speaking = false;
+		this.maybeComplete();
+	}
+
+	/** handleTurnComplete: the LLM text stream ended. */
+	markLlmTextDone(): void {
+		this.llmTextDone = true;
+	}
+
+	/** A tool-call-only turn produced no synthesized text — TTS won't fire onDone. */
+	markNoTextTurnAudioDone(): void {
+		this.audioDone = true;
+	}
+
+	/** Arm the 60 s hard cap (idempotent) that force-completes a stuck turn.
+	 *  `onClearDefer` resets the session's shared playback-defer flag — the one
+	 *  field the gate does not own. */
+	armHardCapIfNeeded(onClearDefer: () => void): void {
+		if (this.hardTimer) return;
+		this.hardTimer = setTimeout(() => {
+			this.d.log('TTS hard cap timer fired — forcing turn completion');
+			this.audioDone = true;
+			this.speaking = false;
+			this.estimatedEndMs = null;
+			this.requestId++; // invalidate late-arriving chunks
+			onClearDefer();
+			this.maybeComplete();
+		}, 60000);
+	}
+
+	/** finalizeTurn interrupted teardown — the gate's part (Hazard-2 order: bump
+	 *  the request id BEFORE the caller runs `ttsProvider.cancel()`). */
+	resetForInterrupt(): void {
+		this.speaking = false;
+		this.llmTextDone = false;
+		this.audioDone = false;
+		this.turnHasText = false;
+		this.estimatedEndMs = null;
+		this.requestId++;
+		this.clearTimers();
 	}
 }

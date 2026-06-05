@@ -64,7 +64,11 @@ import {
 	LegacyNotificationSink,
 	type NotificationSink,
 } from './notification-sink.js';
-import { NativeAudioPlaybackGate } from './playback-gate.js';
+import {
+	ExternalTtsPlaybackGate,
+	NativeAudioPlaybackGate,
+	type PlaybackGate,
+} from './playback-gate.js';
 import { SessionManager } from './session-manager.js';
 import { ToolCallRouter } from './tool-call-router.js';
 import { TranscriptManager } from './transcript-manager.js';
@@ -508,31 +512,16 @@ export class VoiceSession {
 	private _turnWasInterrupted = false;
 	// --- TTS state (actor-mode only) ---
 	private ttsProvider?: TTSProvider;
-	private _ttsCurrentRequestId = 0;
-	private _ttsTurnHasText = false;
-	private _ttsLlmTextDone = false;
-	private _ttsAudioDone = false;
-	private _ttsSpeaking = false;
-	private _ttsFormat?: TTSAudioConfig;
-	private _ttsHardTimer?: ReturnType<typeof setTimeout>;
-	private _ttsFirstTextMs = 0;
-	private _ttsFirstAudioMs = 0;
-	private _ttsTextLength = 0;
-	/** Sum of durationMs across the current turn's TTS audio chunks. Synthesis
-	 *  finishes far faster than realtime playback; this estimates how long the
-	 *  client is still draining audio after the provider reports done. */
-	private _ttsAudioDurationMs = 0;
-	/** Defers turn completion from synthesis-done to estimated client
-	 *  playback-done, keeping the turn interruptible through the audio tail. */
-	private _ttsPlaybackTimer?: ReturnType<typeof setTimeout>;
+	/** External-TTS playback gate — owns the former `_tts*` state machine
+	 *  (request id, done/speaking flags, format, timers, counters) and the
+	 *  completion logic. Constructed when `ttsProvider` is set; the wiring in
+	 *  `wireTtsProvider` drives it. See `playback-gate.ts`. */
+	private ttsGate?: ExternalTtsPlaybackGate;
 	/** Non-null when a completion (the `playback.ended` signal or the fallback
 	 *  timer) was deferred pending an in-progress potential barge-in; the value
-	 *  records which source triggered it (for the completion-source log). */
+	 *  records which source triggered it (for the completion-source log).
+	 *  Source-neutral (native + TTS) — stays in the session (Step 6 → arbiter). */
 	private _ttsPlaybackEndedPending: 'signal' | 'fallback' | null = null;
-	/** Estimated client playback-end (ms epoch) for the current turn — set in
-	 *  `tts.onDone`, used only to classify a barge-in as before/after the
-	 *  estimate for observability. */
-	private _ttsEstimatedPlaybackEndMs: number | null = null;
 	// --- Server-turn finalization dedup (external-TTS turn completion).
 	//     See dev_docs/framework/design-external-tts-turn-completion.md. ---
 	private config: VoiceSessionConfig;
@@ -1045,6 +1034,11 @@ export class VoiceSession {
 		// Wire TTS provider (actor-mode only)
 		if (config.ttsProvider && config.orchestrationMode === 'actor') {
 			this.ttsProvider = config.ttsProvider;
+			this.ttsGate = new ExternalTtsPlaybackGate({
+				onComplete: (turn, opts) => this.finalizeTurn(turn, opts),
+				getCurrentTurn: () => this.currentTurn,
+				log: (msg) => this.log(msg),
+			});
 			this.wireTtsProvider();
 		}
 
@@ -1628,7 +1622,7 @@ export class VoiceSession {
 		// Phase 3: stop the dictation-mode Whisper provider so prewarmed or
 		// active sockets don't survive session close. Idempotent.
 		await this.whisperProvider?.stop().catch(() => undefined);
-		this.ttsClearTimers();
+		this.ttsGate?.clearTimers();
 		// close() bypasses finalizeTurn — tear down the native gate directly so
 		// no native playback timer outlives the session.
 		if (this.nativePlaybackGatingActive) {
@@ -1895,7 +1889,8 @@ export class VoiceSession {
 	/** Wire TTSProvider callbacks and override transport callbacks for text mode. */
 	private wireTtsProvider(): void {
 		const tts = this.ttsProvider;
-		if (!tts) return;
+		const gate = this.ttsGate;
+		if (!tts || !gate) return;
 
 		// Configure TTS with preferred output format
 		const preferredFormat: TTSAudioConfig = {
@@ -1904,7 +1899,7 @@ export class VoiceSession {
 			channels: 1,
 			encoding: 'pcm',
 		};
-		this._ttsFormat = tts.configure(preferredFormat);
+		gate.setFormat(tts.configure(preferredFormat));
 
 		// Wire LLM text output → TTS provider + transcript
 		this.transport.onTextOutput = (text) => {
@@ -1920,31 +1915,25 @@ export class VoiceSession {
 				return;
 			}
 
-			if (!this._ttsTurnHasText) {
-				this._ttsCurrentRequestId++;
-				this._ttsTurnHasText = true;
-				this._ttsFirstTextMs = Date.now();
-				this._ttsFirstAudioMs = 0;
-				this._ttsTextLength = 0;
-				this._ttsAudioDurationMs = 0;
-				this._ttsPlaybackEndedPending = null;
-				this._ttsEstimatedPlaybackEndMs = null;
+			if (!gate.hasTurnText) {
+				gate.beginRequest();
+				this._ttsPlaybackEndedPending = null; // session-owned defer flag
 			}
-			this._ttsTextLength += text.length;
-			tts.synthesize(text, this._ttsCurrentRequestId);
+			gate.addTextLength(text.length);
+			tts.synthesize(text, gate.currentRequestId);
 		};
 
 		// When the LLM text stream ends — flush is end-of-input for this requestId;
 		// the provider must then finalize and emit onDone (see TTSProvider.synthesize).
 		this.transport.onTextDone = () => {
-			if (this._ttsTurnHasText) {
-				tts.synthesize('', this._ttsCurrentRequestId, { flush: true });
+			if (gate.hasTurnText) {
+				tts.synthesize('', gate.currentRequestId, { flush: true });
 			}
 		};
 
 		// Wire TTS audio output → client (fast-path, with stale filtering + resampling)
 		tts.onAudio = (base64Pcm, durationMs, requestId) => {
-			if (requestId !== this._ttsCurrentRequestId) return; // stale
+			if (requestId !== gate.currentRequestId) return; // stale
 			// Phase 3 dictation guard: silence the TTS path when not in agent
 			// mode. Queued synthesis can complete after a transcription-mode
 			// flip; without this guard the client would hear stale agent
@@ -1954,40 +1943,34 @@ export class VoiceSession {
 			// chunk (idempotent — subsequent chunks no-op inside the class).
 			this.maybeArmGraceOnFirstAudio();
 			let buffer: Buffer = Buffer.from(base64Pcm, 'base64');
-			if (
-				this._ttsFormat &&
-				this._ttsFormat.sampleRate !== this.transport.audioFormat.outputSampleRate
-			) {
+			const fmt = gate.format;
+			if (fmt && fmt.sampleRate !== this.transport.audioFormat.outputSampleRate) {
 				buffer = resamplePcm(
 					buffer,
-					this._ttsFormat.sampleRate,
+					fmt.sampleRate,
 					this.transport.audioFormat.outputSampleRate,
-					this._ttsFormat.bitDepth,
+					fmt.bitDepth,
 				);
 			}
 			this.clientTransport.sendAudioToClient(buffer);
 			this.signalAudioStarted();
-			this._ttsSpeaking = true;
-			this._ttsAudioDurationMs += durationMs;
-			if (this._ttsFirstAudioMs === 0) {
-				this._ttsFirstAudioMs = Date.now();
-			}
+			gate.noteAudio(durationMs);
 		};
 
 		// Wire TTS done → turn gating + hook
 		tts.onDone = (requestId) => {
-			if (requestId !== this._ttsCurrentRequestId) return; // stale
-			this.ttsClearTimers();
+			if (requestId !== gate.currentRequestId) return; // stale
+			gate.clearTimers();
 			// Fire TTS synthesis hook with timing metrics
-			if (this.hooks.onTTSSynthesis && this._ttsFirstTextMs > 0) {
+			if (this.hooks.onTTSSynthesis && gate.firstTextAtMs > 0) {
 				const now = Date.now();
 				this.hooks.onTTSSynthesis({
 					sessionId: this.config.sessionId,
 					provider: tts.constructor.name,
-					textLength: this._ttsTextLength,
-					durationMs: now - this._ttsFirstTextMs,
+					textLength: gate.textLength,
+					durationMs: now - gate.firstTextAtMs,
 					audioMs: 0, // Would require tracking total audio duration
-					ttfbMs: this._ttsFirstAudioMs > 0 ? this._ttsFirstAudioMs - this._ttsFirstTextMs : 0,
+					ttfbMs: gate.firstAudioAtMs > 0 ? gate.firstAudioAtMs - gate.firstTextAtMs : 0,
 					requestId,
 				});
 			}
@@ -1997,7 +1980,7 @@ export class VoiceSession {
 			// fallback timer (never completes synchronously, even when synthesis
 			// ran slower than realtime), so a barge-in during the tail works and
 			// a healthy client has room to answer with a playback signal.
-			if (this._ttsFirstAudioMs === 0) {
+			if (gate.firstAudioAtMs === 0) {
 				this.completePlayback();
 				return;
 			}
@@ -2005,20 +1988,17 @@ export class VoiceSession {
 			// schedules at audioBuf.duration / playbackRate); divide by the
 			// slowest rate so the fallback cannot pre-empt a healthy client.
 			const rateDivisor = this.playbackStateProtocolActive ? VoiceSession.MIN_PLAYBACK_RATE : 1;
-			const estimatedEndMs = this._ttsFirstAudioMs + this._ttsAudioDurationMs / rateDivisor;
-			this._ttsEstimatedPlaybackEndMs = estimatedEndMs;
+			const estimatedEndMs = gate.firstAudioAtMs + gate.totalAudioDurationMs / rateDivisor;
+			gate.setEstimatedEnd(estimatedEndMs);
 			const remainingMs =
 				Math.max(estimatedEndMs - Date.now(), 0) + this.ttsPlaybackFallbackMarginMs;
-			this._ttsPlaybackTimer = setTimeout(() => {
-				this._ttsPlaybackTimer = undefined;
-				this.finishOrDeferForVad('fallback');
-			}, remainingMs);
+			gate.armTimer(remainingMs, () => this.finishOrDeferForVad('fallback'));
 			// Tell the client "no more audio for this turn" — it answers with
 			// `playback.ended` once its buffer drains. Ordered after the audio.
 			if (this.playbackStateProtocolActive) {
 				this.clientTransport.sendJsonAfterAudio?.({
 					type: 'audio.done',
-					playbackId: this._ttsCurrentRequestId,
+					playbackId: gate.currentRequestId,
 				});
 			}
 		};
@@ -2040,7 +2020,7 @@ export class VoiceSession {
 
 		// Wire word boundaries to client
 		tts.onWordBoundary = (word, offsetMs, requestId) => {
-			if (requestId !== this._ttsCurrentRequestId) return;
+			if (requestId !== gate.currentRequestId) return;
 			this.clientTransport.sendJsonToClient({
 				type: 'word_boundary',
 				word,
@@ -2061,7 +2041,7 @@ export class VoiceSession {
 		// See dev_docs/framework/design-greeting-interrupt-grace.md §4.
 		this.transport.onSpeechStarted = () => {
 			const frameworkOwns = this.transport.capabilities.frameworkOwnsInterrupt === true;
-			if (this._ttsSpeaking && this._ttsLlmTextDone) {
+			if (gate.isSpeaking && gate.isLlmTextDone) {
 				if (!this.requestInterrupt('tts-onSpeechStarted-tail')) return;
 				if (frameworkOwns) this.transport.cancelResponse?.({});
 				this.finalizeTurn(this.currentTurn, { interrupted: true });
@@ -2069,8 +2049,8 @@ export class VoiceSession {
 			}
 			if (
 				frameworkOwns &&
-				this._ttsSpeaking &&
-				!this._ttsLlmTextDone &&
+				gate.isSpeaking &&
+				!gate.isLlmTextDone &&
 				this.currentTurn &&
 				!this.currentTurn.isFinalized
 			) {
@@ -2111,9 +2091,7 @@ export class VoiceSession {
 			this.finalizeTurn(this.nativeGate.capturedTurn, { interrupted: false });
 			return;
 		}
-		this._ttsAudioDone = true;
-		this._ttsSpeaking = false;
-		this.ttsMaybeCompleteTurn();
+		this.ttsGate?.completeAudio();
 	}
 
 	/**
@@ -2160,29 +2138,6 @@ export class VoiceSession {
 		this._ttsPlaybackEndedPending = null;
 		this.clientVadDetector.resetSegment();
 		this.completePlayback();
-	}
-
-	/** Turn gating: check if both LLM and TTS are done. */
-	private ttsMaybeCompleteTurn(): void {
-		if (this._ttsLlmTextDone && this._ttsAudioDone) {
-			this._ttsLlmTextDone = false;
-			this._ttsAudioDone = false;
-			this._ttsTurnHasText = false;
-			this.ttsClearTimers();
-			this.finalizeTurn(this.currentTurn, { interrupted: false });
-		}
-	}
-
-	/** Clear all TTS timers. */
-	private ttsClearTimers(): void {
-		if (this._ttsHardTimer) {
-			clearTimeout(this._ttsHardTimer);
-			this._ttsHardTimer = undefined;
-		}
-		if (this._ttsPlaybackTimer) {
-			clearTimeout(this._ttsPlaybackTimer);
-			this._ttsPlaybackTimer = undefined;
-		}
 	}
 
 	// --- Gemini event handlers ---
@@ -2317,25 +2272,20 @@ export class VoiceSession {
 		if (!turn || turn.isFinalized || turn !== this.currentTurn) return;
 
 		// TTS turn gating: when TTS is active, defer turn completion until TTS finishes
-		if (this.ttsProvider) {
-			this._ttsLlmTextDone = true;
-			if (!this._ttsTurnHasText) {
+		if (this.ttsProvider && this.ttsGate) {
+			this.ttsGate.markLlmTextDone();
+			if (!this.ttsGate.hasTurnText) {
 				// Tool-call-only turn — no text synthesized, TTS won't fire onDone
-				this._ttsAudioDone = true;
-			} else if (!this._ttsHardTimer) {
-				// Start hard cap timer (60s) to prevent stuck turns
-				this._ttsHardTimer = setTimeout(() => {
-					this.log('TTS hard cap timer fired — forcing turn completion');
-					this._ttsAudioDone = true;
-					this._ttsSpeaking = false;
+				this.ttsGate.markNoTextTurnAudioDone();
+			} else {
+				// Hard cap (60s) prevents a stuck turn. onClearDefer resets the
+				// session-owned playback-defer flag (not owned by the gate).
+				this.ttsGate.armHardCapIfNeeded(() => {
 					this._ttsPlaybackEndedPending = null;
-					this._ttsEstimatedPlaybackEndMs = null;
-					this._ttsCurrentRequestId++; // Invalidate late-arriving chunks
-					this.ttsMaybeCompleteTurn();
-				}, 60000);
+				});
 			}
-			this.ttsMaybeCompleteTurn();
-			return; // Defer — actual turn-end runs via ttsMaybeCompleteTurn → finalizeTurn
+			this.ttsGate.maybeComplete();
+			return; // Defer — actual turn-end runs via gate.maybeComplete → finalizeTurn
 		}
 
 		// Native playback-end gate: when this terminal response produced audio
@@ -2393,10 +2343,8 @@ export class VoiceSession {
 
 		if (opts.interrupted) {
 			this.log('Interrupted by user');
-			if (
-				this._ttsEstimatedPlaybackEndMs !== null &&
-				Date.now() > this._ttsEstimatedPlaybackEndMs
-			) {
+			const estEnd = this.ttsGate?.estimatedPlaybackEndMs ?? null;
+			if (estEnd !== null && Date.now() > estEnd) {
 				this.log('[Latency] barge-in finalized after the estimated playback end');
 			}
 			// Hazard-2 order: invalidate TTS gate state and bump the requestId
@@ -2404,14 +2352,8 @@ export class VoiceSession {
 			// the turn mid-interrupt.
 			safeStep('stt.interrupt', () => this.sttProvider?.handleInterrupted());
 			if (this.ttsProvider) {
-				this._ttsSpeaking = false;
-				this._ttsLlmTextDone = false;
-				this._ttsAudioDone = false;
-				this._ttsTurnHasText = false;
-				this._ttsPlaybackEndedPending = null;
-				this._ttsEstimatedPlaybackEndMs = null;
-				this._ttsCurrentRequestId++;
-				this.ttsClearTimers();
+				this.ttsGate?.resetForInterrupt();
+				this._ttsPlaybackEndedPending = null; // session-owned defer flag
 				safeStep('tts.cancel', () => this.ttsProvider?.cancel());
 			}
 			// Order matters: reset_audio FIRST (clears the gate), then interrupted
@@ -2751,26 +2693,9 @@ export class VoiceSession {
 	 * gating is active, else `null`. A session is TTS *or* native, never both.
 	 * See dev_docs/framework/design-playback-end-gating-openai-native.md §6.
 	 */
-	private liveGate(): {
-		pending: boolean;
-		timerArmed: boolean;
-		id: number;
-		armTimer: (delayMs: number, cb: () => void) => void;
-		clearTimer: () => void;
-	} | null {
+	private liveGate(): PlaybackGate | null {
 		if (this.ttsProvider) {
-			return {
-				pending: this._ttsSpeaking,
-				timerArmed: this._ttsPlaybackTimer !== undefined,
-				id: this._ttsCurrentRequestId,
-				armTimer: (ms, cb) => {
-					this._ttsPlaybackTimer = setTimeout(() => {
-						this._ttsPlaybackTimer = undefined;
-						cb();
-					}, ms);
-				},
-				clearTimer: () => this.ttsClearTimers(),
-			};
+			return this.ttsGate ?? null;
 		}
 		if (this.nativePlaybackGatingActive) {
 			return this.nativeGate ?? null;
