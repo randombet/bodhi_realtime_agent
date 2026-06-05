@@ -49,7 +49,7 @@ import type { TTSAudioConfig, TTSProvider } from '../types/tts.js';
 import type { ArtifactRef, ArtifactStore, SaveArtifactParams } from '../types/workspace.js';
 import { AudioRouter, type InternalTranscriptionMode } from './audio-router.js';
 import { BackgroundNotificationQueue } from './background-notification-queue.js';
-import { CLIENT_VAD_SILENCE_MS, ClientVadDetector } from './client-vad-detector.js';
+import { ClientVadDetector } from './client-vad-detector.js';
 import { ConversationContext } from './conversation-context.js';
 import { ConversationHistoryWriter } from './conversation-history-writer.js';
 import { DirectiveManager } from './directive-manager.js';
@@ -64,6 +64,7 @@ import {
 	LegacyNotificationSink,
 	type NotificationSink,
 } from './notification-sink.js';
+import { PlaybackCompletionArbiter } from './playback-completion-arbiter.js';
 import {
 	ExternalTtsPlaybackGate,
 	NativeAudioPlaybackGate,
@@ -517,11 +518,10 @@ export class VoiceSession {
 	 *  completion logic. Constructed when `ttsProvider` is set; the wiring in
 	 *  `wireTtsProvider` drives it. See `playback-gate.ts`. */
 	private ttsGate?: ExternalTtsPlaybackGate;
-	/** Non-null when a completion (the `playback.ended` signal or the fallback
-	 *  timer) was deferred pending an in-progress potential barge-in; the value
-	 *  records which source triggered it (for the completion-source log).
-	 *  Source-neutral (native + TTS) — stays in the session (Step 6 → arbiter). */
-	private _ttsPlaybackEndedPending: 'signal' | 'fallback' | null = null;
+	/** Playback-completion arbiter — owns the source-neutral playback-defer flag
+	 *  and the completePlayback / finishOrDeferForVad routing. Constructed after
+	 *  the gates. See `playback-completion-arbiter.ts`. */
+	private completionArbiter!: PlaybackCompletionArbiter;
 	// --- Server-turn finalization dedup (external-TTS turn completion).
 	//     See dev_docs/framework/design-external-tts-turn-completion.md. ---
 	private config: VoiceSessionConfig;
@@ -567,7 +567,6 @@ export class VoiceSession {
 	private finalizedInputTurnIds = new Set<number>();
 	private ownsClientTransport: boolean;
 	/** Margin (ms) added to the VAD-defer force-completion timeout. */
-	private static readonly VAD_DEFER_FORCE_MARGIN_MS = 50;
 	/** Default and floor (ms) for the TTS fallback-completion margin — estimate
 	 *  padding before the server force-completes a turn with no playback signal.
 	 *  See dev_docs/framework/design-playback-state-protocol.md. */
@@ -785,7 +784,7 @@ export class VoiceSession {
 					this.lastInputTranscriptionLogText = '';
 				},
 				onVoicedFrame: (now, maxAbs, avgAbs) => this.runClientVadBargeInPolicy(now, maxAbs, avgAbs),
-				onSegmentResolved: () => this.resolveVadDeferredPlayback(),
+				onSegmentResolved: () => this.completionArbiter.resolveDeferredPlayback(),
 			},
 			(msg) => this.log(msg),
 		);
@@ -1106,6 +1105,22 @@ export class VoiceSession {
 			});
 			this.nativeGate.installBargeIn(this.transport);
 		}
+
+		// Playback-completion arbiter — owns the defer flag + completion routing
+		// across the (mutually exclusive) TTS and native gates.
+		this.completionArbiter = new PlaybackCompletionArbiter({
+			getLiveGate: () => this.liveGate(),
+			nativePlaybackGatingActive: this.nativePlaybackGatingActive,
+			getNativeGate: () => this.nativeGate,
+			getTtsGate: () => this.ttsGate,
+			vad: this.clientVadDetector,
+			getBargeInConfig: () => ({
+				bargeInEnabled: this.clientVad.bargeInEnabled,
+				bargeInConfirmMs: this.clientVad.bargeInConfirmMs,
+			}),
+			finalizeTurn: (turn, opts) => this.finalizeTurn(turn, opts),
+			log: (msg) => this.log(msg),
+		});
 
 		// Forward GUI events from EventBus to the client as JSON text frames
 		this.eventBus.subscribe('gui.update', (payload) => {
@@ -1627,7 +1642,7 @@ export class VoiceSession {
 		// no native playback timer outlives the session.
 		if (this.nativePlaybackGatingActive) {
 			this.nativeGate?.clear();
-			this._ttsPlaybackEndedPending = null;
+			this.completionArbiter.clearDefer();
 		}
 		await this.ttsProvider?.stop();
 		if (this.runtimeOrchestrator) {
@@ -1789,23 +1804,6 @@ export class VoiceSession {
 		this.handleClientTtsBargeIn();
 	}
 
-	/**
-	 * VAD-resolution hook (the detector's `onSegmentResolved`): a client speech
-	 * segment ended without a barge-in tearing the gate down. If a playback
-	 * completion was deferred for this potential barge-in, finish it now.
-	 */
-	private resolveVadDeferredPlayback(): void {
-		const deferGate = this.liveGate();
-		if (this._ttsPlaybackEndedPending !== null && deferGate?.pending === true) {
-			this.log(
-				`[Latency] turn complete via ${this._ttsPlaybackEndedPending} (after VAD-resolution defer)`,
-			);
-			this._ttsPlaybackEndedPending = null;
-			deferGate.clearTimer();
-			this.completePlayback();
-		}
-	}
-
 	private logInputTranscriptionLatency(text: string, source: string): void {
 		const trimmed = text.trim();
 		if (!trimmed || trimmed === this.lastInputTranscriptionLogText) return;
@@ -1917,7 +1915,7 @@ export class VoiceSession {
 
 			if (!gate.hasTurnText) {
 				gate.beginRequest();
-				this._ttsPlaybackEndedPending = null; // session-owned defer flag
+				this.completionArbiter.clearDefer();
 			}
 			gate.addTextLength(text.length);
 			tts.synthesize(text, gate.currentRequestId);
@@ -1981,7 +1979,7 @@ export class VoiceSession {
 			// ran slower than realtime), so a barge-in during the tail works and
 			// a healthy client has room to answer with a playback signal.
 			if (gate.firstAudioAtMs === 0) {
-				this.completePlayback();
+				this.completionArbiter.completePlayback();
 				return;
 			}
 			// When the protocol is active the client may slow playback (it
@@ -1992,7 +1990,7 @@ export class VoiceSession {
 			gate.setEstimatedEnd(estimatedEndMs);
 			const remainingMs =
 				Math.max(estimatedEndMs - Date.now(), 0) + this.ttsPlaybackFallbackMarginMs;
-			gate.armTimer(remainingMs, () => this.finishOrDeferForVad('fallback'));
+			gate.armTimer(remainingMs, () => this.completionArbiter.finishOrDeferForVad('fallback'));
 			// Tell the client "no more audio for this turn" — it answers with
 			// `playback.ended` once its buffer drains. Ordered after the audio.
 			if (this.playbackStateProtocolActive) {
@@ -2077,67 +2075,6 @@ export class VoiceSession {
 			return VoiceSession.TTS_PLAYBACK_FALLBACK_MARGIN_DEFAULT_MS;
 		}
 		return Math.max(raw, VoiceSession.TTS_PLAYBACK_FALLBACK_MARGIN_FLOOR_MS);
-	}
-
-	/**
-	 * Finalize the TTS audio side of a turn — synthesis is done AND the client
-	 * has (estimated) finished draining the buffered audio. Split out of
-	 * `onDone` so the turn stays interruptible through the playback tail.
-	 */
-	private completePlayback(): void {
-		// Native playback-end gate: finalize the turn captured when the gate was
-		// armed, not whatever `currentTurn` is now.
-		if (this.nativePlaybackGatingActive && this.nativeGate?.pending) {
-			this.finalizeTurn(this.nativeGate.capturedTurn, { interrupted: false });
-			return;
-		}
-		this.ttsGate?.completeAudio();
-	}
-
-	/**
-	 * The single VAD-aware completion entry point — both the `playback.ended`
-	 * signal and the fallback timer route through it. Completes the turn unless
-	 * a *potential barge-in* is in progress, in which case completion is
-	 * deferred until that VAD segment resolves (a barge-in interrupts the turn;
-	 * silence completes it via the detector's `onSegmentResolved` hook).
-	 * See dev_docs/framework/design-playback-state-protocol.md.
-	 */
-	private finishOrDeferForVad(reason: 'signal' | 'fallback'): void {
-		// A potential barge-in: an active VAD segment, client barge-in enabled,
-		// and a frame already past the in-TTS energy floor. Gating on the energy
-		// floor is essential — residual echo below it would defer every turn.
-		const potentialBargeIn =
-			this.clientVadDetector.isSpeechActive &&
-			this.clientVad.bargeInEnabled &&
-			this.clientVadDetector.isBargeInEligible;
-		// Operate on the live gate's timer (external TTS or native audio).
-		const gate = this.liveGate();
-		gate?.clearTimer();
-		if (potentialBargeIn) {
-			this._ttsPlaybackEndedPending = reason;
-			// Bounded defer — long enough for the barge-in to confirm even with a
-			// high `bargeInConfirmMs`. The callback force-completes (no re-defer,
-			// so it cannot loop) and resets the stale VAD segment.
-			const deferMs =
-				Math.max(CLIENT_VAD_SILENCE_MS, this.clientVad.bargeInConfirmMs) +
-				VoiceSession.VAD_DEFER_FORCE_MARGIN_MS;
-			gate?.armTimer(deferMs, () => this.forceCompleteAfterVadDefer());
-			return;
-		}
-		this.log(`[Latency] turn complete via ${reason}`);
-		this.completePlayback();
-	}
-
-	/** Force-complete a VAD-deferred turn whose segment never resolved (mic
-	 *  frames stopped). Resets the stale VAD segment so it cannot leak into the
-	 *  next turn. */
-	private forceCompleteAfterVadDefer(): void {
-		this.log(
-			`[Latency] TTS turn complete via ${this._ttsPlaybackEndedPending ?? 'fallback'} (forced after VAD defer)`,
-		);
-		this._ttsPlaybackEndedPending = null;
-		this.clientVadDetector.resetSegment();
-		this.completePlayback();
 	}
 
 	// --- Gemini event handlers ---
@@ -2281,7 +2218,7 @@ export class VoiceSession {
 				// Hard cap (60s) prevents a stuck turn. onClearDefer resets the
 				// session-owned playback-defer flag (not owned by the gate).
 				this.ttsGate.armHardCapIfNeeded(() => {
-					this._ttsPlaybackEndedPending = null;
+					this.completionArbiter.clearDefer();
 				});
 			}
 			this.ttsGate.maybeComplete();
@@ -2301,7 +2238,9 @@ export class VoiceSession {
 			// synchronously echoes audio.done back as playback.ended meets an
 			// armed gate rather than a premature-rejected signal. The gate's
 			// fallback timer is id-guarded internally.
-			const armedId = this.nativeGate.arm(turn, () => this.finishOrDeferForVad('fallback'));
+			const armedId = this.nativeGate.arm(turn, () =>
+				this.completionArbiter.finishOrDeferForVad('fallback'),
+			);
 			this.clientTransport.sendJsonAfterAudio?.({ type: 'audio.done', playbackId: armedId });
 			return; // Defer — completion runs via playback.ended / the fallback.
 		}
@@ -2338,7 +2277,7 @@ export class VoiceSession {
 		// shared playback-defer flag is reset alongside.
 		if (this.nativePlaybackGatingActive) {
 			this.nativeGate?.clear();
-			this._ttsPlaybackEndedPending = null;
+			this.completionArbiter.clearDefer();
 		}
 
 		if (opts.interrupted) {
@@ -2353,7 +2292,7 @@ export class VoiceSession {
 			safeStep('stt.interrupt', () => this.sttProvider?.handleInterrupted());
 			if (this.ttsProvider) {
 				this.ttsGate?.resetForInterrupt();
-				this._ttsPlaybackEndedPending = null; // session-owned defer flag
+				this.completionArbiter.clearDefer();
 				safeStep('tts.cancel', () => this.ttsProvider?.cancel());
 			}
 			// Order matters: reset_audio FIRST (clears the gate), then interrupted
@@ -2715,7 +2654,7 @@ export class VoiceSession {
 		if (!this.playbackStateProtocolActive) return;
 		// A signal was already accepted and deferred this turn — ignore further
 		// ones so a client cannot keep re-arming the defer timeout.
-		if (this._ttsPlaybackEndedPending !== null) return;
+		if (this.completionArbiter.hasDeferred) return;
 		const gate = this.liveGate();
 		if (!gate) return;
 		// Timer armed ⇒ the audio-done point has passed — rejects a premature
@@ -2725,7 +2664,7 @@ export class VoiceSession {
 		if (!gate.pending) return;
 		// Stale: a signal for a turn superseded by an interrupt (bumps the id).
 		if (playbackId !== gate.id) return;
-		this.finishOrDeferForVad('signal');
+		this.completionArbiter.finishOrDeferForVad('signal');
 	}
 
 	private handleFileUpload(base64: string, mimeType: string, fileName?: string): void {
