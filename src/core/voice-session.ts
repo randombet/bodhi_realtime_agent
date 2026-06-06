@@ -59,6 +59,7 @@ import {
 	LegacyNotificationSink,
 	type NotificationSink,
 } from './notification-sink.js';
+import { OutboundAudioGate } from './outbound-audio-gate.js';
 import { PlaybackCompletionArbiter } from './playback-completion-arbiter.js';
 import { NativeAudioPlaybackGate, type PlaybackGate } from './playback-gate.js';
 import { SessionManager } from './session-manager.js';
@@ -162,6 +163,14 @@ const DEFAULT_CLIENT_AUDIO_VAD: ResolvedClientAudioVadConfig = {
  *  ~5 s starts hiding real misconfigurations, so the resolver clamps and
  *  treats out-of-range values as `0`. */
 const GRACE_MAX_MS = 5000;
+
+/** Echo-skip window (ms) from the first assistant audio chunk of a turn before
+ *  the framework client-VAD barge-in fallback may fire on the no-playback-gate
+ *  (Gemini native) path. Bridges the gap that the greeting-interrupt grace
+ *  covers for framework-owned-interrupt transports (grace is 0 for Gemini):
+ *  keeps the agent's own opening audio from self-interrupting via mic echo,
+ *  while still letting the user cut a long buffered greeting client-side. */
+const NATIVE_BARGEIN_ECHO_SKIP_MS = 400;
 
 /** Clamp a caller-supplied `greetingInterruptGraceMs` override to a sane
  *  numeric range. Returns `undefined` when omitted (no caller override —
@@ -457,6 +466,19 @@ export class VoiceSession {
 	 *  (`onModelTurnStart`); read by `handleTurnComplete` so the native gate
 	 *  engages only on a turn's terminal spoken response (audio, no tool call). */
 	private _nativeResponseDispatchedToolCall = false;
+	/** Timestamp (ms) of the first assistant audio chunk of the current turn, or
+	 *  0 between/before turns. Drives `isAssistantAudioActive()` on the Gemini
+	 *  native path (no playback gate) so a client-VAD barge-in can interrupt a
+	 *  buffered greeting/answer. Reset at response start + turn finalization. */
+	/** Barge-in eligibility (echo-skip window) + post-interrupt trailing-audio
+	 *  suppression for the native, no-`liveGate`, non-cancellable transport shape
+	 *  (Gemini Live). The peer of `nativeGate` for that shape. Inert when a
+	 *  `PlaybackGate` is active. See `outbound-audio-gate.ts`. */
+	private readonly outboundAudioGate = new OutboundAudioGate({
+		echoSkipMs: NATIVE_BARGEIN_ECHO_SKIP_MS,
+		getActiveServerTurnId: () => this.transport.getActiveServerTurnId?.(),
+		now: () => Date.now(),
+	});
 	// --- Phase 3: transcription mode + dictation buffer + cross-provider quiesce ---
 	/** Transcription/dictation subsystem: owns `internalMode`, the dictation
 	 *  buffer, the Whisper provider, the §3.5 send-guard wrappers + pending
@@ -904,6 +926,9 @@ export class VoiceSession {
 			}
 			// Native playback-end gate: a new model response begins clean.
 			this._nativeResponseDispatchedToolCall = false;
+			// A genuinely new model response: reset the barge-in window + stop
+			// dropping post-interrupt trailing audio.
+			this.outboundAudioGate.onTurnStart();
 			this.turns.ensureCurrent();
 			this.logProviderUserTurnRecognition('model/tool processing started');
 			if (this.sttProvider && !this._commitFiredForTurn) {
@@ -1798,8 +1823,10 @@ export class VoiceSession {
 		if (clientVadBargeInEnergyEligible(this.clientVad, maxAbs, avgAbs)) {
 			this.clientVadDetector.markBargeInEligible();
 		}
-		// The interrupt itself fires only while a playback gate is pending.
-		if (this.liveGate()?.pending !== true) return;
+		// The interrupt fires only while assistant audio is actively playing —
+		// a pending playback gate (TTS/native) OR, on the no-gate Gemini native
+		// path, an active turn whose buffered audio is still playing.
+		if (!this.isAssistantAudioActive()) return;
 		if (this.clientVadDetector.hasBargeInFired) return;
 		if (
 			!clientVadBargeInAllowed(
@@ -1817,6 +1844,9 @@ export class VoiceSession {
 		// defeating real barge-ins. See dev_docs/framework/design-greeting-interrupt-grace.md §4.
 		if (!this.requestInterrupt('client-vad')) return;
 		this.clientVadDetector.markBargeInFired();
+		this.log(
+			`[Latency] client-VAD barge-in actuated (path=${this.liveGate() ? 'gate' : 'native-fallback'}; peak=${maxAbs}; avgAbs=${avgAbs})`,
+		);
 		this.handleClientTtsBargeIn();
 	}
 
@@ -1834,7 +1864,7 @@ export class VoiceSession {
 	}
 
 	private handleClientTtsBargeIn(): void {
-		if (this.liveGate()?.pending !== true) return;
+		if (!this.isAssistantAudioActive()) return;
 		// In framework-owned mode, the framework is responsible for actually
 		// stopping the in-flight response on the wire. cancelResponse({}) is
 		// a no-op when nothing is generating, so this is safe across both
@@ -1842,6 +1872,8 @@ export class VoiceSession {
 		if (this.transport.capabilities.frameworkOwnsInterrupt === true) {
 			this.transport.cancelResponse?.({});
 		}
+		// (Trailing-audio suppression for no-cancel transports is set in
+		// finalizeTurn, covering every framework interrupt path, not just this one.)
 		// The client-side VAD holds the Turn by reference — no server-turn id
 		// needed. A native gate finalizes the captured _nativePlaybackTurn; a
 		// later provider onInterrupted resolves to this same finalized Turn and
@@ -1869,6 +1901,11 @@ export class VoiceSession {
 		// implement quiesce(); guarantees no model audio leaks into dictation
 		// mode even if a quiesce race occurs.
 		if (!this.dictation.isAgentMode()) return;
+		// Records first-audio (drives the no-gate barge-in window) and drops the
+		// trailing audio of a server turn the framework already interrupted —
+		// Gemini keeps streaming an already-generated greeting after we finalize
+		// (no cancel command), so an early barge-in must suppress the remainder.
+		if (!this.outboundAudioGate.noteAudioChunk()) return;
 		this.reconnector.disarmResponseWatchdog();
 
 		// Greeting interrupt grace: arm on the first assistant audio chunk.
@@ -2033,6 +2070,20 @@ export class VoiceSession {
 	private finalizeTurn(turn: Turn | null, opts: { interrupted: boolean }): void {
 		if (!turn) return;
 		if (!turn.finalize()) return; // not the first caller — structural no-op
+		// The turn is no longer speaking — close the no-gate barge-in window.
+		this.outboundAudioGate.onTurnFinalized();
+		// On the native, no-`liveGate`, non-cancellable shape (Gemini), an
+		// interrupt can't stop the model: it keeps streaming the rest of the
+		// already-generated response. Drop that trailing audio until the next
+		// server turn. Covers every framework interrupt path (client-VAD,
+		// direct-input pre-empt, …) — see `handleAudioOutput`.
+		if (
+			opts.interrupted &&
+			this.liveGate() === null &&
+			this.transport.capabilities.frameworkOwnsInterrupt !== true
+		) {
+			this.outboundAudioGate.muteCurrentServerTurn();
+		}
 
 		// Throw-safety: a throw in one effect must not strand the rest, or the
 		// turn would be terminal with a half-published boundary.
@@ -2195,6 +2246,26 @@ export class VoiceSession {
 	 */
 	private handleJsonFromClient(message: Record<string, unknown>): void {
 		this.clientMessageRouter.dispatch(message);
+	}
+
+	/**
+	 * True when assistant audio is actively playing to the client and a user
+	 * barge-in should be honoured.
+	 *
+	 * - TTS / native-gated transports (OpenAI, Qwen): the live playback gate is
+	 *   `pending` — unchanged behaviour.
+	 * - Gemini native path: `liveGate()` is `null` (Gemini gates `turnComplete`
+	 *   on playback, so it is excluded from native-playback gating). Fall back to
+	 *   the `OutboundAudioGate` — interruptible once the turn has been emitting
+	 *   audio past the echo-skip window. Gemini buffers the whole greeting
+	 *   client-side and its provider VAD does not reliably interrupt the buffered
+	 *   tail, so this gives the user a deterministic, client-driven barge-in that
+	 *   does not depend on the provider. See design-outbound-audio-gate.md.
+	 */
+	private isAssistantAudioActive(): boolean {
+		const gate = this.liveGate();
+		if (gate) return gate.pending === true; // TTS / native-gated — unchanged
+		return this.outboundAudioGate.isInterruptible(); // no gate → Gemini fallback
 	}
 
 	/**
