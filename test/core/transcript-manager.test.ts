@@ -377,4 +377,69 @@ describe('TranscriptManager', () => {
 			expect(sink.userMessages).toEqual(['second correction']);
 		});
 	});
+
+	describe('per-utterance boundary (turn-aware input)', () => {
+		// Two user utterances spoken without an intervening turn flush (e.g. the
+		// first barge-in was rejected as too quiet, so no turn finalized) used to
+		// concatenate into one user message: "Hi, how are you doing?Hi, how are
+		// you doing?". A change of STT turnId now finalizes the prior utterance.
+		it('a new STT turnId finalizes the prior utterance instead of concatenating', () => {
+			const sink = createSink();
+			const mgr = new TranscriptManager(sink);
+
+			mgr.handleInput('Hi, how are you doing?', 0);
+			mgr.handleInput('Hi, how are you doing?', 1);
+			mgr.flush();
+
+			expect(sink.userMessages).toEqual(['Hi, how are you doing?', 'Hi, how are you doing?']);
+			const finals = sink.messages.filter((m) => m.partial === false && m.role === 'user');
+			expect(finals).toHaveLength(2);
+		});
+
+		it('distinct utterances with different turnIds stay separate (no merged garbage)', () => {
+			const sink = createSink();
+			const mgr = new TranscriptManager(sink);
+
+			mgr.handleInput('No, no, can you tell me a story?', 2);
+			mgr.handleInput('Hello hello.', 3);
+			mgr.flush();
+
+			expect(sink.userMessages).toEqual(['No, no, can you tell me a story?', 'Hello hello.']);
+		});
+
+		it('a batch transcript restating an existing correction does not double the text', () => {
+			const sink = createSink();
+			const mgr = new TranscriptManager(sink);
+
+			// Provider correction lands first (replace), then the batch STT result
+			// for the same utterance arrives (turn-bearing) — must not append.
+			mgr.correctInput('Hi, how are you doing?');
+			mgr.handleInput('Hi, how are you doing?', 0);
+			mgr.flush();
+
+			expect(sink.userMessages).toEqual(['Hi, how are you doing?']);
+		});
+
+		it('id-less providers keep plain delta-append behavior', () => {
+			const sink = createSink();
+			const mgr = new TranscriptManager(sink);
+
+			mgr.handleInput('hello ');
+			mgr.handleInput('world');
+			mgr.flush();
+
+			expect(sink.userMessages).toEqual(['hello world']);
+		});
+
+		it('same-utterance streaming refinements (same turnId) still accumulate', () => {
+			const sink = createSink();
+			const mgr = new TranscriptManager(sink);
+
+			mgr.handleInput('how ', 0);
+			mgr.handleInput('are you', 0);
+			mgr.flush();
+
+			expect(sink.userMessages).toEqual(['how are you']);
+		});
+	});
 });

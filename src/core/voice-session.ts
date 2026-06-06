@@ -884,7 +884,7 @@ export class VoiceSession {
 				if (turnId === undefined || turnId >= this.turns.numericId) {
 					this._turnWasInterrupted = false;
 				}
-				this.transcriptManager.handleInput(text);
+				this.transcriptManager.handleInput(text, turnId);
 			};
 			this.sttProvider.onPartialTranscript = (text) => {
 				this.transcriptManager.handleInputPartial(text);

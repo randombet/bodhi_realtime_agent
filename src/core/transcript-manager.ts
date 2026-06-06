@@ -27,6 +27,11 @@ export class TranscriptManager {
 	private inputFinalizedThisTurn = false;
 	/** Display-only accumulation of realtime input deltas on interrupted turns. */
 	private interruptedInputDisplay = '';
+	/** STT turn id of the utterance currently in `inputBuffer` (set by the
+	 *  turn-aware `handleInput`). A change marks a new user utterance so the
+	 *  prior one can be finalized instead of concatenated. `undefined` for
+	 *  id-less providers, which keep the plain-append behavior. */
+	private inputTurnId: number | undefined;
 
 	/**
 	 * Optional callback fired when user input is finalized (committed as a non-partial message).
@@ -90,18 +95,59 @@ export class TranscriptManager {
 		});
 	}
 
-	/** Accumulate incoming user speech transcription and emit a partial transcript. */
-	handleInput(text: string): void {
+	/**
+	 * Accumulate incoming user speech transcription and emit a partial transcript.
+	 *
+	 * `turnId` (when the STT provider supplies one) identifies the utterance. A
+	 * change of `turnId` means a *new* user utterance arrived: if the previous
+	 * one is still buffered (e.g. its barge-in was rejected so no turn finalized
+	 * and flushed it), finalize it as its own message instead of concatenating
+	 * the two into one user turn. A batch transcript that merely re-states what a
+	 * provider correction already wrote (same text) is also deduplicated, so the
+	 * text does not double ("X" + "X" → "XX"). Id-less providers keep the plain
+	 * delta-append behavior.
+	 */
+	handleInput(text: string, turnId?: number): void {
 		if (this.inputFinalizedThisTurn) return;
-		if (text.trim()) {
-			this.inputBuffer += text;
-			this.sink.sendToClient({
-				type: 'transcript',
-				role: 'user',
-				text: this.inputBuffer.trim(),
-				partial: true,
-			});
+		if (!text.trim()) return;
+
+		if (
+			turnId !== undefined &&
+			this.inputTurnId !== undefined &&
+			turnId !== this.inputTurnId &&
+			this.inputBuffer.trim()
+		) {
+			this.commitInputUtterance();
 		}
+		if (turnId !== undefined) this.inputTurnId = turnId;
+
+		// Skip a turn-bearing transcript that exactly restates the current buffer
+		// (a provider correction already wrote it); otherwise accumulate.
+		if (!(turnId !== undefined && this.inputBuffer.trim() === text.trim())) {
+			this.inputBuffer += text;
+		}
+		this.sink.sendToClient({
+			type: 'transcript',
+			role: 'user',
+			text: this.inputBuffer.trim(),
+			partial: true,
+		});
+	}
+
+	/**
+	 * Finalize the current input buffer as a user message at a per-utterance
+	 * boundary, WITHOUT locking the turn (unlike `flushInput`, which suppresses
+	 * further input for the rest of the turn). Lets the next utterance accumulate
+	 * into a clean buffer. No-op on an empty buffer.
+	 */
+	private commitInputUtterance(): void {
+		const text = this.inputBuffer.trim();
+		if (!text) return;
+		this.sink.addUserMessage(text);
+		this.sink.sendToClient({ type: 'transcript', role: 'user', text, partial: false });
+		this.inputBuffer = '';
+		this.interruptedInputDisplay = '';
+		this.onInputFinalized?.(text);
 	}
 
 	/** Accumulate incoming model speech transcription and emit a partial transcript. */
@@ -149,6 +195,7 @@ export class TranscriptManager {
 			this.onInputFinalized?.(text);
 		}
 		this.interruptedInputDisplay = '';
+		this.inputTurnId = undefined;
 	}
 
 	/** Flush all transcript buffers — finalize user and assistant messages. */
@@ -179,6 +226,7 @@ export class TranscriptManager {
 		this.outputPrefix = '';
 		this.inputFinalizedThisTurn = false;
 		this.interruptedInputDisplay = '';
+		this.inputTurnId = undefined;
 	}
 
 	/**
