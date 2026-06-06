@@ -871,10 +871,19 @@ export class VoiceSession {
 			this.sttProvider.onTranscript = (text, turnId) => {
 				if (turnId !== undefined && turnId < this.turns.staleInputCutoff) return; // Drop stale results (2+ turns old)
 				if (turnId !== undefined && this.turns.isInputFinalized(turnId)) return;
-				// New user input ends the post-interrupt correction-skip window:
-				// the interrupted turn's trailing turnComplete is now a structural
-				// no-op, so it no longer clears _turnWasInterrupted.
-				this._turnWasInterrupted = false;
+				// New user input ends the post-interrupt correction-skip window, but
+				// only for a genuinely *new* turn. The interrupted turn's own barge-in
+				// utterance lands here late — its audio was committed at finalizeTurn
+				// (commit(numericId)) before advance(), so it carries `numericId - 1`.
+				// Clearing the gate for that late result would let the provider's
+				// post-hoc (clipped) transcription overwrite this good transcript. So
+				// keep the gate armed for the just-finalized turn's trailing STT and
+				// clear it only once current-turn input (`turnId >= numericId`, or an
+				// id-less provider) arrives. The interrupted turn's own finalizeTurn
+				// already armed it; the next normal finalizeTurn clears it.
+				if (turnId === undefined || turnId >= this.turns.numericId) {
+					this._turnWasInterrupted = false;
+				}
 				this.transcriptManager.handleInput(text);
 			};
 			this.sttProvider.onPartialTranscript = (text) => {
