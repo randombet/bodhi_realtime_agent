@@ -201,6 +201,12 @@ export class GeminiLiveTransport implements LLMTransport {
 	private _serverTurnState: 'idle' | 'generating' | 'ended_early' | 'closed' = 'idle';
 	/** Monotonic id of the current Gemini server turn (for finalization dedup). */
 	private _serverTurnId = 0;
+	/** Server turn whose remaining outbound audio is suppressed after a framework
+	 *  `cancelResponse()` (Gemini can't cancel generation, so it keeps streaming
+	 *  the already-generated response). `null` = not suppressing; self-clears when
+	 *  the active server turn advances. See bufferedUncancellableAudio /
+	 *  design-noncancellable-transport-barge-in.md. */
+	private _suppressedServerTurnId: number | null = null;
 	/** Whether the model emitted response text/transcription in the current turn. */
 	private _textEmittedThisTurn = false;
 	/** Whether a tool call appeared in the current turn (disables early completion). */
@@ -245,6 +251,11 @@ export class GeminiLiveTransport implements LLMTransport {
 		// `turnComplete` is delayed by the SDK until model audio playback should
 		// be done — so the native playback-end gate must NOT engage for Gemini.
 		playbackGatedTurnComplete: true,
+		// Gemini streams the whole response faster than realtime and has no
+		// cancel-generation command; `cancelResponse()` suppresses the current
+		// turn's remaining outbound audio instead. The framework drives barge-in
+		// via client VAD. See design-noncancellable-transport-barge-in.md.
+		bufferedUncancellableAudio: true,
 	};
 
 	// --- Quiesce / unquiesce (cross-provider transcription-mode contract) ---
@@ -616,15 +627,25 @@ export class GeminiLiveTransport implements LLMTransport {
 	/** No-op for V1 — server VAD only. */
 	clearAudio(): void {}
 
-	/** Resolved-promise no-op. Gemini has no distinct cancel-generation wire
-	 *  command — its interrupts are provider-driven via
-	 *  `serverContent.interrupted`. The optional method exists on the
-	 *  interface so framework barge-in sites can call it uniformly.
-	 *  `greetingInterruptGraceMs` is `0` for Gemini, so this path is not
-	 *  exercised in production today.
-	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §2. */
+	/** Gemini has no cancel-generation wire command — its interrupts are
+	 *  provider-driven via `serverContent.interrupted` and it keeps streaming the
+	 *  rest of the already-generated response. So `cancelResponse()` satisfies the
+	 *  widened contract ("stop the current response reaching the user") by
+	 *  suppressing the current server turn's *remaining* outbound audio until the
+	 *  next server turn (the response to the barge-in) begins. Drives the
+	 *  `bufferedUncancellableAudio` capability.
+	 *  See dev_docs/framework/design-noncancellable-transport-barge-in.md. */
 	async cancelResponse(): Promise<void> {
-		// Intentionally empty.
+		this._suppressedServerTurnId = this.getActiveServerTurnId() ?? null;
+	}
+
+	/** Whether the current server turn's remaining outbound audio is suppressed
+	 *  (post `cancelResponse`). Self-clears once the active server turn advances. */
+	private isOutboundAudioSuppressed(): boolean {
+		if (this._suppressedServerTurnId === null) return false;
+		if ((this.getActiveServerTurnId() ?? null) === this._suppressedServerTurnId) return true;
+		this._suppressedServerTurnId = null;
+		return false;
 	}
 
 	// Note: `clearInputAudio?` is intentionally not implemented for Gemini —
@@ -808,6 +829,8 @@ export class GeminiLiveTransport implements LLMTransport {
 		this._textEmittedThisTurn = false;
 		this._toolCallSeenThisTurn = false;
 		this._serverTurnWindingDown = false;
+		// New server turn — stop suppressing post-cancelResponse trailing audio.
+		this._suppressedServerTurnId = null;
 	}
 
 	/** Close the current server turn and flush any buffered outbound sends. */
@@ -826,6 +849,7 @@ export class GeminiLiveTransport implements LLMTransport {
 	private resetServerTurnState(): void {
 		this._serverTurnState = 'idle';
 		this._serverTurnWindingDown = false;
+		this._suppressedServerTurnId = null;
 		this._textEmittedThisTurn = false;
 		this._toolCallSeenThisTurn = false;
 		this._windingDownSendBuffer = [];
@@ -916,7 +940,7 @@ export class GeminiLiveTransport implements LLMTransport {
 						// In text-mode pipelines (external TTS), Gemini audio is intentionally ignored.
 						// In _quiesced mode (cross-provider transcription mode), Gemini audio is
 						// suppressed at this seam — VoiceSession owns the routing decision.
-						if (!this._textMode && !this._quiesced) {
+						if (!this._textMode && !this._quiesced && !this.isOutboundAudioSuppressed()) {
 							this.callbacks.onAudioOutput?.(part.inlineData.data);
 							if (this.onAudioOutput) this.onAudioOutput(part.inlineData.data);
 						}

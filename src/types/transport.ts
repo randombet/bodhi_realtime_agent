@@ -68,6 +68,18 @@ export interface TransportCapabilities {
 	 *  honoured (otherwise the provider auto-cancel defeats the grace).
 	 *  Optional — `undefined` means `false`. */
 	frameworkOwnsInterrupt?: boolean;
+	/** True when the transport streams response audio the framework cannot stop
+	 *  on the wire: generation runs faster than realtime and is buffered
+	 *  client-side, and `cancelResponse()` cannot cancel it — instead it
+	 *  suppresses the current response's *remaining* outbound audio. When `true`,
+	 *  the framework (a) drives barge-in itself via client VAD (the provider's own
+	 *  VAD is the only other interrupt and is unreliable mid-stream) and (b)
+	 *  relies on `cancelResponse()` to stop the trailing audio. A transport that
+	 *  sets this MUST implement `cancelResponse` to suppress its current-turn
+	 *  audio. Gemini Live → `true`; OpenAI/Qwen → `false` (cancelResponse cancels
+	 *  generation). Optional — `undefined` means `false`.
+	 *  See dev_docs/framework/design-noncancellable-transport-barge-in.md. */
+	bufferedUncancellableAudio?: boolean;
 }
 
 /** Explicit defaults for every flag. Downstream `LLMTransport` implementations
@@ -89,6 +101,7 @@ export const DEFAULT_TRANSPORT_CAPABILITIES: Required<TransportCapabilities> = {
 	playbackGatedTurnComplete: false,
 	greetingInterruptGraceMs: 0,
 	frameworkOwnsInterrupt: false,
+	bufferedUncancellableAudio: false,
 };
 
 /** Audio format descriptor passed to an STT provider at configuration time. */
