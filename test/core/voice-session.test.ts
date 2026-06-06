@@ -2198,6 +2198,65 @@ describe('VoiceSession', () => {
 			await new Promise<void>((r) => ws.on('close', r));
 		});
 
+		// Regression (PR #39): on a barge-in, the user's utterance is transcribed
+		// correctly by streaming STT but a later provider "correction" overwrote it.
+		// The interrupted turn's own streaming STT lands AFTER the interrupt (tagged
+		// numericId-1); it must NOT clear the interrupted-gate, or the provider's
+		// post-hoc clipped transcript replaces the good one with corrected:true.
+		it('barge-in: late STT for the interrupted turn keeps the correction gate armed', async () => {
+			const stt = createMockSTTProvider();
+			session = new VoiceSession({
+				sessionId: 'sess_stt',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9943,
+				model: mockModel,
+				sttProvider: stt,
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const WebSocket = (await import('ws')).default;
+			const ws = new WebSocket('ws://localhost:9943');
+			await new Promise<void>((r) => ws.on('open', r));
+
+			const received: string[] = [];
+			ws.on('message', (data, isBinary) => {
+				if (!isBinary) received.push(data.toString());
+			});
+
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+			// Greeting turn (turn 0) emits output, then the user barges in: the turn
+			// is finalized (interrupted) and the counter advances to numericId=1.
+			fire({ serverContent: { outputTranscription: { text: 'Hi there! How can—' } } });
+			fire({ serverContent: { interrupted: true } });
+			await new Promise((r) => setTimeout(r, 50));
+
+			// The barge-in utterance's streaming STT lands now, tagged with the
+			// just-finalized turn's id (0 = numericId-1). It shows the good transcript
+			// but must leave the interrupted-gate armed.
+			stt.onTranscript?.("How's it going?", 0);
+			await new Promise((r) => setTimeout(r, 50));
+
+			// Provider's post-hoc transcription of the same clipped barge-in audio.
+			// With the gate still armed it is display-only, NOT a corrected overwrite.
+			fire({ serverContent: { inputTranscription: { text: 'are doing' } } });
+			await new Promise((r) => setTimeout(r, 50));
+
+			const corrections = received
+				.map((r) => JSON.parse(r))
+				.filter((m: Record<string, unknown>) => m.corrected === true);
+			expect(corrections).toHaveLength(0);
+
+			ws.close();
+			await new Promise<void>((r) => ws.on('close', r));
+		});
+
 		it('resets interrupted flag on next turnComplete so correction resumes', async () => {
 			const stt = createMockSTTProvider();
 			session = new VoiceSession({

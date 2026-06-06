@@ -321,6 +321,31 @@ describe('GeminiLiveTransport', () => {
 			expect(propertyAudioOutput).not.toHaveBeenCalled();
 		});
 
+		it('cancelResponse suppresses the current turn audio and resumes on the next', async () => {
+			const onAudioOutput = vi.fn();
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, { onAudioOutput });
+			await transport.connect();
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			const audio = {
+				serverContent: { modelTurn: { parts: [{ inlineData: { data: 'a' } }] } },
+			};
+
+			cbs.onmessage(audio); // server turn 1 — forwarded
+			expect(onAudioOutput).toHaveBeenCalledTimes(1);
+
+			// Gemini can't cancel generation; cancelResponse suppresses the rest of
+			// the current server turn's outbound audio.
+			await transport.cancelResponse();
+			cbs.onmessage(audio); // trailing turn-1 audio — dropped
+			cbs.onmessage(audio);
+			expect(onAudioOutput).toHaveBeenCalledTimes(1);
+
+			// A new server turn (the response to the barge-in) resumes forwarding.
+			cbs.onmessage({ serverContent: { turnComplete: true } });
+			cbs.onmessage(audio); // server turn 2 — forwarded
+			expect(onAudioOutput).toHaveBeenCalledTimes(2);
+		});
+
 		it('dispatches toolCall', async () => {
 			const onToolCall = vi.fn();
 			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, { onToolCall });
@@ -487,6 +512,7 @@ describe('GeminiLiveTransport', () => {
 				textResponseModality: true,
 				quiescible: true,
 				playbackGatedTurnComplete: true,
+				bufferedUncancellableAudio: true,
 			});
 		});
 

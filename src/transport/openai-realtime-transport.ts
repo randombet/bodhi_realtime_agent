@@ -314,6 +314,8 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		// `response.done` fires at generation end, not playback end — the native
 		// playback-end gate engages for OpenAI native audio.
 		playbackGatedTurnComplete: false,
+		// cancelResponse cancels generation on the wire — no buffered trailing audio.
+		bufferedUncancellableAudio: false,
 	};
 
 	// --- LLMTransport callback properties ---

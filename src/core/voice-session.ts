@@ -33,30 +33,25 @@ import type { ConversationHistoryStore } from '../types/history.js';
 import type { FrameworkHooks } from '../types/hooks.js';
 import type { ProcessedKnowledgeBase } from '../types/knowledge-base.js';
 import type { MemoryStore } from '../types/memory.js';
-import { tryParseRtcClientSignaling } from '../types/rtc-signaling.js';
 import type { IClientChannel } from '../types/session-client.js';
 import type { SessionClientSender } from '../types/session-client.js';
 import type { ToolDefinition } from '../types/tool.js';
-import type {
-	ContentTurn,
-	LLMTransport,
-	LLMTransportError,
-	STTProvider,
-	TransportToolResult,
-} from '../types/transport.js';
+import type { LLMTransport, LLMTransportError, STTProvider } from '../types/transport.js';
 import type { TTSProvider } from '../types/tts.js';
 import type { ArtifactRef, ArtifactStore, SaveArtifactParams } from '../types/workspace.js';
-import { AudioRouter, type InternalTranscriptionMode } from './audio-router.js';
+import { AudioRouter } from './audio-router.js';
 import { BackgroundNotificationQueue } from './background-notification-queue.js';
+import { ClientMessageRouter } from './client-message-router.js';
 import { ClientVadDetector } from './client-vad-detector.js';
 import { DEFAULT_RESPONSE_WATCHDOG_MS } from './constants.js';
 import { ConversationContext } from './conversation-context.js';
 import { ConversationHistoryWriter } from './conversation-history-writer.js';
+import { DictationController } from './dictation-controller.js';
 import { DirectiveManager } from './directive-manager.js';
 import { EventBus } from './event-bus.js';
+import { GreetingController } from './greeting-controller.js';
 import { HooksManager } from './hooks.js';
 import { InteractionModeManager } from './interaction-mode.js';
-import { InterruptGraceWindow } from './interrupt-grace-window.js';
 import { MemoryCacheManager } from './memory-cache-manager.js';
 import { MultiplexConversationHistoryStore } from './multiplex-conversation-history-store.js';
 import {
@@ -69,6 +64,7 @@ import { NativeAudioPlaybackGate, type PlaybackGate } from './playback-gate.js';
 import { SessionManager } from './session-manager.js';
 import { ToolCallRouter } from './tool-call-router.js';
 import { TranscriptManager } from './transcript-manager.js';
+import { TransportReconnector } from './transport-reconnector.js';
 import { TtsPipeline } from './tts-pipeline.js';
 import { TurnManager } from './turn-manager.js';
 import type { Turn } from './turn.js';
@@ -167,6 +163,14 @@ const DEFAULT_CLIENT_AUDIO_VAD: ResolvedClientAudioVadConfig = {
  *  treats out-of-range values as `0`. */
 const GRACE_MAX_MS = 5000;
 
+/** Echo-skip window (ms) from the first assistant audio chunk of a turn before
+ *  the framework client-VAD barge-in fallback may fire on the no-playback-gate
+ *  (Gemini native) path. Bridges the gap that the greeting-interrupt grace
+ *  covers for framework-owned-interrupt transports (grace is 0 for Gemini):
+ *  keeps the agent's own opening audio from self-interrupting via mic echo,
+ *  while still letting the user cut a long buffered greeting client-side. */
+const NATIVE_BARGEIN_ECHO_SKIP_MS = 400;
+
 /** Clamp a caller-supplied `greetingInterruptGraceMs` override to a sane
  *  numeric range. Returns `undefined` when omitted (no caller override —
  *  inherit transport default at pass 2); returns `0` for `NaN`, negative,
@@ -203,6 +207,14 @@ export interface VoiceSessionConfig {
 	 * via feedAudioFromClient / feedJsonFromClient and notifyClientConnected / notifyClientDisconnected.
 	 */
 	clientSender?: SessionClientSender;
+	/**
+	 * Supported seam for handling custom inbound JSON message types. Fired ONLY
+	 * for an unrecognized `type` — it does **not** override built-in types
+	 * (`behavior.set`, `ui.response`, `file_upload`, `text_input`,
+	 * `playback.ended`, RTC signaling), and a *malformed* built-in type is dropped
+	 * (not forwarded here). Without it wired, inbound JSON behavior is unchanged.
+	 */
+	onClientJson?: (message: Record<string, unknown>) => void;
 	/**
 	 * Client media plane profile (`websocket` PCM+JSON, or `direct_rtc` split plane: JSON on WS, RTC audio later).
 	 * Defaults to WebSocket when omitted. See {@link createClientChannel}.
@@ -428,17 +440,12 @@ export class VoiceSession {
 	 *  (`!capabilities.playbackGatedTurnComplete`). Resolved once in the
 	 *  constructor. See design-playback-end-gating-openai-native.md. */
 	private nativePlaybackGatingActive = false;
-	/** Pass-1 of greeting-grace resolution (§5): caller override captured in
-	 *  the constructor. `undefined` means "no caller override — inherit from
-	 *  transport capability at finalize time". Resolved+clamped here so an
-	 *  invalid value doesn't survive to pass 2. */
-	private _overrideGraceMs: number | undefined;
-	/** Pass-2-final greeting interrupt grace window (ms). `0` disables the
-	 *  window. Finalized in `handleSetupComplete()` against the transport's
-	 *  post-connect capabilities; `0` until then. Phase A: only the
-	 *  resolution + validation log; Phase C wires the runtime effects.
-	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §5. */
-	private greetingInterruptGraceMs = 0;
+	/** Greeting send + greeting interrupt-grace state (grace window,
+	 *  greeting-in-flight gate, first-audio arming, per-client reset).
+	 *  VoiceSession delegates `sendGreeting`, `finalizeGreetingInterruptGrace`,
+	 *  `maybeArmGraceOnFirstAudio`, `requestInterrupt`, `shouldDropOutbound`,
+	 *  and `resetForClientConnected` to it. See `greeting-controller.ts`. */
+	private greeting!: GreetingController;
 	/** Per-session single-flight FIFO chaining direct-user-input bodies
 	 *  (`handleTextInput`, `injectTranscript`, `injectDictationBuffer`). Each
 	 *  body awaits `cancelResponse({ waitForDone: true })` then finalizes any
@@ -448,29 +455,6 @@ export class VoiceSession {
 	 *  `conversation_already_has_active_response`.
 	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §7.5. */
 	private _directInputChain: Promise<void> = Promise.resolve();
-	/** Per-session interrupt grace window. Constructed in
-	 *  `handleSetupComplete()` once pass-2 validation finalizes
-	 *  `this.greetingInterruptGraceMs`. Until then, holds a windowMs=0
-	 *  placeholder whose `isActive()` always returns `false`, so the gate
-	 *  is structurally inert before connect resolution. Re-armed by
-	 *  `maybeArmGraceOnFirstAudio()` on the first assistant audio chunk;
-	 *  reset on `handleClientConnected()`.
-	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §4, §6. */
-	private _grace: InterruptGraceWindow = new InterruptGraceWindow(0);
-	/** One-shot gate for the `[Latency] Interrupt grace window armed (Nms)`
-	 *  log line — only fires on the arming audio chunk, not on subsequent
-	 *  idempotent `onAudioStart()` calls. Cleared in `handleClientConnected`
-	 *  alongside `_grace.reset()`. */
-	private _graceArmingLogged = false;
-	/** True between session-ready (`handleSetupComplete`) and the first
-	 *  assistant-audio chunk (where `_grace` then takes over). Extends the
-	 *  mic-drop window backwards in time so user speech sent in the gap
-	 *  between session-ready and first-audio doesn't (a) accumulate in the
-	 *  provider's input buffer and (b) get auto-committed by server VAD
-	 *  before the greeting response completes. Only set when the resolved
-	 *  `greetingInterruptGraceMs > 0`.
-	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §6, §8. */
-	private _greetingInFlight = false;
 	/** Native-audio playback-end gate (the OpenAI native path). Present for every
 	 *  native (non-TTS) session — its barge-in runs regardless of gating — but
 	 *  only *arms* when `nativePlaybackGatingActive`. Owns the former `_native*`
@@ -481,32 +465,25 @@ export class VoiceSession {
 	 *  (`onModelTurnStart`); read by `handleTurnComplete` so the native gate
 	 *  engages only on a turn's terminal spoken response (audio, no tool call). */
 	private _nativeResponseDispatchedToolCall = false;
-	/** Reference to the transport's original sendToolResult, captured at
-	 *  construction. flushPendingToolResults calls through this to bypass
-	 *  the guard wrapper installed on the transport. */
-	private _rawSendToolResult: (result: TransportToolResult) => void = () => undefined;
-	/** Same as `_rawSendToolResult` but for `sendContent`. Used to drain
-	 *  `pendingContentTurnsAwaitingAgentMode` on entry to agent mode without
-	 *  re-entering the guard wrapper. */
-	private _rawSendContent: (turns: ContentTurn[], turnComplete?: boolean) => void = () => undefined;
-	/** Queue of `transport.sendContent(turns, true)` calls that arrived while
-	 *  not in agent mode. Each `turnComplete:true` would trigger response.create
-	 *  on OpenAI, which violates the §3.5 dictation-only invariant. Drained
-	 *  on entry to 'agent'. */
-	private pendingContentTurnsAwaitingAgentMode: Array<{
-		turns: ContentTurn[];
-		turnComplete?: boolean;
-	}> = [];
-	// --- Phase 3: transcription-mode state ---
-	private whisperProvider?: STTProvider;
-	private internalMode: InternalTranscriptionMode = 'agent';
-	private dictationBuffer: string[] = [];
+	/** Time (ms) of the current turn's first assistant audio chunk, or `null`
+	 *  between/before turns. Barge-in *eligibility* policy for the no-`liveGate`,
+	 *  `bufferedUncancellableAudio` shape (Gemini): a client-VAD barge-in is
+	 *  honoured once audio has played past `NATIVE_BARGEIN_ECHO_SKIP_MS` (echo
+	 *  rejection). Reset at response start + turn finalization. The trailing-audio
+	 *  suppression itself lives in the transport's `cancelResponse`. See
+	 *  design-noncancellable-transport-barge-in.md. */
+	private _assistantAudioStartedAtMs: number | null = null;
+	// --- Phase 3: transcription mode + dictation buffer + cross-provider quiesce ---
+	/** Transcription/dictation subsystem: owns `internalMode`, the dictation
+	 *  buffer, the Whisper provider, the §3.5 send-guard wrappers + pending
+	 *  queues, and the mode-flip state machine. VoiceSession delegates the
+	 *  enter/exit transitions (via the serialized `setTranscriptionMode`), the
+	 *  buffer accessors, `prewarmTranscriptionMode`, and `prepareForStart`.
+	 *  Every `internalMode` reader reads through it. See `dictation-controller.ts`. */
+	private dictation!: DictationController;
+	/** Serialises `setTranscriptionMode()` with `transferSession()` — concurrent
+	 *  callers queue rather than race. Stays in VoiceSession. */
 	private mutationQueue = new SessionMutationQueue();
-	/** Tool results that arrived while not in 'agent' mode. Flushed in order on
-	 *  re-entry. Prevents response.create from leaking during transcription mode. */
-	private pendingToolResultsAwaitingAgentMode: Array<
-		Parameters<LLMTransport['sendToolResult']>[0]
-	> = [];
 	private _commitFiredForTurn = false;
 	/** True when the current turn was interrupted — skips Gemini transcript correction. */
 	private _turnWasInterrupted = false;
@@ -520,8 +497,14 @@ export class VoiceSession {
 	 *  and the completePlayback / finishOrDeferForVad routing. Constructed after
 	 *  the gates. See `playback-completion-arbiter.ts`. */
 	private completionArbiter!: PlaybackCompletionArbiter;
-	/** Pending response-watchdog timer (model-silence-after-user-turn). */
-	private _responseWatchdogTimer?: ReturnType<typeof setTimeout>;
+	/** Inbound client→server JSON dispatch (RTC signaling, behavior.set,
+	 *  ui.response, file_upload, text_input, playback.ended). Constructed after
+	 *  the client channel + arbiter. See `client-message-router.ts`. */
+	private clientMessageRouter!: ClientMessageRouter;
+	/** Transport reconnect + response-watchdog liveness timer. Owns
+	 *  `triggerReconnect`, GoAway/transport-close handling, resumption updates,
+	 *  the reconnect budget, and the watchdog. See `transport-reconnector.ts`. */
+	private reconnector!: TransportReconnector;
 	/** Resolved watchdog timeout (ms); `<= 0` disables. Set in the constructor. */
 	private readonly responseWatchdogMs: number;
 	// --- Server-turn finalization dedup (external-TTS turn completion).
@@ -548,10 +531,6 @@ export class VoiceSession {
 	private interactionMode = new InteractionModeManager();
 	/** True when `config.orchestrationMode === 'actor'`. */
 	private _isActorMode = false;
-	/** Tracks consecutive reconnect attempts to prevent infinite reconnect storms. */
-	private reconnectAttempts = 0;
-	private static readonly MAX_RECONNECT_ATTEMPTS = 3;
-	private static readonly RECONNECT_BACKOFF_MS = [1000, 2000, 4000];
 	/** Resolves when memory/directives are loaded; used so greeting is sent after load without blocking connect. */
 	private _memoryReadyPromise: Promise<void> = Promise.resolve();
 	private externalAudioHandler: ((data: Buffer) => void) | null = null;
@@ -790,7 +769,7 @@ export class VoiceSession {
 				onSegmentResolved: () => this.completionArbiter.resolveDeferredPlayback(),
 				// User finished a turn → arm the response watchdog (the model now
 				// owes a reply; silence past the timeout forces a reconnect).
-				onUserTurnCompleted: () => this.armResponseWatchdog(),
+				onUserTurnCompleted: () => this.reconnector.armResponseWatchdog(),
 			},
 			(msg) => this.log(msg),
 		);
@@ -804,11 +783,11 @@ export class VoiceSession {
 			vad: this.clientVadDetector,
 			clientAudioInputRate: this.clientAudioInputRate,
 			getSttProvider: () => this.sttProvider,
-			getWhisperProvider: () => this.whisperProvider,
+			getWhisperProvider: () => this.dictation.whisper,
 			isSessionActive: () => this.sessionManager.isActive,
 			isRtcAudioReady: () => this.directRtcChannel?.isRtcAudioReady ?? false,
-			getMode: () => this.internalMode,
-			shouldDropOutbound: () => this._greetingInFlight || this._grace.isActive(),
+			getMode: () => this.dictation.mode,
+			shouldDropOutbound: () => this.greeting.shouldDropOutbound(),
 			routeExternalAudio: (data) => {
 				if (this.agentRouter.activeAgent.audioMode !== 'external') return false;
 				if (this.externalAudioHandler) {
@@ -827,47 +806,27 @@ export class VoiceSession {
 			config.ttsPlaybackFallbackMarginMs,
 		);
 
-		// Intercept transport.sendToolResult so BOTH legacy and actor-mode
-		// dispatch paths go through the transcription-mode guard. The actor
-		// adapter calls `transport.sendToolResult(...)` directly (no
-		// VoiceSession reference), so the cleanest single-point fix is to
-		// wrap the method on the transport instance itself.
-		const originalSendToolResult = this.transport.sendToolResult.bind(this.transport);
-		this.transport.sendToolResult = (result: TransportToolResult) => {
-			// `scheduling: 'silent'` doesn't trigger response.create (the OpenAI
-			// transport just inserts the conversation item), so it doesn't
-			// violate the §3.5 invariant. Pass it through immediately even
-			// during transcription mode. Useful for tools whose result is
-			// informational only — e.g. set_transcription_mode itself.
-			if (result.scheduling === 'silent') {
-				originalSendToolResult(result);
-				return;
-			}
-			if (this.internalMode !== 'agent') {
-				this.pendingToolResultsAwaitingAgentMode.push(result);
-				return;
-			}
-			originalSendToolResult(result);
-		};
-		// Keep a reference so flushPendingToolResults can bypass the guard and
-		// call the underlying method directly (draining INTO agent mode).
-		this._rawSendToolResult = originalSendToolResult;
-
-		// Same pattern for sendContent — gate `turnComplete: true` (which fires
-		// response.create on OpenAI) when not in agent mode. `turnComplete: false`
-		// is a passive append (no response trigger) and passes through.
-		// Catches: directive reinforcement, greetings, memory injection, text
-		// input, legacy notifications, and the actor-mode notification path
-		// (transport-actor.ts) — all route through `this.transport.sendContent`.
-		const originalSendContent = this.transport.sendContent.bind(this.transport);
-		this.transport.sendContent = (turns: ContentTurn[], turnComplete?: boolean) => {
-			if (turnComplete === true && this.internalMode !== 'agent') {
-				this.pendingContentTurnsAwaitingAgentMode.push({ turns, turnComplete });
-				return;
-			}
-			originalSendContent(turns, turnComplete);
-		};
-		this._rawSendContent = originalSendContent;
+		// Transcription/dictation subsystem. Owns `internalMode`, the dictation
+		// buffer, the Whisper provider, and the §3.5 send-guard wrappers — its
+		// constructor installs the `transport.sendToolResult` / `sendContent`
+		// interception (BOTH legacy and actor-mode dispatch paths go through the
+		// transcription-mode guard) BEFORE `wireTransportCallbacks` below, and
+		// seeds `internalMode` from `config.transcriptionMode`.
+		this.dictation = new DictationController(
+			{
+				transport: this.transport,
+				getAudioRouter: () => this.audioRouter,
+				eventBus: this.eventBus,
+				getSessionId: () => this.config.sessionId,
+				reportError: (context, error) => this.reportError(context, error),
+				log: (msg) => this.log(msg),
+			},
+			{
+				whisperProvider: config.whisperProvider,
+				sttProvider: config.sttProvider,
+				transcriptionMode: config.transcriptionMode,
+			},
+		);
 
 		// Wire LLMTransport property callbacks — works for both injected and default transports
 		this.wireTransportCallbacks();
@@ -912,11 +871,20 @@ export class VoiceSession {
 			this.sttProvider.onTranscript = (text, turnId) => {
 				if (turnId !== undefined && turnId < this.turns.staleInputCutoff) return; // Drop stale results (2+ turns old)
 				if (turnId !== undefined && this.turns.isInputFinalized(turnId)) return;
-				// New user input ends the post-interrupt correction-skip window:
-				// the interrupted turn's trailing turnComplete is now a structural
-				// no-op, so it no longer clears _turnWasInterrupted.
-				this._turnWasInterrupted = false;
-				this.transcriptManager.handleInput(text);
+				// New user input ends the post-interrupt correction-skip window, but
+				// only for a genuinely *new* turn. The interrupted turn's own barge-in
+				// utterance lands here late — its audio was committed at finalizeTurn
+				// (commit(numericId)) before advance(), so it carries `numericId - 1`.
+				// Clearing the gate for that late result would let the provider's
+				// post-hoc (clipped) transcription overwrite this good transcript. So
+				// keep the gate armed for the just-finalized turn's trailing STT and
+				// clear it only once current-turn input (`turnId >= numericId`, or an
+				// id-less provider) arrives. The interrupted turn's own finalizeTurn
+				// already armed it; the next normal finalizeTurn clears it.
+				if (turnId === undefined || turnId >= this.turns.numericId) {
+					this._turnWasInterrupted = false;
+				}
+				this.transcriptManager.handleInput(text, turnId);
 			};
 			this.sttProvider.onPartialTranscript = (text) => {
 				this.transcriptManager.handleInputPartial(text);
@@ -945,48 +913,15 @@ export class VoiceSession {
 			};
 		}
 
-		// Wire the transcription-mode Whisper provider (§Phase 3). Independent
-		// from sttProvider — must be a distinct instance.
-		if (config.whisperProvider) {
-			if (config.whisperProvider === config.sttProvider) {
-				throw new Error(
-					'VoiceSession: whisperProvider must be a distinct instance from sttProvider. ' +
-						'Sharing one instance entangles their lifecycles and causes double-start/premature-stop.',
-				);
-			}
-			this.whisperProvider = config.whisperProvider;
-			// Configure with the format VoiceSession actually FEEDS — Whisper
-			// gets PCM16 @ 24 kHz mono after routeAudioToWhisper resamples.
-			// Not the transport's wire format (which may be 16 kHz Gemini or
-			// 8 kHz pcmu OpenAI telephony).
-			this.whisperProvider.configure({
-				sampleRate: 24000,
-				bitDepth: 16,
-				channels: 1,
-				encoding: 'pcm',
-			});
-			// Whisper transcripts feed the dictation buffer ONLY — never the
-			// TranscriptManager / ConversationContext path (that would
-			// auto-inject and violate the "never auto-inject" guarantee).
-			this.whisperProvider.onTranscript = (text) => {
-				if (text) this.dictationBuffer.push(text);
-			};
-			// Partials are not surfaced here today; subscribers wanting live
-			// dictation preview can wire onPartialTranscript directly.
-		}
-		// Honour an initial transcriptionMode='transcription' by setting the
-		// internal mode now. The actual whisper.start() happens lazily on
-		// session start so it lines up with sttProvider's existing pattern.
-		if (config.transcriptionMode === 'transcription') {
-			this.internalMode = 'transcription';
-		}
+		// (Transcription-mode Whisper wiring + initial-mode seed live in the
+		// DictationController constructed above.)
 
 		// Wire onModelTurnStart for STT commit trigger.
 		// P4: also allocate the eager turn id here. Chain pattern preserves
 		// any pre-attached handler on injected transports.
 		const prevModelTurnStart = this.transport.onModelTurnStart;
 		this.transport.onModelTurnStart = () => {
-			this.clearResponseWatchdog();
+			this.reconnector.disarmResponseWatchdog();
 			try {
 				prevModelTurnStart?.();
 			} catch (e) {
@@ -994,6 +929,8 @@ export class VoiceSession {
 			}
 			// Native playback-end gate: a new model response begins clean.
 			this._nativeResponseDispatchedToolCall = false;
+			// A genuinely new model response: reset the barge-in eligibility window.
+			this._assistantAudioStartedAtMs = null;
 			this.turns.ensureCurrent();
 			this.logProviderUserTurnRecognition('model/tool processing started');
 			if (this.sttProvider && !this._commitFiredForTurn) {
@@ -1014,7 +951,7 @@ export class VoiceSession {
 				ensureCurrentTurn: () => this.turns.ensureCurrent(),
 				getCurrentTurn: () => this.turns.current,
 				handleTranscriptOutput: (text) => this.transcriptManager.handleOutput(text),
-				isAgentMode: () => this.internalMode === 'agent',
+				isAgentMode: () => this.dictation.isAgentMode(),
 				isPlaybackStateProtocolActive: () => this.playbackStateProtocolActive,
 				getCompletionArbiter: () => this.completionArbiter,
 				maybeArmGraceOnFirstAudio: () => this.maybeArmGraceOnFirstAudio(),
@@ -1085,11 +1022,22 @@ export class VoiceSession {
 			!this.ttsPipeline &&
 			!this.transport.capabilities.playbackGatedTurnComplete;
 
-		// Greeting-grace pass 1: clamp the caller override into the private
-		// field; finalize against transport capabilities + cancelResponse
-		// availability in handleSetupComplete() (pass 2), BEFORE sendGreeting()
-		// can fire. See design-greeting-interrupt-grace.md §5.
-		this._overrideGraceMs = clampGraceMs(config.greetingInterruptGraceMs);
+		// Greeting send + greeting interrupt-grace controller. Pass 1 clamps the
+		// caller override here; pass 2 (finalizeGreetingInterruptGrace) finalizes
+		// against transport capabilities + cancelResponse availability in
+		// handleSetupComplete(), BEFORE sendGreeting() can fire.
+		// See design-greeting-interrupt-grace.md §5.
+		this.greeting = new GreetingController(
+			{
+				transport: this.transport,
+				getActiveAgent: () => this.agentRouter.activeAgent,
+				getMemoryFacts: () => this.memoryCacheManager?.facts ?? [],
+				getSessionSuffix: () => this.directiveManager.getSessionSuffix(),
+				resetNotificationAudio: () => this.notificationSink.resetAudio(),
+				log: (msg) => this.log(msg),
+			},
+			{ overrideGraceMs: clampGraceMs(config.greetingInterruptGraceMs) },
+		);
 
 		// Native (non-TTS) sessions get the native playback gate. Its barge-in is
 		// installed for every native session (the !ttsProvider sibling of
@@ -1124,6 +1072,45 @@ export class VoiceSession {
 			finalizeTurn: (turn, opts) => this.finalizeTurn(turn, opts),
 			log: (msg) => this.log(msg),
 		});
+
+		// Inbound client→server JSON dispatch. `handleJsonFromClient` stays the
+		// thin VoiceSession entry/intercept point and delegates here.
+		this.clientMessageRouter = new ClientMessageRouter({
+			getDirectRtcChannel: () => this.directRtcChannel,
+			getBehaviorManager: () => this.behaviorManager,
+			eventBus: this.eventBus,
+			getSessionActive: () => this.sessionManager.isActive,
+			conversationContext: this.conversationContext,
+			sendFile: (base64, mimeType) => this.transport.sendFile(base64, mimeType),
+			getArbiter: () => this.completionArbiter,
+			getLiveGate: () => this.liveGate(),
+			getPlaybackStateProtocolActive: () => this.playbackStateProtocolActive,
+			sessionId: this.config.sessionId,
+			getArtifactRegistry: () => this.config.artifactRegistry,
+			handleTextInput: (text) => this.handleTextInput(text),
+			onClientJson: config.onClientJson,
+			reportError: (context, error) => this.reportError(context, error),
+			log: (msg) => this.log(msg),
+		});
+
+		// Transport reconnect + response-watchdog. GoAway reconnects immediately;
+		// transport-close/watchdog go through the budgeted+backed-off path. The
+		// `isAgentMode` thunk reads the DictationController (gates watchdog arming
+		// and the post-reconnect nudge to agent-mode turns only).
+		this.reconnector = new TransportReconnector(
+			{
+				sessionManager: this.sessionManager,
+				clientTransport: this.clientTransport,
+				transport: this.transport,
+				toReplayContent: () => this.conversationContext.toReplayContent(),
+				eventBus: this.eventBus,
+				getSessionId: () => this.config.sessionId,
+				isAgentMode: () => this.dictation.isAgentMode(),
+				reportError: (context, error) => this.reportError(context, error),
+				log: (msg) => this.log(msg),
+			},
+			this.responseWatchdogMs,
+		);
 	}
 
 	private buildAgentRouter(
@@ -1360,7 +1347,7 @@ export class VoiceSession {
 	private wireTransportCallbacks(): void {
 		this.transport.onAudioOutput = (data) => this.handleAudioOutput(data);
 		this.transport.onToolCall = (calls) => {
-			this.clearResponseWatchdog();
+			this.reconnector.disarmResponseWatchdog();
 			// Native playback-end gate: this response dispatched a tool call, so
 			// it is not the turn's terminal spoken response.
 			this._nativeResponseDispatchedToolCall = true;
@@ -1385,7 +1372,7 @@ export class VoiceSession {
 		this.transport.onTurnComplete = (serverTurnId) => this.handleTurnComplete(serverTurnId);
 		this.transport.onInterrupted = (serverTurnId) => this.handleInterrupted(serverTurnId);
 		this.transport.onOutputTranscription = (text) => {
-			this.clearResponseWatchdog();
+			this.reconnector.disarmResponseWatchdog();
 			this.turns.ensureCurrent();
 			this.transcriptManager.handleOutput(text);
 		};
@@ -1394,7 +1381,7 @@ export class VoiceSession {
 		this.transport.onClose = (code, reason) => this.handleTransportClose(code, reason);
 		this.transport.onGoAway = (timeLeft) => this.handleGoAway(timeLeft);
 		this.transport.onResumptionUpdate = (handle, resumable) =>
-			this.handleResumptionUpdate(handle, resumable);
+			this.reconnector.handleResumptionUpdate(handle, resumable);
 		this.transport.onGroundingMetadata = (metadata) => this.handleGroundingMetadata(metadata);
 	}
 
@@ -1581,19 +1568,7 @@ export class VoiceSession {
 		// Phase 3: when constructed with initial transcriptionMode='transcription',
 		// bring Whisper up and quiesce the agent transport before start() resolves.
 		// Audio dropped during these awaits is bounded by clientTransport buffering.
-		if (this.internalMode === 'transcription' && this.whisperProvider) {
-			await this.whisperProvider.start();
-			if (this.transport.capabilities.quiescible && this.transport.quiesce) {
-				try {
-					await this.transport.quiesce();
-				} catch (err) {
-					this.reportError(
-						'transport-quiesce',
-						err instanceof Error ? err : new Error(String(err)),
-					);
-				}
-			}
-		}
+		await this.dictation.prepareForStart();
 		if (this.runtimeOrchestrator) {
 			await this.runtimeOrchestrator.start();
 		}
@@ -1703,9 +1678,9 @@ export class VoiceSession {
 		await this.sttProvider?.stop();
 		// Phase 3: stop the dictation-mode Whisper provider so prewarmed or
 		// active sockets don't survive session close. Idempotent.
-		await this.whisperProvider?.stop().catch(() => undefined);
+		await this.dictation.stopWhisper();
 		this.ttsPipeline?.gate.clearTimers();
-		this.clearResponseWatchdog();
+		this.reconnector.disarmResponseWatchdog();
 		// close() bypasses finalizeTurn — tear down the native gate directly so
 		// no native playback timer outlives the session.
 		if (this.nativePlaybackGatingActive) {
@@ -1767,7 +1742,7 @@ export class VoiceSession {
 
 		// Send the new agent's greeting if configured
 		if (this.clientConnected) {
-			this.sendGreeting();
+			this.greeting.sendGreeting();
 		}
 	}
 
@@ -1850,8 +1825,10 @@ export class VoiceSession {
 		if (clientVadBargeInEnergyEligible(this.clientVad, maxAbs, avgAbs)) {
 			this.clientVadDetector.markBargeInEligible();
 		}
-		// The interrupt itself fires only while a playback gate is pending.
-		if (this.liveGate()?.pending !== true) return;
+		// The interrupt fires only while assistant audio is actively playing —
+		// a pending playback gate (TTS/native) OR, on the no-gate Gemini native
+		// path, an active turn whose buffered audio is still playing.
+		if (!this.isAssistantAudioActive()) return;
 		if (this.clientVadDetector.hasBargeInFired) return;
 		if (
 			!clientVadBargeInAllowed(
@@ -1869,6 +1846,9 @@ export class VoiceSession {
 		// defeating real barge-ins. See dev_docs/framework/design-greeting-interrupt-grace.md §4.
 		if (!this.requestInterrupt('client-vad')) return;
 		this.clientVadDetector.markBargeInFired();
+		this.log(
+			`[Latency] client-VAD barge-in actuated (path=${this.liveGate() ? 'gate' : 'native-fallback'}; peak=${maxAbs}; avgAbs=${avgAbs})`,
+		);
 		this.handleClientTtsBargeIn();
 	}
 
@@ -1886,14 +1866,13 @@ export class VoiceSession {
 	}
 
 	private handleClientTtsBargeIn(): void {
-		if (this.liveGate()?.pending !== true) return;
-		// In framework-owned mode, the framework is responsible for actually
-		// stopping the in-flight response on the wire. cancelResponse({}) is
-		// a no-op when nothing is generating, so this is safe across both
-		// native and TTS paths. See design-greeting-interrupt-grace.md §4.
-		if (this.transport.capabilities.frameworkOwnsInterrupt === true) {
-			this.transport.cancelResponse?.({});
-		}
+		if (!this.isAssistantAudioActive()) return;
+		// Stop the current response reaching the user — uniformly, per the
+		// `cancelResponse` contract: framework-owned transports cancel generation
+		// on the wire; non-cancellable ones (Gemini) suppress their remaining
+		// outbound audio. A no-op when nothing is generating, so it is safe across
+		// native and TTS paths. See design-noncancellable-transport-barge-in.md.
+		this.transport.cancelResponse?.({});
 		// The client-side VAD holds the Turn by reference — no server-turn id
 		// needed. A native gate finalizes the captured _nativePlaybackTurn; a
 		// later provider onInterrupted resolves to this same finalized Turn and
@@ -1920,8 +1899,12 @@ export class VoiceSession {
 		// audio at this seam. Belt-and-braces backup for transports that don't
 		// implement quiesce(); guarantees no model audio leaks into dictation
 		// mode even if a quiesce race occurs.
-		if (this.internalMode !== 'agent') return;
-		this.clearResponseWatchdog();
+		if (!this.dictation.isAgentMode()) return;
+		// Mark the turn's first assistant audio — drives the client-VAD barge-in
+		// eligibility window (`isAssistantAudioActive`). Trailing-audio suppression
+		// after a barge-in is the transport's job (cancelResponse), not here.
+		if (this._assistantAudioStartedAtMs === null) this._assistantAudioStartedAtMs = Date.now();
+		this.reconnector.disarmResponseWatchdog();
 
 		// Greeting interrupt grace: arm on the first assistant audio chunk.
 		// Idempotent — subsequent chunks no-op inside the class.
@@ -1965,31 +1948,6 @@ export class VoiceSession {
 		return Math.max(raw, VoiceSession.TTS_PLAYBACK_FALLBACK_MARGIN_FLOOR_MS);
 	}
 
-	/** Arm (or re-arm) the response watchdog after the user's turn ends. */
-	private armResponseWatchdog(): void {
-		if (this.responseWatchdogMs <= 0) return;
-		if (this.internalMode !== 'agent') return; // never watch a non-agent (dictation/transcription) turn
-		this.clearResponseWatchdog();
-		// Safe to arm even if the session isn't ACTIVE right now: the fire-time
-		// `state !== 'ACTIVE'` guard below makes a stale timer a no-op.
-		this._responseWatchdogTimer = setTimeout(() => {
-			this._responseWatchdogTimer = undefined;
-			if (this.sessionManager.state !== 'ACTIVE') return;
-			this.log(
-				`[Watchdog] Model silent ${this.responseWatchdogMs}ms after user turn — forcing reconnect`,
-			);
-			this.triggerReconnect('response-watchdog', true);
-		}, this.responseWatchdogMs);
-	}
-
-	/** Cancel the response watchdog (model showed activity, or teardown). */
-	private clearResponseWatchdog(): void {
-		if (this._responseWatchdogTimer) {
-			clearTimeout(this._responseWatchdogTimer);
-			this._responseWatchdogTimer = undefined;
-		}
-	}
-
 	// --- Gemini event handlers ---
 
 	private handleSetupComplete(_sessionId: string): void {
@@ -2013,94 +1971,30 @@ export class VoiceSession {
 		}
 		// Send greeting after memory/directives are loaded (no blocking of connect)
 		if (this.clientConnected) {
-			this._memoryReadyPromise.then(() => this.sendGreeting());
+			this._memoryReadyPromise.then(() => this.greeting.sendGreeting());
 		}
 	}
 
-	/** Pass 2 of greeting-grace resolution (§5). Reads the transport's
-	 *  now-finalized capabilities (`greetingInterruptGraceMs`,
-	 *  `frameworkOwnsInterrupt`) and the presence of `cancelResponse`;
-	 *  combines with the caller override stored in pass 1; validates;
-	 *  publishes the effective value to `this.greetingInterruptGraceMs`.
-	 *  Phase A: validation log only — Phase C wires the runtime effects. */
+	/** Pass 2 of greeting-grace resolution (§5). Thin delegator —
+	 *  see `GreetingController.finalizeGreetingInterruptGrace`. */
 	private finalizeGreetingInterruptGrace(): void {
-		const transportDefault =
-			clampGraceMs(this.transport.capabilities.greetingInterruptGraceMs) ?? 0;
-		const requestedGraceMs = this._overrideGraceMs ?? transportDefault;
-		if (requestedGraceMs <= 0) {
-			this.greetingInterruptGraceMs = 0;
-			return;
-		}
-		const frameworkOwns = this.transport.capabilities.frameworkOwnsInterrupt === true;
-		const hasCancelResponse = typeof this.transport.cancelResponse === 'function';
-		if (!frameworkOwns || !hasCancelResponse) {
-			const reason = !frameworkOwns
-				? 'frameworkOwnsInterrupt is not true (provider auto-cancel still wins)'
-				: 'cancelResponse is not implemented on the transport';
-			this.log(
-				`[WARN] greetingInterruptGraceMs=${requestedGraceMs}ms requested but ${reason}. Disabling grace for this session.`,
-			);
-			this.greetingInterruptGraceMs = 0;
-			return;
-		}
-		this.greetingInterruptGraceMs = requestedGraceMs;
-		this.log(`[Latency] greetingInterruptGraceMs resolved to ${this.greetingInterruptGraceMs}ms`);
-		// Construct the runtime grace window with the finalized length.
-		// Arming happens later, on the first assistant audio chunk.
-		this._grace = new InterruptGraceWindow(this.greetingInterruptGraceMs);
-		this._graceArmingLogged = false;
-		// `_greetingInFlight` is set by `sendGreeting()` at the actual send
-		// time, not here. Setting it at session-ready would be wiped by
-		// `handleClientConnected` (which runs between session-ready and
-		// sendGreeting in the common "client connects later" path) — and
-		// before `startMic` runs there are no mic frames to gate anyway.
-		// See dev_docs/framework/design-greeting-interrupt-grace.md §6, §8.
+		this.greeting.finalizeGreetingInterruptGrace();
 	}
 
-	/** Idempotent arming hook called from every assistant-audio chunk site
-	 *  (native `handleAudioOutput`, external TTS `tts.onAudio`). Arms the
-	 *  window on the first chunk via the class's own idempotency; emits the
-	 *  one-shot armed-log; and asks the transport to clear any pre-arming
-	 *  echo residue from its input buffer (no-op on transports without
-	 *  `clearInputAudio`).
-	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §6, §8. */
+	/** Idempotent first-audio grace arming. Thin delegator — see
+	 *  `GreetingController.maybeArmGraceOnFirstAudio`. Called from every
+	 *  assistant-audio chunk site (native `handleAudioOutput`, external TTS). */
 	private maybeArmGraceOnFirstAudio(): void {
-		if (this.greetingInterruptGraceMs <= 0) return;
-		const wasActive = this._grace.isActive();
-		this._grace.onAudioStart();
-		if (!wasActive && this._grace.isActive() && !this._graceArmingLogged) {
-			this._graceArmingLogged = true;
-			// Hand off pre-audio mic-drop to the grace window. (The two flags
-			// are deliberately overlapped during the same call: the gate in
-			// routeAudioToAgent ORs them, and the order of assignment doesn't
-			// matter — mic frames sent in this tick are still dropped.)
-			this._greetingInFlight = false;
-			this.log(`[Latency] Interrupt grace window armed (${this.greetingInterruptGraceMs}ms)`);
-			// Belt-and-suspenders: discard any provider input-buffer residue.
-			// With `_greetingInFlight` set in `sendGreeting()`, the gate has
-			// been active for the entire greeting-send → first-audio window,
-			// so the buffer should already be empty. The only frames that
-			// could still be in the buffer are pre-`sendGreeting` (i.e.
-			// WS-connect → session-ready, plus the brief microtask gap into
-			// sendGreeting via `_memoryReadyPromise.then`) — typically empty
-			// because `startMic` hasn't started capturing yet. Safe to
-			// discard either way.
-			this.transport.clearInputAudio?.();
-		}
+		this.greeting.maybeArmGraceOnFirstAudio();
 	}
 
-	/** Returns `true` if the caller should proceed with the interrupt;
-	 *  `false` (and logs) if the grace is currently suppressing it. Wraps
-	 *  `_grace.isActive()` with the session's log channel.
-	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §4. */
+	/** Returns `true` if the caller should proceed with the interrupt; `false`
+	 *  (and logs) if the greeting grace is currently suppressing it. Thin
+	 *  delegator — see `GreetingController.requestInterrupt`. Kept on
+	 *  VoiceSession so its many injection sites (gates, tts, vad) are
+	 *  untouched. */
 	private requestInterrupt(source: string): boolean {
-		if (this._grace.isActive()) {
-			this.log(
-				`[Latency] interrupt suppressed (grace, ${this._grace.remainingMs()}ms remaining; src=${source})`,
-			);
-			return false;
-		}
-		return true;
+		return this.greeting.requestInterrupt(source);
 	}
 
 	/** Start STT when session becomes ACTIVE (agent ready). Fire-and-forget. */
@@ -2110,9 +2004,9 @@ export class VoiceSession {
 	}
 
 	private handleTurnComplete(serverTurnId?: number): void {
-		this.clearResponseWatchdog();
+		this.reconnector.disarmResponseWatchdog();
 		// A completed turn means the connection is healthy — reset reconnect counter
-		this.reconnectAttempts = 0;
+		this.reconnector.resetAttempts();
 
 		// Correlate the completion to its Turn. `stale` → a long-gone turn,
 		// ignore; `new` → a turn that produced no model output, birth it.
@@ -2174,6 +2068,10 @@ export class VoiceSession {
 	private finalizeTurn(turn: Turn | null, opts: { interrupted: boolean }): void {
 		if (!turn) return;
 		if (!turn.finalize()) return; // not the first caller — structural no-op
+		// The turn is no longer speaking — close the barge-in eligibility window.
+		// (Trailing-audio suppression after an interrupt is the transport's job,
+		// via cancelResponse — see handleClientTtsBargeIn.)
+		this._assistantAudioStartedAtMs = null;
 
 		// Throw-safety: a throw in one effect must not strand the rest, or the
 		// turn would be terminal with a half-published boundary.
@@ -2291,54 +2189,8 @@ export class VoiceSession {
 		this.transport.sendContent([{ role: 'user', text }], true);
 	}
 
-	/** Send the active agent's greeting prompt to the LLM to trigger a spoken greeting. */
-	private sendGreeting(): void {
-		const agent = this.agentRouter.activeAgent;
-		if (!agent.greeting) {
-			this._greetingInFlight = false;
-			return;
-		}
-		this.log(`Sending greeting for agent "${agent.name}"`);
-		// The effective pre-audio gate must start at the actual greeting send,
-		// not only at setup-complete: in the common ordering where the LLM is
-		// ready before the browser connects, handleClientConnected resets the
-		// per-client grace state immediately before scheduling this greeting.
-		if (this.greetingInterruptGraceMs > 0 && !this._graceArmingLogged) {
-			this._greetingInFlight = true;
-		}
-		// Pre-greeting audio-gate reset (clears the actor debounce too, via the sink).
-		this.notificationSink.resetAudio();
-
-		// Collapse memory facts + session directives + greeting into ONE
-		// sendContent call. Previously this fired two sendContent calls (memory
-		// first with turnComplete: true, then the greeting), which created two
-		// separate response.create on framework-owned interruption (and also
-		// risked racing two active responses on OpenAI Realtime — see
-		// `conversation_already_has_active_response`). Combining keeps the
-		// grace-window invariant "first audio = greeting" intact.
-		// See dev_docs/framework/design-greeting-interrupt-grace.md §6.
-		const cachedFacts = this.memoryCacheManager?.facts ?? [];
-		const memoryPrefix =
-			cachedFacts.length > 0
-				? `[MEMORY — what you already know about this user from previous sessions]\n${cachedFacts
-						.map((f) => `- ${f.content}`)
-						.join('\n')}\n\n`
-				: '';
-		if (cachedFacts.length > 0) {
-			this.log(`Injected ${cachedFacts.length} memory facts`);
-		}
-
-		// Prepend session directives so the greeting response respects user preferences (e.g. pacing)
-		const directiveSuffix = this.directiveManager.getSessionSuffix();
-		const greetingBody = directiveSuffix
-			? `${directiveSuffix}\n\n${agent.greeting}`
-			: agent.greeting;
-		const greetingText = `${memoryPrefix}${greetingBody}`;
-		this.transport.sendContent([{ role: 'user', text: greetingText }], true);
-	}
-
 	private handleInterrupted(serverTurnId?: number): void {
-		this.clearResponseWatchdog();
+		this.reconnector.disarmResponseWatchdog();
 		// Correlate the interrupt to its Turn. A `stale` interrupt for a
 		// long-gone turn is ignored; `new` (no turn / interrupt before any model
 		// output) births one via the no-turn net. The structural idempotency of
@@ -2366,93 +2218,49 @@ export class VoiceSession {
 		this.clientTransport.sendJsonToClient({ type: 'grounding', payload: metadata });
 	}
 
+	/** Thin delegator — kept for parity with the other transport-callback intercept
+	 *  points. The immediate (unbudgeted) GoAway reconnect lives in
+	 *  {@link TransportReconnector}. */
 	private handleGoAway(timeLeft: string): void {
-		this.clearResponseWatchdog();
-		this.log(`GoAway from Gemini (timeLeft=${timeLeft})`);
-		this.eventBus.publish('session.goaway', {
-			sessionId: this.config.sessionId,
-			timeLeft,
-		});
-
-		// Initiate reconnection
-		const handle = this.sessionManager.resumptionHandle;
-		if (handle) {
-			this.sessionManager.transitionTo('RECONNECTING');
-			this.clientTransport.startBuffering();
-
-			this.transport
-				.reconnect({
-					resumptionHandle: handle,
-					conversationHistory: this.conversationContext.toReplayContent(),
-				})
-				.then(() => {
-					const buffered = this.clientTransport.stopBuffering();
-					for (const chunk of buffered) {
-						this.transport.sendAudio(chunk.toString('base64'));
-					}
-					this.sessionManager.transitionTo('ACTIVE');
-					this.log('Reconnect complete; session ACTIVE');
-				})
-				.catch((err) => {
-					this.clientTransport.stopBuffering();
-					this.reportError('reconnect', err);
-					this.sessionManager.transitionTo('CLOSED');
-				});
-		}
-	}
-
-	private handleResumptionUpdate(handle: string, resumable: boolean): void {
-		// On resumable updates, cache the handle so a later reconnect can resume.
-		// On non-resumable updates, CLEAR the cache so reconnect-with-state
-		// cannot attempt a resume from a stale handle (Google's docs warn that
-		// resuming after non-resumable can lose data — fresh-session-with-replay
-		// is safer; the GeminiLiveTransport applies the same policy internally).
-		if (resumable) {
-			this.sessionManager.updateResumptionHandle(handle);
-		} else {
-			this.sessionManager.clearResumptionHandle();
-		}
+		this.reconnector.handleGoAway(timeLeft);
 	}
 
 	// --- Client transport handlers ---
 
+	/**
+	 * Thin entry/intercept point for inbound client→server JSON. Stays on
+	 * VoiceSession because an example monkey-patches it (and external consumers
+	 * may too); the actual dispatch lives in {@link ClientMessageRouter}.
+	 */
 	private handleJsonFromClient(message: Record<string, unknown>): void {
-		if (this.directRtcChannel) {
-			const rtc = tryParseRtcClientSignaling(message);
-			if (rtc) {
-				this.directRtcChannel.feedSignaling(rtc);
-				return;
-			}
-		}
+		this.clientMessageRouter.dispatch(message);
+	}
 
-		if (
-			message.type === 'behavior.set' &&
-			typeof message.key === 'string' &&
-			typeof message.preset === 'string'
-		) {
-			this.behaviorManager?.handleClientSet(message.key, message.preset);
-		} else if (message.type === 'ui.response' && message.payload) {
-			this.eventBus.publish('subagent.ui.response', {
-				sessionId: this.config.sessionId,
-				response: message.payload as {
-					requestId: string;
-					selectedOptionId?: string;
-					formData?: Record<string, unknown>;
-				},
-			});
-		} else if (message.type === 'file_upload' && message.data) {
-			const data = message.data as { base64: string; mimeType: string; fileName?: string };
-			this.handleFileUpload(data.base64, data.mimeType, data.fileName);
-		} else if (message.type === 'text_input' && typeof message.text === 'string') {
-			// Fire-and-forget — handleTextInput is async (serializes via the
-			// direct-input FIFO). handleJsonFromClient is a dispatcher and
-			// must not block other branches on one text input.
-			this.handleTextInput(message.text).catch((err) =>
-				this.reportError('text_input', err instanceof Error ? err : new Error(String(err))),
-			);
-		} else if (message.type === 'playback.ended' && typeof message.playbackId === 'number') {
-			this.handlePlaybackEnded(message.playbackId);
-		}
+	/**
+	 * True when assistant audio is actively playing to the client and a user
+	 * barge-in should be honoured.
+	 *
+	 * - TTS / native-gated transports (OpenAI, Qwen): the live playback gate is
+	 *   `pending` — unchanged behaviour.
+	 * - `bufferedUncancellableAudio` transports (Gemini native): `liveGate()` is
+	 *   `null`. A barge-in is honoured once the turn has emitted audio past the
+	 *   echo-skip window. Such a transport buffers the whole response client-side
+	 *   and its provider VAD does not reliably interrupt the buffered tail, so
+	 *   this gives the user a deterministic, client-driven barge-in; the trailing
+	 *   audio is then stopped by `cancelResponse`.
+	 *   See design-noncancellable-transport-barge-in.md.
+	 */
+	private isAssistantAudioActive(): boolean {
+		const gate = this.liveGate();
+		if (gate) return gate.pending === true; // TTS / native-gated — unchanged
+		// No playback gate: a client-VAD barge-in is honoured only for transports
+		// that declare buffered, uncancellable audio (Gemini). Other no-gate
+		// transports (OpenAI/Qwen on mobile/phone) keep today's behaviour (none).
+		if (this.transport.capabilities.bufferedUncancellableAudio !== true) return false;
+		return (
+			this._assistantAudioStartedAtMs !== null &&
+			Date.now() - this._assistantAudioStartedAtMs >= NATIVE_BARGEIN_ECHO_SKIP_MS
+		);
 	}
 
 	/**
@@ -2469,61 +2277,6 @@ export class VoiceSession {
 			return this.nativeGate ?? null;
 		}
 		return null;
-	}
-
-	/**
-	 * Client→server playback-state signal: the client's audio buffer for
-	 * `playbackId` has drained. Completes the turn (or defers it for an
-	 * in-progress potential barge-in via `finishOrDeferForVad`). The guards
-	 * reject every signal that does not concern the live, post-synthesis turn —
-	 * source-agnostic via `liveGate()` (external TTS or native audio).
-	 * See dev_docs/framework/design-playback-end-gating-openai-native.md §5.
-	 */
-	private handlePlaybackEnded(playbackId: number): void {
-		if (!this.playbackStateProtocolActive) return;
-		// A signal was already accepted and deferred this turn — ignore further
-		// ones so a client cannot keep re-arming the defer timeout.
-		if (this.completionArbiter.hasDeferred) return;
-		const gate = this.liveGate();
-		if (!gate) return;
-		// Timer armed ⇒ the audio-done point has passed — rejects a premature
-		// signal that would otherwise complete the turn mid-synthesis.
-		if (!gate.timerArmed) return;
-		// Not pending ⇒ the turn already finished or was interrupted.
-		if (!gate.pending) return;
-		// Stale: a signal for a turn superseded by an interrupt (bumps the id).
-		if (playbackId !== gate.id) return;
-		this.completionArbiter.finishOrDeferForVad('signal');
-	}
-
-	private handleFileUpload(base64: string, mimeType: string, fileName?: string): void {
-		if (!this.sessionManager.isActive) return;
-
-		// Send image/document to the LLM as inline data
-		this.transport.sendFile(base64, mimeType);
-
-		// Record in conversation context
-		this.conversationContext.addUserMessage(`[Uploaded file: ${fileName ?? 'file'}]`);
-
-		// Store in artifact registry for cross-tool access (supported binary image types only).
-		if (this.config.artifactRegistry && mimeType.startsWith('image/')) {
-			try {
-				this.config.artifactRegistry.store(
-					base64,
-					mimeType,
-					fileName ?? `upload_${Date.now()}`,
-					'uploaded',
-					fileName,
-				);
-			} catch (err) {
-				const msg = err instanceof Error ? err.message : String(err);
-				this.log(`Failed to store artifact: ${msg}`);
-				this.eventBus.publish('gui.notification', {
-					sessionId: this.config.sessionId,
-					message: `File uploaded to voice session but cannot be forwarded to agents: ${msg}`,
-				});
-			}
-		}
 	}
 
 	/** Single-flight FIFO for direct-input bodies. Each enqueued body runs
@@ -2594,11 +2347,7 @@ export class VoiceSession {
 		// audio chunk armed — leaking the prior session's grace into a
 		// different audio context.
 		// See dev_docs/framework/design-greeting-interrupt-grace.md §6.
-		this._grace.reset();
-		this._graceArmingLogged = false;
-		// Don't leak greeting-in-flight state into the new client session.
-		// The next sendGreeting (if any) will re-set it.
-		this._greetingInFlight = false;
+		this.greeting.resetForClientConnected();
 		const transportInfo = describeClientTransport(this.config.clientMedia);
 
 		// Send audio format config so the client can negotiate correct sample rates
@@ -2624,7 +2373,7 @@ export class VoiceSession {
 
 		this.behaviorManager?.sendCatalog();
 		if (this.sessionManager.isActive) {
-			this._memoryReadyPromise.then(() => this.sendGreeting());
+			this._memoryReadyPromise.then(() => this.greeting.sendGreeting());
 		}
 	}
 
@@ -2666,74 +2415,10 @@ export class VoiceSession {
 		this.reportError('llm-transport', err);
 	}
 
-	/** Force a reconnect using the proven resumption-handle + buffering path.
-	 *  Shared by the transport-close handler and the response watchdog.
-	 *  @param reason short tag for logs
-	 *  @param elicit when true, after a successful reconnect, nudge the model to
-	 *    respond (used by the watchdog — a stalled turn has no pending generation). */
-	private triggerReconnect(reason: string, elicit = false): void {
-		if (this.sessionManager.state !== 'ACTIVE') return;
-		const handle = this.sessionManager.resumptionHandle;
-		if (handle && this.reconnectAttempts < VoiceSession.MAX_RECONNECT_ATTEMPTS) {
-			const attempt = this.reconnectAttempts++;
-			const delay = VoiceSession.RECONNECT_BACKOFF_MS[attempt] ?? 4000;
-			this.log(
-				`Reconnect attempt ${attempt + 1}/${VoiceSession.MAX_RECONNECT_ATTEMPTS} in ${delay}ms (reason=${reason})`,
-			);
-			this.sessionManager.transitionTo('RECONNECTING');
-			this.clientTransport.startBuffering();
-			setTimeout(() => {
-				this.transport
-					.reconnect({
-						resumptionHandle: handle,
-						conversationHistory: this.conversationContext.toReplayContent(),
-					})
-					.then(() => {
-						const buffered = this.clientTransport.stopBuffering();
-						for (const chunk of buffered) {
-							this.transport.sendAudio(chunk.toString('base64'));
-						}
-						this.sessionManager.transitionTo('ACTIVE');
-						this.log('Reconnect complete; session ACTIVE');
-						if (elicit) this.elicitModelResponse(reason);
-					})
-					.catch((err) => {
-						this.clientTransport.stopBuffering();
-						this.reportError('reconnect', err);
-						this.sessionManager.transitionTo('CLOSED');
-					});
-			}, delay);
-		} else {
-			if (this.reconnectAttempts >= VoiceSession.MAX_RECONNECT_ATTEMPTS) {
-				this.log(
-					`Reconnect limit reached (${VoiceSession.MAX_RECONNECT_ATTEMPTS} attempts), giving up`,
-				);
-			}
-			this.sessionManager.transitionTo('CLOSED');
-		}
-	}
-
-	/** Best-effort post-reconnect generation nudge: prefer the transport's
-	 *  content-less elicit (Gemini), else fall back to triggerGeneration (OpenAI).
-	 *  Agent mode only — never nudge while in transcription/dictation mode. */
-	private elicitModelResponse(reason: string): void {
-		if (this.internalMode !== 'agent') return;
-		this.log(`[Watchdog] Re-eliciting model response after reconnect (reason=${reason})`);
-		try {
-			if (this.transport.elicitResponse) {
-				this.transport.elicitResponse();
-			} else {
-				this.transport.triggerGeneration();
-			}
-		} catch (e) {
-			this.log(`[Watchdog] Re-elicit nudge failed (best-effort): ${(e as Error).message}`);
-		}
-	}
-
+	/** Thin delegator — a test invokes this private method directly. The reconnect
+	 *  logic lives in {@link TransportReconnector}. */
 	private handleTransportClose(code?: number, reason?: string): void {
-		const detail = code != null ? ` code=${code}${reason ? ` reason="${reason}"` : ''}` : '';
-		this.log(`Transport closed (state=${this.sessionManager.state}${detail})`);
-		this.triggerReconnect('transport-close');
+		this.reconnector.handleTransportClose(code, reason);
 	}
 
 	private reportError(component: string, error: unknown): void {
@@ -2762,7 +2447,7 @@ export class VoiceSession {
 	/** Public stable mode. Transient `starting_*` / `stopping_*` states are
 	 *  collapsed to the closest stable mode so callers never observe them. */
 	getTranscriptionMode(): TranscriptionMode {
-		switch (this.internalMode) {
+		switch (this.dictation.mode) {
 			case 'agent':
 			case 'stopping_transcription':
 				return 'agent';
@@ -2776,12 +2461,12 @@ export class VoiceSession {
 	 *  Useful for built-in tools (e.g. `inject_dictation_as_user_message`)
 	 *  and for ops surfaces that want to preview the buffer. */
 	getDictationBuffer(): string {
-		return this.dictationBuffer.join(' ').trim();
+		return this.dictation.getDictationBuffer();
 	}
 
 	/** Discard buffered dictation without injecting it. */
 	clearDictationBuffer(): void {
-		this.dictationBuffer = [];
+		this.dictation.clearDictationBuffer();
 	}
 
 	/** Inject the dictation buffer as a user message into the agent's
@@ -2790,10 +2475,8 @@ export class VoiceSession {
 	 *  writes to the transport AND records the user turn in
 	 *  ConversationContext (so history/memory/subagent context see it). */
 	injectDictationBuffer(): Promise<void> {
-		if (this.internalMode !== 'agent') return Promise.resolve();
-		const text = this.getDictationBuffer();
+		const text = this.dictation.takeDictationBufferForInjection();
 		if (!text) return Promise.resolve();
-		this.dictationBuffer = [];
 		return this.injectTranscript(text);
 	}
 
@@ -2824,124 +2507,24 @@ export class VoiceSession {
 	/** Pre-start the whisper session without flipping audio routing. Useful
 	 *  for masking the ~150–500 ms whisper-start latency on the first flip. */
 	async prewarmTranscriptionMode(): Promise<void> {
-		if (!this.whisperProvider) return;
-		await this.whisperProvider.start();
+		await this.dictation.prewarmTranscriptionMode();
 	}
 
 	/** Switch between `'agent'` and `'transcription'`. Idempotent. Serialised
 	 *  with `transferSession()` via the SessionMutationQueue — concurrent
-	 *  callers queue rather than race. */
+	 *  callers queue rather than race. The mode-flip mechanics live in the
+	 *  DictationController; the serialization stays here. */
 	async setTranscriptionMode(mode: TranscriptionMode): Promise<void> {
 		return this.mutationQueue.enqueue(async () => {
 			if (mode === this.getTranscriptionMode()) return;
 			if (mode === 'transcription') {
-				if (!this.whisperProvider) {
+				if (!this.dictation.whisper) {
 					throw new Error('setTranscriptionMode: no whisperProvider configured on VoiceSession');
 				}
-				await this.enterTranscriptionMode();
+				await this.dictation.enterTranscriptionMode();
 			} else {
-				await this.exitTranscriptionMode();
+				await this.dictation.exitTranscriptionMode();
 			}
-		});
-	}
-
-	/** Agent → transcription transition. */
-	private async enterTranscriptionMode(): Promise<void> {
-		this.internalMode = 'starting_transcription';
-		// Quiesce the transport so any in-flight response stops emitting.
-		// Optional method — fall back to the framework-layer guard.
-		if (this.transport.capabilities.quiescible && this.transport.quiesce) {
-			try {
-				await this.transport.quiesce();
-			} catch (err) {
-				this.reportError('transport-quiesce', err instanceof Error ? err : new Error(String(err)));
-			}
-		}
-		// Clear unprocessed input audio server-side (mandatory — see design §3.4).
-		// Some transports auto-trigger responses via VAD's create_response:true;
-		// without clearAudio() that response can fire after the mode flip.
-		try {
-			this.transport.clearAudio();
-		} catch {
-			// Best-effort: clearAudio is a no-op when disconnected.
-		}
-		// Bring up whisper. Idempotent — no-op if prewarm already ran.
-		// setTranscriptionMode('transcription') above already verified that
-		// whisperProvider is set, so this is safe.
-		const whisper = this.whisperProvider;
-		if (!whisper) {
-			this.internalMode = 'agent';
-			throw new Error('enterTranscriptionMode: whisperProvider missing');
-		}
-		try {
-			await whisper.start();
-		} catch (err) {
-			// Rollback on failure.
-			this.internalMode = 'agent';
-			if (this.transport.capabilities.quiescible && this.transport.unquiesce) {
-				try {
-					await this.transport.unquiesce();
-				} catch {
-					// Best-effort rollback.
-				}
-			}
-			throw err;
-		}
-		// Flush buffered transition frames in FIFO order through the router's
-		// whisper routing (which handles resampling).
-		this.audioRouter.drainTransitionBufferToWhisper();
-		this.internalMode = 'transcription';
-		this.eventBus.publish('session.transcription_mode_changed', {
-			mode: 'transcription',
-			sessionId: this.config.sessionId,
-		});
-	}
-
-	/** Transcription → agent transition. Asymmetric — audio routing is
-	 *  restored synchronously; the public promise awaits whisper.stop().
-	 *
-	 *  Ordering matters: unquiesce() drains the OpenAI transport's
-	 *  _pendingWhenIdle queue which fires `response.create`. The §3.5
-	 *  invariant says no response.create while not in agent mode, so
-	 *  unquiesce() must run AFTER `internalMode = 'agent'`, not before.
-	 *  The brief `_quiesced` window costs a few ms of audio suppression
-	 *  during stop_transcription, traded for strict invariant compliance. */
-	private async exitTranscriptionMode(): Promise<void> {
-		// Restore audio ROUTING immediately so the user is never silent. The
-		// routing switch's stopping_transcription case (§3.3) feeds mic frames
-		// to the transport from the very next frame; suppression at the
-		// audio-output seam is still on for the brief window below.
-		this.internalMode = 'stopping_transcription';
-		// Tear down whisper FIRST so any in-flight whisper transcripts that
-		// arrived just before "end dictation" finish landing in the buffer.
-		// Idempotent.
-		try {
-			await this.whisperProvider?.stop();
-		} catch (err) {
-			this.reportError('whisper-stop', err instanceof Error ? err : new Error(String(err)));
-		}
-		// Flip to agent BEFORE unquiesce — unquiesce() in OpenAI drains
-		// _pendingWhenIdle, which sends response.create. That has to happen
-		// when internalMode === 'agent' to honour §3.5.
-		this.internalMode = 'agent';
-		// Now unquiesce — drains any when_idle tool results that accumulated.
-		if (this.transport.capabilities.quiescible && this.transport.unquiesce) {
-			try {
-				await this.transport.unquiesce();
-			} catch (err) {
-				this.reportError(
-					'transport-unquiesce',
-					err instanceof Error ? err : new Error(String(err)),
-				);
-			}
-		}
-		// Drain framework-side queues: tool results AND content turns that
-		// arrived while not in agent mode.
-		this.flushPendingToolResults();
-		this.flushPendingContentTurns();
-		this.eventBus.publish('session.transcription_mode_changed', {
-			mode: 'agent',
-			sessionId: this.config.sessionId,
 		});
 	}
 
@@ -2952,34 +2535,11 @@ export class VoiceSession {
 		instructions?: string,
 		overrides?: Parameters<LLMTransport['triggerGeneration']>[1],
 	): void {
-		if (this.internalMode !== 'agent') {
+		if (!this.dictation.isAgentMode()) {
 			throw new Error(
-				`TRANSCRIPTION_MODE_LOCKED: triggerGeneration is blocked while transcription mode is '${this.internalMode}'`,
+				`TRANSCRIPTION_MODE_LOCKED: triggerGeneration is blocked while transcription mode is '${this.dictation.mode}'`,
 			);
 		}
 		this.transport.triggerGeneration(instructions, overrides);
-	}
-
-	/** Flush tool results that arrived during transcription mode. Calls the
-	 *  unguarded sender so we don't re-enter the queue. */
-	private flushPendingToolResults(): void {
-		if (this.pendingToolResultsAwaitingAgentMode.length === 0) return;
-		const queued = this.pendingToolResultsAwaitingAgentMode;
-		this.pendingToolResultsAwaitingAgentMode = [];
-		for (const result of queued) {
-			this._rawSendToolResult(result);
-		}
-	}
-
-	/** Flush content turns (sendContent calls) that arrived with
-	 *  turnComplete=true during transcription mode. Same idempotency story
-	 *  as flushPendingToolResults — drain through the raw sender. */
-	private flushPendingContentTurns(): void {
-		if (this.pendingContentTurnsAwaitingAgentMode.length === 0) return;
-		const queued = this.pendingContentTurnsAwaitingAgentMode;
-		this.pendingContentTurnsAwaitingAgentMode = [];
-		for (const { turns, turnComplete } of queued) {
-			this._rawSendContent(turns, turnComplete);
-		}
 	}
 }

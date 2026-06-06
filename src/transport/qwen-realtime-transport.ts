@@ -184,6 +184,8 @@ export class QwenRealtimeTransport implements LLMTransport {
 			// response.done is generation-gated (like OpenAI) — the session needs
 			// nativePlaybackGating + playbackStateProtocol to arm tail barge-in.
 			playbackGatedTurnComplete: false,
+			// cancelResponse cancels generation on the wire — no buffered trailing audio.
+			bufferedUncancellableAudio: false,
 			// Grace window after first audio so browser AEC converges before
 			// echo-triggered events count as barge-in (OpenAI default).
 			greetingInterruptGraceMs: 1000,

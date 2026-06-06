@@ -109,6 +109,7 @@ describe('OpenAIRealtimeTransport', () => {
 				automaticPreambles: false,
 				quiescible: true,
 				playbackGatedTurnComplete: false,
+				bufferedUncancellableAudio: false,
 				// B8 framework-owned default: interrupt_response: false →
 				// frameworkOwnsInterrupt: true → grace recommendation: 1000ms.
 				frameworkOwnsInterrupt: true,

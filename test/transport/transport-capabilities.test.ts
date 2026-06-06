@@ -9,6 +9,10 @@ describe('TransportCapabilities defaults', () => {
 	it('playbackGatedTurnComplete defaults to false', () => {
 		expect(DEFAULT_TRANSPORT_CAPABILITIES.playbackGatedTurnComplete).toBe(false);
 	});
+
+	it('bufferedUncancellableAudio defaults to false', () => {
+		expect(DEFAULT_TRANSPORT_CAPABILITIES.bufferedUncancellableAudio).toBe(false);
+	});
 });
 
 describe('playbackGatedTurnComplete per transport', () => {
@@ -20,5 +24,17 @@ describe('playbackGatedTurnComplete per transport', () => {
 	it('OpenAI Realtime: response.done is generation-gated → false', () => {
 		const t = new OpenAIRealtimeTransport({ apiKey: 'test-key', model: 'gpt-realtime' });
 		expect(t.capabilities.playbackGatedTurnComplete).toBe(false);
+	});
+});
+
+describe('bufferedUncancellableAudio per transport', () => {
+	it('Gemini Live: no cancel command, buffered audio → true', () => {
+		const t = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+		expect(t.capabilities.bufferedUncancellableAudio).toBe(true);
+	});
+
+	it('OpenAI Realtime: cancelResponse cancels generation → false', () => {
+		const t = new OpenAIRealtimeTransport({ apiKey: 'test-key', model: 'gpt-realtime' });
+		expect(t.capabilities.bufferedUncancellableAudio).toBe(false);
 	});
 });

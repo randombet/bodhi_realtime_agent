@@ -756,6 +756,23 @@ async function main() {
 		// realtime). See design-playback-end-gating-openai-native.md.
 		playbackStateProtocol: 'audio_done',
 		nativePlaybackGating: true,
+		// Custom inbound-JSON handling: a UI client (or test harness) can send
+		// { "type": "set_transcription_mode", "mode": "agent" | "transcription" }
+		// over the client WebSocket. `onClientJson` fires for message types the
+		// framework does not recognize (the supported public seam — no private
+		// monkey-patching). `sessionRef` is the late-bound session (set below).
+		onClientJson: (msg) => {
+			if (msg.type !== 'set_transcription_mode') return;
+			const mode = msg.mode;
+			if (mode === 'agent' || mode === 'transcription') {
+				console.log(`${ts()} [JSON] set_transcription_mode → ${mode}`);
+				void sessionRef?.setTranscriptionMode(mode).catch((err) => {
+					console.error(`${ts()} [JSON] setTranscriptionMode failed`, err);
+				});
+				return;
+			}
+			console.warn(`${ts()} [JSON] set_transcription_mode: invalid mode "${String(mode)}"`);
+		},
 		hooks: {
 			onSessionStart: (event) => {
 				console.log(`${ts()} [Session] Started: ${event.sessionId} (agent: ${event.agentName})`);
@@ -852,32 +869,10 @@ async function main() {
 		}
 	};
 
-	// (2) JSON-over-WS exit: a UI client (or test harness) can send
-	//     { "type": "set_transcription_mode", "mode": "agent" | "transcription" }
-	//     over the client WebSocket. The framework routes JSON messages to
-	//     session.feedJsonFromClient, which fires onJsonMessage hook if wired.
-	//     For demos we monkey-patch the session's internal handleJsonFromClient
-	//     to also recognise our custom message type. In a production app you'd
-	//     wire this through the hosted-service layer instead.
-	const sessionWithJsonHook = session as unknown as {
-		handleJsonFromClient: (msg: Record<string, unknown>) => void;
-	};
-	const originalHandleJson = sessionWithJsonHook.handleJsonFromClient.bind(session);
-	sessionWithJsonHook.handleJsonFromClient = (msg: Record<string, unknown>) => {
-		if (msg.type === 'set_transcription_mode') {
-			const mode = msg.mode;
-			if (mode === 'agent' || mode === 'transcription') {
-				console.log(`${ts()} [JSON] set_transcription_mode → ${mode}`);
-				void session.setTranscriptionMode(mode).catch((err) => {
-					console.error(`${ts()} [JSON] setTranscriptionMode failed`, err);
-				});
-				return;
-			}
-			console.warn(`${ts()} [JSON] set_transcription_mode: invalid mode "${String(mode)}"`);
-			return;
-		}
-		originalHandleJson(msg);
-	};
+	// (2) JSON-over-WS exit: handled via the `onClientJson` config hook above —
+	//     a UI client sends { "type": "set_transcription_mode", "mode": ... } over
+	//     the client WebSocket and the framework forwards the unrecognized type to
+	//     that hook. No private monkey-patching required.
 
 	// Subscribe to events for logging — track item index to print only new items per turn
 	let lastLoggedIndex = 0;
