@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 import { describe, expect, it } from 'vitest';
 import {
+	buildAvatarPublicClientConfig,
 	getSpatialRealPresetIdSet,
 	loadAvatarCatalog,
 	resolveSpatialRealSessionAvatarId,
@@ -39,5 +40,19 @@ describe('resolveSpatialRealSessionAvatarId', () => {
 		const spatial = cat.providers.find((p) => p.kind === 'spatialreal');
 		expect(spatial?.presets.length).toBe(13);
 		expect(getSpatialRealPresetIdSet().size).toBe(13);
+	});
+
+	it('builds provider-neutral public config with Spatial compatibility fields', () => {
+		const cfg = buildAvatarPublicClientConfig({
+			appId: 'app_123',
+			avatarId: envDefault,
+			region: 'us-west',
+			env: 'intl',
+		});
+		expect(cfg.defaultProviderId).toBe('spatialreal');
+		expect(cfg.avatarProviders?.[0]?.kind).toBe('spatialreal');
+		expect(cfg.provider).toBe('spatialreal');
+		expect(cfg.defaultAvatarId).toBe(envDefault);
+		expect(cfg.tokenPath).toBe('/api/avatars/session-token?providerId=spatialreal');
 	});
 });

@@ -129,6 +129,22 @@ describe('web-client playback-state protocol', () => {
 		expect(state.playbackEndedTimer).toBeNull();
 	});
 
+	it('does not schedule while an avatar sink absorbs assistant PCM', async () => {
+		const { setSpatialWebAvatarSink } = await import(
+			'../../app/web-client/src/spatial-web-avatar/sink.js'
+		);
+		setSpatialWebAvatarSink({
+			onAssistantPcm: () => {},
+			onTurnEnd: () => {},
+			onTurnInterrupted: () => {},
+			onKeyframes: () => {},
+		});
+		state.audioDonePlaybackId = 7;
+		maybeSchedulePlaybackEnded();
+		expect(state.playbackEndedTimer).toBeNull();
+		setSpatialWebAvatarSink(null);
+	});
+
 	it('emits exactly once per turn even if scheduled again afterwards', () => {
 		state.audioDonePlaybackId = 7;
 		maybeSchedulePlaybackEnded();

@@ -263,7 +263,7 @@ curl -sS -H 'Authorization: Bearer <token>' \
 
 ### Related: browser avatar embed (Spatial Real)
 
-For a **first-party web embed** (iframe or hosted page on the same Bodhi origin) that shows the Spatial Real face plus voice on **`/ws`** (not `/ws/mobile`), see **`app/docs/avatar-integration.md` §2.5–2.6**: `POST /api/embed/avatar-sessions`, `POST /api/embed/spatial-session-token`, and the **`/embed/avatar`** route. That path uses short-lived **embed intents** on the WebSocket instead of shipping a long-lived `bsk_` secret to an untrusted browser. **§2.6** contrasts this with the normal **`/api/users/me/agents`** CRUD API (persistence vs bootstrap-only).
+For a **first-party web embed** (iframe or hosted page on the same Bodhi origin) that shows the avatar plus voice on **`/ws`** (not `/ws/mobile`), see **`app/docs/avatar-integration.md` §2.5–2.6**: `POST /api/embed/avatar-sessions`, `POST /api/embed/avatar-session-token` (legacy alias: `/api/embed/spatial-session-token`), and the **`/embed/avatar`** route. That path uses short-lived **embed intents** on the WebSocket instead of shipping a long-lived `bsk_` secret to an untrusted browser. **§2.6** contrasts this with the normal **`/api/users/me/agents`** CRUD API (persistence vs bootstrap-only).
 
 ### Related: remote coding worker from Agent Studio
 
