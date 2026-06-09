@@ -109,6 +109,11 @@ export function renderPrometheus(c: MetricsCollector): string {
 			'Interrupted turns followed by a clean turn (recovery).',
 			c.bargeInRecoveredTotal,
 		),
+		renderCounter(
+			'voice_jumpin_total',
+			'Agent took the floor while the user was still speaking (jump-ins).',
+			c.jumpInTotal,
+		),
 		renderHistogramVec(
 			'voice_tts_ttfb_ms',
 			'TTS time-to-first-byte by provider (ms).',

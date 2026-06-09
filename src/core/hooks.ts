@@ -35,6 +35,12 @@ export class HooksManager {
 	get onTurnFinalized() {
 		return this.hooks.onTurnFinalized;
 	}
+	get onJumpIn() {
+		return this.hooks.onJumpIn;
+	}
+	get onAgentReentry() {
+		return this.hooks.onAgentReentry;
+	}
 	get onToolCall() {
 		return this.hooks.onToolCall;
 	}

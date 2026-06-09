@@ -1385,7 +1385,15 @@ export class VoiceSession {
 		this.transport.onAudioOutput = (data) => this.handleAudioOutput(data);
 		// Latency: first audio chunk of the response (stop-to-first-audio anchor).
 		this.transport.onFirstAudioChunk = () => {
-			if (this._turnTiming.firstAudioMs === null) this._turnTiming.firstAudioMs = this.nowMs();
+			if (this._turnTiming.firstAudioMs !== null) return;
+			this._turnTiming.firstAudioMs = this.nowMs();
+			// JIR: agent audio began while the user is still speaking (false turn-end).
+			if (this.clientVadDetector.isSpeechActive) {
+				this.hooks.onJumpIn?.({
+					sessionId: this.config.sessionId,
+					turnId: this.turns.current?.id,
+				});
+			}
 		};
 		this.transport.onToolCall = (calls) => {
 			this.reconnector.disarmResponseWatchdog();

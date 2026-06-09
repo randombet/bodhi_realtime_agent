@@ -105,6 +105,13 @@ describe('MetricsCollector', () => {
 		expect(c.bargeInRecoveredTotal.entries()[0].value).toBe(1);
 	});
 
+	it('counts jump-ins', () => {
+		const c = new MetricsCollector();
+		c.hooks.onJumpIn?.({ sessionId: 's', turnId: '1' });
+		c.hooks.onJumpIn?.({ sessionId: 's', turnId: '2' });
+		expect(c.jumpInTotal.entries()[0].value).toBe(2);
+	});
+
 	it('records a missed barge-in (successful=false)', () => {
 		const c = new MetricsCollector();
 		c.hooks.onBargeInDetected?.({

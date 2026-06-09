@@ -88,6 +88,20 @@ export interface FrameworkHooks {
 		interrupted: boolean;
 	}): void;
 
+	/**
+	 * Fires when the agent's audio starts while the user is still actively speaking
+	 * — a "jump-in" / false turn-end (the agent took the floor prematurely).
+	 * Jump-in rate = jump-ins / turns.
+	 */
+	onJumpIn?(event: { sessionId: string; turnId?: string }): void;
+
+	/**
+	 * Fires when the agent re-enters with audio after yielding to a barge-in.
+	 * `reentryMs` is the pause between the interrupt and the next agent audio
+	 * (human baseline ≈ 200ms).
+	 */
+	onAgentReentry?(event: { sessionId: string; reentryMs: number }): void;
+
 	/** Fires when Gemini requests a tool invocation (before execution). */
 	onToolCall?(event: {
 		sessionId: string;

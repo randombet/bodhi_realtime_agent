@@ -34,6 +34,8 @@ export class MetricsCollector {
 	readonly turnsInterruptedTotal = new Counter();
 	/** Interrupted turns that recovered (a clean turn followed). */
 	readonly bargeInRecoveredTotal = new Counter();
+	/** Agent took the floor while the user was still speaking (jump-ins). */
+	readonly jumpInTotal = new Counter();
 	// --- TTS / tools / errors (execution) ---
 	readonly ttsTtfbMs = new HistogramVec();
 	readonly toolDurationMs = new HistogramVec();
@@ -92,6 +94,9 @@ export class MetricsCollector {
 		onBargeInDetected: (e) => {
 			this.bargeInCancelLatencyMs.observe(e.latencyMs);
 			this.bargeInTotal.inc({ successful: String(e.successful) });
+		},
+		onJumpIn: () => {
+			this.jumpInTotal.inc();
 		},
 		onTurnFinalized: (e) => {
 			this.turnsTotal.inc();
