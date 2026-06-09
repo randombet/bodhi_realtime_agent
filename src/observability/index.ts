@@ -16,3 +16,11 @@ export {
 	labelKey,
 } from './histogram.js';
 export { MetricsCollector } from './metrics-collector.js';
+export {
+	createMetricsHandler,
+	type MetricsExporter,
+	type MetricsHttpResponse,
+	PROMETHEUS_CONTENT_TYPE,
+	PrometheusExporter,
+	renderPrometheus,
+} from './prometheus.js';
