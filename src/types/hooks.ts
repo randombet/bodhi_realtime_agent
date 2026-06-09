@@ -77,6 +77,17 @@ export interface FrameworkHooks {
 		successful: boolean;
 	}): void;
 
+	/**
+	 * Fires once when any turn is finalized — clean or interrupted. Gives the
+	 * agent-interruption rate (interrupted / total) and the denominator for
+	 * barge-in recovery rate.
+	 */
+	onTurnFinalized?(event: {
+		sessionId: string;
+		turnId: string;
+		interrupted: boolean;
+	}): void;
+
 	/** Fires when Gemini requests a tool invocation (before execution). */
 	onToolCall?(event: {
 		sessionId: string;

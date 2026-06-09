@@ -45,6 +45,7 @@ export class ClientVadDetector {
 	private speechStartMs = 0;
 	private lastVoiceMs = 0;
 	private bargeInFired = false;
+	private bargeInMissed = false;
 	private eligible = false;
 	private _lastSpeechCompletedMs = 0;
 	private _lastSpeechDurationMs = 0;
@@ -67,6 +68,10 @@ export class ClientVadDetector {
 	get hasBargeInFired(): boolean {
 		return this.bargeInFired;
 	}
+	/** True once a threshold-passing barge-in was detected but declined this segment. */
+	get hasBargeInMissed(): boolean {
+		return this.bargeInMissed;
+	}
 	get speechStartedAtMs(): number {
 		return this.speechStartMs;
 	}
@@ -84,6 +89,10 @@ export class ClientVadDetector {
 	/** Mark that the barge-in has fired for this segment (fires at most once). */
 	markBargeInFired(): void {
 		this.bargeInFired = true;
+	}
+	/** Mark that a threshold-passing barge-in was declined this segment (once). */
+	markBargeInMissed(): void {
+		this.bargeInMissed = true;
 	}
 
 	/** Process one inbound mic frame (PCM16). Mirrors the former
@@ -103,6 +112,7 @@ export class ClientVadDetector {
 				this.speechActive = true;
 				this.speechStartMs = now;
 				this.bargeInFired = false;
+				this.bargeInMissed = false;
 				this.eligible = false;
 				this.log(
 					`[Latency] User voice input started (client audio VAD; peak=${maxAbs}; avgAbs=${Math.round(avgAbs)})`,

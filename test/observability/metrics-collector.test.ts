@@ -92,6 +92,32 @@ describe('MetricsCollector', () => {
 		expect(labels).not.toContain('p3');
 	});
 
+	it('tracks interruption rate and recovery via onTurnFinalized', () => {
+		const c = new MetricsCollector();
+		const fin = (interrupted: boolean) =>
+			c.hooks.onTurnFinalized?.({ sessionId: 's', turnId: 't', interrupted });
+		fin(false); // clean
+		fin(true); // interrupted -> awaiting recovery
+		fin(false); // clean after interrupt -> recovered
+		fin(true); // interrupted, no clean turn after -> not recovered
+		expect(c.turnsTotal.entries()[0].value).toBe(4);
+		expect(c.turnsInterruptedTotal.entries()[0].value).toBe(2);
+		expect(c.bargeInRecoveredTotal.entries()[0].value).toBe(1);
+	});
+
+	it('records a missed barge-in (successful=false)', () => {
+		const c = new MetricsCollector();
+		c.hooks.onBargeInDetected?.({
+			sessionId: 's',
+			speechStartedAtMs: 1000,
+			detectedAtMs: 1200,
+			cancelRequestedAtMs: 1200,
+			latencyMs: 0,
+			successful: false,
+		});
+		expect(c.bargeInTotal.entries()).toEqual([{ labels: { successful: 'false' }, value: 1 }]);
+	});
+
 	it('never stores transcript text (textLength only on the typed payload)', () => {
 		const c = new MetricsCollector();
 		// onTranscriptReady payload exposes textLength, not text — recorded as a span only.

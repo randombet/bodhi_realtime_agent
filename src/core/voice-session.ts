@@ -1885,7 +1885,23 @@ export class VoiceSession {
 		// within a 1s grace would set the "fired" flag, and the `hasBargeInFired`
 		// guard above would skip the next loud frame at t=1100ms (post-grace),
 		// defeating real barge-ins. See dev_docs/framework/design-greeting-interrupt-grace.md §4.
-		if (!this.requestInterrupt('client-vad')) return;
+		if (!this.requestInterrupt('client-vad')) {
+			// Threshold-passing barge-in declined (e.g. greeting grace): a *missed*
+			// barge-in. Emit once per segment so the rate isn't inflated per-frame.
+			if (!this.clientVadDetector.hasBargeInMissed) {
+				this.clientVadDetector.markBargeInMissed();
+				const at = this.nowMs();
+				this.hooks.onBargeInDetected?.({
+					sessionId: this.config.sessionId,
+					speechStartedAtMs: this.clientVadDetector.speechStartedAtMs,
+					detectedAtMs: now,
+					cancelRequestedAtMs: at,
+					latencyMs: Math.max(0, at - now),
+					successful: false,
+				});
+			}
+			return;
+		}
 		this.clientVadDetector.markBargeInFired();
 		this.log(
 			`[Latency] client-VAD barge-in actuated (path=${this.liveGate() ? 'gate' : 'native-fallback'}; peak=${maxAbs}; avgAbs=${avgAbs})`,
@@ -2216,6 +2232,13 @@ export class VoiceSession {
 			});
 			this.clientTransport.sendJsonToClient({ type: 'turn.end', turnId: turn.id });
 		});
+		safeStep('hook.onTurnFinalized', () =>
+			this.hooks.onTurnFinalized?.({
+				sessionId: this.config.sessionId,
+				turnId: turn.id,
+				interrupted: opts.interrupted,
+			}),
+		);
 
 		// Turn-bound usage sources reset per turn; non-turn-bound (`no_turn:*`)
 		// keep their session-scoped counter.

@@ -27,9 +27,13 @@ export class MetricsCollector {
 	readonly turnProviderProcessingMs = new Histogram();
 	readonly turnBackendToClientMs = new Histogram();
 	readonly stopToTranscriptMs = new Histogram();
-	// --- Barge-in (user behavior) ---
+	// --- Barge-in / turn-taking (user behavior) ---
 	readonly bargeInCancelLatencyMs = new Histogram([10, 30, 60, 100, 200, 500, 1000]);
 	readonly bargeInTotal = new Counter();
+	readonly turnsTotal = new Counter();
+	readonly turnsInterruptedTotal = new Counter();
+	/** Interrupted turns that recovered (a clean turn followed). */
+	readonly bargeInRecoveredTotal = new Counter();
 	// --- TTS / tools / errors (execution) ---
 	readonly ttsTtfbMs = new HistogramVec();
 	readonly toolDurationMs = new HistogramVec();
@@ -38,6 +42,8 @@ export class MetricsCollector {
 
 	/** turnId → user-speech-end timestamp, for stop-to-transcript correlation. */
 	private readonly pendingSpeechEnd = new Map<string, number>();
+	/** True while awaiting a clean turn after an interrupt (recovery tracking). */
+	private awaitingRecovery = false;
 
 	/** Cardinality guard: distinct values seen per capped label dimension. */
 	private readonly maxLabelCardinality: number;
@@ -86,6 +92,17 @@ export class MetricsCollector {
 		onBargeInDetected: (e) => {
 			this.bargeInCancelLatencyMs.observe(e.latencyMs);
 			this.bargeInTotal.inc({ successful: String(e.successful) });
+		},
+		onTurnFinalized: (e) => {
+			this.turnsTotal.inc();
+			if (e.interrupted) {
+				this.turnsInterruptedTotal.inc();
+				this.awaitingRecovery = true;
+			} else if (this.awaitingRecovery) {
+				// A clean turn followed an interrupt → recovered.
+				this.bargeInRecoveredTotal.inc();
+				this.awaitingRecovery = false;
+			}
 		},
 		onTTSSynthesis: (e) => {
 			this.ttsTtfbMs.observe({ provider: this.cap(this.seenProviders, e.provider) }, e.ttfbMs);

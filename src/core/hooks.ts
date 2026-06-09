@@ -32,6 +32,9 @@ export class HooksManager {
 	get onBargeInDetected() {
 		return this.hooks.onBargeInDetected;
 	}
+	get onTurnFinalized() {
+		return this.hooks.onTurnFinalized;
+	}
 	get onToolCall() {
 		return this.hooks.onToolCall;
 	}

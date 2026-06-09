@@ -89,7 +89,26 @@ export function renderPrometheus(c: MetricsCollector): string {
 			'Barge-in detect→cancel-actuation latency (ms).',
 			c.bargeInCancelLatencyMs,
 		),
-		renderCounter('voice_bargein_total', 'Barge-ins by outcome.', c.bargeInTotal),
+		renderCounter(
+			'voice_bargein_total',
+			'Barge-ins by outcome (successful=actuated).',
+			c.bargeInTotal,
+		),
+		renderCounter(
+			'voice_turns_total',
+			'Finalized turns (interruption-rate denominator).',
+			c.turnsTotal,
+		),
+		renderCounter(
+			'voice_turns_interrupted_total',
+			'Finalized turns that were interrupted.',
+			c.turnsInterruptedTotal,
+		),
+		renderCounter(
+			'voice_bargein_recovered_total',
+			'Interrupted turns followed by a clean turn (recovery).',
+			c.bargeInRecoveredTotal,
+		),
 		renderHistogramVec(
 			'voice_tts_ttfb_ms',
 			'TTS time-to-first-byte by provider (ms).',
