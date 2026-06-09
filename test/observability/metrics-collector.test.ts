@@ -112,6 +112,13 @@ describe('MetricsCollector', () => {
 		expect(c.jumpInTotal.entries()[0].value).toBe(2);
 	});
 
+	it('records agent re-entry latency', () => {
+		const c = new MetricsCollector();
+		c.hooks.onAgentReentry?.({ sessionId: 's', reentryMs: 350 });
+		expect(c.reentryLatencyMs.count).toBe(1);
+		expect(c.reentryLatencyMs.sum).toBe(350);
+	});
+
 	it('records a missed barge-in (successful=false)', () => {
 		const c = new MetricsCollector();
 		c.hooks.onBargeInDetected?.({

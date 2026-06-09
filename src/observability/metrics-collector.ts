@@ -36,6 +36,8 @@ export class MetricsCollector {
 	readonly bargeInRecoveredTotal = new Counter();
 	/** Agent took the floor while the user was still speaking (jump-ins). */
 	readonly jumpInTotal = new Counter();
+	/** Pause from a yield (interrupt) to the agent's next audio (re-entry, ms). */
+	readonly reentryLatencyMs = new Histogram([100, 200, 500, 1000, 2000, 3000]);
 	// --- TTS / tools / errors (execution) ---
 	readonly ttsTtfbMs = new HistogramVec();
 	readonly toolDurationMs = new HistogramVec();
@@ -97,6 +99,9 @@ export class MetricsCollector {
 		},
 		onJumpIn: () => {
 			this.jumpInTotal.inc();
+		},
+		onAgentReentry: (e) => {
+			this.reentryLatencyMs.observe(e.reentryMs);
 		},
 		onTurnFinalized: (e) => {
 			this.turnsTotal.inc();

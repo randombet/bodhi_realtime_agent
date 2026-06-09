@@ -480,6 +480,9 @@ export class VoiceSession {
 		modelStartMs: null,
 		firstAudioMs: null,
 	};
+	/** Metric-clock time of the last interrupt (yield), for re-entry latency;
+	 *  cleared once the agent re-enters with audio. */
+	private _lastInterruptAtMs: number | null = null;
 	/** Time (ms) of the current turn's first assistant audio chunk, or `null`
 	 *  between/before turns. Barge-in *eligibility* policy for the no-`liveGate`,
 	 *  `bufferedUncancellableAudio` shape (Gemini): a client-VAD barge-in is
@@ -1387,6 +1390,14 @@ export class VoiceSession {
 		this.transport.onFirstAudioChunk = () => {
 			if (this._turnTiming.firstAudioMs !== null) return;
 			this._turnTiming.firstAudioMs = this.nowMs();
+			// Re-entry latency: pause from the last interrupt (yield) to this audio.
+			if (this._lastInterruptAtMs !== null) {
+				this.hooks.onAgentReentry?.({
+					sessionId: this.config.sessionId,
+					reentryMs: Math.max(0, this._turnTiming.firstAudioMs - this._lastInterruptAtMs),
+				});
+				this._lastInterruptAtMs = null;
+			}
 			// JIR: agent audio began while the user is still speaking (false turn-end).
 			if (this.clientVadDetector.isSpeechActive) {
 				this.hooks.onJumpIn?.({
@@ -2189,6 +2200,8 @@ export class VoiceSession {
 
 		if (opts.interrupted) {
 			this.log('Interrupted by user');
+			// Re-entry latency anchor: time of this yield (next agent audio closes it).
+			this._lastInterruptAtMs = this.nowMs();
 			const estEnd = this.ttsPipeline?.gate.estimatedPlaybackEndMs ?? null;
 			if (estEnd !== null && Date.now() > estEnd) {
 				this.log('[Latency] barge-in finalized after the estimated playback end');

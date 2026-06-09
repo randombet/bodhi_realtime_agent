@@ -114,6 +114,11 @@ export function renderPrometheus(c: MetricsCollector): string {
 			'Agent took the floor while the user was still speaking (jump-ins).',
 			c.jumpInTotal,
 		),
+		renderHistogram(
+			'voice_reentry_latency_ms',
+			'Pause from a yield (interrupt) to the agent re-entering with audio (ms).',
+			c.reentryLatencyMs,
+		),
 		renderHistogramVec(
 			'voice_tts_ttfb_ms',
 			'TTS time-to-first-byte by provider (ms).',
