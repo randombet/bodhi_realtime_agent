@@ -71,7 +71,7 @@ describe('MetricsCollector', () => {
 	});
 
 	it('caps label cardinality: providers past the cap fold to "other"', () => {
-		const c = new MetricsCollector({ maxLabelCardinality: 2 });
+		const c = new MetricsCollector({ privacy: { maxLabelCardinality: 2 } });
 		for (const provider of ['p1', 'p2', 'p3', 'p4']) {
 			c.hooks.onTTSSynthesis?.({
 				sessionId: 's',
@@ -117,6 +117,38 @@ describe('MetricsCollector', () => {
 		c.hooks.onAgentReentry?.({ sessionId: 's', reentryMs: 350 });
 		expect(c.reentryLatencyMs.count).toBe(1);
 		expect(c.reentryLatencyMs.sum).toBe(350);
+	});
+
+	it('logs once when a label dimension hits the cardinality cap', () => {
+		const logs: string[] = [];
+		const c = new MetricsCollector({
+			privacy: { maxLabelCardinality: 1 },
+			log: (m) => logs.push(m),
+		});
+		const tts = (provider: string) =>
+			c.hooks.onTTSSynthesis?.({
+				sessionId: 's',
+				provider,
+				textLength: 1,
+				durationMs: 1,
+				audioMs: 1,
+				ttfbMs: 1,
+				requestId: 1,
+			});
+		tts('a');
+		tts('b');
+		tts('c');
+		expect(logs.filter((m) => m.includes('cardinality cap')).length).toBe(1);
+	});
+
+	it('samples high-volume observations but keeps turn counters + slow turns exact', () => {
+		// rate 0 → drop all sampled events; counters and slow turns still recorded.
+		const c = new MetricsCollector({ privacy: { sessionSamplingRate: 0, slowTurnMs: 1500 } });
+		c.hooks.onTurnLatency?.({ sessionId: 's', turnId: '1', segments: { totalE2EMs: 200 } }); // fast → sampled out
+		c.hooks.onTurnLatency?.({ sessionId: 's', turnId: '2', segments: { totalE2EMs: 2000 } }); // slow → kept
+		c.hooks.onTurnFinalized?.({ sessionId: 's', turnId: '1', interrupted: false }); // counter always exact
+		expect(c.turnE2eMs.count).toBe(1); // only the slow turn
+		expect(c.turnsTotal.entries()[0].value).toBe(1); // counter unaffected by sampling
 	});
 
 	it('records a missed barge-in (successful=false)', () => {

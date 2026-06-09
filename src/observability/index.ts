@@ -17,6 +17,12 @@ export {
 } from './histogram.js';
 export { MetricsCollector } from './metrics-collector.js';
 export {
+	DEFAULT_PRIVACY_CONFIG,
+	hashUnit,
+	LabelGuard,
+	type PrivacyConfig,
+} from './privacy.js';
+export {
 	createMetricsHandler,
 	type MetricsExporter,
 	type MetricsHttpResponse,

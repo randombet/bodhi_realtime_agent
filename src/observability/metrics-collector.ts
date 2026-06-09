@@ -2,6 +2,7 @@
 
 import type { FrameworkHooks } from '../types/hooks.js';
 import { Counter, Histogram, HistogramVec } from './histogram.js';
+import { DEFAULT_PRIVACY_CONFIG, LabelGuard, type PrivacyConfig, hashUnit } from './privacy.js';
 
 /**
  * Subscribes to {@link FrameworkHooks} events and aggregates them into in-memory
@@ -14,12 +15,13 @@ import { Counter, Histogram, HistogramVec } from './histogram.js';
  *     new VoiceSession({ ...cfg, hooks: collector.hooks });
  *     // expose collector via the /metrics endpoint helper
  *
- * Privacy (Phase 1 minimum): never stores transcript text — only `textLength`
- * and timing — never attaches per-session/user labels, and only ever emits a
- * fixed allowlist of low-cardinality label keys (`provider`, `status`,
- * `component`, `severity`, `successful`). Unbounded-ish values (`provider`,
- * `component`) fold to `"other"` past `maxLabelCardinality` so a runaway value
- * cannot mint unbounded series. Phase 4 adds the configurable PrivacyConfig.
+ * Privacy: never stores transcript text (only `textLength` + timing) and never
+ * attaches per-session/user labels; only a fixed allowlist of low-cardinality
+ * keys (`provider`, `status`, `component`, `severity`, `successful`) is emitted.
+ * A {@link PrivacyConfig} bounds label cardinality (fold to `"other"`, logged)
+ * and optionally **samples** high-volume observations per session — while keeping
+ * rare/interesting events (errors, barge-ins, jump-ins, re-entries, slow turns)
+ * and all turn counters exact, so derived rates stay correct.
  */
 export class MetricsCollector {
 	// --- Latency (infrastructure) ---
@@ -49,28 +51,28 @@ export class MetricsCollector {
 	/** True while awaiting a clean turn after an interrupt (recovery tracking). */
 	private awaitingRecovery = false;
 
-	/** Cardinality guard: distinct values seen per capped label dimension. */
-	private readonly maxLabelCardinality: number;
-	private readonly seenProviders = new Set<string>();
-	private readonly seenComponents = new Set<string>();
+	private readonly privacy: PrivacyConfig;
+	private readonly labelGuard: LabelGuard;
 
-	constructor(opts: { maxLabelCardinality?: number } = {}) {
-		this.maxLabelCardinality = opts.maxLabelCardinality ?? 50;
+	constructor(opts: { privacy?: Partial<PrivacyConfig>; log?: (msg: string) => void } = {}) {
+		this.privacy = { ...DEFAULT_PRIVACY_CONFIG, ...opts.privacy };
+		this.labelGuard = new LabelGuard(this.privacy.maxLabelCardinality, opts.log);
 	}
 
-	/** Return `value`, or `"other"` once this dimension hits the cardinality cap. */
-	private cap(seen: Set<string>, value: string): string {
-		if (seen.has(value)) return value;
-		if (seen.size < this.maxLabelCardinality) {
-			seen.add(value);
-			return value;
-		}
-		return 'other';
+	/** True if this session's high-volume observations should be recorded. Errors,
+	 *  barge-ins, jump-ins, re-entries, slow turns, and turn counters bypass this. */
+	private keepSession(sessionId: string): boolean {
+		return (
+			this.privacy.sessionSamplingRate >= 1 ||
+			hashUnit(sessionId) < this.privacy.sessionSamplingRate
+		);
 	}
 
 	/** A {@link FrameworkHooks} object wired to this collector. Stable identity. */
 	readonly hooks: FrameworkHooks = {
 		onTurnLatency: (e) => {
+			// Event-biased: slow turns always kept; otherwise sample by session.
+			if (e.segments.totalE2EMs < this.privacy.slowTurnMs && !this.keepSession(e.sessionId)) return;
 			this.turnE2eMs.observe(e.segments.totalE2EMs);
 			if (e.segments.geminiProcessingMs !== undefined)
 				this.turnProviderProcessingMs.observe(e.segments.geminiProcessingMs);
@@ -78,7 +80,7 @@ export class MetricsCollector {
 				this.turnBackendToClientMs.observe(e.segments.backendToClientMs);
 		},
 		onUserSpeechEnd: (e) => {
-			if (e.turnId === undefined) return;
+			if (e.turnId === undefined || !this.keepSession(e.sessionId)) return;
 			this.pendingSpeechEnd.set(e.turnId, e.atMs);
 			// Bound the correlation map (evict oldest insertion).
 			if (this.pendingSpeechEnd.size > 256) {
@@ -115,15 +117,17 @@ export class MetricsCollector {
 			}
 		},
 		onTTSSynthesis: (e) => {
-			this.ttsTtfbMs.observe({ provider: this.cap(this.seenProviders, e.provider) }, e.ttfbMs);
+			if (!this.keepSession(e.sessionId)) return;
+			this.ttsTtfbMs.observe({ provider: this.labelGuard.cap('provider', e.provider) }, e.ttfbMs);
 		},
 		onToolResult: (e) => {
 			this.toolDurationMs.observe({ status: e.status }, e.durationMs);
 			this.toolTotal.inc({ status: e.status });
 		},
 		onError: (e) => {
+			// Always kept (event-biased): errors are rare and high-value.
 			this.errorTotal.inc({
-				component: this.cap(this.seenComponents, e.component),
+				component: this.labelGuard.cap('component', e.component),
 				severity: e.severity,
 			});
 		},
