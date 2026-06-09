@@ -330,6 +330,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	onError?: (error: LLMTransportError) => void;
 	onClose?: (code?: number, reason?: string) => void;
 	onModelTurnStart?: () => void;
+	onFirstAudioChunk?: () => void;
 	onGoAway?: (timeLeft: string) => void;
 	onResumptionUpdate?: (handle: string, resumable: boolean) => void;
 	onGroundingMetadata?: (metadata: Record<string, unknown>) => void;
@@ -397,6 +398,8 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 
 	// when_idle scheduling: buffer tool results while model is generating
 	private _isModelGenerating = false;
+	/** Tracks whether onFirstAudioChunk has fired for the current response. */
+	private _firstAudioFired = false;
 	private _pendingWhenIdle: TransportToolResult[] = [];
 	private _interruptToolResultQueue: Promise<void> = Promise.resolve();
 
@@ -1571,6 +1574,10 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			// quiesce(); _suppressAudio is the per-turn interruption flag set
 			// by barge-in. Either dropping the audio is correct.
 			if (this._quiesced || this._suppressAudio) return;
+			if (!this._firstAudioFired) {
+				this._firstAudioFired = true;
+				this.onFirstAudioChunk?.();
+			}
 			if (this.onAudioOutput) this.onAudioOutput(event.delta);
 
 			// Track audio duration for interruption handling. Uses the resolved
@@ -1597,6 +1604,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		// --- Response lifecycle: track when a response is active ---
 		rt.on('response.created', () => {
 			this._isModelGenerating = true;
+			this._firstAudioFired = false;
 			// Arm the active-response waiter — idempotent. The waiter may
 			// already be armed by `markResponsePending()` if the framework
 			// sent `response.create` itself (sendContent/triggerGeneration/

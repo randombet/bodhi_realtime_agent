@@ -119,6 +119,8 @@ export class QwenRealtimeTransport implements LLMTransport {
 	private completedToolCalls: TransportToolCall[] = [];
 	private isGenerating = false;
 	private suppressAudio = false;
+	/** Tracks whether onFirstAudioChunk has fired for the current response. */
+	private firstAudioFired = false;
 	private inputTranscriptionEnabled = true;
 	// Tool-result scheduling: 'when_idle' results buffered while the model is
 	// generating (flushed on response.done); 'interrupt' results serialized
@@ -146,6 +148,7 @@ export class QwenRealtimeTransport implements LLMTransport {
 	onError?: (error: { error: Error; recoverable: boolean }) => void;
 	onClose?: (code?: number, reason?: string) => void;
 	onModelTurnStart?: () => void;
+	onFirstAudioChunk?: () => void;
 	onTextOutput?: (text: string) => void;
 	onTextDone?: () => void;
 	onSpeechStarted?: () => void;
@@ -711,6 +714,7 @@ export class QwenRealtimeTransport implements LLMTransport {
 			case 'response.created':
 				this.isGenerating = true;
 				this.suppressAudio = false;
+				this.firstAudioFired = false;
 				this.completedToolCalls = [];
 				if (this.onModelTurnStart) this.onModelTurnStart();
 				break;
@@ -738,8 +742,13 @@ export class QwenRealtimeTransport implements LLMTransport {
 			}
 			case 'response.audio.delta': {
 				const delta = (e as { delta?: string }).delta;
-				if (!this.suppressAudio && typeof delta === 'string' && this.onAudioOutput)
-					this.onAudioOutput(delta);
+				if (!this.suppressAudio && typeof delta === 'string') {
+					if (!this.firstAudioFired) {
+						this.firstAudioFired = true;
+						this.onFirstAudioChunk?.();
+					}
+					if (this.onAudioOutput) this.onAudioOutput(delta);
+				}
 				break;
 			}
 			case 'response.audio_transcript.delta': {

@@ -150,6 +150,8 @@ export interface GeminiTransportCallbacks {
 	onInterrupted?(serverTurnId?: number): void;
 	/** Model started a new response turn (first audio or tool call). */
 	onModelTurnStart?(): void;
+	/** First audio chunk of the model's response (TTS-first-audio anchor). */
+	onFirstAudioChunk?(): void;
 	/** Transcription of user's spoken input. */
 	onInputTranscription?(text: string): void;
 	/** Transcription of model's spoken output. */
@@ -186,6 +188,8 @@ export class GeminiLiveTransport implements LLMTransport {
 	private setupResolver: (() => void) | null = null;
 	/** Tracks whether onModelTurnStart has already fired for the current turn. */
 	private _modelTurnStarted = false;
+	/** Tracks whether onFirstAudioChunk has already fired for the current response. */
+	private _firstAudioFired = false;
 	/** Whether the transport should emit text output (used by external TTS pipelines). */
 	private _textMode = false;
 	/**
@@ -290,6 +294,7 @@ export class GeminiLiveTransport implements LLMTransport {
 	onError?: (error: LLMTransportError) => void;
 	onClose?: (code?: number, reason?: string) => void;
 	onModelTurnStart?: () => void;
+	onFirstAudioChunk?: () => void;
 	onGoAway?: (timeLeft: string) => void;
 	onResumptionUpdate?: (handle: string, resumable: boolean) => void;
 	onGroundingMetadata?: (metadata: Record<string, unknown>) => void;
@@ -487,6 +492,7 @@ export class GeminiLiveTransport implements LLMTransport {
 
 	async disconnect(): Promise<void> {
 		this._modelTurnStarted = false;
+		this._firstAudioFired = false;
 		this._cachedGeminiUsage = null;
 		this.resetServerTurnState();
 		if (this.session) {
@@ -838,6 +844,7 @@ export class GeminiLiveTransport implements LLMTransport {
 		this._serverTurnState = 'closed';
 		this._serverTurnWindingDown = false;
 		this._modelTurnStarted = false;
+		this._firstAudioFired = false;
 		if (this._windingDownTimer) {
 			clearTimeout(this._windingDownTimer);
 			this._windingDownTimer = undefined;
@@ -941,6 +948,11 @@ export class GeminiLiveTransport implements LLMTransport {
 						// In _quiesced mode (cross-provider transcription mode), Gemini audio is
 						// suppressed at this seam — VoiceSession owns the routing decision.
 						if (!this._textMode && !this._quiesced && !this.isOutboundAudioSuppressed()) {
+							if (!this._firstAudioFired) {
+								this._firstAudioFired = true;
+								this.callbacks.onFirstAudioChunk?.();
+								if (this.onFirstAudioChunk) this.onFirstAudioChunk();
+							}
 							this.callbacks.onAudioOutput?.(part.inlineData.data);
 							if (this.onAudioOutput) this.onAudioOutput(part.inlineData.data);
 						}
