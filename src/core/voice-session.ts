@@ -203,6 +203,13 @@ export interface VoiceSessionConfig {
 	/** Lifecycle hooks for observability. */
 	hooks?: FrameworkHooks;
 	/**
+	 * Injectable time source (milliseconds) for all metric/latency duration math.
+	 * Defaults to `Date.now`. Shared with `ClientVadDetector` so session-side and
+	 * VAD-side timestamps come from one clock (never subtract across clocks). Tests
+	 * inject a fake clock to make latency assertions deterministic.
+	 */
+	nowMs?: () => number;
+	/**
 	 * Sender for all output to the client. The server owns the socket and feeds input
 	 * via feedAudioFromClient / feedJsonFromClient and notifyClientConnected / notifyClientDisconnected.
 	 */
@@ -510,6 +517,8 @@ export class VoiceSession {
 	// --- Server-turn finalization dedup (external-TTS turn completion).
 	//     See dev_docs/framework/design-external-tts-turn-completion.md. ---
 	private config: VoiceSessionConfig;
+	/** Injectable ms clock for metric/latency math (default `Date.now`). */
+	private readonly nowMs: () => number;
 	private directiveManager = new DirectiveManager();
 	private transcriptManager!: TranscriptManager;
 	/** Whether a client WebSocket connection is currently active. */
@@ -560,6 +569,7 @@ export class VoiceSession {
 
 	constructor(config: VoiceSessionConfig) {
 		this.config = config;
+		this.nowMs = config.nowMs ?? Date.now;
 		this.ownsClientTransport = !config.clientSender;
 		this.eventBus = new EventBus();
 		this.hooks = new HooksManager();
@@ -772,6 +782,7 @@ export class VoiceSession {
 				onUserTurnCompleted: () => this.reconnector.armResponseWatchdog(),
 			},
 			(msg) => this.log(msg),
+			this.nowMs,
 		);
 
 		// Inbound client-audio fast path. Dependencies are read through
@@ -1355,7 +1366,7 @@ export class VoiceSession {
 				const names = calls.map((c) => c.name).join(', ');
 				this.logProviderUserTurnRecognition('tool call received');
 				const sinceVadEnd = this.clientVadDetector.lastSpeechCompletedMs
-					? ` (${Date.now() - this.clientVadDetector.lastSpeechCompletedMs}ms after client audio VAD end)`
+					? ` (${this.nowMs() - this.clientVadDetector.lastSpeechCompletedMs}ms after client audio VAD end)`
 					: '';
 				this.log(`Tool calls from LLM: [${names}]${sinceVadEnd}`);
 				this.transcriptManager.flushInput();
@@ -1857,7 +1868,7 @@ export class VoiceSession {
 		if (!trimmed || trimmed === this.lastInputTranscriptionLogText) return;
 		this.lastInputTranscriptionLogText = trimmed;
 		const sinceVadEnd = this.clientVadDetector.lastSpeechCompletedMs
-			? `; ${Date.now() - this.clientVadDetector.lastSpeechCompletedMs}ms after client audio VAD end`
+			? `; ${this.nowMs() - this.clientVadDetector.lastSpeechCompletedMs}ms after client audio VAD end`
 			: '';
 		const preview = trimmed.replace(/\s+/g, ' ').slice(0, 120);
 		this.log(
@@ -1890,7 +1901,7 @@ export class VoiceSession {
 			return;
 		this.lastGeminiRecognitionLoggedForSpeechEndMs = this.clientVadDetector.lastSpeechCompletedMs;
 		this.log(
-			`[Latency] Provider recognized user input completed (${reason}; ${Date.now() - this.clientVadDetector.lastSpeechCompletedMs}ms after client audio VAD end; clientSpeechDuration=${this.clientVadDetector.lastSpeechDurationMs}ms)`,
+			`[Latency] Provider recognized user input completed (${reason}; ${this.nowMs() - this.clientVadDetector.lastSpeechCompletedMs}ms after client audio VAD end; clientSpeechDuration=${this.clientVadDetector.lastSpeechDurationMs}ms)`,
 		);
 	}
 
@@ -1903,7 +1914,7 @@ export class VoiceSession {
 		// Mark the turn's first assistant audio — drives the client-VAD barge-in
 		// eligibility window (`isAssistantAudioActive`). Trailing-audio suppression
 		// after a barge-in is the transport's job (cancelResponse), not here.
-		if (this._assistantAudioStartedAtMs === null) this._assistantAudioStartedAtMs = Date.now();
+		if (this._assistantAudioStartedAtMs === null) this._assistantAudioStartedAtMs = this.nowMs();
 		this.reconnector.disarmResponseWatchdog();
 
 		// Greeting interrupt grace: arm on the first assistant audio chunk.
@@ -2259,7 +2270,7 @@ export class VoiceSession {
 		if (this.transport.capabilities.bufferedUncancellableAudio !== true) return false;
 		return (
 			this._assistantAudioStartedAtMs !== null &&
-			Date.now() - this._assistantAudioStartedAtMs >= NATIVE_BARGEIN_ECHO_SKIP_MS
+			this.nowMs() - this._assistantAudioStartedAtMs >= NATIVE_BARGEIN_ECHO_SKIP_MS
 		);
 	}
 
