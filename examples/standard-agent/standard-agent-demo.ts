@@ -61,7 +61,11 @@ if (API_KEY.length === 0) {
 const PORT = Number(process.env.PORT) || 9900;
 const HOST = process.env.HOST || '0.0.0.0';
 const SESSION_ID = `session_${Date.now()}`;
-const LIVE_MODEL = 'gemini-2.5-flash-native-audio-preview-12-2025';
+// Latency experiment: half-cascade live model instead of the production
+// `standard` default (`gemini-2.5-flash-native-audio-preview-12-2025`).
+// Everything else (STT provider, VAD default, googleSearch) is unchanged so
+// the live model is the only variable.
+const LIVE_MODEL = 'gemini-3.1-flash-live-preview';
 const google = createGoogleGenerativeAI({ apiKey: API_KEY });
 
 async function main() {
@@ -98,6 +102,14 @@ async function main() {
 			read_image: createImageReaderSubagent(API_KEY, artifactRegistry),
 		},
 		geminiModel: LIVE_MODEL,
+		// Latency experiment #2: tighter endpointing (default is silenceDurationMs=500).
+		// 200ms makes Gemini commit the user turn sooner after they stop speaking.
+		realtimeInputConfig: {
+			automaticActivityDetection: {
+				endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
+				silenceDurationMs: 200,
+			},
+		},
 		sttProvider: new GeminiBatchSTTProvider({ apiKey: API_KEY, model: 'gemini-3-flash-preview' }),
 		speechConfig: { voiceName: 'Puck' },
 		hooks: {
