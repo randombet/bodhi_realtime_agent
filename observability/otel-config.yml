@@ -1,0 +1,31 @@
+# OpenTelemetry Collector — metrics-only pipeline (default).
+#
+# The app's OTel exporter (createOtelMetricsHooks) pushes OTLP metrics here; the
+# Collector's `prometheus` exporter exposes a scrape endpoint that Prometheus
+# scrapes. The Collector does NOT push into Prometheus — add a scrape job for
+# `:8889` to prometheus.yml (see observability/dashboards/).
+#
+# Validate: `otelcol validate --config observability/otel-config.yml`
+# (not run in CI here — requires the collector binary).
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch: {}
+
+exporters:
+  prometheus:
+    endpoint: 0.0.0.0:8889
+
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [prometheus]
