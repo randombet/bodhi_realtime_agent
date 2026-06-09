@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-import type { Meter } from '@opentelemetry/api';
+import { type Meter, type Tracer, context, trace } from '@opentelemetry/api';
 import type { FrameworkHooks } from '../types/hooks.js';
 
 /**
@@ -89,4 +89,67 @@ export function createOtelMetricsHooks(meter: Meter): FrameworkHooks {
 		},
 		onError: (ev) => errorTotal.add(1, { component: ev.component, severity: ev.severity }),
 	};
+}
+
+/**
+ * OPTIONAL turn-waterfall tracing. Reconstructs a `voice_turn` span with
+ * `provider_processing` / `backend_to_client` child spans from the per-turn
+ * timing (correlating `onUserSpeechEnd` → `onTurnLatency` by turnId). Off unless
+ * the host opts in by registering these hooks.
+ *
+ * Requires a **trace backend** (Tempo/Jaeger) and a configured tracer; Prometheus
+ * stores metrics only. Assumes an epoch-millisecond clock (the default `nowMs`);
+ * a monotonic `performance.now()` clock would mis-place spans on the wall-clock.
+ *
+ * Compose with the metrics hooks via `mergeHooks(metricsHooks, tracingHooks)`.
+ */
+export function createOtelTracingHooks(tracer: Tracer): FrameworkHooks {
+	const speechEnds = new Map<string, number>();
+	return {
+		onUserSpeechEnd: (ev) => {
+			if (ev.turnId !== undefined) speechEnds.set(ev.turnId, ev.atMs);
+		},
+		onTurnLatency: (ev) => {
+			if (ev.turnId === undefined) return;
+			const start = speechEnds.get(ev.turnId);
+			if (start === undefined) return;
+			speechEnds.delete(ev.turnId);
+			const s = ev.segments;
+			const turnSpan = tracer.startSpan('voice_turn', { startTime: start });
+			turnSpan.setAttribute('turn.id', ev.turnId);
+			turnSpan.setAttribute('latency.e2e_ms', s.totalE2EMs);
+			const ctx = trace.setSpan(context.active(), turnSpan);
+			let cursor = start;
+			if (s.geminiProcessingMs !== undefined) {
+				const child = tracer.startSpan('provider_processing', { startTime: cursor }, ctx);
+				cursor += s.geminiProcessingMs;
+				child.end(cursor);
+			}
+			if (s.backendToClientMs !== undefined) {
+				const child = tracer.startSpan('backend_to_client', { startTime: cursor }, ctx);
+				cursor += s.backendToClientMs;
+				child.end(cursor);
+			}
+			turnSpan.end(start + s.totalE2EMs);
+		},
+	};
+}
+
+/** Merge multiple FrameworkHooks, invoking each hook for every source that
+ *  defines it (e.g. metrics + tracing). Later sources do not overwrite earlier. */
+export function mergeHooks(...sources: FrameworkHooks[]): FrameworkHooks {
+	const merged: Record<string, (ev: unknown) => void> = {};
+	for (const src of sources) {
+		for (const [key, fn] of Object.entries(src)) {
+			if (typeof fn !== 'function') continue;
+			const prev = merged[key];
+			merged[key] = prev
+				? (ev) => {
+						prev(ev);
+						(fn as (e: unknown) => void)(ev);
+					}
+				: (fn as (e: unknown) => void);
+		}
+	}
+	return merged as FrameworkHooks;
 }
