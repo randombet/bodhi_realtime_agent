@@ -23,6 +23,15 @@ export class HooksManager {
 	get onTurnLatency() {
 		return this.hooks.onTurnLatency;
 	}
+	get onUserSpeechEnd() {
+		return this.hooks.onUserSpeechEnd;
+	}
+	get onTranscriptReady() {
+		return this.hooks.onTranscriptReady;
+	}
+	get onBargeInDetected() {
+		return this.hooks.onBargeInDetected;
+	}
 	get onToolCall() {
 		return this.hooks.onToolCall;
 	}

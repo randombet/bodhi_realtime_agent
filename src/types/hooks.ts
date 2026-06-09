@@ -37,6 +37,46 @@ export interface FrameworkHooks {
 		};
 	}): void;
 
+	/**
+	 * Fires when end-of-user-speech is detected (client/provider VAD end) — the
+	 * anchor for stop-to-first-audio (S2FA) and stop-to-transcript (S2T). `atMs`
+	 * comes from the session's metric clock (see `VoiceSessionConfig.nowMs`).
+	 */
+	onUserSpeechEnd?(event: {
+		sessionId: string;
+		turnId?: string;
+		atMs: number;
+	}): void;
+
+	/**
+	 * Fires when the user transcript for a turn is finalized (STT commit). Paired
+	 * with `onUserSpeechEnd`, the delta gives stop-to-transcript (S2T). Carries
+	 * `textLength` only — never the transcript text (privacy, see design §6).
+	 */
+	onTranscriptReady?(event: {
+		sessionId: string;
+		turnId?: string;
+		atMs: number;
+		textLength: number;
+	}): void;
+
+	/**
+	 * Fires when a client-VAD barge-in is detected over assistant audio. Cancel
+	 * latency is `cancelRequestedAtMs - detectedAtMs` (detection → actuation), NOT
+	 * anything involving speech end. `successful` is false when the barge-in was
+	 * detected but declined (below threshold / no active audio). All timestamps
+	 * come from the session metric clock.
+	 */
+	onBargeInDetected?(event: {
+		sessionId: string;
+		speechStartedAtMs: number;
+		detectedAtMs: number;
+		cancelRequestedAtMs: number;
+		audioStoppedAtMs?: number;
+		latencyMs: number;
+		successful: boolean;
+	}): void;
+
 	/** Fires when Gemini requests a tool invocation (before execution). */
 	onToolCall?(event: {
 		sessionId: string;
