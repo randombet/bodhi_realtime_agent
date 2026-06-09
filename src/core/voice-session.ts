@@ -593,6 +593,13 @@ export class VoiceSession {
 		// invoked at runtime (agentRouter is initialized before any transcript fires).
 		this.transcriptManager.onInputFinalized = (text) => {
 			this.turns.markInputFinalized();
+			// Latency: user transcript finalized (S2T anchor). textLength only — never text.
+			this.hooks.onTranscriptReady?.({
+				sessionId: this.config.sessionId,
+				turnId: this.turns.current?.id,
+				atMs: this.nowMs(),
+				textLength: text.length,
+			});
 			const activeId = this.interactionMode.getActiveToolCallId();
 			if (activeId) {
 				const session = this.agentRouter.getSubagentSession(activeId);
@@ -787,7 +794,15 @@ export class VoiceSession {
 				onSegmentResolved: () => this.completionArbiter.resolveDeferredPlayback(),
 				// User finished a turn → arm the response watchdog (the model now
 				// owes a reply; silence past the timeout forces a reconnect).
-				onUserTurnCompleted: () => this.reconnector.armResponseWatchdog(),
+				onUserTurnCompleted: () => {
+					this.reconnector.armResponseWatchdog();
+					// Latency: end-of-user-speech (S2FA/S2T anchor) on the shared metric clock.
+					this.hooks.onUserSpeechEnd?.({
+						sessionId: this.config.sessionId,
+						turnId: this.turns.current?.id,
+						atMs: this.clientVadDetector.lastSpeechCompletedMs || this.nowMs(),
+					});
+				},
 			},
 			(msg) => this.log(msg),
 			this.nowMs,
