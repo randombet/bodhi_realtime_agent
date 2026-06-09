@@ -1,0 +1,94 @@
+{
+  "title": "Bodhi Voice Agent — HAI Metrics",
+  "uid": "bodhi-voice-agent",
+  "tags": ["voice", "hai", "observability"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": { "list": [] },
+  "panels": [
+    { "type": "row", "title": "Layer 1 — Infrastructure latency", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 } },
+    {
+      "type": "timeseries",
+      "title": "End-to-end latency P50/P95/P99 (ms)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "ms", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 800 } ] } } },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.50, sum(rate(voice_turn_latency_e2e_ms_bucket[5m])) by (le))", "legendFormat": "p50" },
+        { "refId": "B", "expr": "histogram_quantile(0.95, sum(rate(voice_turn_latency_e2e_ms_bucket[5m])) by (le))", "legendFormat": "p95" },
+        { "refId": "C", "expr": "histogram_quantile(0.99, sum(rate(voice_turn_latency_e2e_ms_bucket[5m])) by (le))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "TTFT (provider processing) & first-audio P95 (ms)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "ms" } },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.95, sum(rate(voice_turn_provider_processing_ms_bucket[5m])) by (le))", "legendFormat": "ttft p95" },
+        { "refId": "B", "expr": "histogram_quantile(0.95, sum(rate(voice_tts_ttfb_ms_bucket[5m])) by (le))", "legendFormat": "tts ttfb p95" }
+      ]
+    },
+    { "type": "row", "title": "Layer 2 — Execution quality (live)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 } },
+    {
+      "type": "timeseries",
+      "title": "Tool result rate by status (/s)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 10 },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(voice_tool_total[5m])) by (status)", "legendFormat": "{{status}}" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Error rate by severity (/s)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 10 },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(voice_error_total[5m])) by (severity)", "legendFormat": "{{severity}}" }
+      ]
+    },
+    { "type": "row", "title": "Layer 3 — User behavior", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 } },
+    {
+      "type": "timeseries",
+      "title": "Barge-in cancel latency P95 (ms)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 19 },
+      "fieldConfig": { "defaults": { "unit": "ms", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 60 } ] } } },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.95, sum(rate(voice_bargein_cancel_latency_ms_bucket[5m])) by (le))", "legendFormat": "cancel p95" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Barge-in recovery rate (15m)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 19 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1, "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 0.9 } ] } } },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(voice_bargein_recovered_total[15m])) / clamp_min(sum(rate(voice_turns_interrupted_total[15m])), 1)" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Interruption & jump-in rate (/s)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 19 },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(voice_turns_interrupted_total[5m]))", "legendFormat": "interrupted" },
+        { "refId": "B", "expr": "sum(rate(voice_jumpin_total[5m]))", "legendFormat": "jump-in" }
+      ]
+    },
+    { "type": "row", "title": "Layer 2/4 — Quality & business (OFFLINE — fixture/demo until Phase 5)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 27 } },
+    {
+      "type": "text",
+      "title": "Offline metrics",
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 28 },
+      "options": { "mode": "markdown", "content": "WER / MOS (Layer 2) and TSR / FCR / sentiment (Layer 4) are **offline** metrics — populated by the Phase 5 evaluation pipeline (e.g. a Prometheus Pushgateway or side table). These panels are placeholders until that ingestion exists." }
+    }
+  ]
+}
