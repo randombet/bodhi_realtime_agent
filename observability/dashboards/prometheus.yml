@@ -1,0 +1,19 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alert-rules.yml
+
+scrape_configs:
+  # The host app mounts createMetricsHandler() at /metrics — set host:port here.
+  - job_name: bodhi-voice-agent
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8787"]
+
+  # Phase 2 OTLP path (optional): scrape the OTel Collector's Prometheus exporter
+  # instead of (or in addition to) the app's direct /metrics endpoint.
+  # - job_name: otel-collector
+  #   static_configs:
+  #     - targets: ["otel-collector:8889"]

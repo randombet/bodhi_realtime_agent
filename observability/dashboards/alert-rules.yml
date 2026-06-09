@@ -1,0 +1,32 @@
+# Example Prometheus alert-rule templates for the HAI voice metrics.
+# The framework ships these as templates only — it does not run Alertmanager or
+# deliver notifications (that is the operator's responsibility).
+groups:
+  - name: voice-agent-latency
+    rules:
+      # Layer 1 — infrastructure latency (ships after Phase 1).
+      - alert: VoiceE2ELatencyP95High
+        expr: histogram_quantile(0.95, sum(rate(voice_turn_latency_e2e_ms_bucket[5m])) by (le)) > 800
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Voice end-to-end latency P95 > 800ms"
+          description: "Stop-to-first-audio P95 exceeded the 800ms acceptable ceiling."
+
+  - name: voice-agent-behavior
+    rules:
+      # Layer 3 — user behavior (ships after Phase 1.5).
+      - alert: VoiceBargeInCancelLatencyP95High
+        expr: histogram_quantile(0.95, sum(rate(voice_bargein_cancel_latency_ms_bucket[5m])) by (le)) > 60
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Barge-in cancel latency P95 > 60ms"
+      - alert: VoiceBargeInRecoveryLow
+        expr: |
+          (sum(rate(voice_bargein_recovered_total[15m]))
+            / clamp_min(sum(rate(voice_turns_interrupted_total[15m])), 1)) < 0.9
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "Barge-in recovery rate < 90%"
