@@ -25,6 +25,7 @@ See per-demo sections below for env vars and run commands.
 
 | Demo | Feature | Entry Point | Run |
 |------|---------|-------------|-----|
+| Standard Agent | Local copy of the production `standard` profile (search, math, time, speed, image/video, image analysis, math-expert hand-off) | `standard-agent/standard-agent-demo.ts` | `pnpm tsx examples/standard-agent/standard-agent-demo.ts` |
 | OpenAI Realtime | OpenAI native-audio voice assistant with tools/subagents | `openai-realtime-tools.ts` | `pnpm tsx examples/openai-realtime-tools.ts` |
 | Cartesia TTS | Custom voice synthesis via Cartesia Sonic | `cartesia-tts-demo.ts` | `pnpm tsx examples/cartesia-tts-demo.ts` |
 | Twilio Human Transfer | Transfer live call to a real human and back | `twilio-demo.ts` | `pnpm tsx examples/twilio-demo.ts` |
@@ -34,6 +35,19 @@ See per-demo sections below for env vars and run commands.
 | Interviewer | Document-driven software interview with a planning subagent | `interviewer/interviewer-demo.ts` | `pnpm tsx examples/interviewer/interviewer-demo.ts` |
 | Direct RTC | Gemini Live voice agent over Opus WebRTC (no tools/subagents) | `direct-rtc-demo/server.ts` | `pnpm demo:direct-rtc` (needs `GEMINI_API_KEY`) |
 | Widget embed dump | Static page on port 8765 to test `wg_*` + `bodhi-widget.js` from another origin | `embed-widget-dump/server.mjs` | `pnpm examples:embed-widget-dump` |
+
+## Standard Agent
+
+Local, single-user copy of the hosted **Standard agent** profile. See
+[standard-agent/README.md](standard-agent/README.md).
+
+```bash
+export GEMINI_API_KEY="your-gemini-key"
+pnpm tsx examples/standard-agent/standard-agent-demo.ts
+# In another terminal (reuses the generic web client):
+pnpm tsx examples/openclaw/web-client.ts
+# Open http://localhost:8080 and click Connect.
+```
 
 ## OpenAI Realtime
 
