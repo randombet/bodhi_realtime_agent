@@ -2,10 +2,10 @@
 
 # Standard Agent — local demo
 
-A standalone, single-user copy of the production **Standard agent** profile
-(`app/agents/definitions/builtin/standard.ts`). It imports the same
-`standardMainAgent` / `mathExpertAgent` objects, tools, and media subagents the
-hosted server compiles, so the voice behavior matches the real contact card.
+A standalone, single-user demo that imports the production **Standard agent** profile agents
+(`standardMainAgent` / `mathExpertAgent`) and wires the hosted-only helpers locally. It reuses the
+same agent objects, tools, and media subagents the hosted server compiles, so the voice behavior
+matches the real contact card.
 
 ## What it does
 

@@ -3,10 +3,11 @@
 /**
  * Standard Agent — local demo
  *
- * A standalone, single-user copy of the production `standard` profile
- * (`app/agents/definitions/builtin/standard.ts`). It reuses the exact same
- * agent objects, tools, and media subagents the hosted server compiles, so the
- * voice behavior matches the real "Standard agent" contact card.
+ * A standalone, single-user demo that imports the production `standard` profile
+ * agents (`standardMainAgent` / `mathExpertAgent`) and wires the hosted-only
+ * helpers locally. It reuses the exact same agent objects, tools, and media
+ * subagents the hosted server compiles, so the voice behavior matches the real
+ * "Standard agent" contact card.
  *
  * Functionality (mirrors the standard profile):
  *   - Main agent "Bodhi": Google Search, calculator, current time, speech speed,
@@ -35,11 +36,6 @@
 
 import 'dotenv/config';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
-import { VoiceSession } from '../../src/core/voice-session.js';
-import { GeminiBatchSTTProvider } from '../../src/transport/gemini-batch-stt-provider.js';
-import { speechSpeed } from '../../src/behaviors/presets.js';
-import type { MainAgent } from '../../src/types/agent.js';
-import { ArtifactRegistry } from '../../app/lib/media/artifact-registry.js';
 import {
 	createImageReaderSubagent,
 	createImageSubagent,
@@ -47,6 +43,11 @@ import {
 } from '../../app/agents/bodhi-subagents.js';
 import { mathExpertAgent, standardMainAgent } from '../../app/agents/profiles/standard.js';
 import { createListArtifactsTool } from '../../app/agents/tools/common-tools.js';
+import { ArtifactRegistry } from '../../app/lib/media/artifact-registry.js';
+import { speechSpeed } from '../../src/behaviors/presets.js';
+import { VoiceSession } from '../../src/core/voice-session.js';
+import { GeminiBatchSTTProvider } from '../../src/transport/gemini-batch-stt-provider.js';
+import type { MainAgent } from '../../src/types/agent.js';
 
 function ts(): string {
 	return new Date().toISOString().slice(11, 23);

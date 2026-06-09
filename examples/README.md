@@ -25,7 +25,7 @@ See per-demo sections below for env vars and run commands.
 
 | Demo | Feature | Entry Point | Run |
 |------|---------|-------------|-----|
-| Standard Agent | Local copy of the production `standard` profile (search, math, time, speed, image/video, image analysis, math-expert hand-off) | `standard-agent/standard-agent-demo.ts` | `pnpm tsx examples/standard-agent/standard-agent-demo.ts` |
+| Standard Agent | Standalone demo that imports the production `standard` profile agents and wires hosted-only helpers locally (search, math, time, speed, image/video, image analysis, math-expert hand-off) | `standard-agent/standard-agent-demo.ts` | `pnpm tsx examples/standard-agent/standard-agent-demo.ts` |
 | OpenAI Realtime | OpenAI native-audio voice assistant with tools/subagents | `openai-realtime-tools.ts` | `pnpm tsx examples/openai-realtime-tools.ts` |
 | Cartesia TTS | Custom voice synthesis via Cartesia Sonic | `cartesia-tts-demo.ts` | `pnpm tsx examples/cartesia-tts-demo.ts` |
 | Twilio Human Transfer | Transfer live call to a real human and back | `twilio-demo.ts` | `pnpm tsx examples/twilio-demo.ts` |
@@ -38,7 +38,8 @@ See per-demo sections below for env vars and run commands.
 
 ## Standard Agent
 
-Local, single-user copy of the hosted **Standard agent** profile. See
+Local, single-user demo that imports the hosted **Standard agent** profile agents and wires
+demo-only helpers locally. See
 [standard-agent/README.md](standard-agent/README.md).
 
 ```bash
