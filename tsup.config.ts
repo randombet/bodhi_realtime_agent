@@ -1,7 +1,12 @@
 import { defineConfig } from "tsup";
 
 export default defineConfig({
-	entry: ["src/index.ts"],
+	entry: {
+		index: "src/index.ts",
+		// Optional observability subpath — `.../observability` (kept out of the core
+		// entry so importing nothing pulls nothing).
+		"observability/index": "src/observability/index.ts",
+	},
 	format: ["esm", "cjs"],
 	dts: true,
 	sourcemap: true,

@@ -17,6 +17,16 @@
         "types": "./dist/index.d.cts",
         "default": "./dist/index.cjs"
       }
+    },
+    "./observability": {
+      "import": {
+        "types": "./dist/observability/index.d.ts",
+        "default": "./dist/observability/index.js"
+      },
+      "require": {
+        "types": "./dist/observability/index.d.cts",
+        "default": "./dist/observability/index.cjs"
+      }
     }
   },
   "files": [
