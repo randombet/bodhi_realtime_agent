@@ -66,6 +66,7 @@ import { ToolCallRouter } from './tool-call-router.js';
 import { TranscriptManager } from './transcript-manager.js';
 import { TransportReconnector } from './transport-reconnector.js';
 import { TtsPipeline } from './tts-pipeline.js';
+import { computeTurnLatencySegments } from './turn-latency.js';
 import { TurnManager } from './turn-manager.js';
 import type { Turn } from './turn.js';
 import { computeCacheHitRatio, deriveProviderItemId, deriveUsageSource } from './usage-helpers.js';
@@ -472,6 +473,13 @@ export class VoiceSession {
 	 *  (`onModelTurnStart`); read by `handleTurnComplete` so the native gate
 	 *  engages only on a turn's terminal spoken response (audio, no tool call). */
 	private _nativeResponseDispatchedToolCall = false;
+	/** Per-response latency stamps on the metric clock (`nowMs`), reset when a
+	 *  model response begins. user-speech-end is read from the VAD at emit time.
+	 *  Consumed by `emitTurnLatency` → `onTurnLatency`. */
+	private _turnTiming: { modelStartMs: number | null; firstAudioMs: number | null } = {
+		modelStartMs: null,
+		firstAudioMs: null,
+	};
 	/** Time (ms) of the current turn's first assistant audio chunk, or `null`
 	 *  between/before turns. Barge-in *eligibility* policy for the no-`liveGate`,
 	 *  `bufferedUncancellableAudio` shape (Gemini): a client-VAD barge-in is
@@ -942,6 +950,9 @@ export class VoiceSession {
 			this._nativeResponseDispatchedToolCall = false;
 			// A genuinely new model response: reset the barge-in eligibility window.
 			this._assistantAudioStartedAtMs = null;
+			// Latency: stamp provider-response start; reset first-audio for this response.
+			this._turnTiming.modelStartMs = this.nowMs();
+			this._turnTiming.firstAudioMs = null;
 			this.turns.ensureCurrent();
 			this.logProviderUserTurnRecognition('model/tool processing started');
 			if (this.sttProvider && !this._commitFiredForTurn) {
@@ -1357,6 +1368,10 @@ export class VoiceSession {
 	 *  (`wireTtsProvider` / the native gate's `installBargeIn`). */
 	private wireTransportCallbacks(): void {
 		this.transport.onAudioOutput = (data) => this.handleAudioOutput(data);
+		// Latency: first audio chunk of the response (stop-to-first-audio anchor).
+		this.transport.onFirstAudioChunk = () => {
+			if (this._turnTiming.firstAudioMs === null) this._turnTiming.firstAudioMs = this.nowMs();
+		};
 		this.transport.onToolCall = (calls) => {
 			this.reconnector.disarmResponseWatchdog();
 			// Native playback-end gate: this response dispatched a tool call, so
@@ -2076,6 +2091,23 @@ export class VoiceSession {
 	 *
 	 * See dev_docs/framework/design-turn-lifecycle-refactor.md § Idempotent finalization.
 	 */
+	/** Emit the per-turn latency breakdown to `onTurnLatency`, when a listener is
+	 *  registered and the timing anchors are available. Stamps come from the metric
+	 *  clock (`nowMs`); user-speech-end is read from the shared-clock VAD. No-op for
+	 *  tool-only turns (no audio → no `firstAudioMs`) — `computeTurnLatencySegments`
+	 *  returns null. */
+	private emitTurnLatency(turn: Turn): void {
+		const hook = this.hooks.onTurnLatency;
+		if (!hook) return;
+		const segments = computeTurnLatencySegments({
+			userSpeechEndMs: this.clientVadDetector.lastSpeechCompletedMs || null,
+			modelStartMs: this._turnTiming.modelStartMs,
+			firstAudioMs: this._turnTiming.firstAudioMs,
+		});
+		if (!segments) return;
+		hook({ sessionId: this.config.sessionId, turnId: turn.id, segments });
+	}
+
 	private finalizeTurn(turn: Turn | null, opts: { interrupted: boolean }): void {
 		if (!turn) return;
 		if (!turn.finalize()) return; // not the first caller — structural no-op
@@ -2147,6 +2179,7 @@ export class VoiceSession {
 		this._turnWasInterrupted = opts.interrupted;
 
 		safeStep('transcript.flush', () => this.transcriptManager.flush());
+		safeStep('hook.onTurnLatency', () => this.emitTurnLatency(turn));
 		this.turns.advance();
 		this.log(`Turn complete: ${turn.id}`);
 		safeStep('publish.turn_end', () => {
