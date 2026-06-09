@@ -1890,7 +1890,19 @@ export class VoiceSession {
 		this.log(
 			`[Latency] client-VAD barge-in actuated (path=${this.liveGate() ? 'gate' : 'native-fallback'}; peak=${maxAbs}; avgAbs=${avgAbs})`,
 		);
+		// Barge-in latency = detection (`now`) → cancel actuation, on the metric clock.
+		// (Confirm delay is detectedAtMs − speechStartedAtMs; cancel latency is the
+		// detect→actuate span this hook reports.)
+		const cancelRequestedAtMs = this.nowMs();
 		this.handleClientTtsBargeIn();
+		this.hooks.onBargeInDetected?.({
+			sessionId: this.config.sessionId,
+			speechStartedAtMs: this.clientVadDetector.speechStartedAtMs,
+			detectedAtMs: now,
+			cancelRequestedAtMs,
+			latencyMs: Math.max(0, cancelRequestedAtMs - now),
+			successful: true,
+		});
 	}
 
 	private logInputTranscriptionLatency(text: string, source: string): void {
