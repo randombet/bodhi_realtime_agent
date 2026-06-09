@@ -14,8 +14,11 @@ export const DEFAULT_RECONNECT_TIMEOUT_MS = 45_000;
 
 /** Default model-silence watchdog after the user's turn ends (ms). A silent
  *  stall (socket open, no model output) past this forces a reconnect.
- *  `<= 0` disables the watchdog. */
-export const DEFAULT_RESPONSE_WATCHDOG_MS = 8_000;
+ *  `<= 0` disables the watchdog. Lowered from 8_000 to recover stalls faster;
+ *  must stay above worst-case legitimate first-token latency (observed:
+ *  ~1.3–2.8 s normal, ~2.2 s grounded on gemini-3.1-flash-live-preview —
+ *  but ~6 s grounded on the older native-audio model). */
+export const DEFAULT_RESPONSE_WATCHDOG_MS = 5_000;
 
 /** Default timeout for subagent execution (ms). */
 export const DEFAULT_SUBAGENT_TIMEOUT_MS = 60_000;
