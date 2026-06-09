@@ -83,12 +83,41 @@
         { "refId": "B", "expr": "sum(rate(voice_jumpin_total[5m]))", "legendFormat": "jump-in" }
       ]
     },
-    { "type": "row", "title": "Layer 2/4 — Quality & business (OFFLINE — fixture/demo until Phase 5)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 27 } },
+    { "type": "row", "title": "Layer 2/4 — Quality & business (OFFLINE — Phase 5 eval pipeline via Pushgateway)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 27 } },
     {
-      "type": "text",
-      "title": "Offline metrics",
-      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 28 },
-      "options": { "mode": "markdown", "content": "WER / MOS (Layer 2) and TSR / FCR / sentiment (Layer 4) are **offline** metrics — populated by the Phase 5 evaluation pipeline (e.g. a Prometheus Pushgateway or side table). These panels are placeholders until that ingestion exists." }
+      "type": "timeseries",
+      "title": "WER trend (lower is better; target < 5%)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 28 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 0.05 }, { "color": "red", "value": 0.10 } ] } } },
+      "targets": [ { "refId": "A", "expr": "voice_eval_wer", "legendFormat": "WER" } ]
+    },
+    {
+      "type": "stat",
+      "title": "MOS (target ≥ 4.5)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 4, "x": 12, "y": 28 },
+      "fieldConfig": { "defaults": { "min": 1, "max": 5, "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "yellow", "value": 4.0 }, { "color": "green", "value": 4.5 } ] } } },
+      "targets": [ { "refId": "A", "expr": "avg(voice_eval_mos)" } ]
+    },
+    {
+      "type": "stat",
+      "title": "Task success / FCR (avg)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 4, "x": 16, "y": 28 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 } },
+      "targets": [
+        { "refId": "A", "expr": "avg(voice_eval_task_success)", "legendFormat": "TSR" },
+        { "refId": "B", "expr": "avg(voice_eval_fcr)", "legendFormat": "FCR" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Sentiment trend (-1..1)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 4, "x": 20, "y": 28 },
+      "fieldConfig": { "defaults": { "min": -1, "max": 1 } },
+      "targets": [ { "refId": "A", "expr": "avg(voice_eval_sentiment)", "legendFormat": "sentiment" } ]
     }
   ]
 }

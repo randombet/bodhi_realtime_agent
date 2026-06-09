@@ -30,3 +30,26 @@ groups:
         labels: { severity: warning }
         annotations:
           summary: "Barge-in recovery rate < 90%"
+
+  - name: voice-agent-offline-eval
+    rules:
+      # Layer 2/4 — offline evaluation regressions (Phase 5; metrics pushed via
+      # Pushgateway by the eval pipeline). An injected regression trips these.
+      - alert: VoiceWERHigh
+        expr: voice_eval_wer > 0.10
+        for: 0m
+        labels: { severity: warning }
+        annotations:
+          summary: "Word Error Rate > 10% (offline eval)"
+      - alert: VoiceMOSLow
+        expr: voice_eval_mos < 4.0
+        for: 0m
+        labels: { severity: warning }
+        annotations:
+          summary: "MOS < 4.0 (offline eval)"
+      - alert: VoiceTaskSuccessLow
+        expr: avg_over_time(voice_eval_task_success[1d]) < 0.85
+        for: 0m
+        labels: { severity: warning }
+        annotations:
+          summary: "Task Success Rate < 85% (offline eval)"

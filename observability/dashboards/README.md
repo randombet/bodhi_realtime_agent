@@ -43,7 +43,7 @@ docker compose -f observability/dashboards/docker-compose.yml up
 | 1 Infrastructure | E2E latency P50/95/99, TTFT, TTS ttfb | live (Phase 1) |
 | 2 Execution | tool result rate, error rate | live (Phase 1) |
 | 3 User behavior | barge-in cancel P95, recovery rate, interruption/jump-in | live (Phase 1.5) |
-| 2/4 Quality & business | WER, MOS, TSR, FCR, sentiment | **offline** — Phase 5 ingestion (placeholder panel) |
+| 2/4 Quality & business | WER, MOS, TSR, FCR, sentiment | **offline** — push `voice_eval_*` gauges from your eval pipeline (see `renderOfflineEvalMetrics` / `computeWER` in the observability module) to a Pushgateway; panels + regression alerts read them |
 
 ## OpenTelemetry (Phase 2, optional)
 
