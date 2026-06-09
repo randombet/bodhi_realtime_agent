@@ -17,6 +17,11 @@ export {
 } from './histogram.js';
 export { MetricsCollector } from './metrics-collector.js';
 export {
+	computeWER,
+	type OfflineEvalMetrics,
+	renderOfflineEvalMetrics,
+} from './offline-eval.js';
+export {
 	DEFAULT_PRIVACY_CONFIG,
 	hashUnit,
 	LabelGuard,
