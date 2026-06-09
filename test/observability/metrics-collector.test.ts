@@ -70,6 +70,28 @@ describe('MetricsCollector', () => {
 		expect(c.toolDurationMs.size).toBe(2);
 	});
 
+	it('caps label cardinality: providers past the cap fold to "other"', () => {
+		const c = new MetricsCollector({ maxLabelCardinality: 2 });
+		for (const provider of ['p1', 'p2', 'p3', 'p4']) {
+			c.hooks.onTTSSynthesis?.({
+				sessionId: 's',
+				provider,
+				textLength: 10,
+				durationMs: 100,
+				audioMs: 90,
+				ttfbMs: 20,
+				requestId: 1,
+			});
+		}
+		const labels = c.ttsTtfbMs.entries().map((e) => e.labels.provider);
+		// 2 distinct kept, the rest folded → at most 3 series (p1, p2, other)
+		expect(c.ttsTtfbMs.size).toBe(3);
+		expect(labels).toContain('other');
+		expect(labels).toContain('p1');
+		expect(labels).toContain('p2');
+		expect(labels).not.toContain('p3');
+	});
+
 	it('never stores transcript text (textLength only on the typed payload)', () => {
 		const c = new MetricsCollector();
 		// onTranscriptReady payload exposes textLength, not text — recorded as a span only.
