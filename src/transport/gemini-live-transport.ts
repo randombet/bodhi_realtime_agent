@@ -618,7 +618,10 @@ export class GeminiLiveTransport implements LLMTransport {
 	 *  after a reconnect. No-op if the session is not connected. */
 	elicitResponse(): void {
 		if (!this.session) return;
-		this.session.sendClientContent({ turns: [], turnComplete: true });
+		// Omit `turns` entirely — the SDK parses any non-null/non-undefined value
+		// and rejects an empty array ("contents are required"), so `turns: []`
+		// throws instead of sending a bare turnComplete.
+		this.session.sendClientContent({ turnComplete: true });
 	}
 
 	/** No-op for V1 — server VAD only. */

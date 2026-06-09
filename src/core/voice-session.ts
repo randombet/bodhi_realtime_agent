@@ -1372,8 +1372,14 @@ export class VoiceSession {
 		this.transport.onTurnComplete = (serverTurnId) => this.handleTurnComplete(serverTurnId);
 		this.transport.onInterrupted = (serverTurnId) => this.handleInterrupted(serverTurnId);
 		this.transport.onOutputTranscription = (text) => {
+			const turn = this.turns.ensureCurrent();
+			if (!turn) {
+				this.log(
+					'[Watchdog] Ignored output transcription for already-finalized turn; watchdog NOT disarmed',
+				);
+				return;
+			}
 			this.reconnector.disarmResponseWatchdog();
-			this.turns.ensureCurrent();
 			this.transcriptManager.handleOutput(text);
 		};
 		this.transport.onSessionReady = (sessionId) => this.handleSetupComplete(sessionId);
@@ -1900,6 +1906,11 @@ export class VoiceSession {
 		// implement quiesce(); guarantees no model audio leaks into dictation
 		// mode even if a quiesce race occurs.
 		if (!this.dictation.isAgentMode()) return;
+		const turn = this.turns.ensureCurrent();
+		if (!turn) {
+			this.log('[Watchdog] Ignored output audio for already-finalized turn; watchdog NOT disarmed');
+			return;
+		}
 		// Mark the turn's first assistant audio — drives the client-VAD barge-in
 		// eligibility window (`isAssistantAudioActive`). Trailing-audio suppression
 		// after a barge-in is the transport's job (cancelResponse), not here.
@@ -1910,7 +1921,6 @@ export class VoiceSession {
 		// Idempotent — subsequent chunks no-op inside the class.
 		this.maybeArmGraceOnFirstAudio();
 
-		this.turns.ensureCurrent();
 		this.signalAudioStarted();
 		const raw = Buffer.from(data, 'base64');
 		if (this.nativePlaybackGatingActive) this.nativeGate?.noteAudioChunk(raw.length);
@@ -2004,17 +2014,27 @@ export class VoiceSession {
 	}
 
 	private handleTurnComplete(serverTurnId?: number): void {
-		this.reconnector.disarmResponseWatchdog();
-		// A completed turn means the connection is healthy — reset reconnect counter
-		this.reconnector.resetAttempts();
-
 		// Correlate the completion to its Turn. `stale` → a long-gone turn,
 		// ignore; `new` → a turn that produced no model output, birth it.
 		const r = this.turns.resolve(serverTurnId, 'completion');
-		if (r.kind === 'stale') return;
+		if (r.kind === 'stale') {
+			this.log(
+				`[Watchdog] Ignored stale turnComplete (serverTurnId=${serverTurnId}); watchdog NOT disarmed`,
+			);
+			return;
+		}
 		const turn = r.kind === 'new' ? this.turns.ensureCurrent(serverTurnId) : r.turn;
 		// Drop a trailing / superseded completion before touching any gate state.
-		if (!turn || turn.isFinalized || turn !== this.turns.current) return;
+		if (!turn || turn.isFinalized || turn !== this.turns.current) {
+			this.log(
+				`[Watchdog] Ignored turnComplete for already-finalized/superseded turn (serverTurnId=${serverTurnId}); watchdog NOT disarmed`,
+			);
+			return;
+		}
+
+		this.reconnector.disarmResponseWatchdog();
+		// A completed turn means the connection is healthy — reset reconnect counter
+		this.reconnector.resetAttempts();
 
 		// TTS turn gating: when TTS is active, defer turn completion until TTS finishes
 		const ttsGate = this.ttsPipeline?.gate;
@@ -2190,14 +2210,26 @@ export class VoiceSession {
 	}
 
 	private handleInterrupted(serverTurnId?: number): void {
-		this.reconnector.disarmResponseWatchdog();
 		// Correlate the interrupt to its Turn. A `stale` interrupt for a
 		// long-gone turn is ignored; `new` (no turn / interrupt before any model
 		// output) births one via the no-turn net. The structural idempotency of
 		// finalizeTurn replaces the old trailing-interrupt / dedup-set guards.
 		const r = this.turns.resolve(serverTurnId, 'interrupt');
-		if (r.kind === 'stale') return;
+		if (r.kind === 'stale') {
+			this.log(
+				`[Watchdog] Ignored stale interrupted (serverTurnId=${serverTurnId}); watchdog NOT disarmed`,
+			);
+			return;
+		}
 		const turn = r.kind === 'new' ? this.turns.ensureCurrent(serverTurnId) : r.turn;
+		if (!turn || turn.isFinalized || turn !== this.turns.current) {
+			this.log(
+				`[Watchdog] Ignored interrupted for already-finalized/superseded turn (serverTurnId=${serverTurnId}); watchdog NOT disarmed`,
+			);
+			return;
+		}
+
+		this.reconnector.disarmResponseWatchdog();
 		this.finalizeTurn(turn, { interrupted: true });
 	}
 
