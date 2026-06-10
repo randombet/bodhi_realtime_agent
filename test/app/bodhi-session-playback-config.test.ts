@@ -66,3 +66,78 @@ describe('createBodhiSessionConfig — playback-state config threading', () => {
 		expect(config.clientAudioInputRate).toBe(16000);
 	});
 });
+
+describe('createBodhiSessionConfig — watchdog replay recovery threading (H2)', () => {
+	it('threads watchdogReplayRecovery for gemini sessions; absent by default', async () => {
+		const on = await createBodhiSessionConfig({
+			...baseOptions(),
+			watchdogReplayRecovery: true,
+		});
+		expect(on.watchdogReplayRecovery).toBe(true);
+
+		const off = await createBodhiSessionConfig(baseOptions());
+		expect(off.watchdogReplayRecovery).toBeUndefined();
+	});
+
+	it('does NOT forward watchdogReplayRecovery for the openai provider (replay is Gemini-only)', async () => {
+		const config = await createBodhiSessionConfig({
+			...baseOptions(),
+			liveRealtimeProvider: 'openai' as const,
+			openAiApiKey: 'test-openai-key',
+			watchdogReplayRecovery: true,
+		});
+		expect(config.watchdogReplayRecovery).toBeUndefined();
+	});
+
+	it('threads an explicit responseWatchdogMs override verbatim', async () => {
+		const config = await createBodhiSessionConfig({
+			...baseOptions(),
+			responseWatchdogMs: 12_000,
+		});
+		expect(config.responseWatchdogMs).toBe(12_000);
+	});
+
+	it('derives the slow-model window from the EFFECTIVE model: no-override fallback → 8000', async () => {
+		// The fallback (gemini-2.5-flash-native-audio-preview-12-2025) is applied
+		// inside createBodhiSessionConfig — deciding from the override variable
+		// alone would leave exactly these sessions on the hazardous 5 s default.
+		const config = await createBodhiSessionConfig({
+			...baseOptions(),
+			watchdogReplayRecovery: true,
+		});
+		expect(config.geminiModel).toBe('gemini-2.5-flash-native-audio-preview-12-2025');
+		expect(config.responseWatchdogMs).toBe(8000);
+	});
+
+	it('derives the slow-model window for the second 2.5 native-audio catalog id', async () => {
+		const config = await createBodhiSessionConfig({
+			...baseOptions(),
+			liveRealtimeModel: 'gemini-live-2.5-flash-native-audio',
+			watchdogReplayRecovery: true,
+		});
+		expect(config.responseWatchdogMs).toBe(8000);
+	});
+
+	it('keeps the framework default window on gemini-3.1-flash-live-preview', async () => {
+		const config = await createBodhiSessionConfig({
+			...baseOptions(),
+			liveRealtimeModel: 'gemini-3.1-flash-live-preview',
+			watchdogReplayRecovery: true,
+		});
+		expect(config.responseWatchdogMs).toBeUndefined();
+	});
+
+	it('does not derive a window when replay recovery is off (two independent knobs)', async () => {
+		const config = await createBodhiSessionConfig(baseOptions());
+		expect(config.responseWatchdogMs).toBeUndefined();
+	});
+
+	it('an explicit responseWatchdogMs wins over the derived slow-model window', async () => {
+		const config = await createBodhiSessionConfig({
+			...baseOptions(),
+			watchdogReplayRecovery: true,
+			responseWatchdogMs: 9_500,
+		});
+		expect(config.responseWatchdogMs).toBe(9_500);
+	});
+});
