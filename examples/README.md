@@ -39,7 +39,9 @@ See per-demo sections below for env vars and run commands.
 ## Standard Agent
 
 Local, single-user demo that imports the hosted **Standard agent** profile agents and wires
-demo-only helpers locally. See
+demo-only helpers locally. Also opts into `watchdogReplayRecovery` (watchdog-stall recovery via
+retained-utterance replay — dark by default framework-wide; see
+`dev_docs/framework/design-retained-user-content-recovery.md`). See
 [standard-agent/README.md](standard-agent/README.md).
 
 ```bash
@@ -142,3 +144,12 @@ See [embed-widget-dump/README.md](embed-widget-dump/README.md). Run the Bodhi AP
 ```bash
 pnpm examples:embed-widget-dump
 ```
+
+## Probes (`probes/`)
+
+Not demos — standalone scripts that verify a provider behavior a design depends on (Phase 0
+gates; results are recorded in the corresponding `dev_docs/framework/design-*.md`).
+
+| Probe | Verifies | Run |
+|-------|----------|-----|
+| `probes/gemini-inline-audio-replay.ts` | Gemini Live answers a `clientContent` inline-audio user turn with `turnComplete: true` (retained-utterance recovery replay shape), in clean and post-barge-in states | `pnpm tsx examples/probes/gemini-inline-audio-replay.ts` (needs `GEMINI_API_KEY`) |
