@@ -244,6 +244,71 @@ describe('VoiceSession', () => {
 		expect(onSessionStart).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'sess_1' }));
 	});
 
+	it('throwing observability hooks do not disrupt the turn (fire-and-forget isolation)', async () => {
+		// FrameworkHooks contract: exceptions are caught and logged. A throwing
+		// user hook must not abort the path that emitted it — here, a throwing
+		// onTranscriptReady fires mid-transcript-flush and must not prevent the
+		// assistant final transcript or turn completion from reaching the client.
+		const boom = () => {
+			throw new Error('user hook exploded');
+		};
+		const onTranscriptReady = vi.fn(boom);
+		session = new VoiceSession({
+			sessionId: 'sess_1',
+			userId: 'user_1',
+			apiKey: 'test-key',
+			agents: [createEchoAgent()],
+			initialAgent: 'echo',
+			port: 9944,
+			model: mockModel,
+			hooks: {
+				onTranscriptReady,
+				onUserSpeechEnd: boom,
+				onBargeInDetected: boom,
+				onJumpIn: boom,
+				onAgentReentry: boom,
+				onTurnFinalized: boom,
+			},
+		});
+
+		await session.start();
+		await new Promise((r) => setTimeout(r, 50));
+
+		const WebSocket = (await import('ws')).default;
+		const ws = new WebSocket('ws://localhost:9944');
+		await new Promise<void>((r) => ws.on('open', r));
+
+		const received: string[] = [];
+		ws.on('message', (data, isBinary) => {
+			if (!isBinary) received.push(data.toString());
+		});
+
+		const { _getMessageHandler } = await import('@google/genai');
+		const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+		fire({ serverContent: { inputTranscription: { text: 'Hello there' } } });
+		fire({ serverContent: { outputTranscription: { text: 'Hi! How can I help?' } } });
+		fire({ serverContent: { turnComplete: true } });
+
+		await new Promise((r) => setTimeout(r, 100));
+
+		const messages = received.map((r) => JSON.parse(r)) as Record<string, unknown>[];
+		const assistantFinal = messages.find(
+			(m) => m.type === 'transcript' && m.role === 'assistant' && m.partial === false,
+		);
+		const turnEnd = messages.find((m) => m.type === 'turn.end');
+
+		// The throwing hook actually fired (the test is meaningful)...
+		expect(onTranscriptReady).toHaveBeenCalled();
+		// ...and the turn still completed cleanly despite it.
+		expect(assistantFinal).toBeDefined();
+		expect(assistantFinal?.text).toBe('Hi! How can I help?');
+		expect(turnEnd).toBeDefined();
+
+		ws.close();
+		await new Promise<void>((r) => ws.on('close', r));
+	});
+
 	it('sends session.config and session.ready for local demo clients', async () => {
 		session = new VoiceSession({
 			sessionId: 'sess_ready',

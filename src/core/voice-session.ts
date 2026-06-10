@@ -597,12 +597,14 @@ export class VoiceSession {
 		this.transcriptManager.onInputFinalized = (text) => {
 			this.turns.markInputFinalized();
 			// Latency: user transcript finalized (S2T anchor). textLength only — never text.
-			this.hooks.onTranscriptReady?.({
-				sessionId: this.config.sessionId,
-				turnId: this.turns.current?.id,
-				atMs: this.nowMs(),
-				textLength: text.length,
-			});
+			this.safeEmitHook('onTranscriptReady', () =>
+				this.hooks.onTranscriptReady?.({
+					sessionId: this.config.sessionId,
+					turnId: this.turns.current?.id,
+					atMs: this.nowMs(),
+					textLength: text.length,
+				}),
+			);
 			const activeId = this.interactionMode.getActiveToolCallId();
 			if (activeId) {
 				const session = this.agentRouter.getSubagentSession(activeId);
@@ -800,11 +802,13 @@ export class VoiceSession {
 				onUserTurnCompleted: () => {
 					this.reconnector.armResponseWatchdog();
 					// Latency: end-of-user-speech (S2FA/S2T anchor) on the shared metric clock.
-					this.hooks.onUserSpeechEnd?.({
-						sessionId: this.config.sessionId,
-						turnId: this.turns.current?.id,
-						atMs: this.clientVadDetector.lastSpeechCompletedMs || this.nowMs(),
-					});
+					this.safeEmitHook('onUserSpeechEnd', () =>
+						this.hooks.onUserSpeechEnd?.({
+							sessionId: this.config.sessionId,
+							turnId: this.turns.current?.id,
+							atMs: this.clientVadDetector.lastSpeechCompletedMs || this.nowMs(),
+						}),
+					);
 				},
 			},
 			(msg) => this.log(msg),
@@ -1392,18 +1396,20 @@ export class VoiceSession {
 			this._turnTiming.firstAudioMs = this.nowMs();
 			// Re-entry latency: pause from the last interrupt (yield) to this audio.
 			if (this._lastInterruptAtMs !== null) {
-				this.hooks.onAgentReentry?.({
-					sessionId: this.config.sessionId,
-					reentryMs: Math.max(0, this._turnTiming.firstAudioMs - this._lastInterruptAtMs),
-				});
+				const reentryMs = Math.max(0, this._turnTiming.firstAudioMs - this._lastInterruptAtMs);
 				this._lastInterruptAtMs = null;
+				this.safeEmitHook('onAgentReentry', () =>
+					this.hooks.onAgentReentry?.({ sessionId: this.config.sessionId, reentryMs }),
+				);
 			}
 			// JIR: agent audio began while the user is still speaking (false turn-end).
 			if (this.clientVadDetector.isSpeechActive) {
-				this.hooks.onJumpIn?.({
-					sessionId: this.config.sessionId,
-					turnId: this.turns.current?.id,
-				});
+				this.safeEmitHook('onJumpIn', () =>
+					this.hooks.onJumpIn?.({
+						sessionId: this.config.sessionId,
+						turnId: this.turns.current?.id,
+					}),
+				);
 			}
 		};
 		this.transport.onToolCall = (calls) => {
@@ -1910,14 +1916,16 @@ export class VoiceSession {
 			if (!this.clientVadDetector.hasBargeInMissed) {
 				this.clientVadDetector.markBargeInMissed();
 				const at = this.nowMs();
-				this.hooks.onBargeInDetected?.({
-					sessionId: this.config.sessionId,
-					speechStartedAtMs: this.clientVadDetector.speechStartedAtMs,
-					detectedAtMs: now,
-					cancelRequestedAtMs: at,
-					latencyMs: Math.max(0, at - now),
-					successful: false,
-				});
+				this.safeEmitHook('onBargeInDetected', () =>
+					this.hooks.onBargeInDetected?.({
+						sessionId: this.config.sessionId,
+						speechStartedAtMs: this.clientVadDetector.speechStartedAtMs,
+						detectedAtMs: now,
+						cancelRequestedAtMs: at,
+						latencyMs: Math.max(0, at - now),
+						successful: false,
+					}),
+				);
 			}
 			return;
 		}
@@ -1930,14 +1938,16 @@ export class VoiceSession {
 		// detect→actuate span this hook reports.)
 		const cancelRequestedAtMs = this.nowMs();
 		this.handleClientTtsBargeIn();
-		this.hooks.onBargeInDetected?.({
-			sessionId: this.config.sessionId,
-			speechStartedAtMs: this.clientVadDetector.speechStartedAtMs,
-			detectedAtMs: now,
-			cancelRequestedAtMs,
-			latencyMs: Math.max(0, cancelRequestedAtMs - now),
-			successful: true,
-		});
+		this.safeEmitHook('onBargeInDetected', () =>
+			this.hooks.onBargeInDetected?.({
+				sessionId: this.config.sessionId,
+				speechStartedAtMs: this.clientVadDetector.speechStartedAtMs,
+				detectedAtMs: now,
+				cancelRequestedAtMs,
+				latencyMs: Math.max(0, cancelRequestedAtMs - now),
+				successful: true,
+			}),
+		);
 	}
 
 	private logInputTranscriptionLatency(text: string, source: string): void {
@@ -2539,12 +2549,30 @@ export class VoiceSession {
 	private reportError(component: string, error: unknown): void {
 		const err = error instanceof Error ? error : new Error(String(error));
 		if (this.hooks.onError) {
-			this.hooks.onError({
-				sessionId: this.config.sessionId,
-				component,
-				error: err,
-				severity: 'error',
-			});
+			try {
+				this.hooks.onError({
+					sessionId: this.config.sessionId,
+					component,
+					error: err,
+					severity: 'error',
+				});
+			} catch (e) {
+				// onError is itself a user hook — a throw here must not escape the
+				// error-reporting path (it would defeat safeStep/safeEmitHook guards).
+				this.log(`onError hook threw: ${(e as Error).message}`);
+			}
+		}
+	}
+
+	/** Invoke an observability hook with throw isolation. FrameworkHooks are
+	 *  fire-and-forget: a throwing user-supplied hook must never disrupt the
+	 *  turn/VAD/transport path that emitted it. */
+	private safeEmitHook(name: string, fn: () => void): void {
+		try {
+			fn();
+		} catch (e) {
+			this.log(`hook ${name} threw: ${(e as Error).message}`);
+			this.reportError(`hook.${name}`, e);
 		}
 	}
 
