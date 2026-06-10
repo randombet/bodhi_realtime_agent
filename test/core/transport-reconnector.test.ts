@@ -170,6 +170,54 @@ describe('TransportReconnector', () => {
 			expect(h.sm.transitionTo).toHaveBeenLastCalledWith('ACTIVE');
 		});
 
+		it('hosted (DirectRtcClientChannel) reconnect drains assistant audio to the client, never the LLM', async () => {
+			// H1 of design-hosted-replay-recovery-rollout.md: same contract as the
+			// ClientSenderAdapter case, for the direct-RTC channel — both drain
+			// paths (this one: budgeted triggerReconnect).
+			const { DirectRtcClientChannel } = await import(
+				'../../src/transport/direct-rtc-client-channel.js'
+			);
+			const senderAudio = vi.fn();
+			const channel = new DirectRtcClientChannel({
+				sender: { sendAudio: senderAudio, sendJson: vi.fn() },
+			});
+			const h = makeHarness({
+				clientTransport: channel as unknown as ReturnType<typeof fakeClientTransport>,
+			});
+
+			h.reconnector.triggerReconnect('transport-close');
+			channel.sendAudioToClient(Buffer.from('assistant-speech'));
+			expect(senderAudio).not.toHaveBeenCalled();
+
+			vi.advanceTimersByTime(1000);
+			await vi.runAllTimersAsync();
+
+			expect(senderAudio).toHaveBeenCalledWith(Buffer.from('assistant-speech'));
+			expect(h.transport.sendAudio).not.toHaveBeenCalled();
+			expect(h.sm.transitionTo).toHaveBeenLastCalledWith('ACTIVE');
+		});
+
+		it('GoAway drain (DirectRtcClientChannel) also delivers assistant audio to the client, never the LLM', async () => {
+			const { DirectRtcClientChannel } = await import(
+				'../../src/transport/direct-rtc-client-channel.js'
+			);
+			const senderAudio = vi.fn();
+			const channel = new DirectRtcClientChannel({
+				sender: { sendAudio: senderAudio, sendJson: vi.fn() },
+			});
+			const h = makeHarness({
+				clientTransport: channel as unknown as ReturnType<typeof fakeClientTransport>,
+			});
+
+			h.reconnector.handleGoAway('10s');
+			channel.sendAudioToClient(Buffer.from('assistant-tail'));
+			await vi.runAllTimersAsync();
+
+			expect(senderAudio).toHaveBeenCalledWith(Buffer.from('assistant-tail'));
+			expect(h.transport.sendAudio).not.toHaveBeenCalled();
+			expect(h.sm.transitionTo).toHaveBeenLastCalledWith('ACTIVE');
+		});
+
 		it('follows the backoff schedule 1000/2000/4000 across attempts', async () => {
 			const h = makeHarness({});
 			const reconnect = h.transport.reconnect as ReturnType<typeof vi.fn>;
