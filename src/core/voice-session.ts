@@ -42,8 +42,8 @@ import type { ArtifactRef, ArtifactStore, SaveArtifactParams } from '../types/wo
 import { AudioRouter } from './audio-router.js';
 import { BackgroundNotificationQueue } from './background-notification-queue.js';
 import { ClientMessageRouter } from './client-message-router.js';
-import { ClientVadDetector } from './client-vad-detector.js';
-import { DEFAULT_RESPONSE_WATCHDOG_MS } from './constants.js';
+import { ClientVadDetector, pcmChunksContainSpeech } from './client-vad-detector.js';
+import { DEFAULT_REPLAY_MAX_AGE_MS, DEFAULT_RESPONSE_WATCHDOG_MS } from './constants.js';
 import { ConversationContext } from './conversation-context.js';
 import { ConversationHistoryWriter } from './conversation-history-writer.js';
 import { DictationController } from './dictation-controller.js';
@@ -958,10 +958,13 @@ export class VoiceSession {
 			this._assistantAudioStartedAtMs = null;
 			const modelTurn = this.turns.ensureCurrent();
 			// Correlated model activity consumed the pending utterance — clear the
-			// recovery-replay candidate. Trailing model-start for a just-finalized
-			// turn (ensureCurrent → null) must NOT clear it (correlate-before-
-			// mutate, same scoped rule as the watchdog-disarm guards).
-			if (modelTurn) this.utteranceRetainer?.clear();
+			// recovery-replay candidate and the replay stage. Trailing model-start
+			// for a just-finalized turn (ensureCurrent → null) must NOT clear it
+			// (correlate-before-mutate, same scoped rule as the disarm guards).
+			if (modelTurn) {
+				this.utteranceRetainer?.clear();
+				this.reconnector.resetReplayState();
+			}
 			this.logProviderUserTurnRecognition('model/tool processing started');
 			if (this.sttProvider && !this._commitFiredForTurn) {
 				this._commitFiredForTurn = true;
@@ -1138,6 +1141,11 @@ export class VoiceSession {
 				isAgentMode: () => this.dictation.isAgentMode(),
 				reportError: (context, error) => this.reportError(context, error),
 				log: (msg) => this.log(msg),
+				// Watchdog-stall recovery (watchdogReplayRecovery flag): without a
+				// retainer this returns null and recovery keeps today's behavior.
+				peekRetainedUtterance: () =>
+					this.utteranceRetainer?.peek(DEFAULT_REPLAY_MAX_AGE_MS) ?? null,
+				detectSpeech: (chunks) => pcmChunksContainSpeech(chunks),
 			},
 			this.responseWatchdogMs,
 		);
@@ -1687,6 +1695,7 @@ export class VoiceSession {
 		this.notificationQueue?.clear();
 		// Retained user audio is session-scoped and memory-only — drop it now.
 		this.utteranceRetainer?.clear();
+		this.reconnector.resetReplayState();
 
 		// Flush any buffered transcription before closing
 		this.transcriptManager.flush();

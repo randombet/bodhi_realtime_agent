@@ -12,6 +12,26 @@ export const CLIENT_VAD_AVG_ABS_THRESHOLD = 220;
 /** Outcome of a completed speech segment. */
 export type VadSegmentOutcome = 'completed' | 'ignored' | 'none';
 
+/** One-shot speech check over PCM16 chunks with the same energy thresholds as
+ *  the live VAD. Used on the reconnect-buffer drain ("did the user speak during
+ *  the reconnect window?") — clients stream continuously, so chunk *presence*
+ *  is meaningless; only speech energy counts. */
+export function pcmChunksContainSpeech(chunks: Buffer[]): boolean {
+	const energy: FrameEnergy = { maxAbs: 0, avgAbs: 0, samples: 0 };
+	for (const chunk of chunks) {
+		if (chunk.length < 2) continue;
+		analyzeFrameInto(chunk, energy);
+		if (energy.samples === 0) continue;
+		if (
+			energy.maxAbs >= CLIENT_VAD_PEAK_THRESHOLD ||
+			energy.avgAbs >= CLIENT_VAD_AVG_ABS_THRESHOLD
+		) {
+			return true;
+		}
+	}
+	return false;
+}
+
 /**
  * Events emitted by `ClientVadDetector`. The detector owns the VAD *state*;
  * these hooks let `VoiceSession` keep the *policy* (barge-in actuation, the

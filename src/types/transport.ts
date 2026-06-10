@@ -179,6 +179,19 @@ export interface ContentTurn {
 	text: string;
 }
 
+/** A retained user utterance for watchdog-stall recovery replay
+ *  (`LLMTransport.replayUserTurn`). Produced by `LastUtteranceRetainer` from
+ *  the transport-normalized PCM the router actually sent to the model. */
+export interface RetainedUserTurn {
+	/** PCM16 mono at `transport.audioFormat.inputSampleRate`. */
+	pcm: Buffer;
+	sampleRateHz: number;
+	/** Retainer-owned identity — no framework turn id exists at VAD seal time. */
+	utteranceId: number;
+	/** Freshness key for age-based replay expiry. */
+	sealedAtMs: number;
+}
+
 /**
  * Rich replay item for reconnect/transfer recovery.
  * Preserves the full conversation structure — text, tool calls/results, files,
@@ -550,6 +563,16 @@ export interface LLMTransport {
 	 *  back to `triggerGeneration()`. Gemini implements it as a content-less
 	 *  `turnComplete`. */
 	elicitResponse?(): void;
+
+	/** Re-send a retained user utterance as a complete user turn, eliciting a
+	 *  response. Used by the response watchdog when a stalled turn left pending
+	 *  user input the provider never answered — first in-place on the existing
+	 *  connection, then once more after a reconnect if the model stays silent.
+	 *  Returns true if the transport dispatched it; false/absent → caller falls
+	 *  back. Optional. Gemini sends `clientContent` inline audio with an explicit
+	 *  `turnComplete` (no server-VAD dependence; Phase 0 validated — see
+	 *  dev_docs/framework/design-retained-user-content-recovery.md). */
+	replayUserTurn?(turn: RetainedUserTurn): boolean;
 
 	// --- Turn correlation (optional) ---
 	/** The transport's currently-active server-turn id, or `undefined` when no

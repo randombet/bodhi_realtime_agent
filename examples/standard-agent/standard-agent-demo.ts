@@ -103,6 +103,10 @@ async function main() {
 			read_image: createImageReaderSubagent(API_KEY, artifactRegistry),
 		},
 		geminiModel: LIVE_MODEL,
+		// Watchdog-stall recovery (R6 validation): retain the last utterance and
+		// replay it on a stall — in-place first, reconnect+replay as escalation.
+		// Dark by default framework-wide; this demo opts in for live validation.
+		watchdogReplayRecovery: true,
 		// Latency experiment #2: tighter endpointing (default is silenceDurationMs=500).
 		// 200ms makes Gemini commit the user turn sooner after they stop speaking.
 		realtimeInputConfig: {

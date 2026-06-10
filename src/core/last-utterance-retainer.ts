@@ -14,15 +14,9 @@
  * See dev_docs/framework/design-retained-user-content-recovery.md.
  */
 
-export interface RetainedUserTurn {
-	/** PCM16 mono, transport-normalized (transport.audioFormat.inputSampleRate). */
-	pcm: Buffer;
-	sampleRateHz: number;
-	/** Retainer-owned identity — no framework turn id exists at VAD seal time. */
-	utteranceId: number;
-	/** Freshness key for age-based replay expiry. */
-	sealedAtMs: number;
-}
+import type { RetainedUserTurn } from '../types/transport.js';
+
+export type { RetainedUserTurn };
 
 export interface LastUtteranceRetainerOptions {
 	/** Rate of the PCM fed in — transport.audioFormat.inputSampleRate. */
