@@ -1171,6 +1171,17 @@ export class VoiceSession {
 					this._reconnectWindowFrames = 0;
 					this._reconnectWindowSpeech = false;
 				},
+				// R7b: a replayed turn emits no input transcription — promote the
+				// pending batch-STT/display partial so the user's words appear.
+				onReplayDispatched: this.utteranceRetainer
+					? () => {
+							if (this.transcriptManager.finalizeInterruptedInputPartial()) {
+								this.log(
+									'[Watchdog] Promoted pending input partial as the replayed turn transcript',
+								);
+							}
+						}
+					: undefined,
 			},
 			this.responseWatchdogMs,
 		);

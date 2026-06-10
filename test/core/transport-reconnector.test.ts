@@ -86,6 +86,7 @@ function makeHarness(opts: {
 	detectSpeech?: TransportReconnectorDeps['detectSpeech'];
 	isSpeechActive?: TransportReconnectorDeps['isSpeechActive'];
 	hostedReconnectSpeech?: TransportReconnectorDeps['hostedReconnectSpeech'];
+	onReplayDispatched?: TransportReconnectorDeps['onReplayDispatched'];
 }): Harness {
 	const sm = fakeSessionManager(
 		opts.initial ?? 'ACTIVE',
@@ -110,6 +111,7 @@ function makeHarness(opts: {
 		detectSpeech: opts.detectSpeech,
 		isSpeechActive: opts.isSpeechActive,
 		hostedReconnectSpeech: opts.hostedReconnectSpeech,
+		onReplayDispatched: opts.onReplayDispatched,
 	};
 	const reconnector = new TransportReconnector(deps, opts.watchdogMs ?? 8000);
 	return { reconnector, sm, clientTransport, transport, eventBus, log, reportError };
@@ -765,6 +767,55 @@ describe('TransportReconnector', () => {
 			await vi.advanceTimersByTimeAsync(WD);
 			await vi.advanceTimersByTimeAsync(1000);
 			expect(replayUserTurn).toHaveBeenCalledTimes(1);
+		});
+
+		it('R7b: onReplayDispatched fires on stage-1 and stage-2 replay success, never on the nudge', async () => {
+			const { transport, replayUserTurn } = replayTransport();
+			const onReplayDispatched = vi.fn();
+			const h = makeHarness({
+				watchdogMs: WD,
+				transport,
+				peekRetainedUtterance: () => retained(),
+				onReplayDispatched,
+			});
+			h.reconnector.armResponseWatchdog();
+			await vi.advanceTimersByTimeAsync(WD); // stage 1
+			expect(onReplayDispatched).toHaveBeenCalledTimes(1);
+
+			await vi.advanceTimersByTimeAsync(WD); // stage 2: reconnect + replay
+			await vi.advanceTimersByTimeAsync(1000);
+			expect(replayUserTurn).toHaveBeenCalledTimes(2);
+			expect(onReplayDispatched).toHaveBeenCalledTimes(2);
+
+			// Fire 3 → tier-3 nudge only: no further dispatch callback.
+			await vi.advanceTimersByTimeAsync(WD);
+			await vi.advanceTimersByTimeAsync(2000);
+			expect(h.transport.elicitResponse).toHaveBeenCalledTimes(1);
+			expect(onReplayDispatched).toHaveBeenCalledTimes(2);
+		});
+
+		it('R7b: onReplayDispatched does NOT fire when the replay throws or is deferred', async () => {
+			const { transport } = replayTransport(() => {
+				throw new Error('boom');
+			});
+			const onReplayDispatched = vi.fn();
+			let speaking = false;
+			const h = makeHarness({
+				watchdogMs: WD,
+				transport,
+				peekRetainedUtterance: () => retained(),
+				isSpeechActive: () => speaking,
+				onReplayDispatched,
+			});
+			speaking = true;
+			h.reconnector.armResponseWatchdog();
+			await vi.advanceTimersByTimeAsync(WD); // deferred (mid-speech)
+			expect(onReplayDispatched).not.toHaveBeenCalled();
+
+			speaking = false;
+			h.reconnector.armResponseWatchdog();
+			await vi.advanceTimersByTimeAsync(WD); // stage 1 attempt → throws
+			expect(onReplayDispatched).not.toHaveBeenCalled();
 		});
 
 		it('transport-close reconnect never replays (no recovery without a watchdog stall)', async () => {

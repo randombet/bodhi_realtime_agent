@@ -150,6 +150,36 @@ export class TranscriptManager {
 		this.onInputFinalized?.(text);
 	}
 
+	/**
+	 * R7b (replayed-turn transcript): promote the pending input text to a
+	 * finalized user message. Used when a watchdog replay re-sends the retained
+	 * utterance — inline-audio replay turns emit NO input transcription, so
+	 * without this the user would see an answer to an invisible question.
+	 * Prefers the authoritative batch-STT `inputBuffer` when present; falls
+	 * back to the interrupted-turn display partial. Locks the turn (like
+	 * `flushInput`) so a trailing transcript for the same utterance cannot
+	 * duplicate the message. Returns false when nothing is pending.
+	 */
+	finalizeInterruptedInputPartial(): boolean {
+		if (this.inputFinalizedThisTurn) return false;
+		const text = this.inputBuffer.trim() || this.interruptedInputDisplay.trim();
+		if (!text) return false;
+		this.sink.addUserMessage(text);
+		this.sink.sendToClient({
+			type: 'transcript',
+			role: 'user',
+			text,
+			partial: false,
+			recovered: true,
+		});
+		this.inputBuffer = '';
+		this.interruptedInputDisplay = '';
+		this.inputTurnId = undefined;
+		this.inputFinalizedThisTurn = true;
+		this.onInputFinalized?.(text);
+		return true;
+	}
+
 	/** Accumulate incoming model speech transcription and emit a partial transcript. */
 	handleOutput(text: string): void {
 		if (text.trim()) {

@@ -58,6 +58,12 @@ export interface TransportReconnectorDeps {
 	/** R7c: a reconnect window opened (client channel began buffering) — the
 	 *  session resets its reconnect-window freshness tee. Optional. */
 	onReconnectWindowStart?(): void;
+	/** R7b: a retained-utterance replay was successfully dispatched (stage 1 or
+	 *  stage 2). The session promotes any pending input partial to a finalized
+	 *  transcript — replay turns emit no input transcription of their own.
+	 *  Never fires for deferred/failed replays or the content-less nudge.
+	 *  Optional. */
+	onReplayDispatched?(): void;
 }
 
 /** Reconnect-window speech verdict driving the stage-2 replay decision. */
@@ -148,6 +154,7 @@ export class TransportReconnector {
 				this.deps.log(
 					`[Watchdog] Model silent ${this.responseWatchdogMs}ms after user turn — replayed retained user utterance in-place (no reconnect)`,
 				);
+				this.deps.onReplayDispatched?.(); // R7b: surface the replayed turn's transcript
 				this.armResponseWatchdog(); // response window for the replay itself
 				return;
 			}
@@ -304,6 +311,7 @@ export class TransportReconnector {
 		) {
 			this._replayStage = 'replayed-after-reconnect';
 			this.deps.log('[Watchdog] Replayed retained user utterance after reconnect');
+			this.deps.onReplayDispatched?.(); // R7b: surface the replayed turn's transcript
 			this.armResponseWatchdog();
 			return;
 		}
