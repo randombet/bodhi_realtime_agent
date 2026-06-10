@@ -141,3 +141,21 @@ describe('createBodhiSessionConfig — watchdog replay recovery threading (H2)',
 		expect(config.responseWatchdogMs).toBe(9_500);
 	});
 });
+
+describe('createBodhiSessionConfig — Gemini server-VAD default', () => {
+	it('defaults hosted Gemini sessions to silenceDurationMs 300 (down from the framework 500)', async () => {
+		const config = await createBodhiSessionConfig(baseOptions());
+		expect(config.realtimeInputConfig).toEqual({
+			automaticActivityDetection: { silenceDurationMs: 300 },
+		});
+	});
+
+	it('does not apply the Gemini VAD default to openai-provider sessions', async () => {
+		const config = await createBodhiSessionConfig({
+			...baseOptions(),
+			liveRealtimeProvider: 'openai' as const,
+			openAiApiKey: 'test-openai-key',
+		});
+		expect(config.realtimeInputConfig).toBeUndefined();
+	});
+});
