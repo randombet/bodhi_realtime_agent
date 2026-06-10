@@ -7,10 +7,11 @@ rule_files:
 
 scrape_configs:
   # The host app mounts createMetricsHandler() at /metrics — set host:port here.
+  # 9900 is the default port of the repo's app server (`pnpm start`).
   - job_name: bodhi-voice-agent
     metrics_path: /metrics
     static_configs:
-      - targets: ["host.docker.internal:8787"]
+      - targets: ["host.docker.internal:9900"]
 
   # Phase 2 OTLP path (optional): scrape the OTel Collector's Prometheus exporter
   # instead of (or in addition to) the app's direct /metrics endpoint.

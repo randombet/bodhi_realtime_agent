@@ -5,7 +5,8 @@
 #   Grafana → http://localhost:3000 (anonymous admin)   Prometheus → :9090
 #
 # The host app must mount createMetricsHandler() at /metrics — set its host:port
-# in prometheus.yml (default host.docker.internal:8787).
+# in prometheus.yml (default host.docker.internal:9900, the repo app server's
+# `pnpm start` port, which mounts /metrics out of the box).
 services:
   prometheus:
     image: prom/prometheus:latest

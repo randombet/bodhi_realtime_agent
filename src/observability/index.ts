@@ -15,6 +15,7 @@ export {
 	HistogramVec,
 	labelKey,
 } from './histogram.js';
+export { mergeHooks } from './merge-hooks.js';
 export { MetricsCollector } from './metrics-collector.js';
 export {
 	computeWER,

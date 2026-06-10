@@ -115,6 +115,90 @@ Point a Prometheus scrape job at that endpoint and you have live histograms.
 A ready-made compose stack (Prometheus + Grafana + provisioned dashboard) lives
 in [`observability/dashboards/`](../../observability/dashboards/README.md).
 
+::: tip Already wired in this repo's app server
+`pnpm start` mounts `/metrics` on the app server (default port **9900**) and
+merges a server-wide `MetricsCollector` into every session's hooks — no code
+needed to try it. See [Run it locally](#run-it-locally) below.
+:::
+
+## Run it locally
+
+End-to-end verification on your machine: app → `/metrics` → Prometheus →
+Grafana, with a real voice session driving the numbers.
+
+```mermaid
+flowchart LR
+  YOU(("🎤 you,<br/>talking")) --> WC[web client<br/>:5173]
+  WC <-->|audio WS| APP["app server<br/>pnpm start · :9900<br/>(mounts /metrics)"]
+  PROM[(Prometheus<br/>:9090)] -->|scrape every 15s| APP
+  GRAF[Grafana :3000<br/>HAI dashboard] --> PROM
+```
+
+**1. Start the app server** (it mounts `/metrics` out of the box):
+
+```bash
+pnpm start          # app server on :9900
+```
+
+**2. Sanity-check the endpoint** — zeroed histograms before any session:
+
+```bash
+curl -s http://localhost:9900/metrics | head
+# HELP voice_turn_latency_e2e_ms End-to-end stop-to-first-audio latency (ms).
+# TYPE voice_turn_latency_e2e_ms histogram
+# voice_turn_latency_e2e_ms_bucket{le="50"} 0
+# ...
+```
+
+**3. Start Prometheus + Grafana** (scrape target defaults to
+`host.docker.internal:9900`, matching step 1):
+
+```bash
+docker compose -f observability/dashboards/docker-compose.yml up
+```
+
+- Prometheus → <http://localhost:9090> — check **Status → Targets**: the
+  `bodhi-voice-agent` job should be **UP**.
+- Grafana → <http://localhost:3000> (anonymous admin) — the **Bodhi Voice
+  Agent — HAI Metrics** dashboard is provisioned automatically.
+
+**4. Drive real traffic** — run the web client and have a conversation:
+
+```bash
+pnpm web-client     # then open it in the browser and talk
+```
+
+**5. Verify the metrics move.** After a few turns:
+
+```bash
+curl -s http://localhost:9900/metrics | grep -E "_count|_total" | grep -v " 0$"
+```
+
+| Do this | Expect to move |
+|---|---|
+| Complete a few spoken turns | `voice_turn_latency_e2e_ms_count`, `voice_turns_total`, `voice_stop_to_transcript_ms_count` |
+| Interrupt the agent mid-sentence | `voice_bargein_total{successful="true"}`, `voice_turns_interrupted_total`, then `voice_bargein_recovered_total` on your next clean turn |
+| Try interrupting during the greeting grace | `voice_bargein_total{successful="false"}` (a missed barge-in) |
+| Let a tool-using agent run a tool | `voice_tool_total{status="completed"}` |
+
+In Grafana, the Layer-1 latency percentiles and Layer-3 barge-in panels fill in
+as Prometheus accumulates samples (rate windows need a couple of minutes of
+data to render percentiles).
+
+**Cleanup:** `Ctrl-C` the app server; `docker compose -f
+observability/dashboards/docker-compose.yml down` for the stack.
+
+::: details Troubleshooting
+- **Target DOWN in Prometheus** — the container reaches your host via
+  `host.docker.internal`; on Linux this requires the `extra_hosts:
+  host-gateway` entry already present in the compose file. Also confirm the
+  app port matches `prometheus.yml` (`PORT` env overrides 9900).
+- **`/metrics` 404** — the route only answers `GET /metrics` on the app
+  server's HTTP port (not the web-client dev-server port).
+- **Panels empty but counters non-zero** — percentile panels use 5m `rate()`
+  windows; wait ~2 minutes or tighten the dashboard time range.
+:::
+
 ## Anatomy of a turn's latency
 
 Every turn stamps a small set of edges on a **single injectable clock**
