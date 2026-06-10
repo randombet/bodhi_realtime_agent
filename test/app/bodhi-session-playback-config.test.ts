@@ -97,25 +97,29 @@ describe('createBodhiSessionConfig — watchdog replay recovery threading (H2)',
 		expect(config.responseWatchdogMs).toBe(12_000);
 	});
 
-	it('derives the slow-model window from the EFFECTIVE model: no-override fallback → 8000', async () => {
-		// The fallback (gemini-2.5-flash-native-audio-preview-12-2025) is applied
-		// inside createBodhiSessionConfig — deciding from the override variable
-		// alone would leave exactly these sessions on the hazardous 5 s default.
+	it('no-override fallback is gemini-3.1 (fast model): no derived window', async () => {
+		// The hosted fallback moved to the half-cascade live model — fast
+		// first-token latency, so the framework 5 s default window applies.
 		const config = await createBodhiSessionConfig({
 			...baseOptions(),
 			watchdogReplayRecovery: true,
 		});
-		expect(config.geminiModel).toBe('gemini-2.5-flash-native-audio-preview-12-2025');
-		expect(config.responseWatchdogMs).toBe(8000);
+		expect(config.geminiModel).toBe('gemini-3.1-flash-live-preview');
+		expect(config.responseWatchdogMs).toBeUndefined();
 	});
 
-	it('derives the slow-model window for the second 2.5 native-audio catalog id', async () => {
-		const config = await createBodhiSessionConfig({
-			...baseOptions(),
-			liveRealtimeModel: 'gemini-live-2.5-flash-native-audio',
-			watchdogReplayRecovery: true,
-		});
-		expect(config.responseWatchdogMs).toBe(8000);
+	it('derives the slow-model window for BOTH 2.5 native-audio catalog ids (override UI)', async () => {
+		for (const liveRealtimeModel of [
+			'gemini-2.5-flash-native-audio-preview-12-2025',
+			'gemini-live-2.5-flash-native-audio',
+		]) {
+			const config = await createBodhiSessionConfig({
+				...baseOptions(),
+				liveRealtimeModel,
+				watchdogReplayRecovery: true,
+			});
+			expect(config.responseWatchdogMs).toBe(8000);
+		}
 	});
 
 	it('keeps the framework default window on gemini-3.1-flash-live-preview', async () => {
