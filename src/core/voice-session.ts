@@ -52,6 +52,7 @@ import { EventBus } from './event-bus.js';
 import { GreetingController } from './greeting-controller.js';
 import { HooksManager } from './hooks.js';
 import { InteractionModeManager } from './interaction-mode.js';
+import { LastUtteranceRetainer } from './last-utterance-retainer.js';
 import { MemoryCacheManager } from './memory-cache-manager.js';
 import { MultiplexConversationHistoryStore } from './multiplex-conversation-history-store.js';
 import {
@@ -227,8 +228,14 @@ export interface VoiceSessionConfig {
 	/** Listen timeout for local client WebSocket server startup (legacy/local mode). */
 	listenTimeoutMs?: number;
 	/** Model-silence watchdog (ms) after the user's turn ends. If the model emits
-	 *  nothing for this long, force a reconnect. Default 8000; `<= 0` disables. */
+	 *  nothing for this long, force a reconnect. Default 5000; `<= 0` disables. */
 	responseWatchdogMs?: number;
+	/** Watchdog-stall recovery via retained-utterance replay (see
+	 *  dev_docs/framework/design-retained-user-content-recovery.md). When true,
+	 *  the last routed user utterance is retained (bounded, memory-only) and a
+	 *  response-watchdog stall replays it — in-place first, then once more after
+	 *  a reconnect. Default false (ships dark until live-validated). */
+	watchdogReplayRecovery?: boolean;
 	/** LLM model name (e.g. "gemini-3.1-flash-live-preview"). */
 	geminiModel?: string;
 	/** Vercel AI SDK model for subagent text generation. */
@@ -423,6 +430,10 @@ export class VoiceSession {
 		getActiveServerTurnId: () => this.transport.getActiveServerTurnId?.(),
 	});
 	private sttProvider?: STTProvider;
+	/** Last routed user utterance for watchdog-stall recovery replay. Only
+	 *  constructed when `config.watchdogReplayRecovery` is true (dark rollout).
+	 *  See dev_docs/framework/design-retained-user-content-recovery.md. */
+	private utteranceRetainer?: LastUtteranceRetainer;
 	/** Resolved post-transport-construction from config.clientAudioInputRate
 	 *  (default: transport.audioFormat.inputSampleRate — the rate the
 	 *  framework instructs clients to send). */
@@ -759,17 +770,30 @@ export class VoiceSession {
 		// Client-VAD segment tracker. The detector owns the segment state and
 		// energy math; the barge-in *policy* (gate-pending + grace + actuation)
 		// and the playback-defer resolution stay here via these event handlers.
+		// Last-utterance retention (watchdog-stall recovery) — transport rate is
+		// known here, and retention must store the transport-normalized PCM.
+		if (config.watchdogReplayRecovery) {
+			this.utteranceRetainer = new LastUtteranceRetainer({
+				sampleRateHz: this.transport.audioFormat.inputSampleRate,
+			});
+		}
+
 		this.clientVadDetector = new ClientVadDetector(
 			{
 				onSpeechStart: () => {
 					// New segment ends the input-transcription log-dedup window.
 					this.lastInputTranscriptionLogText = '';
+					this.utteranceRetainer?.markSpeechStart();
 				},
 				onVoicedFrame: (now, maxAbs, avgAbs) => this.runClientVadBargeInPolicy(now, maxAbs, avgAbs),
 				onSegmentResolved: () => this.completionArbiter.resolveDeferredPlayback(),
-				// User finished a turn → arm the response watchdog (the model now
+				// User finished a turn → seal the retained utterance (recovery
+				// replay candidate), then arm the response watchdog (the model now
 				// owes a reply; silence past the timeout forces a reconnect).
-				onUserTurnCompleted: () => this.reconnector.armResponseWatchdog(),
+				onUserTurnCompleted: () => {
+					this.utteranceRetainer?.seal();
+					this.reconnector.armResponseWatchdog();
+				},
 			},
 			(msg) => this.log(msg),
 		);
@@ -788,6 +812,7 @@ export class VoiceSession {
 			isRtcAudioReady: () => this.directRtcChannel?.isRtcAudioReady ?? false,
 			getMode: () => this.dictation.mode,
 			shouldDropOutbound: () => this.greeting.shouldDropOutbound(),
+			retainer: this.utteranceRetainer,
 			routeExternalAudio: (data) => {
 				if (this.agentRouter.activeAgent.audioMode !== 'external') return false;
 				if (this.externalAudioHandler) {
@@ -931,7 +956,12 @@ export class VoiceSession {
 			this._nativeResponseDispatchedToolCall = false;
 			// A genuinely new model response: reset the barge-in eligibility window.
 			this._assistantAudioStartedAtMs = null;
-			this.turns.ensureCurrent();
+			const modelTurn = this.turns.ensureCurrent();
+			// Correlated model activity consumed the pending utterance — clear the
+			// recovery-replay candidate. Trailing model-start for a just-finalized
+			// turn (ensureCurrent → null) must NOT clear it (correlate-before-
+			// mutate, same scoped rule as the watchdog-disarm guards).
+			if (modelTurn) this.utteranceRetainer?.clear();
 			this.logProviderUserTurnRecognition('model/tool processing started');
 			if (this.sttProvider && !this._commitFiredForTurn) {
 				this._commitFiredForTurn = true;
@@ -1655,6 +1685,8 @@ export class VoiceSession {
 		// Actor mode: NotificationActor.onStop clears its own state when the
 		// runtime orchestrator stops below.
 		this.notificationQueue?.clear();
+		// Retained user audio is session-scoped and memory-only — drop it now.
+		this.utteranceRetainer?.clear();
 
 		// Flush any buffered transcription before closing
 		this.transcriptManager.flush();

@@ -1618,6 +1618,79 @@ describe('VoiceSession', () => {
 		});
 	});
 
+	describe('watchdog replay recovery — retained utterance lifecycle', () => {
+		function getRetainer(s: VoiceSession) {
+			return (
+				s as unknown as {
+					utteranceRetainer?: {
+						markSpeechStart(): void;
+						feed(data: Buffer): void;
+						seal(): boolean;
+						peek(maxAgeMs: number): unknown;
+					};
+				}
+			).utteranceRetainer;
+		}
+
+		it('does not construct the retainer when the flag is off (dark rollout)', () => {
+			session = new VoiceSession({
+				sessionId: 'sess_retainer_off',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+				model: mockModel,
+				transport: createMutableServerTurnTransport(),
+			});
+			expect(getRetainer(session)).toBeUndefined();
+		});
+
+		it('clears retained content on correlated model activity but NOT on a stale trailing model-start', () => {
+			const transport = createMutableServerTurnTransport();
+			session = new VoiceSession({
+				sessionId: 'sess_retainer_clear',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+				model: mockModel,
+				transport,
+				watchdogReplayRecovery: true,
+				responseWatchdogMs: 0,
+			});
+			session.sessionManager.transitionTo('CONNECTING');
+			session.sessionManager.transitionTo('ACTIVE');
+			const retainer = getRetainer(session);
+			expect(retainer).toBeDefined();
+			if (!retainer) return;
+
+			// Assistant turn 1 starts, then the user barges in (turn finalized).
+			transport.activeServerTurnId = 1;
+			transport.onModelTurnStart?.();
+			transport.onInterrupted?.(1);
+
+			// The barge-in utterance seals after finalization (VAD completes late).
+			retainer.markSpeechStart();
+			retainer.feed(Buffer.alloc(320, 1));
+			expect(retainer.seal()).toBe(true);
+			expect(retainer.peek(30_000)).not.toBeNull();
+
+			// Stale trailing model-start for the SAME finalized server turn —
+			// ensureCurrent() resolves to the just-finalized turn (null) and the
+			// retained utterance must survive (it is the recovery content).
+			transport.onModelTurnStart?.();
+			expect(retainer.peek(30_000)).not.toBeNull();
+
+			// Genuinely new model response (new server turn) — the utterance was
+			// consumed by the provider: cleared.
+			transport.activeServerTurnId = 2;
+			transport.onModelTurnStart?.();
+			expect(retainer.peek(30_000)).toBeNull();
+		});
+	});
+
 	describe('reconnect error handling', () => {
 		it('keeps the response watchdog armed across stale turnComplete for a finalized turn', async () => {
 			vi.useFakeTimers();
