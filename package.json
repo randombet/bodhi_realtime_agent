@@ -25,6 +25,7 @@
   "scripts": {
     "start": "tsx app/server/index.ts",
     "start:twilio-local": "node scripts/start-with-ngrok.mjs",
+    "deploy:nginx:gcp": "bash app/server/deploy/setup-nginx-bodhi-8080.sh",
     "build": "tsup",
     "web-client:build": "vite build --config app/web-client/vite.config.ts",
     "web-client:dev": "vite --config app/web-client/vite.config.ts",
