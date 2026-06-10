@@ -154,11 +154,13 @@ describe('isHostedReplayRecoveryAllowedForWebSession (H3 case-A allowlist)', () 
 });
 
 describe('isHostedReplayRecoveryEnvEnabled', () => {
-	it('is on only for BODHI_WATCHDOG_REPLAY_RECOVERY=1', () => {
+	it('is ON by default; BODHI_WATCHDOG_REPLAY_RECOVERY=0 is the kill switch', () => {
+		expect(isHostedReplayRecoveryEnvEnabled({})).toBe(true); // default on
 		expect(isHostedReplayRecoveryEnvEnabled({ BODHI_WATCHDOG_REPLAY_RECOVERY: '1' })).toBe(true);
-		expect(isHostedReplayRecoveryEnvEnabled({ BODHI_WATCHDOG_REPLAY_RECOVERY: 'true' })).toBe(
-			false,
+		expect(isHostedReplayRecoveryEnvEnabled({ BODHI_WATCHDOG_REPLAY_RECOVERY: '0' })).toBe(false);
+		// Exact-match kill switch — no truthy/falsy-string surprises.
+		expect(isHostedReplayRecoveryEnvEnabled({ BODHI_WATCHDOG_REPLAY_RECOVERY: 'false' })).toBe(
+			true,
 		);
-		expect(isHostedReplayRecoveryEnvEnabled({})).toBe(false);
 	});
 });
