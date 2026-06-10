@@ -105,7 +105,7 @@ describe('createClientChannel', () => {
 		expect(sendAudio).toHaveBeenCalledWith(buf);
 	});
 
-	it('buffers outbound audio when using ClientSenderAdapter buffering', () => {
+	it('buffers outbound audio during buffering and flushes it to the client on stopBuffering', () => {
 		const sendAudio = vi.fn();
 		const sendJson = vi.fn();
 		const ch = createClientChannel({
@@ -117,8 +117,12 @@ describe('createClientChannel', () => {
 		ch.sendAudioToClient(Buffer.from([9]));
 		expect(sendAudio).not.toHaveBeenCalled();
 		const drained = ch.stopBuffering();
-		expect(drained).toHaveLength(1);
-		expect(drained[0]).toEqual(Buffer.from([9]));
+		// Outbound assistant audio belongs to the client, never the LLM: the
+		// reconnector pumps the return value into transport.sendAudio, so the
+		// adapter flushes to the sender and returns [].
+		expect(drained).toEqual([]);
+		expect(sendAudio).toHaveBeenCalledOnce();
+		expect(sendAudio).toHaveBeenCalledWith(Buffer.from([9]));
 	});
 
 	it('returns ClientTransport for websocket profile without clientSender', () => {
