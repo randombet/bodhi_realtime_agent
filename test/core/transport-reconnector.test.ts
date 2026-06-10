@@ -140,6 +140,30 @@ describe('TransportReconnector', () => {
 			expect(h.sm.transitionTo).toHaveBeenLastCalledWith('ACTIVE');
 		});
 
+		it('hosted (ClientSenderAdapter) reconnect drains assistant audio to the client, never the LLM', async () => {
+			// Real adapter, not a fake: the hosted drain contract (R1 of
+			// design-retained-user-content-recovery.md) at the reconnector level.
+			const { ClientSenderAdapter } = await import('../../src/transport/client-sender-adapter.js');
+			const senderAudio = vi.fn();
+			const adapter = new ClientSenderAdapter({ sendAudio: senderAudio, sendJson: vi.fn() });
+			const h = makeHarness({
+				clientTransport: adapter as unknown as ReturnType<typeof fakeClientTransport>,
+			});
+
+			h.reconnector.triggerReconnect('transport-close');
+			// Assistant audio produced during the reconnect window is buffered.
+			adapter.sendAudioToClient(Buffer.from('assistant-speech'));
+			expect(senderAudio).not.toHaveBeenCalled();
+
+			vi.advanceTimersByTime(1000);
+			await vi.runAllTimersAsync();
+
+			// Drained to the CLIENT on stopBuffering — never into the LLM as input.
+			expect(senderAudio).toHaveBeenCalledWith(Buffer.from('assistant-speech'));
+			expect(h.transport.sendAudio).not.toHaveBeenCalled();
+			expect(h.sm.transitionTo).toHaveBeenLastCalledWith('ACTIVE');
+		});
+
 		it('follows the backoff schedule 1000/2000/4000 across attempts', async () => {
 			const h = makeHarness({});
 			const reconnect = h.transport.reconnect as ReturnType<typeof vi.fn>;
