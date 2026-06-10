@@ -15,6 +15,7 @@ import { RuntimeOrchestrator } from '../runtime/runtime-orchestrator.js';
 import { decodeMulawToPcm } from '../telephony/audio-codec.js';
 import { ToolExecutor } from '../tools/tool-executor.js';
 import { createClientChannel } from '../transport/client-channel-factory.js';
+import { ClientTransport } from '../transport/client-transport.js';
 import { DirectRtcClientChannel } from '../transport/direct-rtc-client-channel.js';
 import {
 	DEFAULT_GEMINI_LIVE_MODEL,
@@ -434,6 +435,11 @@ export class VoiceSession {
 	 *  constructed when `config.watchdogReplayRecovery` is true (dark rollout).
 	 *  See dev_docs/framework/design-retained-user-content-recovery.md. */
 	private utteranceRetainer?: LastUtteranceRetainer;
+	/** R7c reconnect-window freshness tee (hosted): frames/speech observed at
+	 *  `feedAudioFromClient` while RECONNECTING — captured BEFORE the router's
+	 *  `isSessionActive()` drop, the only place that speech is still visible. */
+	private _reconnectWindowFrames = 0;
+	private _reconnectWindowSpeech = false;
 	/** Resolved post-transport-construction from config.clientAudioInputRate
 	 *  (default: transport.audioFormat.inputSampleRate — the rate the
 	 *  framework instructs clients to send). */
@@ -794,6 +800,13 @@ export class VoiceSession {
 					this.utteranceRetainer?.seal();
 					this.reconnector.armResponseWatchdog();
 				},
+				// Ignored blip / forced reset: the segment can never seal — drop the
+				// in-progress retained audio (keeps the sealed replay candidate) and
+				// let a deferred watchdog replay re-evaluate instead of stranding.
+				onSegmentAborted: () => {
+					this.utteranceRetainer?.abortSegment();
+					this.reconnector.notifySegmentAborted();
+				},
 			},
 			(msg) => this.log(msg),
 		);
@@ -962,7 +975,7 @@ export class VoiceSession {
 			// for a just-finalized turn (ensureCurrent → null) must NOT clear it
 			// (correlate-before-mutate, same scoped rule as the disarm guards).
 			if (modelTurn) {
-				this.utteranceRetainer?.clear();
+				this.utteranceRetainer?.clearAnswered();
 				this.reconnector.resetReplayState();
 			}
 			this.logProviderUserTurnRecognition('model/tool processing started');
@@ -1146,6 +1159,18 @@ export class VoiceSession {
 				peekRetainedUtterance: () =>
 					this.utteranceRetainer?.peek(DEFAULT_REPLAY_MAX_AGE_MS) ?? null,
 				detectSpeech: (chunks) => pcmChunksContainSpeech(chunks),
+				// R7a/R7c deps are scoped to the flag (retainer present) so flag-off
+				// sessions keep the legacy watchdog/recovery behavior exactly.
+				isSpeechActive: this.utteranceRetainer
+					? () => this.clientVadDetector.isSpeechActive
+					: undefined,
+				hostedReconnectSpeech: this.utteranceRetainer
+					? () => this.reconnectWindowSpeechVerdict()
+					: undefined,
+				onReconnectWindowStart: () => {
+					this._reconnectWindowFrames = 0;
+					this._reconnectWindowSpeech = false;
+				},
 			},
 			this.responseWatchdogMs,
 		);
@@ -1694,7 +1719,7 @@ export class VoiceSession {
 		// runtime orchestrator stops below.
 		this.notificationQueue?.clear();
 		// Retained user audio is session-scoped and memory-only — drop it now.
-		this.utteranceRetainer?.clear();
+		this.utteranceRetainer?.clearAll();
 		this.reconnector.resetReplayState();
 
 		// Flush any buffered transcription before closing
@@ -2457,7 +2482,29 @@ export class VoiceSession {
 
 	/** Feed client audio into the session (LLM + STT). Used when the server owns the socket (multi-user). */
 	feedAudioFromClient(data: Buffer): void {
+		// R7c input-side freshness tee: while RECONNECTING the router drops input
+		// at the isSessionActive() gate, so the speech-energy verdict for the
+		// reconnect window must be captured here, before the drop.
+		if (this.utteranceRetainer && this.sessionManager.state === 'RECONNECTING') {
+			this._reconnectWindowFrames++;
+			if (!this._reconnectWindowSpeech && pcmChunksContainSpeech([data])) {
+				this._reconnectWindowSpeech = true;
+			}
+		}
 		this.audioRouter.handleFromClient(data, 'websocket');
+	}
+
+	/** R7c hosted reconnect-window verdict (consulted by the recovery controller
+	 *  when the channel drain returned no inbound chunks). Local `ClientTransport`
+	 *  sessions buffer inbound mic at the WS layer — there the drain is the
+	 *  authoritative signal and an empty drain proves the client sent nothing. */
+	private reconnectWindowSpeechVerdict(): 'none' | 'hosted-speech' | 'unknown' {
+		if (this.clientTransport instanceof ClientTransport) return 'none';
+		if (this._reconnectWindowSpeech) return 'hosted-speech';
+		// Hosted clients stream continuously (silence included): zero frames in
+		// the window means the forwarding path itself went quiet — unsafe to
+		// conclude the user stayed silent.
+		return this._reconnectWindowFrames > 0 ? 'none' : 'unknown';
 	}
 
 	/** Feed client JSON (text_input, file_upload, etc.) into the session. Used when the server owns the socket. */

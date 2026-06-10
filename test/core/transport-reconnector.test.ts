@@ -84,6 +84,8 @@ function makeHarness(opts: {
 	replay?: ReplayItem[];
 	peekRetainedUtterance?: TransportReconnectorDeps['peekRetainedUtterance'];
 	detectSpeech?: TransportReconnectorDeps['detectSpeech'];
+	isSpeechActive?: TransportReconnectorDeps['isSpeechActive'];
+	hostedReconnectSpeech?: TransportReconnectorDeps['hostedReconnectSpeech'];
 }): Harness {
 	const sm = fakeSessionManager(
 		opts.initial ?? 'ACTIVE',
@@ -106,6 +108,8 @@ function makeHarness(opts: {
 		log,
 		peekRetainedUtterance: opts.peekRetainedUtterance,
 		detectSpeech: opts.detectSpeech,
+		isSpeechActive: opts.isSpeechActive,
+		hostedReconnectSpeech: opts.hostedReconnectSpeech,
 	};
 	const reconnector = new TransportReconnector(deps, opts.watchdogMs ?? 8000);
 	return { reconnector, sm, clientTransport, transport, eventBus, log, reportError };
@@ -602,6 +606,164 @@ describe('TransportReconnector', () => {
 			await vi.advanceTimersByTimeAsync(WD);
 			await vi.advanceTimersByTimeAsync(1000);
 			expect(detectSpeech).not.toHaveBeenCalled();
+			expect(replayUserTurn).toHaveBeenCalledTimes(1);
+		});
+
+		it('R7a: a mid-speech fire defers — no replay, no reconnect, stage unchanged, NO re-arm', async () => {
+			const { transport, replayUserTurn } = replayTransport();
+			let speaking = true;
+			const h = makeHarness({
+				watchdogMs: WD,
+				transport,
+				peekRetainedUtterance: () => retained(),
+				isSpeechActive: () => speaking,
+			});
+			h.reconnector.armResponseWatchdog();
+			await vi.advanceTimersByTimeAsync(WD); // fire while user is speaking
+
+			expect(replayUserTurn).not.toHaveBeenCalled();
+			expect(h.sm.transitionTo).not.toHaveBeenCalledWith('RECONNECTING');
+			expect(h.log).toHaveBeenCalledWith(expect.stringContaining('deferred'));
+
+			// NOT re-armed: nothing happens however long the speech continues.
+			await vi.advanceTimersByTimeAsync(WD * 5);
+			expect(replayUserTurn).not.toHaveBeenCalled();
+			expect(h.sm.transitionTo).not.toHaveBeenCalledWith('RECONNECTING');
+
+			// The deferring speech completes and seals a NEW utterance — its own
+			// completion re-arms the watchdog (session calls armResponseWatchdog).
+			speaking = false;
+			h.reconnector.armResponseWatchdog();
+			await vi.advanceTimersByTimeAsync(WD);
+			expect(replayUserTurn).toHaveBeenCalledTimes(1); // stage 1 for the retained utterance
+			expect(h.sm.transitionTo).not.toHaveBeenCalledWith('RECONNECTING');
+		});
+
+		it('R7a: notifySegmentAborted after a deferred fire re-arms for the ORIGINAL retained utterance', async () => {
+			const { transport, replayUserTurn } = replayTransport();
+			let speaking = true;
+			const h = makeHarness({
+				watchdogMs: WD,
+				transport,
+				peekRetainedUtterance: () => retained(7),
+				isSpeechActive: () => speaking,
+			});
+			h.reconnector.armResponseWatchdog();
+			await vi.advanceTimersByTimeAsync(WD); // deferred (mid-speech)
+			expect(replayUserTurn).not.toHaveBeenCalled();
+
+			// The deferring segment resolves as ignored / force-reset — the session
+			// aborts it and notifies; recovery for the original utterance resumes.
+			speaking = false;
+			h.reconnector.notifySegmentAborted();
+			await vi.advanceTimersByTimeAsync(WD);
+			expect(replayUserTurn).toHaveBeenCalledTimes(1);
+			expect(replayUserTurn).toHaveBeenCalledWith(expect.objectContaining({ utteranceId: 7 }));
+			expect(h.sm.transitionTo).not.toHaveBeenCalledWith('RECONNECTING'); // stage unchanged → stage 1
+		});
+
+		it('R7a: notifySegmentAborted without a deferred fire does NOT arm the watchdog', async () => {
+			const { transport, replayUserTurn } = replayTransport();
+			const h = makeHarness({
+				watchdogMs: WD,
+				transport,
+				peekRetainedUtterance: () => retained(),
+				isSpeechActive: () => false,
+			});
+			h.reconnector.notifySegmentAborted();
+			await vi.advanceTimersByTimeAsync(WD * 3);
+			expect(replayUserTurn).not.toHaveBeenCalled();
+		});
+
+		it('R7c: local drained speech skips the replay AND re-arms the watchdog for the fresh speech', async () => {
+			const replayUserTurn = vi.fn(() => true);
+			const transport = fakeTransport({
+				isConnected: false,
+				replayUserTurn,
+			} as unknown as Partial<LLMTransport>);
+			const ct = fakeClientTransport([Buffer.alloc(320, 99)]);
+			const h = makeHarness({
+				watchdogMs: WD,
+				transport,
+				clientTransport: ct,
+				detectSpeech: () => true,
+				peekRetainedUtterance: () => retained(),
+			});
+			const arm = vi.spyOn(h.reconnector, 'armResponseWatchdog');
+			h.reconnector.armResponseWatchdog();
+			await vi.advanceTimersByTimeAsync(WD);
+			await vi.advanceTimersByTimeAsync(1000);
+
+			expect(replayUserTurn).not.toHaveBeenCalled();
+			// Re-armed after the skip: the drained speech bypassed VAD bookkeeping,
+			// so a second stall on it must still have a recovery timer.
+			expect(arm).toHaveBeenCalledTimes(2); // initial + post-skip re-arm
+		});
+
+		it('R7c: hosted-speech verdict suppresses the stage-2 replay and the nudge', async () => {
+			const replayUserTurn = vi.fn(() => true);
+			const transport = fakeTransport({
+				isConnected: false,
+				replayUserTurn,
+			} as unknown as Partial<LLMTransport>);
+			const h = makeHarness({
+				watchdogMs: WD,
+				transport,
+				clientTransport: fakeClientTransport([]),
+				hostedReconnectSpeech: () => 'hosted-speech',
+				peekRetainedUtterance: () => retained(),
+			});
+			h.reconnector.armResponseWatchdog();
+			await vi.advanceTimersByTimeAsync(WD);
+			await vi.advanceTimersByTimeAsync(1000);
+
+			expect(replayUserTurn).not.toHaveBeenCalled();
+			expect(h.transport.elicitResponse).not.toHaveBeenCalled();
+			expect(h.log).toHaveBeenCalledWith(
+				expect.stringContaining('hosted user spoke during reconnect'),
+			);
+		});
+
+		it('R7c: unknown hosted freshness suppresses the stage-2 replay (unsafe to guess)', async () => {
+			const replayUserTurn = vi.fn(() => true);
+			const transport = fakeTransport({
+				isConnected: false,
+				replayUserTurn,
+			} as unknown as Partial<LLMTransport>);
+			const h = makeHarness({
+				watchdogMs: WD,
+				transport,
+				clientTransport: fakeClientTransport([]),
+				hostedReconnectSpeech: () => 'unknown',
+				peekRetainedUtterance: () => retained(),
+			});
+			h.reconnector.armResponseWatchdog();
+			await vi.advanceTimersByTimeAsync(WD);
+			await vi.advanceTimersByTimeAsync(1000);
+
+			expect(replayUserTurn).not.toHaveBeenCalled();
+			expect(h.transport.elicitResponse).not.toHaveBeenCalled();
+			expect(h.log).toHaveBeenCalledWith(
+				expect.stringContaining('reconnect-window speech state unknown'),
+			);
+		});
+
+		it('R7c: a proven hosted "none" verdict permits the stage-2 replay', async () => {
+			const replayUserTurn = vi.fn(() => true);
+			const transport = fakeTransport({
+				isConnected: false,
+				replayUserTurn,
+			} as unknown as Partial<LLMTransport>);
+			const h = makeHarness({
+				watchdogMs: WD,
+				transport,
+				clientTransport: fakeClientTransport([]),
+				hostedReconnectSpeech: () => 'none',
+				peekRetainedUtterance: () => retained(),
+			});
+			h.reconnector.armResponseWatchdog();
+			await vi.advanceTimersByTimeAsync(WD);
+			await vi.advanceTimersByTimeAsync(1000);
 			expect(replayUserTurn).toHaveBeenCalledTimes(1);
 		});
 
