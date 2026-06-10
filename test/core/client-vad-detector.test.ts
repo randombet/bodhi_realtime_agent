@@ -47,6 +47,7 @@ describe('ClientVadDetector', () => {
 			onVoicedFrame: vi.fn(),
 			onSegmentResolved: vi.fn(),
 			onUserTurnCompleted: vi.fn(),
+			onSegmentAborted: vi.fn(),
 		};
 		detector = new ClientVadDetector(events, vi.fn(), () => now);
 	});
@@ -88,6 +89,38 @@ describe('ClientVadDetector', () => {
 		expect(events.onSegmentResolved).toHaveBeenCalledTimes(1); // fires regardless
 		expect(events.onUserTurnCompleted).not.toHaveBeenCalled(); // never on 'ignored'
 		expect(detector.lastSpeechCompletedMs).toBe(0); // not recorded on 'ignored'
+	});
+
+	it('fires onSegmentAborted on an ignored (too-short) segment', () => {
+		detector.process(VOICED); // start at t=0
+		now = CLIENT_VAD_MIN_SPEECH_MS - 1;
+		detector.process(VOICED);
+		now += CLIENT_VAD_SILENCE_MS;
+		detector.process(SILENT); // complete → 'ignored'
+
+		expect(events.onSegmentAborted).toHaveBeenCalledTimes(1);
+		expect(events.onUserTurnCompleted).not.toHaveBeenCalled();
+	});
+
+	it('does not fire onSegmentAborted on a completed segment', () => {
+		detector.process(VOICED);
+		now = 200;
+		detector.process(VOICED);
+		now = 200 + CLIENT_VAD_SILENCE_MS;
+		detector.process(SILENT); // complete → 'completed'
+
+		expect(events.onSegmentAborted).not.toHaveBeenCalled();
+		expect(events.onUserTurnCompleted).toHaveBeenCalledTimes(1);
+	});
+
+	it('fires onSegmentAborted on resetSegment() of an active segment only', () => {
+		detector.resetSegment(); // no active segment → no event
+		expect(events.onSegmentAborted).not.toHaveBeenCalled();
+
+		detector.process(VOICED); // open a segment
+		detector.resetSegment(); // forced cleanup of an active segment
+		expect(events.onSegmentAborted).toHaveBeenCalledTimes(1);
+		expect(detector.isSpeechActive).toBe(false);
 	});
 
 	it('does not hold silence below the threshold open as a completion', () => {

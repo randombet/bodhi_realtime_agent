@@ -153,3 +153,5 @@ gates; results are recorded in the corresponding `dev_docs/framework/design-*.md
 | Probe | Verifies | Run |
 |-------|----------|-----|
 | `probes/gemini-inline-audio-replay.ts` | Gemini Live answers a `clientContent` inline-audio user turn with `turnComplete: true` (retained-utterance recovery replay shape), in clean and post-barge-in states | `pnpm tsx examples/probes/gemini-inline-audio-replay.ts` (needs `GEMINI_API_KEY`) |
+| `probes/hosted-replay-recovery.ts` | Stage-1 watchdog-stall replay + R7a mid-speech deferral + R7b transcript promotion, end-to-end in the hosted session shape (`feedAudioFromClient` + `ClientSenderAdapter`); stall forced via a short `PROBE_WATCHDOG_MS` | `pnpm tsx examples/probes/hosted-replay-recovery.ts` (needs `GEMINI_API_KEY`) |
+| `probes/hosted-reconnect-freshness.ts` | R7c reconnect-window verdicts (`none`/`hosted-speech`/`unknown`) on a real resumption-handle reconnect, by controlling what flows through `feedAudioFromClient` during the window | `pnpm tsx examples/probes/hosted-reconnect-freshness.ts [silence\|speech\|none\|all]` (needs `GEMINI_API_KEY`) |

@@ -107,7 +107,7 @@ describe('LastUtteranceRetainer', () => {
 		expect(second?.pcm[0]).toBe(2); // previous utterance replaced
 	});
 
-	it('clear() drops the sealed utterance but keeps an in-progress segment', () => {
+	it('clearAnswered() drops the sealed utterance but keeps an in-progress segment', () => {
 		const r = makeRetainer();
 		r.markSpeechStart();
 		r.feed(frame(1));
@@ -118,9 +118,66 @@ describe('LastUtteranceRetainer', () => {
 		// is the NEXT utterance and must survive.
 		r.markSpeechStart();
 		r.feed(frame(9));
-		r.clear();
+		r.clearAnswered();
 		expect(r.peek(30_000)).toBeNull();
 		expect(r.seal()).toBe(true);
+		expect(r.peek(30_000)?.pcm[0]).toBe(9);
+	});
+
+	it('abortSegment() drops the in-progress segment without clearing the sealed candidate', () => {
+		const r = makeRetainer();
+		r.markSpeechStart();
+		r.feed(frame(1));
+		expect(r.seal()).toBe(true);
+		const sealedId = r.peek(30_000)?.utteranceId;
+
+		// A VAD blip opens a segment, then resolves as ignored / force-reset.
+		r.markSpeechStart();
+		r.feed(frame(7));
+		r.abortSegment();
+
+		// Sealed replay candidate survives; the aborted segment can never seal.
+		expect(r.peek(30_000)?.utteranceId).toBe(sealedId);
+		expect(r.seal()).toBe(false);
+	});
+
+	it('after abortSegment() future routed audio returns to the pre-roll ring', () => {
+		const r = makeRetainer(); // pre-roll budget 320 B = 2 frames
+		r.markSpeechStart();
+		r.feed(frame(1));
+		r.abortSegment();
+
+		// These frames must land in pre-roll (segment is gone), so the next real
+		// utterance is sealed WITH its pre-roll tail.
+		r.feed(frame(3));
+		r.feed(frame(4));
+		r.markSpeechStart();
+		r.feed(frame(5));
+		expect(r.seal()).toBe(true);
+		const turn = r.peek(30_000);
+		expect(turn?.pcm.length).toBe(3 * 160);
+		expect(turn?.pcm[0]).toBe(3);
+		expect(turn?.pcm[320]).toBe(5);
+	});
+
+	it('clearAll() drops sealed, pre-roll, and in-progress audio', () => {
+		const r = makeRetainer();
+		r.markSpeechStart();
+		r.feed(frame(1));
+		expect(r.seal()).toBe(true);
+		r.feed(frame(2)); // pre-roll
+		r.markSpeechStart(); // in-progress, seeded from pre-roll
+		r.feed(frame(3));
+
+		r.clearAll();
+		expect(r.peek(30_000)).toBeNull();
+		// In-progress segment gone — nothing seals.
+		expect(r.seal()).toBe(false);
+		// Pre-roll gone — a fresh segment seeds empty.
+		r.markSpeechStart();
+		r.feed(frame(9));
+		expect(r.seal()).toBe(true);
+		expect(r.peek(30_000)?.pcm.length).toBe(160);
 		expect(r.peek(30_000)?.pcm[0]).toBe(9);
 	});
 

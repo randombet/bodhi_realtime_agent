@@ -130,11 +130,25 @@ export class LastUtteranceRetainer {
 		return this.sealed;
 	}
 
-	/** On correlated model activity (the utterance was answered) and on session
-	 *  close. Keeps any in-progress segment — mid-utterance speech at clear time
-	 *  is the NEXT user turn, not the answered one. */
-	clear(): void {
+	/** Ignored/forced-reset VAD segment: drop the in-progress segment (it can
+	 *  never seal) and return future routed audio to the pre-roll ring. Keeps
+	 *  the sealed replay candidate — a blip must not destroy recovery content. */
+	abortSegment(): void {
+		this.segment = null;
+	}
+
+	/** On correlated model activity (the utterance was answered). Keeps any
+	 *  in-progress segment — mid-utterance speech at clear time is the NEXT
+	 *  user turn, not the answered one. Never use this for close/dispose. */
+	clearAnswered(): void {
 		this.sealed = null;
 		this.preRoll.clear();
+	}
+
+	/** Session close/dispose: drop sealed, pre-roll, and in-progress audio. */
+	clearAll(): void {
+		this.sealed = null;
+		this.preRoll.clear();
+		this.segment = null;
 	}
 }

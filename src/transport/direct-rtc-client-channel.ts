@@ -140,6 +140,14 @@ export class DirectRtcClientChannel implements IClientChannel {
 
 	stopBuffering(): Buffer[] {
 		this._buffering = false;
-		return this.audioBuffer.drain();
+		// Buffered audio is OUTBOUND assistant speech — deliver it to the client
+		// sink (engine / pre-media accumulator / WebSocket sender), NEVER back to
+		// the reconnect drain loop, which pumps returned chunks into the LLM as
+		// user input. Same contract as ClientSenderAdapter (parent design R1;
+		// H1 of design-hosted-replay-recovery-rollout.md).
+		for (const chunk of this.audioBuffer.drain()) {
+			this.sendAudioToClient(chunk);
+		}
+		return [];
 	}
 }
