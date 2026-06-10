@@ -662,7 +662,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	 *  `LLMTransport.cancelResponse` JSDoc on the interface for the contract.
 	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §2, §7.
 	 *
-	 *  Returns Promise<void>. Never rejects — transient send failures are
+	 *  Returns `Promise<void>`. Never rejects — transient send failures are
 	 *  caught and logged internally. */
 	async cancelResponse(opts?: CancelResponseOptions): Promise<void> {
 		// Step 1 (no-op fast path): nothing to cancel AND nothing to truncate.
