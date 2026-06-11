@@ -152,6 +152,7 @@ export class QwenRealtimeTransport implements LLMTransport {
 	onTextOutput?: (text: string) => void;
 	onTextDone?: () => void;
 	onSpeechStarted?: () => void;
+	onUserSpeechStopped?: () => void;
 	onRealtimeLLMUsage?: (usage: ReturnType<typeof normalizeQwenResponseUsage>) => void;
 
 	constructor(config: QwenRealtimeConfig) {
@@ -704,6 +705,10 @@ export class QwenRealtimeTransport implements LLMTransport {
 					this.isGenerating = false;
 					if (this.onInterrupted) this.onInterrupted();
 				}
+				break;
+			case 'input_audio_buffer.speech_stopped':
+				// Provider VAD end-of-speech — preferred latency anchor (receipt time).
+				if (this.onUserSpeechStopped) this.onUserSpeechStopped();
 				break;
 			case 'conversation.item.input_audio_transcription.completed': {
 				if (this.inputTranscriptionEnabled && this.onInputTranscription) {

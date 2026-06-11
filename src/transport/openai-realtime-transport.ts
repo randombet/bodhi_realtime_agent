@@ -337,6 +337,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	onTextOutput?: (text: string) => void;
 	onTextDone?: () => void;
 	onSpeechStarted?: () => void;
+	onUserSpeechStopped?: () => void;
 	onRealtimeLLMUsage?: (usage: RealtimeLLMUsageEvent) => void;
 	onReasoningStart?: () => void;
 	onReasoningDone?: (info: { durationMs: number; reasoningTokens?: number }) => void;
@@ -1792,6 +1793,12 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			}
 			this._isModelGenerating = false;
 			if (this.onInterrupted) this.onInterrupted();
+		});
+
+		// Provider VAD end-of-speech — the preferred user-speech-end latency
+		// anchor (receipt time; see LLMTransport.onUserSpeechStopped JSDoc).
+		rt.on('input_audio_buffer.speech_stopped', () => {
+			if (this.onUserSpeechStopped) this.onUserSpeechStopped();
 		});
 
 		// --- Input transcription ---

@@ -1428,6 +1428,17 @@ describe('OpenAIRealtimeTransport', () => {
 			expect(speechStarted).toHaveBeenCalledOnce();
 		});
 
+		it('fires onUserSpeechStopped on speech_stopped, after onSpeechStarted', () => {
+			const order: string[] = [];
+			transport.onSpeechStarted = () => order.push('started');
+			transport.onUserSpeechStopped = () => order.push('stopped');
+
+			mockRt.emit('input_audio_buffer.speech_started', {});
+			mockRt.emit('input_audio_buffer.speech_stopped', {});
+
+			expect(order).toEqual(['started', 'stopped']);
+		});
+
 		it('fires onSpeechStarted even when model is not generating', () => {
 			const speechStarted = vi.fn();
 			const interrupted = vi.fn();

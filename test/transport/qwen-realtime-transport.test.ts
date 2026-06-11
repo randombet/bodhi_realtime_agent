@@ -160,6 +160,16 @@ describe('QwenRealtimeTransport', () => {
 		expect(order).toEqual(['first-audio', 'audio', 'audio', 'first-audio', 'audio']);
 	});
 
+	it('onUserSpeechStopped: fires on speech_stopped, after onSpeechStarted', async () => {
+		const [t, ws] = await connect();
+		const order: string[] = [];
+		t.onSpeechStarted = () => order.push('started');
+		t.onUserSpeechStopped = () => order.push('stopped');
+		ws.msg({ type: 'input_audio_buffer.speech_started' });
+		ws.msg({ type: 'input_audio_buffer.speech_stopped' });
+		expect(order).toEqual(['started', 'stopped']);
+	});
+
 	it('input transcription: emits once on completed, not on delta', async () => {
 		const [t, ws] = await connect();
 		const got: string[] = [];

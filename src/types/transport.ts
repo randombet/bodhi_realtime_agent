@@ -606,6 +606,15 @@ export interface LLMTransport {
 	 *  Gemini: may require custom VAD signal — needs empirical testing. */
 	onSpeechStarted?: () => void;
 
+	/** Fires when the provider's server VAD detects end of user speech.
+	 *  OpenAI/Qwen: wired to input_audio_buffer.speech_stopped. Gemini Live has
+	 *  no equivalent wire event (callback never fires there — the framework
+	 *  falls back to client-VAD timing). The latency anchor derived from this is
+	 *  callback receipt time: biased late by the provider's silence window +
+	 *  network hop (a bounded lower-bound bias — see the observability design,
+	 *  investment-hai-metrics-observability.md §11). */
+	onUserSpeechStopped?: () => void;
+
 	// --- Optional capability callbacks (only fired by supporting transports) ---
 	onGoAway?: (timeLeft: string) => void;
 	onResumptionUpdate?: (handle: string, resumable: boolean) => void;
