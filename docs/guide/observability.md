@@ -201,9 +201,17 @@ observability/dashboards/docker-compose.yml down` for the stack.
 
 ## Anatomy of a turn's latency
 
-Every turn stamps a small set of edges on a **single injectable clock**
-(`VoiceSessionConfig.nowMs`, default `Date.now`). The segments are computed at
-turn finalization and emitted once through `onTurnLatency`.
+Latency is **event-sourced**: the core publishes raw timestamped facts as
+EventBus topics (`speech.user_started/ended`, `response.started`,
+`response.first_audio`, `session.reset`), and a `TurnLatencyTracker` subscriber
+correlates them into per-turn segments. Every timestamp is the **source edge on
+a single injectable clock** (`VoiceSessionConfig.nowMs`, default `Date.now`):
+client-VAD events carry the *detected* edges, provider VAD events
+(`input_audio_buffer.speech_stopped` on OpenAI/Qwen, surfaced as
+`onUserSpeechStopped`) use receipt time. The tracker consumes through an
+**async edge** — its bus handlers only append to a bounded ring buffer; the
+correlation runs on a `setImmediate` drain — so metric processing never sits on
+the audio path.
 
 ```mermaid
 sequenceDiagram
@@ -211,26 +219,28 @@ sequenceDiagram
   participant U as User (mic)
   participant V as VoiceSession
   participant P as Provider (LLM)
-  participant C as Client (speaker)
+  participant T as TurnLatencyTracker
 
   U->>V: speech frames
-  Note over U,V: client VAD detects silence
-  rect rgb(235, 245, 255)
-    Note over V: 🕐 userSpeechEnd<br/>(onUserSpeechEnd)
-  end
+  Note over U,V: VAD detects end of speech
+  V->>T: 🕐 speech.user_ended (anchor)
   V->>P: audio / commit
   P-->>V: response starts
-  rect rgb(235, 245, 255)
-    Note over V: 🕐 modelStart<br/>(onModelTurnStart)
-  end
+  V->>T: 🕐 response.started — claims the anchor
   P-->>V: first audio chunk
-  V->>C: first audio out
-  rect rgb(235, 245, 255)
-    Note over V: 🕐 firstAudio<br/>(onFirstAudioChunk)
-  end
+  V->>T: 🕐 response.first_audio
   P-->>V: turn complete
-  Note over V: finalizeTurn →<br/>onTurnLatency + onTurnFinalized
+  V->>T: turn.end (the epoch tick)
+  Note over T: drain tick →<br/>onTurnLatency + 'turn.latency'
 ```
+
+The anchor attribution is what makes the numbers trustworthy: the **provider**
+anchor is preferred over client-VAD (no dependence on client energy
+thresholds); an anchor whose speech *started* after the response began is a
+barge-in/next utterance and is **promoted to the next turn**, never attached to
+the active one; and a turn that should have an anchor but doesn't is **dropped
+with a reason** (`voice_turn_latency_dropped_total{reason}`) rather than
+emitted wrong — no sample beats a garbage sample.
 
 The three stamps produce the segment breakdown:
 
@@ -252,15 +262,22 @@ hooks.onTurnLatency = ({ sessionId, turnId, segments }) => {
 };
 ```
 
-::: tip Transport-agnostic naming
+::: tip Transport-agnostic naming and known bias
 The segment field names (`geminiProcessingMs`, `backendToGeminiMs`) are
 historical — they carry the same meaning on OpenAI and Qwen transports. Only
 `totalE2EMs`, `geminiProcessingMs`, and `backendToClientMs` are populated today;
-the other typed fields are reserved.
+the other typed fields are reserved. **Provider-anchored samples are a
+bounded-bias lower bound** of true stop-to-first-audio (the provider's VAD
+event arrives after its silence window + a network hop); on Gemini Live there
+is no provider speech-stopped event, so anchors come from client VAD only —
+quiet-mic turns there show up as `no_anchor` drops, never wrong values.
 :::
 
-Tool-only turns produce no audio, so no latency event is emitted for them —
-the histogram never mixes "spoke back" with "ran a tool silently".
+Tool-only turns produce no audio, so no latency sample is emitted for them —
+and **multi-response turns keep the first response's stamps**, so a tool-using
+turn's E2E correctly includes the tool execution time. `onTurnLatency` fires on
+the tracker's drain tick, asynchronously ≈ one macrotask after the turn
+finalizes.
 
 ## Anatomy of a barge-in
 
@@ -333,6 +350,13 @@ interface FrameworkHooks {
     };
   }): void;
 
+  /** A turn produced no latency sample — makes coverage gaps observable. */
+  onTurnLatencyDropped?(event: {
+    sessionId: string;
+    turnId?: string;
+    reason: 'no_anchor' | 'stale_anchor' | 'implausible' | 'reset' | 'overflow';
+  }): void;
+
   /** End-of-user-speech (VAD end) — the S2FA / S2T anchor. */
   onUserSpeechEnd?(event: { sessionId: string; turnId?: string; atMs: number }): void;
 
@@ -387,6 +411,9 @@ across Gemini, OpenAI, and Qwen:
 - `onModelTurnStart` — provider began **any** response (audio or tool call)
 - `onFirstAudioChunk` — first audio chunk of the response, once per response
   (the stop-to-first-audio anchor; re-arms when a new response begins)
+- `onUserSpeechStopped` — provider server-VAD end-of-speech
+  (`input_audio_buffer.speech_stopped`; OpenAI/Qwen only — Gemini Live has no
+  equivalent and falls back to client-VAD anchors)
 
 ## Metric reference
 
@@ -395,7 +422,8 @@ rendered by `renderPrometheus`):
 
 | Metric | Type | Layer | Meaning | Target |
 |---|---|---|---|---|
-| `voice_turn_latency_e2e_ms` | histogram | 1 | stop-to-first-audio | P95 < 800 ms (aspire ~300) |
+| `voice_turn_latency_e2e_ms` | histogram | 1 | stop-to-first-audio (provider-anchored = bounded-bias lower bound) | P95 < 800 ms (aspire ~300) |
+| `voice_turn_latency_dropped_total{reason}` | counter | 1 | turns with no latency sample (`no_anchor` = quiet-mic voice turn, `stale_anchor`, `implausible`, `reset`, `overflow`) | ≈ 0; nonzero `no_anchor` = mic-gain coverage gap |
 | `voice_turn_provider_processing_ms` | histogram | 1 | user stop → provider start (≈TTFT) | 100–500 ms |
 | `voice_turn_backend_to_client_ms` | histogram | 1 | provider start → first audio out | — |
 | `voice_stop_to_transcript_ms` | histogram | 1 | user stop → transcript finalized | provider-dependent |
