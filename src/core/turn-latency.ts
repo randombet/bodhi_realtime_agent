@@ -11,15 +11,10 @@
  * Non-Goal, so the mapping is documented here instead.
  */
 
-/** Segment breakdown matching the `onTurnLatency` event's `segments` shape. */
-export interface TurnLatencySegments {
-	clientToBackendMs?: number;
-	backendToGeminiMs?: number;
-	geminiProcessingMs?: number;
-	geminiToBackendMs?: number;
-	backendToClientMs?: number;
-	totalE2EMs: number;
-}
+import type { TurnLatencySegments } from '../types/hooks.js';
+
+/** Re-exported for existing importers; the canonical home is `types/hooks.ts`. */
+export type { TurnLatencySegments };
 
 /** Raw per-turn timestamps (metric clock); `null` when the edge was not observed. */
 export interface TurnLatencyStamps {

@@ -244,6 +244,68 @@ describe('VoiceSession', () => {
 		expect(onSessionStart).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'sess_1' }));
 	});
 
+	it('publishes raw latency facts on the EventBus (§11): response.started/first_audio, origins, close ordering', async () => {
+		session = new VoiceSession({
+			sessionId: 'sess_1',
+			userId: 'user_1',
+			apiKey: 'test-key',
+			agents: [createEchoAgent()],
+			initialAgent: 'echo',
+			port: 9945,
+			model: mockModel,
+		});
+
+		const started: Array<{ turnId: string; atMs: number; origin: string }> = [];
+		const firstAudio: Array<{ turnId: string; atMs: number }> = [];
+		const lifecycle: string[] = [];
+		session.eventBus.subscribe('response.started', (p) => started.push(p));
+		session.eventBus.subscribe('response.first_audio', (p) => firstAudio.push(p));
+		session.eventBus.subscribe('session.reset', (p) => lifecycle.push(`reset:${p.reason}`));
+		session.eventBus.subscribe('turn.end', () => lifecycle.push('turn.end'));
+
+		await session.start();
+		await new Promise((r) => setTimeout(r, 50));
+
+		const WebSocket = (await import('ws')).default;
+		const ws = new WebSocket('ws://localhost:9945');
+		await new Promise<void>((r) => ws.on('open', r));
+
+		const { _getMessageHandler } = await import('@google/genai');
+		const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+		// Audio-bearing model response → response.started (default user_audio) + first_audio.
+		fire({ serverContent: { modelTurn: { parts: [{ inlineData: { data: 'AAAA' } }] } } });
+		await new Promise((r) => setTimeout(r, 20));
+
+		expect(started).toHaveLength(1);
+		expect(started[0].origin).toBe('user_audio');
+		expect(typeof started[0].atMs).toBe('number');
+		expect(firstAudio).toHaveLength(1);
+		expect(firstAudio[0].turnId).toBe(started[0].turnId);
+		expect(firstAudio[0].atMs).toBeGreaterThanOrEqual(started[0].atMs);
+
+		// Complete the turn, then drive a text-input response → origin user_text.
+		fire({ serverContent: { turnComplete: true } });
+		await new Promise((r) => setTimeout(r, 30));
+		ws.send(JSON.stringify({ type: 'text_input', text: 'hello' }));
+		await new Promise((r) => setTimeout(r, 80));
+		fire({ serverContent: { modelTurn: { parts: [{ inlineData: { data: 'BBBB' } }] } } });
+		await new Promise((r) => setTimeout(r, 20));
+
+		expect(started).toHaveLength(2);
+		expect(started[1].origin).toBe('user_text');
+
+		// close(): session.reset{'close'} must precede the teardown turn.end.
+		lifecycle.length = 0;
+		await session.close();
+		session = null;
+		expect(lifecycle[0]).toBe('reset:close');
+		expect(lifecycle).toContain('turn.end');
+		expect(lifecycle.indexOf('reset:close')).toBeLessThan(lifecycle.indexOf('turn.end'));
+
+		ws.close();
+	});
+
 	it('throwing observability hooks do not disrupt the turn (fire-and-forget isolation)', async () => {
 		// FrameworkHooks contract: exceptions are caught and logged. A throwing
 		// user hook must not abort the path that emitted it — here, a throwing

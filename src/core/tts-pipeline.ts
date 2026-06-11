@@ -228,7 +228,15 @@ export class TtsPipeline {
 		//     text; in provider-owned mode the server's auto-cancel + the
 		//     transport's own truncate already handle this via onInterrupted.
 		// See dev_docs/framework/design-greeting-interrupt-grace.md §4.
+		const prevSpeechStarted = transport.onSpeechStarted;
 		transport.onSpeechStarted = () => {
+			// Chain-preserve any earlier handler (e.g. the session's raw-fact
+			// publisher for speech.user_started) — same pattern as the native gate.
+			try {
+				prevSpeechStarted?.();
+			} catch (e) {
+				deps.log(`pre-attached onSpeechStarted threw: ${(e as Error).message}`);
+			}
 			const frameworkOwns = transport.capabilities.frameworkOwnsInterrupt === true;
 			const turn = deps.getCurrentTurn();
 			if (gate.isSpeaking && gate.isLlmTextDone) {

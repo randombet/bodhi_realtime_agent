@@ -4,6 +4,22 @@ import type { ToolExecution } from './tool.js';
 import type { RealtimeLLMUsageEvent } from './transport.js';
 
 /**
+ * Per-turn latency segment breakdown emitted via `onTurnLatency` and the
+ * `'turn.latency'` EventBus topic. Field names are historically Gemini-flavored
+ * but transport-agnostic in meaning: `geminiProcessingMs` ≈ user stop →
+ * provider response start (TTFT-like); `backendToClientMs` = provider response
+ * start → first audio out; `totalE2EMs` = stop-to-first-audio (the headline).
+ */
+export interface TurnLatencySegments {
+	clientToBackendMs?: number;
+	backendToGeminiMs?: number;
+	geminiProcessingMs?: number;
+	geminiToBackendMs?: number;
+	backendToClientMs?: number;
+	totalE2EMs: number;
+}
+
+/**
  * Optional lifecycle hooks for observability, logging, and metrics.
  * All hooks are synchronous and fire-and-forget — exceptions are caught and logged.
  * Register hooks via VoiceSessionConfig or HooksManager.register().
@@ -27,14 +43,7 @@ export interface FrameworkHooks {
 	onTurnLatency?(event: {
 		sessionId: string;
 		turnId: string;
-		segments: {
-			clientToBackendMs?: number;
-			backendToGeminiMs?: number;
-			geminiProcessingMs?: number;
-			geminiToBackendMs?: number;
-			backendToClientMs?: number;
-			totalE2EMs: number;
-		};
+		segments: TurnLatencySegments;
 	}): void;
 
 	/**
