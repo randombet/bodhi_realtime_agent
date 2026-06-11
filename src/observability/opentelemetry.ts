@@ -37,6 +37,7 @@ export function createOtelMetricsHooks(meter: Meter): FrameworkHooks {
 	const ttsTtfb = meter.createHistogram('voice.tts.ttfb', { unit: 'ms' });
 	const toolDuration = meter.createHistogram('voice.tool.duration', { unit: 'ms' });
 
+	const latencyDropped = meter.createCounter('voice.turn.latency.dropped');
 	const bargeIn = meter.createCounter('voice.bargein.total');
 	const turns = meter.createCounter('voice.turns.total');
 	const turnsInterrupted = meter.createCounter('voice.turns.interrupted');
@@ -56,6 +57,7 @@ export function createOtelMetricsHooks(meter: Meter): FrameworkHooks {
 			if (ev.segments.backendToClientMs !== undefined)
 				backendToClient.record(ev.segments.backendToClientMs);
 		},
+		onTurnLatencyDropped: (ev) => latencyDropped.add(1, { reason: ev.reason }),
 		onUserSpeechEnd: (ev) => {
 			if (ev.turnId !== undefined) speechEnds.set(ev.turnId, ev.atMs);
 		},

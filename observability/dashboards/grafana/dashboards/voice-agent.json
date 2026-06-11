@@ -118,6 +118,16 @@
       "gridPos": { "h": 8, "w": 4, "x": 20, "y": 28 },
       "fieldConfig": { "defaults": { "min": -1, "max": 1 } },
       "targets": [ { "refId": "A", "expr": "avg(voice_eval_sentiment)", "legendFormat": "sentiment" } ]
+    },
+    { "type": "row", "title": "Metric coverage", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 36 } },
+    {
+      "type": "timeseries",
+      "title": "Latency samples dropped by reason (/s) — coverage gaps, not errors (no_anchor = quiet-mic voice turns)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 7, "w": 24, "x": 0, "y": 37 },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(voice_turn_latency_dropped_total[5m])) by (reason)", "legendFormat": "{{reason}}" }
+      ]
     }
   ]
 }

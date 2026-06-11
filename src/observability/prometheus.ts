@@ -66,8 +66,13 @@ export function renderPrometheus(c: MetricsCollector): string {
 	return [
 		renderHistogram(
 			'voice_turn_latency_e2e_ms',
-			'End-to-end stop-to-first-audio latency (ms).',
+			'End-to-end stop-to-first-audio latency (ms). Provider-anchored samples are a bounded-bias LOWER BOUND (anchor = provider VAD event receipt time).',
 			c.turnE2eMs,
+		),
+		renderCounter(
+			'voice_turn_latency_dropped_total',
+			'Turns that produced no latency sample, by reason (measurement coverage — see observability design §11).',
+			c.turnLatencyDroppedTotal,
 		),
 		renderHistogram(
 			'voice_turn_provider_processing_ms',

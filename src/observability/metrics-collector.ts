@@ -29,6 +29,8 @@ export class MetricsCollector {
 	readonly turnProviderProcessingMs = new Histogram();
 	readonly turnBackendToClientMs = new Histogram();
 	readonly stopToTranscriptMs = new Histogram();
+	/** Turns that produced no latency sample, by reason — measurement coverage. */
+	readonly turnLatencyDroppedTotal = new Counter();
 	// --- Barge-in / turn-taking (user behavior) ---
 	readonly bargeInCancelLatencyMs = new Histogram([10, 30, 60, 100, 200, 500, 1000]);
 	readonly bargeInTotal = new Counter();
@@ -78,6 +80,10 @@ export class MetricsCollector {
 				this.turnProviderProcessingMs.observe(e.segments.geminiProcessingMs);
 			if (e.segments.backendToClientMs !== undefined)
 				this.turnBackendToClientMs.observe(e.segments.backendToClientMs);
+		},
+		onTurnLatencyDropped: (e) => {
+			// Always kept (event-biased): coverage gaps are rare and high-value.
+			this.turnLatencyDroppedTotal.inc({ reason: e.reason });
 		},
 		onUserSpeechEnd: (e) => {
 			if (e.turnId === undefined || !this.keepSession(e.sessionId)) return;

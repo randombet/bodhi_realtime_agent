@@ -151,6 +151,19 @@ describe('MetricsCollector', () => {
 		expect(c.turnsTotal.entries()[0].value).toBe(1); // counter unaffected by sampling
 	});
 
+	it('records latency drops by reason (coverage counter, never sampled out)', () => {
+		const c = new MetricsCollector({ privacy: { sessionSamplingRate: 0 } });
+		c.hooks.onTurnLatencyDropped?.({ sessionId: 's', turnId: 't1', reason: 'no_anchor' });
+		c.hooks.onTurnLatencyDropped?.({ sessionId: 's', reason: 'overflow' });
+		c.hooks.onTurnLatencyDropped?.({ sessionId: 's', turnId: 't2', reason: 'no_anchor' });
+		expect(c.turnLatencyDroppedTotal.entries()).toEqual(
+			expect.arrayContaining([
+				{ labels: { reason: 'no_anchor' }, value: 2 },
+				{ labels: { reason: 'overflow' }, value: 1 },
+			]),
+		);
+	});
+
 	it('records a missed barge-in (successful=false)', () => {
 		const c = new MetricsCollector();
 		c.hooks.onBargeInDetected?.({
