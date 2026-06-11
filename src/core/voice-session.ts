@@ -66,7 +66,7 @@ import { ToolCallRouter } from './tool-call-router.js';
 import { TranscriptManager } from './transcript-manager.js';
 import { TransportReconnector } from './transport-reconnector.js';
 import { TtsPipeline } from './tts-pipeline.js';
-import { computeTurnLatencySegments } from './turn-latency.js';
+import { TurnLatencyTracker } from './turn-latency-tracker.js';
 import { TurnManager } from './turn-manager.js';
 import type { Turn } from './turn.js';
 import { computeCacheHitRatio, deriveProviderItemId, deriveUsageSource } from './usage-helpers.js';
@@ -536,6 +536,8 @@ export class VoiceSession {
 	private config: VoiceSessionConfig;
 	/** Injectable ms clock for metric/latency math (default `Date.now`). */
 	private readonly nowMs: () => number;
+	/** §11 latency-fact correlator (bus subscriber with an async-edge ring). */
+	private readonly turnLatencyTracker: TurnLatencyTracker;
 	private directiveManager = new DirectiveManager();
 	private transcriptManager!: TranscriptManager;
 	/** Whether a client WebSocket connection is currently active. */
@@ -653,6 +655,23 @@ export class VoiceSession {
 		if (config.hooks) {
 			this.hooks.register(config.hooks);
 		}
+
+		// Correlates the raw latency facts published on the bus into per-turn
+		// segments (observability design §11). Pure subscriber — its only
+		// coupling to this session is the bus topics + the hook emitters.
+		this.turnLatencyTracker = new TurnLatencyTracker({
+			sessionId: config.sessionId,
+			bus: this.eventBus,
+			emitLatency: (turnId, segments) =>
+				this.safeEmitHook('onTurnLatency', () =>
+					this.hooks.onTurnLatency?.({ sessionId: config.sessionId, turnId, segments }),
+				),
+			emitDrop: (reason, turnId) =>
+				this.safeEmitHook('onTurnLatencyDropped', () =>
+					this.hooks.onTurnLatencyDropped?.({ sessionId: config.sessionId, turnId, reason }),
+				),
+			log: (msg) => this.log(msg),
+		});
 
 		this.sessionManager = new SessionManager(
 			{
@@ -1783,13 +1802,15 @@ export class VoiceSession {
 		// Flush any buffered transcription before closing
 		this.transcriptManager.flush();
 
-		// §11 close ordering: quiesce the latency pipeline BEFORE the teardown
-		// turn.end below, so that tick can never emit a latency sample. (The
-		// tracker's flush() runs first when constructed — step 2 of §11.5.)
+		// §11 close ordering: (1) flush — already-finalized buffered turns still
+		// emit; (2) session.reset quiesces the tracker; (3) the teardown turn.end
+		// below then lands on a quiesced tracker and can never emit a sample.
+		this.turnLatencyTracker.flush();
 		this.eventBus.publish('session.reset', {
 			sessionId: this.config.sessionId,
 			reason: 'close',
 		});
+		this.turnLatencyTracker.flush(); // process the reset synchronously
 
 		// Fire turn end if a turn is still active. Teardown only does the
 		// lifecycle transition — NOT finalizeTurn (its completion effects, e.g.
@@ -2250,23 +2271,6 @@ export class VoiceSession {
 	 *
 	 * See dev_docs/framework/design-turn-lifecycle-refactor.md § Idempotent finalization.
 	 */
-	/** Emit the per-turn latency breakdown to `onTurnLatency`, when a listener is
-	 *  registered and the timing anchors are available. Stamps come from the metric
-	 *  clock (`nowMs`); user-speech-end is read from the shared-clock VAD. No-op for
-	 *  tool-only turns (no audio → no `firstAudioMs`) — `computeTurnLatencySegments`
-	 *  returns null. */
-	private emitTurnLatency(turn: Turn): void {
-		const hook = this.hooks.onTurnLatency;
-		if (!hook) return;
-		const segments = computeTurnLatencySegments({
-			userSpeechEndMs: this.clientVadDetector.lastSpeechCompletedMs || null,
-			modelStartMs: this._turnTiming.modelStartMs,
-			firstAudioMs: this._turnTiming.firstAudioMs,
-		});
-		if (!segments) return;
-		hook({ sessionId: this.config.sessionId, turnId: turn.id, segments });
-	}
-
 	private finalizeTurn(turn: Turn | null, opts: { interrupted: boolean }): void {
 		if (!turn) return;
 		if (!turn.finalize()) return; // not the first caller — structural no-op
@@ -2340,7 +2344,8 @@ export class VoiceSession {
 		this._turnWasInterrupted = opts.interrupted;
 
 		safeStep('transcript.flush', () => this.transcriptManager.flush());
-		safeStep('hook.onTurnLatency', () => this.emitTurnLatency(turn));
+		// onTurnLatency is emitted by the TurnLatencyTracker on its drain tick,
+		// driven by the turn.end publish below (§11) — no direct emission here.
 		this.turns.advance();
 		this.log(`Turn complete: ${turn.id}`);
 		safeStep('publish.turn_end', () => {

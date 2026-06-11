@@ -23,6 +23,9 @@ export class HooksManager {
 	get onTurnLatency() {
 		return this.hooks.onTurnLatency;
 	}
+	get onTurnLatencyDropped() {
+		return this.hooks.onTurnLatencyDropped;
+	}
 	get onUserSpeechEnd() {
 		return this.hooks.onUserSpeechEnd;
 	}

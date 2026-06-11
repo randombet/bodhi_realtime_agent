@@ -20,6 +20,21 @@ export interface TurnLatencySegments {
 }
 
 /**
+ * Why a turn produced no latency sample (design §11): `no_anchor` — a
+ * user-audio turn had no speech-end stamp (quiet-mic coverage gap);
+ * `stale_anchor` — an anchor existed but died with the previous epoch;
+ * `implausible` — E2E outside [0, 10s]; `reset` — reconnect/transfer/close
+ * discarded in-flight stamps; `overflow` — the tracker ring hit capacity and
+ * failed closed.
+ */
+export type TurnLatencyDropReason =
+	| 'no_anchor'
+	| 'stale_anchor'
+	| 'implausible'
+	| 'reset'
+	| 'overflow';
+
+/**
  * Optional lifecycle hooks for observability, logging, and metrics.
  * All hooks are synchronous and fire-and-forget — exceptions are caught and logged.
  * Register hooks via VoiceSessionConfig or HooksManager.register().
@@ -39,11 +54,21 @@ export interface FrameworkHooks {
 		reason: string;
 	}): void;
 
-	/** Fires at the end of each turn with segment-level latency breakdown. */
+	/** Fires at the end of each turn with segment-level latency breakdown.
+	 *  Emitted by the TurnLatencyTracker on its drain tick — asynchronously,
+	 *  ≈ one macrotask after the turn finalizes. */
 	onTurnLatency?(event: {
 		sessionId: string;
 		turnId: string;
 		segments: TurnLatencySegments;
+	}): void;
+
+	/** Fires when a turn produced no latency sample, with the reason — makes
+	 *  measurement gaps observable instead of silent (design §11). */
+	onTurnLatencyDropped?(event: {
+		sessionId: string;
+		turnId?: string;
+		reason: TurnLatencyDropReason;
 	}): void;
 
 	/**
