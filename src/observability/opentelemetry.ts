@@ -46,7 +46,10 @@ export function createOtelMetricsHooks(meter: Meter): FrameworkHooks {
 	const toolTotal = meter.createCounter('voice.tool.total');
 	const errorTotal = meter.createCounter('voice.error.total');
 
-	const speechEnds = new Map<string, number>();
+	// Sequential S2T anchor (not turnId-keyed — speech end precedes turn
+	// allocation); provider precedence + consume-on-use + plausibility guard,
+	// mirroring MetricsCollector.
+	let pendingS2T: { atMs: number; source: string } | null = null;
 	let awaitingRecovery = false;
 
 	return {
@@ -59,14 +62,18 @@ export function createOtelMetricsHooks(meter: Meter): FrameworkHooks {
 		},
 		onTurnLatencyDropped: (ev) => latencyDropped.add(1, { reason: ev.reason }),
 		onUserSpeechEnd: (ev) => {
-			if (ev.turnId !== undefined) speechEnds.set(ev.turnId, ev.atMs);
+			const source = ev.source ?? 'client-vad';
+			if (pendingS2T === null || source === 'provider' || pendingS2T.source !== 'provider') {
+				pendingS2T = { atMs: ev.atMs, source };
+			}
 		},
 		onTranscriptReady: (ev) => {
-			if (ev.turnId === undefined) return;
-			const start = speechEnds.get(ev.turnId);
-			if (start === undefined) return;
-			speechEnds.delete(ev.turnId);
-			s2t.record(Math.max(0, ev.atMs - start));
+			const anchor = pendingS2T;
+			if (anchor === null) return;
+			pendingS2T = null;
+			const deltaMs = ev.atMs - anchor.atMs;
+			if (deltaMs < 0 || deltaMs > 10_000) return;
+			s2t.record(deltaMs);
 		},
 		onBargeInDetected: (ev) => {
 			cancelLatency.record(ev.latencyMs);

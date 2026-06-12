@@ -41,11 +41,33 @@ describe('MetricsCollector', () => {
 		expect(c.stopToTranscriptMs.sum).toBe(200);
 	});
 
-	it('does not correlate across mismatched turnIds', () => {
+	it('S2T works without turnIds (provider anchor, pre-turn timing)', () => {
 		const c = new MetricsCollector();
-		c.hooks.onUserSpeechEnd?.({ sessionId: 's', turnId: '7', atMs: 1000 });
-		c.hooks.onTranscriptReady?.({ sessionId: 's', turnId: '8', atMs: 1200, textLength: 9 });
-		expect(c.stopToTranscriptMs.count).toBe(0);
+		c.hooks.onUserSpeechEnd?.({ sessionId: 's', atMs: 1000, source: 'provider' });
+		c.hooks.onTranscriptReady?.({ sessionId: 's', atMs: 1300, textLength: 9 });
+		expect(c.stopToTranscriptMs.count).toBe(1);
+		expect(c.stopToTranscriptMs.sum).toBe(300);
+	});
+
+	it('S2T anchor: provider replaces client; client never downgrades provider', () => {
+		const c = new MetricsCollector();
+		c.hooks.onUserSpeechEnd?.({ sessionId: 's', atMs: 900, source: 'provider' });
+		c.hooks.onUserSpeechEnd?.({ sessionId: 's', atMs: 1000, source: 'client-vad' });
+		c.hooks.onTranscriptReady?.({ sessionId: 's', atMs: 1200, textLength: 9 });
+		expect(c.stopToTranscriptMs.sum).toBe(300); // 1200 − 900 (provider kept)
+	});
+
+	it('S2T anchor is consumed on use and implausible spans are dropped, not clamped', () => {
+		const c = new MetricsCollector();
+		c.hooks.onUserSpeechEnd?.({ sessionId: 's', atMs: 1000 });
+		c.hooks.onTranscriptReady?.({ sessionId: 's', atMs: 1200, textLength: 9 });
+		// Second transcript without a new speech end → no sample (consumed).
+		c.hooks.onTranscriptReady?.({ sessionId: 's', atMs: 1400, textLength: 4 });
+		expect(c.stopToTranscriptMs.count).toBe(1);
+		// Stale anchor (>10s gap) → dropped.
+		c.hooks.onUserSpeechEnd?.({ sessionId: 's', atMs: 2000 });
+		c.hooks.onTranscriptReady?.({ sessionId: 's', atMs: 20_000, textLength: 4 });
+		expect(c.stopToTranscriptMs.count).toBe(1);
 	});
 
 	it('records barge-in cancel latency + a labeled total', () => {

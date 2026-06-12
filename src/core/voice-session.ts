@@ -846,6 +846,7 @@ export class VoiceSession {
 							sessionId: this.config.sessionId,
 							turnId: this.turns.current?.id,
 							atMs,
+							source: 'client-vad',
 						}),
 					);
 				},
@@ -1461,11 +1462,22 @@ export class VoiceSession {
 			});
 		};
 		this.transport.onUserSpeechStopped = () => {
+			const atMs = this.nowMs();
 			this.eventBus.publish('speech.user_ended', {
 				sessionId: this.config.sessionId,
-				atMs: this.nowMs(),
+				atMs,
 				source: 'provider',
 			});
+			// Bridge to the public hook too — hook-based consumers (S2T) would
+			// otherwise stay client-VAD-only and miss quiet-mic turns.
+			this.safeEmitHook('onUserSpeechEnd', () =>
+				this.hooks.onUserSpeechEnd?.({
+					sessionId: this.config.sessionId,
+					turnId: this.turns.current?.id,
+					atMs,
+					source: 'provider',
+				}),
+			);
 		};
 		// Latency: first audio chunk of the response (stop-to-first-audio anchor).
 		this.transport.onFirstAudioChunk = () => {

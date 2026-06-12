@@ -48,8 +48,12 @@ export class MetricsCollector {
 	readonly toolTotal = new Counter();
 	readonly errorTotal = new Counter();
 
-	/** turnId → user-speech-end timestamp, for stop-to-transcript correlation. */
-	private readonly pendingSpeechEnd = new Map<string, number>();
+	/** Latest unconsumed speech-end anchor for stop-to-transcript. Sequential
+	 *  join, NOT turnId-keyed: speech end usually precedes turn allocation, so
+	 *  hook events frequently carry no turnId. Provider replaces client (fills
+	 *  the quiet-mic coverage gap; receipt-time bias documented in §11);
+	 *  consumed on use; staleness bounded by the plausibility guard. */
+	private pendingS2T: { atMs: number; source: 'provider' | 'client-vad' } | null = null;
 	/** True while awaiting a clean turn after an interrupt (recovery tracking). */
 	private awaitingRecovery = false;
 
@@ -86,20 +90,27 @@ export class MetricsCollector {
 			this.turnLatencyDroppedTotal.inc({ reason: e.reason });
 		},
 		onUserSpeechEnd: (e) => {
-			if (e.turnId === undefined || !this.keepSession(e.sessionId)) return;
-			this.pendingSpeechEnd.set(e.turnId, e.atMs);
-			// Bound the correlation map (evict oldest insertion).
-			if (this.pendingSpeechEnd.size > 256) {
-				const oldest = this.pendingSpeechEnd.keys().next().value;
-				if (oldest !== undefined) this.pendingSpeechEnd.delete(oldest);
+			if (!this.keepSession(e.sessionId)) return;
+			const source = e.source ?? 'client-vad';
+			// Provider replaces anything; client never downgrades a provider anchor
+			// (tracker-consistent precedence).
+			if (
+				this.pendingS2T === null ||
+				source === 'provider' ||
+				this.pendingS2T.source !== 'provider'
+			) {
+				this.pendingS2T = { atMs: e.atMs, source };
 			}
 		},
 		onTranscriptReady: (e) => {
-			if (e.turnId === undefined) return;
-			const start = this.pendingSpeechEnd.get(e.turnId);
-			if (start === undefined) return;
-			this.pendingSpeechEnd.delete(e.turnId);
-			this.stopToTranscriptMs.observe(Math.max(0, e.atMs - start));
+			const anchor = this.pendingS2T;
+			if (anchor === null) return;
+			this.pendingS2T = null; // consume-on-use — never reused for a later transcript
+			const deltaMs = e.atMs - anchor.atMs;
+			// Plausibility guard: drop, don't clamp (a negative/huge span means the
+			// anchor belonged to a different utterance).
+			if (deltaMs < 0 || deltaMs > 10_000) return;
+			this.stopToTranscriptMs.observe(deltaMs);
 		},
 		onBargeInDetected: (e) => {
 			this.bargeInCancelLatencyMs.observe(e.latencyMs);

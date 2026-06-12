@@ -72,14 +72,19 @@ export interface FrameworkHooks {
 	}): void;
 
 	/**
-	 * Fires when end-of-user-speech is detected (client/provider VAD end) — the
-	 * anchor for stop-to-first-audio (S2FA) and stop-to-transcript (S2T). `atMs`
-	 * comes from the session's metric clock (see `VoiceSessionConfig.nowMs`).
+	 * Fires when end-of-user-speech is detected — the anchor for
+	 * stop-to-first-audio (S2FA) and stop-to-transcript (S2T). Fires once per
+	 * detecting source: `client-vad` carries the detected end edge; `provider`
+	 * (OpenAI/Qwen `speech_stopped`) carries receipt time and fills the
+	 * quiet-mic coverage gap. `turnId` is usually undefined — the turn is not
+	 * born until the model responds; correlate sequentially, not by id. `atMs`
+	 * is on the session metric clock (see `VoiceSessionConfig.nowMs`).
 	 */
 	onUserSpeechEnd?(event: {
 		sessionId: string;
 		turnId?: string;
 		atMs: number;
+		source?: 'provider' | 'client-vad';
 	}): void;
 
 	/**

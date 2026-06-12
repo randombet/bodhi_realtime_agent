@@ -30,16 +30,15 @@ describe('MetricsCollector overhead/bounded-memory', () => {
 		expect(c.errorTotal.size).toBeLessThanOrEqual(51);
 	});
 
-	it('correlation map for stop-to-transcript is bounded (no unbounded growth)', () => {
+	it('stop-to-transcript state is O(1) (single sequential anchor — no unbounded growth)', () => {
 		const c = new MetricsCollector();
-		// 10k un-correlated speech-ends (no matching transcript) must not grow unbounded.
+		// 10k un-correlated speech-ends just overwrite the single anchor slot.
 		for (let i = 0; i < 10_000; i++) {
-			c.hooks.onUserSpeechEnd?.({ sessionId: 's', turnId: `t${i}`, atMs: i });
+			c.hooks.onUserSpeechEnd?.({ sessionId: 's', atMs: i });
 		}
-		// Internal pendingSpeechEnd is capped at 256; assert via a fresh correlation
-		// still working and total turn series not exploding.
-		c.hooks.onUserSpeechEnd?.({ sessionId: 's', turnId: 'recent', atMs: 1 });
-		c.hooks.onTranscriptReady?.({ sessionId: 's', turnId: 'recent', atMs: 5, textLength: 1 });
+		// A fresh correlation still works against the latest anchor.
+		c.hooks.onUserSpeechEnd?.({ sessionId: 's', atMs: 20_000 });
+		c.hooks.onTranscriptReady?.({ sessionId: 's', atMs: 20_005, textLength: 1 });
 		expect(c.stopToTranscriptMs.count).toBe(1);
 	});
 
