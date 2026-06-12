@@ -187,6 +187,40 @@ describe('TurnLatencyTracker', () => {
 		}
 	});
 
+	it('pairs an end only with its OWN source start: interleaved echo start cannot misclassify a provider stop', () => {
+		const h = harness();
+		h.speechStart(50, 'provider'); // user starts speaking (provider VAD)
+		h.respStart('t1', 100); // semantic VAD responds early
+		h.speechStart(120, 'client-vad'); // echo segment opens on the client mic
+		h.speechEnd(350, 'provider'); // pairs with provider start(50) < 100 → late-attach
+		h.firstAudio('t1', 500);
+		h.turnEnd('t1');
+		h.tracker.flush();
+
+		// Before the per-source fix this paired with the client start (120 > 100)
+		// and diverted the provider anchor to the next turn → t1 dropped.
+		expect(h.drops).toHaveLength(0);
+		expect(h.latencies).toEqual([
+			{ turnId: 't1', segments: { totalE2EMs: 150, backendToClientMs: 400 } },
+		]);
+	});
+
+	it('an end consumes its source start: a later end without its own start has unknown start', () => {
+		const h = harness();
+		h.speechStart(50, 'client-vad');
+		h.speechEnd(900, 'client-vad'); // consumes the start
+		h.respStart('t1', 1300);
+		// Second client-vad end with NO new start: end edge (1400) is post-response
+		// with unknown start → cannot rule out echo → next-turn pending, and the
+		// active anchor (900) stays intact.
+		h.speechEnd(1400, 'client-vad');
+		h.firstAudio('t1', 1450);
+		h.turnEnd('t1');
+		h.tracker.flush();
+
+		expect(h.latencies[0].segments.totalE2EMs).toBe(550); // 1450 − 900
+	});
+
 	it('provider anchor wins over client-VAD; client-VAD never downgrades provider', () => {
 		const h = harness();
 		h.speechStart(400);

@@ -71,7 +71,15 @@ export class TurnLatencyTracker {
 	/** Set on ring overflow; cleared at the next resync boundary. */
 	private suppressUntilResync = false;
 
-	private lastSpeechStart: { atMs: number; source: Anchor['source'] } | null = null;
+	/** Latest unconsumed speech-start edge PER SOURCE. Provider and client-VAD
+	 *  streams interleave (e.g. provider start → response → echo client start →
+	 *  provider stop); pairing an end with the other source's start would
+	 *  misclassify it (wrong start guard → barge-in instead of late-attach).
+	 *  An end consumes its own source's start. */
+	private lastSpeechStartBySource: Record<Anchor['source'], number | null> = {
+		provider: null,
+		'client-vad': null,
+	};
 	/** Anchor awaiting the next response.started. */
 	private pendingAnchor: Anchor | null = null;
 	/** Barge-in/next-utterance anchor, promoted across the next turn.end. */
@@ -153,7 +161,8 @@ export class TurnLatencyTracker {
 		this.current = null;
 		this.pendingAnchor = null;
 		this.nextTurnPendingAnchor = null;
-		this.lastSpeechStart = null;
+		this.lastSpeechStartBySource.provider = null;
+		this.lastSpeechStartBySource['client-vad'] = null;
 	}
 
 	private process(entry: RingEntry): void {
@@ -161,17 +170,17 @@ export class TurnLatencyTracker {
 		switch (entry.topic) {
 			case 'speech.user_started': {
 				const p = entry.payload as EventPayloadMap['speech.user_started'];
-				this.lastSpeechStart = { atMs: p.atMs, source: p.source };
+				this.lastSpeechStartBySource[p.source] = p.atMs;
 				return;
 			}
 			case 'speech.user_ended': {
 				if (this.suppressUntilResync) return;
 				const p = entry.payload as EventPayloadMap['speech.user_ended'];
-				this.onSpeechEnded({
-					atMs: p.atMs,
-					source: p.source,
-					startAtMs: this.lastSpeechStart?.atMs ?? null,
-				});
+				// Pair the end ONLY with its own source's start, consuming it so a
+				// stale start can never pair with a later end whose start was lost.
+				const startAtMs = this.lastSpeechStartBySource[p.source];
+				this.lastSpeechStartBySource[p.source] = null;
+				this.onSpeechEnded({ atMs: p.atMs, source: p.source, startAtMs });
 				return;
 			}
 			case 'response.started': {
