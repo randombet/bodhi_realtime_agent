@@ -25,7 +25,10 @@
   "scripts": {
     "start": "tsx app/server/index.ts",
     "start:twilio-local": "node scripts/start-with-ngrok.mjs",
+    "deploy:gcp:base-image": "bash app/server/deploy/setup-gcp-base-image.sh",
     "deploy:nginx:gcp": "bash app/server/deploy/setup-nginx-bodhi-8080.sh",
+    "deploy:nginx:prod": "bash app/server/deploy/setup-nginx-bodhi-production.sh",
+    "deploy:gcp:single-vm": "bash app/server/deploy/setup-gcp-single-vm.sh",
     "build": "tsup",
     "web-client:build": "vite build --config app/web-client/vite.config.ts",
     "web-client:dev": "vite --config app/web-client/vite.config.ts",
