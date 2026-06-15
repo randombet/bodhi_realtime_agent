@@ -39,6 +39,10 @@ export interface AudioRouterDeps {
 	/** If the active agent uses external audio, route the frame there and return
 	 *  `true` so the router does not forward it to the transport. */
 	routeExternalAudio: (data: Buffer) => boolean;
+	/** Optional last-utterance retention tee (watchdog-stall recovery replay).
+	 *  Fed the transport-normalized PCM only on the agent path, after the
+	 *  greeting-grace gate — retention must mirror what the model received. */
+	retainer?: { feed(data: Buffer): void };
 }
 
 /**
@@ -118,6 +122,9 @@ export class AudioRouter {
 		const transportRate = this.d.transport.audioFormat.inputSampleRate;
 		const transportPcm =
 			clientRate === transportRate ? data : resamplePcm(data, clientRate, transportRate, 16);
+		// Retention tee: the transport-normalized PCM the model is about to
+		// receive (pre µ-law encode — the retained copy is PCM16 either way).
+		this.d.retainer?.feed(transportPcm);
 		const transportAudio =
 			this.d.transport.audioFormat.encoding === 'pcmu'
 				? encodePcmToMulaw(transportPcm).toString('base64') // already at 8 kHz

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 import type { IClientChannel } from '../types/session-client.js';
-import type { LLMTransport, ReplayItem } from '../types/transport.js';
+import type { LLMTransport, ReplayItem, RetainedUserTurn } from '../types/transport.js';
 import type { EventBus } from './event-bus.js';
 import type { SessionManager } from './session-manager.js';
 
@@ -35,7 +35,39 @@ export interface TransportReconnectorDeps {
 	isAgentMode(): boolean;
 	reportError(context: string, error: Error): void;
 	log(message: string): void;
+	/** Retained-utterance recovery (`watchdogReplayRecovery`): freshness-windowed,
+	 *  non-consuming read of the last routed user utterance. `null`/absent when
+	 *  the feature is off, nothing is retained, or it is stale. Optional. */
+	peekRetainedUtterance?(): RetainedUserTurn | null;
+	/** Energy check over drained reconnect-buffer PCM chunks ("did the user
+	 *  speak during the reconnect window?"). Chunk presence is meaningless —
+	 *  clients stream continuously, silence included. Optional. */
+	detectSpeech?(chunks: Buffer[]): boolean;
+	/** R7a mid-speech guard: true while the client VAD reports an in-progress
+	 *  speech segment. A watchdog fire during live speech defers recovery (the
+	 *  in-flight speech drives it) instead of replaying/reconnecting. Optional. */
+	isSpeechActive?(): boolean;
+	/** R7c hosted freshness verdict for the just-ended reconnect window, from
+	 *  the session's input-side tee (captured before the `isSessionActive()`
+	 *  drop): `'hosted-speech'` = user spoke (their speech was DROPPED — a
+	 *  retained replay would be stale), `'none'` = frames flowed and none were
+	 *  speech, `'unknown'` = no signal (zero frames seen — forwarding may have
+	 *  stopped; unsafe to guess). Consulted only when the drain returned no
+	 *  inbound chunks. Optional; absent → `'none'` (legacy behavior). */
+	hostedReconnectSpeech?(): 'none' | 'hosted-speech' | 'unknown';
+	/** R7c: a reconnect window opened (client channel began buffering) — the
+	 *  session resets its reconnect-window freshness tee. Optional. */
+	onReconnectWindowStart?(): void;
+	/** R7b: a retained-utterance replay was successfully dispatched (stage 1 or
+	 *  stage 2). The session promotes any pending input partial to a finalized
+	 *  transcript — replay turns emit no input transcription of their own.
+	 *  Never fires for deferred/failed replays or the content-less nudge.
+	 *  Optional. */
+	onReplayDispatched?(): void;
 }
+
+/** Reconnect-window speech verdict driving the stage-2 replay decision. */
+export type ReconnectWindowSpeech = 'none' | 'local-drained-speech' | 'hosted-speech' | 'unknown';
 
 /**
  * Owns the transport reconnect path and the response-watchdog liveness timer as
@@ -65,6 +97,16 @@ export class TransportReconnector {
 	private reconnectAttempts = 0;
 	/** Pending response-watchdog timer (model-silence-after-user-turn). */
 	private _responseWatchdogTimer?: ReturnType<typeof setTimeout>;
+	/** Retained-replay stage for the CURRENT stalled utterance (max one in-place
+	 *  + one post-reconnect replay per sealed utterance — duplicate-context cap).
+	 *  See design-retained-user-content-recovery.md. */
+	private _replayStage: 'idle' | 'replayed-in-place' | 'replayed-after-reconnect' = 'idle';
+	private _replayedUtteranceId: number | null = null;
+	/** R7a: a watchdog fire was deferred because the user was mid-speech. The
+	 *  deferring speech's own completion re-arms the watchdog; if that segment
+	 *  is instead aborted (ignored blip / forced reset), `notifySegmentAborted`
+	 *  re-arms so recovery for the original retained utterance is not stranded. */
+	private _replayDeferred = false;
 
 	constructor(
 		private readonly deps: TransportReconnectorDeps,
@@ -76,17 +118,95 @@ export class TransportReconnector {
 	armResponseWatchdog(): void {
 		if (this.responseWatchdogMs <= 0) return;
 		if (!this.deps.isAgentMode()) return; // never watch a non-agent (dictation/transcription) turn
+		this._replayDeferred = false; // a new arm supersedes any deferred fire
 		this.disarmResponseWatchdog();
 		// Safe to arm even if the session isn't ACTIVE right now: the fire-time
 		// `state !== 'ACTIVE'` guard below makes a stale timer a no-op.
 		this._responseWatchdogTimer = setTimeout(() => {
 			this._responseWatchdogTimer = undefined;
 			if (this.deps.sessionManager.state !== 'ACTIVE') return;
-			this.deps.log(
-				`[Watchdog] Model silent ${this.responseWatchdogMs}ms after user turn — forcing reconnect`,
-			);
-			this.triggerReconnect('response-watchdog', true);
+			this.onResponseWatchdogFired();
 		}, this.responseWatchdogMs);
+	}
+
+	/** Stall detected. STAGE 1: replay the retained utterance in-place on the
+	 *  still-open connection (stalled sessions stay usable — investigation repro
+	 *  1). STAGE 2 (escalation, also the path when stage 1 is impossible):
+	 *  budgeted reconnect, then replay again. */
+	private onResponseWatchdogFired(): void {
+		// R7a mid-speech guard (stage 1 only — the only time the VAD can see live
+		// speech): the in-flight utterance drives recovery; replaying or
+		// reconnecting under the user would inject a stale turn or cut them off.
+		// No re-arm here — re-arming would loop the timer through one long
+		// utterance. The segment's own completion re-arms (onUserTurnCompleted),
+		// and an aborted segment re-arms via notifySegmentAborted().
+		if (this.deps.isSpeechActive?.() === true) {
+			this._replayDeferred = true;
+			this.deps.log(
+				`[Watchdog] Model silent ${this.responseWatchdogMs}ms after user turn — deferred (user speech in progress; no replay, no reconnect)`,
+			);
+			return;
+		}
+		const retained = this.deps.peekRetainedUtterance?.() ?? null;
+		if (retained && this.stageFor(retained) === 'idle' && this.deps.transport.isConnected) {
+			this._replayStage = 'replayed-in-place';
+			if (this.tryReplay(retained, 'in-place')) {
+				this.deps.log(
+					`[Watchdog] Model silent ${this.responseWatchdogMs}ms after user turn — replayed retained user utterance in-place (no reconnect)`,
+				);
+				this.deps.onReplayDispatched?.(); // R7b: surface the replayed turn's transcript
+				this.armResponseWatchdog(); // response window for the replay itself
+				return;
+			}
+			// Transport can't replay (returned false / threw) → reconnect path.
+		}
+		this.deps.log(
+			`[Watchdog] Model silent ${this.responseWatchdogMs}ms after user turn — forcing reconnect`,
+		);
+		this.triggerReconnect('response-watchdog', true);
+	}
+
+	/** Stage state belongs to ONE sealed utterance; reset when identity changes
+	 *  (a new utterance sealed mid-recovery must start back at stage idle, and a
+	 *  stale utterance must not inherit a fresh stage). */
+	private stageFor(retained: RetainedUserTurn): typeof this._replayStage {
+		if (this._replayedUtteranceId !== retained.utteranceId) {
+			this._replayedUtteranceId = retained.utteranceId;
+			this._replayStage = 'idle';
+		}
+		return this._replayStage;
+	}
+
+	/** Wired from correlated model activity (the stall resolved) and teardown. */
+	resetReplayState(): void {
+		this._replayStage = 'idle';
+		this._replayedUtteranceId = null;
+		this._replayDeferred = false;
+	}
+
+	/** R7a: the VAD segment that deferred a watchdog fire was aborted (ignored
+	 *  blip / forced reset) — it will never complete, so its completion can
+	 *  never re-arm. Re-arm now for the ORIGINAL retained utterance; replay
+	 *  stage state is intentionally unchanged. No-op without a deferred fire. */
+	notifySegmentAborted(): void {
+		if (!this._replayDeferred) return;
+		this.deps.log(
+			'[Watchdog] Deferring speech segment aborted — re-arming for the retained utterance',
+		);
+		this.armResponseWatchdog(); // also clears _replayDeferred
+	}
+
+	/** Best-effort: a throwing transport must not abort recovery (the
+	 *  `elicitResponse` empty-`turns` SDK rejection is the cautionary precedent). */
+	private tryReplay(retained: RetainedUserTurn, where: string): boolean {
+		try {
+			return this.deps.transport.replayUserTurn?.(retained) === true;
+		} catch (e) {
+			this.deps.log(
+				`[Watchdog] Retained utterance replay failed ${where} (best-effort): ${(e as Error).message}`,
+			);
+			return false;
+		}
 	}
 
 	/** Cancel the response watchdog (model showed activity, or teardown). */
@@ -114,6 +234,7 @@ export class TransportReconnector {
 			);
 			this.deps.sessionManager.transitionTo('RECONNECTING');
 			this.deps.clientTransport.startBuffering();
+			this.deps.onReconnectWindowStart?.();
 			setTimeout(() => {
 				this.deps.transport
 					.reconnect({
@@ -125,9 +246,20 @@ export class TransportReconnector {
 						for (const chunk of buffered) {
 							this.deps.transport.sendAudio(chunk.toString('base64'));
 						}
+						// Reconnect-window speech verdict ("fresh speech wins" — never
+						// replay an old utterance after newer speech). Local mode: drained
+						// chunks are inbound mic PCM — energy-check them. Hosted mode
+						// drains nothing inbound; the session's input-side tee supplies
+						// the verdict (absent → 'none', the legacy behavior).
+						const reconnectSpeech: ReconnectWindowSpeech =
+							buffered.length > 0
+								? (this.deps.detectSpeech?.(buffered) ?? false)
+									? 'local-drained-speech'
+									: 'none'
+								: (this.deps.hostedReconnectSpeech?.() ?? 'none');
 						this.deps.sessionManager.transitionTo('ACTIVE');
 						this.deps.log('Reconnect complete; session ACTIVE');
-						if (elicit) this.elicitModelResponse(reason);
+						if (elicit) this.recoverModelResponse(reason, reconnectSpeech);
 					})
 					.catch((err) => {
 						this.deps.clientTransport.stopBuffering();
@@ -145,11 +277,46 @@ export class TransportReconnector {
 		}
 	}
 
-	/** Best-effort post-reconnect generation nudge: prefer the transport's
-	 *  content-less elicit (Gemini), else fall back to triggerGeneration (OpenAI).
-	 *  Agent mode only — never nudge while in transcription/dictation mode. */
-	private elicitModelResponse(reason: string): void {
+	/** Post-reconnect recovery. STAGE 2: replay the retained utterance once on
+	 *  the fresh session — but only when the reconnect-window speech verdict is
+	 *  a proven `'none'` ("fresh speech wins", and unknown is unsafe to guess).
+	 *  Falls back to the content-less nudge (tier 3). Agent mode only — never
+	 *  nudge a non-agent dictation/transcription turn. */
+	private recoverModelResponse(reason: string, reconnectSpeech: ReconnectWindowSpeech): void {
 		if (!this.deps.isAgentMode()) return;
+		if (reconnectSpeech === 'local-drained-speech') {
+			this.deps.log('[Watchdog] Skipping retained replay — user spoke during reconnect');
+			// The drained speech bypassed AudioRouter/VAD, so no completion will
+			// arm a watchdog for it — re-arm here or a second stall on that fresh
+			// speech has no timer left to recover it (R7c bookkeeping).
+			this.armResponseWatchdog();
+			return; // server VAD handles the freshly drained speech as a normal turn
+		}
+		if (reconnectSpeech === 'hosted-speech') {
+			// The user's reconnect-window speech was dropped at the input gate —
+			// answering the OLDER retained utterance now would be out of order.
+			this.deps.log('[Watchdog] Skipping retained replay — hosted user spoke during reconnect');
+			return;
+		}
+		if (reconnectSpeech === 'unknown') {
+			this.deps.log('[Watchdog] Skipping retained replay — reconnect-window speech state unknown');
+			return;
+		}
+		const retained = this.deps.peekRetainedUtterance?.() ?? null;
+		if (
+			reason === 'response-watchdog' &&
+			retained &&
+			this.stageFor(retained) !== 'replayed-after-reconnect' &&
+			this.tryReplay(retained, 'after reconnect')
+		) {
+			this._replayStage = 'replayed-after-reconnect';
+			this.deps.log('[Watchdog] Replayed retained user utterance after reconnect');
+			this.deps.onReplayDispatched?.(); // R7b: surface the replayed turn's transcript
+			this.armResponseWatchdog();
+			return;
+		}
+		// Tier 3 — content-less nudge: prefer the transport's elicit (Gemini),
+		// else fall back to triggerGeneration (OpenAI).
 		this.deps.log(`[Watchdog] Re-eliciting model response after reconnect (reason=${reason})`);
 		try {
 			if (this.deps.transport.elicitResponse) {

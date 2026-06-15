@@ -25,6 +25,7 @@ See per-demo sections below for env vars and run commands.
 
 | Demo | Feature | Entry Point | Run |
 |------|---------|-------------|-----|
+| Standard Agent | Standalone demo that imports the production `standard` profile agents and wires hosted-only helpers locally (search, math, time, speed, image/video, image analysis, math-expert hand-off) | `standard-agent/standard-agent-demo.ts` | `pnpm tsx examples/standard-agent/standard-agent-demo.ts` |
 | OpenAI Realtime | OpenAI native-audio voice assistant with tools/subagents | `openai-realtime-tools.ts` | `pnpm tsx examples/openai-realtime-tools.ts` |
 | Cartesia TTS | Custom voice synthesis via Cartesia Sonic | `cartesia-tts-demo.ts` | `pnpm tsx examples/cartesia-tts-demo.ts` |
 | Twilio Human Transfer | Transfer live call to a real human and back | `twilio-demo.ts` | `pnpm tsx examples/twilio-demo.ts` |
@@ -34,6 +35,22 @@ See per-demo sections below for env vars and run commands.
 | Interviewer | Document-driven software interview with a planning subagent | `interviewer/interviewer-demo.ts` | `pnpm tsx examples/interviewer/interviewer-demo.ts` |
 | Direct RTC | Gemini Live voice agent over Opus WebRTC (no tools/subagents) | `direct-rtc-demo/server.ts` | `pnpm demo:direct-rtc` (needs `GEMINI_API_KEY`) |
 | Widget embed dump | Static page on port 8765 to test `wg_*` + `bodhi-widget.js` from another origin | `embed-widget-dump/server.mjs` | `pnpm examples:embed-widget-dump` |
+
+## Standard Agent
+
+Local, single-user demo that imports the hosted **Standard agent** profile agents and wires
+demo-only helpers locally. Also opts into `watchdogReplayRecovery` (watchdog-stall recovery via
+retained-utterance replay — dark by default framework-wide; see
+`dev_docs/framework/design-retained-user-content-recovery.md`). See
+[standard-agent/README.md](standard-agent/README.md).
+
+```bash
+export GEMINI_API_KEY="your-gemini-key"
+pnpm tsx examples/standard-agent/standard-agent-demo.ts
+# In another terminal (reuses the generic web client):
+pnpm tsx examples/openclaw/web-client.ts
+# Open http://localhost:8080 and click Connect.
+```
 
 ## OpenAI Realtime
 
@@ -127,3 +144,14 @@ See [embed-widget-dump/README.md](embed-widget-dump/README.md). Run the Bodhi AP
 ```bash
 pnpm examples:embed-widget-dump
 ```
+
+## Probes (`probes/`)
+
+Not demos — standalone scripts that verify a provider behavior a design depends on (Phase 0
+gates; results are recorded in the corresponding `dev_docs/framework/design-*.md`).
+
+| Probe | Verifies | Run |
+|-------|----------|-----|
+| `probes/gemini-inline-audio-replay.ts` | Gemini Live answers a `clientContent` inline-audio user turn with `turnComplete: true` (retained-utterance recovery replay shape), in clean and post-barge-in states | `pnpm tsx examples/probes/gemini-inline-audio-replay.ts` (needs `GEMINI_API_KEY`) |
+| `probes/hosted-replay-recovery.ts` | Stage-1 watchdog-stall replay + R7a mid-speech deferral + R7b transcript promotion, end-to-end in the hosted session shape (`feedAudioFromClient` + `ClientSenderAdapter`); stall forced via a short `PROBE_WATCHDOG_MS` | `pnpm tsx examples/probes/hosted-replay-recovery.ts` (needs `GEMINI_API_KEY`) |
+| `probes/hosted-reconnect-freshness.ts` | R7c reconnect-window verdicts (`none`/`hosted-speech`/`unknown`) on a real resumption-handle reconnect, by controlling what flows through `feedAudioFromClient` during the window | `pnpm tsx examples/probes/hosted-reconnect-freshness.ts [silence\|speech\|none\|all]` (needs `GEMINI_API_KEY`) |

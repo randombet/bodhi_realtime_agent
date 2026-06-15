@@ -17,6 +17,7 @@ import type {
 	RealtimeLLMUsageEvent,
 	ReconnectState,
 	ReplayItem,
+	RetainedUserTurn,
 	SessionUpdate,
 	TransportCapabilities,
 	TransportToolCall,
@@ -618,7 +619,40 @@ export class GeminiLiveTransport implements LLMTransport {
 	 *  after a reconnect. No-op if the session is not connected. */
 	elicitResponse(): void {
 		if (!this.session) return;
-		this.session.sendClientContent({ turns: [], turnComplete: true });
+		// Omit `turns` entirely — the SDK parses any non-null/non-undefined value
+		// and rejects an empty array ("contents are required"), so `turns: []`
+		// throws instead of sending a bare turnComplete.
+		this.session.sendClientContent({ turnComplete: true });
+	}
+
+	/** Replay a retained user utterance as a complete user turn — inline audio
+	 *  content with an explicit `turnComplete`, deliberately NOT the realtime
+	 *  channel (no server-VAD dependence; a brief utterance after a barge-in is
+	 *  exactly what the server VAD dropped). Phase 0 validated this shape in both
+	 *  clean and post-barge-in states (raw PCM, no input transcription emitted —
+	 *  see design-retained-user-content-recovery.md). */
+	replayUserTurn(turn: RetainedUserTurn): boolean {
+		if (!this.session) return false;
+		// Same winding-down discipline as sendContent/sendFile: a replay must not
+		// race a session draining toward close.
+		if (this.bufferIfWindingDown(() => this.replayUserTurn(turn))) return true;
+		this.session.sendClientContent({
+			turns: [
+				{
+					role: 'user',
+					parts: [
+						{
+							inlineData: {
+								data: turn.pcm.toString('base64'),
+								mimeType: `audio/pcm;rate=${turn.sampleRateHz}`,
+							},
+						},
+					] as never[],
+				},
+			],
+			turnComplete: true,
+		});
+		return true;
 	}
 
 	/** No-op for V1 — server VAD only. */

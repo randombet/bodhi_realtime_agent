@@ -12,6 +12,26 @@ export const CLIENT_VAD_AVG_ABS_THRESHOLD = 220;
 /** Outcome of a completed speech segment. */
 export type VadSegmentOutcome = 'completed' | 'ignored' | 'none';
 
+/** One-shot speech check over PCM16 chunks with the same energy thresholds as
+ *  the live VAD. Used on the reconnect-buffer drain ("did the user speak during
+ *  the reconnect window?") — clients stream continuously, so chunk *presence*
+ *  is meaningless; only speech energy counts. */
+export function pcmChunksContainSpeech(chunks: Buffer[]): boolean {
+	const energy: FrameEnergy = { maxAbs: 0, avgAbs: 0, samples: 0 };
+	for (const chunk of chunks) {
+		if (chunk.length < 2) continue;
+		analyzeFrameInto(chunk, energy);
+		if (energy.samples === 0) continue;
+		if (
+			energy.maxAbs >= CLIENT_VAD_PEAK_THRESHOLD ||
+			energy.avgAbs >= CLIENT_VAD_AVG_ABS_THRESHOLD
+		) {
+			return true;
+		}
+	}
+	return false;
+}
+
 /**
  * Events emitted by `ClientVadDetector`. The detector owns the VAD *state*;
  * these hooks let `VoiceSession` keep the *policy* (barge-in actuation, the
@@ -31,6 +51,12 @@ export interface VadEvents {
 	 *  speech) — the user finished a turn. Fires only on `'completed'`, never on
 	 *  `'ignored'`. Optional. (Session arms the response watchdog.) */
 	onUserTurnCompleted?(): void;
+	/** A segment ended WITHOUT a completed user turn: resolved as `'ignored'`
+	 *  (below min speech) or torn down via `resetSegment()` while active.
+	 *  Optional. (Session aborts the retained in-progress segment and lets a
+	 *  deferred watchdog replay re-evaluate — see
+	 *  design-retained-user-content-recovery.md, R7a.) */
+	onSegmentAborted?(): void;
 }
 
 /**
@@ -142,6 +168,7 @@ export class ClientVadDetector {
 			this.log(
 				`[Latency] User voice input ignored (client audio VAD; reason=${reason}; speechDuration=${speechDurationMs}ms; silenceObserved=${silenceObservedMs}ms; minSpeechDuration=${CLIENT_VAD_MIN_SPEECH_MS}ms)`,
 			);
+			this.events.onSegmentAborted?.();
 			return 'ignored';
 		}
 		this._lastSpeechCompletedMs = speechEndMs;
@@ -153,11 +180,15 @@ export class ClientVadDetector {
 		return 'completed';
 	}
 
-	/** Drop a stale segment with no events (the forced VAD-defer cleanup path). */
+	/** Drop a stale segment (the forced VAD-defer cleanup path). Emits only
+	 *  `onSegmentAborted` (when a segment was active) so retained-utterance
+	 *  recovery can abort its in-progress segment; no other events fire. */
 	resetSegment(): void {
+		const wasActive = this.speechActive;
 		this.speechActive = false;
 		this.speechStartMs = 0;
 		this.lastVoiceMs = 0;
 		this.eligible = false;
+		if (wasActive) this.events.onSegmentAborted?.();
 	}
 }
