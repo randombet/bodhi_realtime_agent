@@ -1403,6 +1403,77 @@ describe('VoiceSession', () => {
 			).toBe(true);
 		});
 
+		it('reinforcement injects the directive without triggering a new generation (turnComplete=false)', async () => {
+			// Regression: reinforceDirectives must NOT request a model response.
+			// Sending the directive with turnComplete=true makes it a synthetic
+			// user turn that the model answers, which completes another clean turn
+			// and re-fires reinforcement — an unbounded self-talk loop.
+			session = new VoiceSession({
+				sessionId: 'sess_1',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [
+					{
+						name: 'directive-agent',
+						instructions: 'Agent with directive tool',
+						tools: [
+							{
+								name: 'set_pace',
+								description: 'Set pacing',
+								parameters: z.object({ speed: z.string() }),
+								execution: 'inline',
+								execute: async (_args, ctx) => {
+									ctx.setDirective?.('pacing', 'Speak slowly');
+									return { ok: true };
+								},
+							},
+						],
+					},
+				],
+				initialAgent: 'directive-agent',
+				port: 9892,
+				model: mockModel,
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const { _getMessageHandler, _getMockSession } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+			const mockGeminiSession = (
+				_getMockSession as unknown as () => Record<string, ReturnType<typeof vi.fn>>
+			)();
+
+			fire({
+				toolCall: {
+					functionCalls: [{ id: 'tc_d1', name: 'set_pace', args: { speed: 'slow' } }],
+				},
+			});
+
+			await new Promise((r) => setTimeout(r, 100));
+
+			mockGeminiSession.sendClientContent.mockClear();
+			mockGeminiSession.sendRealtimeInput.mockClear();
+			fire({ serverContent: { turnComplete: true } });
+
+			await new Promise((r) => setTimeout(r, 50));
+
+			// The directive is injected via sendClientContent...
+			const directiveCall = mockGeminiSession.sendClientContent.mock.calls.find((call) => {
+				const arg = call[0] as { turns?: Array<{ parts?: Array<{ text?: string }> }> };
+				return arg.turns?.some((t) => t.parts?.some((p) => p.text?.includes('Speak slowly')));
+			});
+			expect(directiveCall).toBeDefined();
+			// ...with turnComplete=false so it does NOT trigger a new generation.
+			expect((directiveCall?.[0] as { turnComplete?: boolean }).turnComplete).toBe(false);
+			// And it must NOT be sent via the generation-triggering realtime-input path.
+			expect(
+				mockGeminiSession.sendRealtimeInput.mock.calls.some((c) =>
+					(c[0] as { text?: string }).text?.includes('Speak slowly'),
+				),
+			).toBe(false);
+		});
+
 		it('clearing a directive stops injection on next turn', async () => {
 			session = new VoiceSession({
 				sessionId: 'sess_1',

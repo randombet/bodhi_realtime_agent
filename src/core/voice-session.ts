@@ -2283,7 +2283,11 @@ export class VoiceSession {
 		const text = this.directiveManager.getReinforcementText();
 		if (!text) return;
 		this.log(`Reinforcing directives: ${text.slice(0, 120)}...`);
-		this.transport.sendContent([{ role: 'user', text }], true);
+		// turnComplete=false: append to context WITHOUT requesting a response.
+		// A generation-triggering injection here makes the model answer its own
+		// directive reminder, which completes another clean turn and re-fires this
+		// reinforcement — an unbounded self-talk loop.
+		this.transport.sendContent([{ role: 'user', text }], false);
 	}
 
 	private handleInterrupted(serverTurnId?: number): void {
