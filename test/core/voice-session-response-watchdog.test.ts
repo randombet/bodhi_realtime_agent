@@ -192,6 +192,42 @@ describe('response watchdog', () => {
 		}
 	});
 
+	it('defers (no reconnect) when the watchdog fires mid-speech, then recovers (flag off)', async () => {
+		// Regression: a multi-segment user turn must not be cut off. The watchdog is armed by
+		// segment N's completion, but segment N+1 starts before it fires; the fire must DEFER
+		// (R7a) instead of forcing a reconnect — even with watchdogReplayRecovery off (the
+		// default here), where the mid-speech guard used to be unwired.
+		let session: VoiceSession | undefined;
+		try {
+			const s = setup(); // no watchdogReplayRecovery → retainer absent (the bug condition)
+			session = s.session;
+			await activate(session, s.transport);
+
+			completeUserTurn(session); // segment N completes → arms watchdog (fires ~8s later)
+
+			// Segment N+1 STARTS (~4s into the window) but does NOT complete: the user is
+			// actively speaking when the stale segment-N timer fires.
+			vi.advanceTimersByTime(4000);
+			session.feedAudioFromClient(micFrame(2400)); // speech start → speechActive = true
+			vi.advanceTimersByTime(150);
+			session.feedAudioFromClient(micFrame(2400)); // still voiced; no completing silence
+
+			vi.advanceTimersByTime(4000); // segment-N timer fires here, mid-speech → DEFER
+			vi.advanceTimersByTime(1000); // would-be reconnect backoff window
+			expect(s.transport.reconnect).not.toHaveBeenCalled();
+			expect(session.sessionManager.state).toBe('ACTIVE');
+
+			// No-strand guarantee: when the user finally stops, the segment completes and
+			// re-arms; a genuine model-silence window after that still recovers.
+			session.feedAudioFromClient(micFrame(0)); // silence → complete → re-arm watchdog
+			vi.advanceTimersByTime(8000); // fresh window elapses, model still silent → fires
+			vi.advanceTimersByTime(1000); // backoff → reconnect()
+			expect(s.transport.reconnect).toHaveBeenCalledTimes(1);
+		} finally {
+			await session?.close();
+		}
+	});
+
 	it('is disabled when responseWatchdogMs <= 0', async () => {
 		let session: VoiceSession | undefined;
 		try {

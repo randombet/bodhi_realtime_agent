@@ -1159,11 +1159,12 @@ export class VoiceSession {
 				peekRetainedUtterance: () =>
 					this.utteranceRetainer?.peek(DEFAULT_REPLAY_MAX_AGE_MS) ?? null,
 				detectSpeech: (chunks) => pcmChunksContainSpeech(chunks),
-				// R7a/R7c deps are scoped to the flag (retainer present) so flag-off
-				// sessions keep the legacy watchdog/recovery behavior exactly.
-				isSpeechActive: this.utteranceRetainer
-					? () => this.clientVadDetector.isSpeechActive
-					: undefined,
+				// Mid-speech watchdog deferral (R7a) is ALWAYS wired: it only reads the
+				// client VAD's in-progress-segment flag and merely postpones recovery while
+				// the user is talking, so flag-off sessions must not force a reconnect under
+				// a live multi-segment utterance. The R7c hosted-freshness verdict below stays
+				// scoped to the retained-replay rollout flag.
+				isSpeechActive: () => this.clientVadDetector.isSpeechActive,
 				hostedReconnectSpeech: this.utteranceRetainer
 					? () => this.reconnectWindowSpeechVerdict()
 					: undefined,
