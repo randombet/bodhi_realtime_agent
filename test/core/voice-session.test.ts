@@ -1405,9 +1405,10 @@ describe('VoiceSession', () => {
 
 		it('reinforcement injects the directive without triggering a new generation (turnComplete=false)', async () => {
 			// Regression: reinforceDirectives must NOT request a model response.
-			// Sending the directive with turnComplete=true makes it a synthetic
-			// user turn that the model answers, which completes another clean turn
-			// and re-fires reinforcement — an unbounded self-talk loop.
+			// A generation-triggering injection makes the model speak an unsolicited
+			// "self-talk" turn in reply to its own directive reminder. So the directive
+			// is appended with turnComplete=false (no response requested); the user's
+			// next audio turn commits it via server VAD.
 			session = new VoiceSession({
 				sessionId: 'sess_1',
 				userId: 'user_1',
@@ -1458,7 +1459,7 @@ describe('VoiceSession', () => {
 
 			await new Promise((r) => setTimeout(r, 50));
 
-			// The directive is injected via sendClientContent...
+			// The directive is appended via sendClientContent...
 			const directiveCall = mockGeminiSession.sendClientContent.mock.calls.find((call) => {
 				const arg = call[0] as { turns?: Array<{ parts?: Array<{ text?: string }> }> };
 				return arg.turns?.some((t) => t.parts?.some((p) => p.text?.includes('Speak slowly')));
