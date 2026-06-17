@@ -2279,15 +2279,17 @@ export class VoiceSession {
 		safeStep('notif.turn_complete', () => this.notificationSink.turnComplete());
 	}
 
-	/** Inject all active directives into the LLM's context to prevent behavioral drift. */
+	/** Inject all active directives into the LLM's context to prevent behavioral drift.
+	 *
+	 *  Sent with turnComplete=false: appends the directive to the conversation
+	 *  WITHOUT requesting a model response. A generation-triggering injection makes
+	 *  the model speak an unsolicited "self-talk" turn in reply to its own directive
+	 *  reminder, so we deliberately leave the turn open and let the user's next audio
+	 *  turn commit it via server VAD. Runs on every clean (non-interrupted) turn. */
 	private reinforceDirectives(): void {
 		const text = this.directiveManager.getReinforcementText();
 		if (!text) return;
 		this.log(`Reinforcing directives: ${text.slice(0, 120)}...`);
-		// turnComplete=false: append to context WITHOUT requesting a response.
-		// A generation-triggering injection here makes the model answer its own
-		// directive reminder, which completes another clean turn and re-fires this
-		// reinforcement — an unbounded self-talk loop.
 		this.transport.sendContent([{ role: 'user', text }], false);
 	}
 
