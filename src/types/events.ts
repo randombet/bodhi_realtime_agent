@@ -2,9 +2,24 @@
 
 import type { ExternalEvent } from './agent.js';
 import type { SubagentResult, ToolCall, ToolResult, UIPayload } from './conversation.js';
+import type { TurnLatencySegments } from './hooks.js';
 import type { SessionState } from './session.js';
 import type { RealtimeLLMUsageEvent } from './transport.js';
 import type { UIResponse } from './ui.js';
+
+/** Which VAD produced a speech timing fact. */
+export type SpeechEventSource = 'provider' | 'client-vad';
+
+/**
+ * What initiated a model response — assigned explicitly at every
+ * response-creating call site (observability design §11). Only `'user_audio'`
+ * turns are latency-eligible for a `no_anchor` drop.
+ */
+export type ResponseOrigin =
+	| 'user_audio'
+	| 'user_text'
+	| 'assistant_initiated'
+	| 'tool_continuation';
 
 /** Source identifier for a published `realtime.usage` EventBus event. */
 export type RealtimeUsageSource =
@@ -93,6 +108,25 @@ export interface EventPayloadMap {
 	'turn.start': { sessionId: string; turnId: string };
 	'turn.end': { sessionId: string; turnId: string };
 	'turn.interrupted': { sessionId: string; turnId: string };
+
+	// Raw latency facts (observability design §11 — consumed by TurnLatencyTracker).
+	// `atMs` is the SOURCE EDGE on the session metric clock: client-VAD events
+	// carry the detector's detected edges (speechStartMs / speechEndMs =
+	// lastVoiceMs), NOT publish time; provider events use callback receipt time
+	// (bounded late bias — see the design doc).
+	'speech.user_started': { sessionId: string; atMs: number; source: SpeechEventSource };
+	'speech.user_ended': { sessionId: string; atMs: number; source: SpeechEventSource };
+	'response.started': {
+		sessionId: string;
+		turnId: string;
+		atMs: number;
+		origin: ResponseOrigin;
+	};
+	'response.first_audio': { sessionId: string; turnId: string; atMs: number };
+	/** In-flight latency stamps must be discarded (reconnect/transfer/close). */
+	'session.reset': { sessionId: string; reason: 'reconnect' | 'transfer' | 'close' };
+	/** Computed per-turn latency result (mirror of `onTurnLatency`). */
+	'turn.latency': { sessionId: string; turnId: string; segments: TurnLatencySegments };
 
 	// GUI events
 	'gui.update': { sessionId: string; data: Record<string, unknown> };

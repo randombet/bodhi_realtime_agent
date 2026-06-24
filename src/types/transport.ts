@@ -605,6 +605,13 @@ export interface LLMTransport {
 	 *  Used by VoiceSession to trigger STT provider commit. */
 	onModelTurnStart?: () => void;
 
+	/** Fires once per model response, on the FIRST audio chunk emitted to the
+	 *  client. Distinct from `onModelTurnStart` (which fires on any response part,
+	 *  including tool-only turns) — this marks the moment audio actually begins, the
+	 *  anchor for TTS-first-audio / stop-to-first-audio latency. Transports reset
+	 *  their per-response "audio started" flag when a new response begins. */
+	onFirstAudioChunk?: () => void;
+
 	// --- Text-mode callbacks (active when responseModality is 'text') ---
 	/** Fires when the model produces text output (text-mode responses).
 	 *  Only active when responseModality is 'text' (i.e., external TTS in use).
@@ -621,6 +628,15 @@ export interface LLMTransport {
 	 *  OpenAI: wired to input_audio_buffer.speech_started.
 	 *  Gemini: may require custom VAD signal — needs empirical testing. */
 	onSpeechStarted?: () => void;
+
+	/** Fires when the provider's server VAD detects end of user speech.
+	 *  OpenAI/Qwen: wired to input_audio_buffer.speech_stopped. Gemini Live has
+	 *  no equivalent wire event (callback never fires there — the framework
+	 *  falls back to client-VAD timing). The latency anchor derived from this is
+	 *  callback receipt time: biased late by the provider's silence window +
+	 *  network hop (a bounded lower-bound bias — see the observability design,
+	 *  investment-hai-metrics-observability.md §11). */
+	onUserSpeechStopped?: () => void;
 
 	// --- Optional capability callbacks (only fired by supporting transports) ---
 	onGoAway?: (timeLeft: string) => void;

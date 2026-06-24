@@ -14,7 +14,7 @@ export default withMermaid(
 			// `dev_docs/`, `app/`, `examples/`, top-level `README.md`). The targets
 			// exist on disk and resolve correctly when the doc is viewed on GitHub,
 			// but VitePress's checker can't see outside the docs/ directory.
-			/^\.{1,2}\/(\.\.\/)*(dev_docs|app|examples|README)(\/|$)/,
+			/^\.{1,2}\/(\.\.\/)*(dev_docs|app|examples|observability|README)(\/|$)/,
 			// Bare directory link to `./advanced/` (no `advanced/index.md` exists;
 			// the section's entry page is `advanced/subagents`).
 			/^\.\/advanced(\/(index)?)?$/,
@@ -51,6 +51,7 @@ export default withMermaid(
 							{ text: 'Memory', link: '/guide/memory' },
 							{ text: 'Knowledge base', link: '/guide/knowledge-base' },
 							{ text: 'Events & Hooks', link: '/guide/events' },
+							{ text: 'Observability', link: '/guide/observability' },
 							{ text: 'Transport', link: '/guide/transport' },
 							{ text: 'Known Issues', link: '/guide/known-issues' },
 						],

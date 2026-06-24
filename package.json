@@ -17,6 +17,34 @@
         "types": "./dist/index.d.cts",
         "default": "./dist/index.cjs"
       }
+    },
+    "./observability": {
+      "import": {
+        "types": "./dist/observability/index.d.ts",
+        "default": "./dist/observability/index.js"
+      },
+      "require": {
+        "types": "./dist/observability/index.d.cts",
+        "default": "./dist/observability/index.cjs"
+      }
+    },
+    "./observability/opentelemetry": {
+      "import": {
+        "types": "./dist/observability/opentelemetry.d.ts",
+        "default": "./dist/observability/opentelemetry.js"
+      },
+      "require": {
+        "types": "./dist/observability/opentelemetry.d.cts",
+        "default": "./dist/observability/opentelemetry.cjs"
+      }
+    }
+  },
+  "peerDependencies": {
+    "@opentelemetry/api": ">=1.9.0"
+  },
+  "peerDependenciesMeta": {
+    "@opentelemetry/api": {
+      "optional": true
     }
   },
   "files": [
@@ -84,6 +112,9 @@
   "devDependencies": {
     "@biomejs/biome": "^1.9.0",
     "@braintree/sanitize-url": "^7.1.2",
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/exporter-metrics-otlp-http": "^0.218.0",
+    "@opentelemetry/sdk-metrics": "^2.7.1",
     "@types/node": "^22.0.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",

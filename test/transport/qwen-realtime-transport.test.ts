@@ -144,6 +144,32 @@ describe('QwenRealtimeTransport', () => {
 		expect(chunks).toEqual(['AAAA']);
 	});
 
+	it('onFirstAudioChunk: fires once per response, before audio, resets next response', async () => {
+		const [t, ws] = await connect();
+		const order: string[] = [];
+		t.onFirstAudioChunk = () => order.push('first-audio');
+		t.onAudioOutput = () => order.push('audio');
+		ws.msg({ type: 'response.created' });
+		ws.msg({ type: 'response.audio.delta', delta: 'AAAA' });
+		ws.msg({ type: 'response.audio.delta', delta: 'BBBB' });
+		// first-audio fires once, and before the first audio chunk
+		expect(order).toEqual(['first-audio', 'audio', 'audio']);
+		// a new response re-arms the one-shot
+		ws.msg({ type: 'response.created' });
+		ws.msg({ type: 'response.audio.delta', delta: 'CCCC' });
+		expect(order).toEqual(['first-audio', 'audio', 'audio', 'first-audio', 'audio']);
+	});
+
+	it('onUserSpeechStopped: fires on speech_stopped, after onSpeechStarted', async () => {
+		const [t, ws] = await connect();
+		const order: string[] = [];
+		t.onSpeechStarted = () => order.push('started');
+		t.onUserSpeechStopped = () => order.push('stopped');
+		ws.msg({ type: 'input_audio_buffer.speech_started' });
+		ws.msg({ type: 'input_audio_buffer.speech_stopped' });
+		expect(order).toEqual(['started', 'stopped']);
+	});
+
 	it('input transcription: emits once on completed, not on delta', async () => {
 		const [t, ws] = await connect();
 		const got: string[] = [];

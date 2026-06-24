@@ -68,6 +68,7 @@ import { ToolCallRouter } from './tool-call-router.js';
 import { TranscriptManager } from './transcript-manager.js';
 import { TransportReconnector } from './transport-reconnector.js';
 import { TtsPipeline } from './tts-pipeline.js';
+import { TurnLatencyTracker } from './turn-latency-tracker.js';
 import { TurnManager } from './turn-manager.js';
 import type { Turn } from './turn.js';
 import { computeCacheHitRatio, deriveProviderItemId, deriveUsageSource } from './usage-helpers.js';
@@ -204,6 +205,13 @@ export interface VoiceSessionConfig {
 	subagentConfigs?: Record<string, SubagentConfig>;
 	/** Lifecycle hooks for observability. */
 	hooks?: FrameworkHooks;
+	/**
+	 * Injectable time source (milliseconds) for all metric/latency duration math.
+	 * Defaults to `Date.now`. Shared with `ClientVadDetector` so session-side and
+	 * VAD-side timestamps come from one clock (never subtract across clocks). Tests
+	 * inject a fake clock to make latency assertions deterministic.
+	 */
+	nowMs?: () => number;
 	/**
 	 * Sender for all output to the client. The server owns the socket and feeds input
 	 * via feedAudioFromClient / feedJsonFromClient and notifyClientConnected / notifyClientDisconnected.
@@ -482,6 +490,22 @@ export class VoiceSession {
 	 *  (`onModelTurnStart`); read by `handleTurnComplete` so the native gate
 	 *  engages only on a turn's terminal spoken response (audio, no tool call). */
 	private _nativeResponseDispatchedToolCall = false;
+	/** Per-response latency stamps on the metric clock (`nowMs`), reset when a
+	 *  model response begins. user-speech-end is read from the VAD at emit time.
+	 *  Consumed by `emitTurnLatency` → `onTurnLatency`. */
+	private _turnTiming: { modelStartMs: number | null; firstAudioMs: number | null } = {
+		modelStartMs: null,
+		firstAudioMs: null,
+	};
+	/** Metric-clock time of the last interrupt (yield), for re-entry latency;
+	 *  cleared once the agent re-enters with audio. */
+	private _lastInterruptAtMs: number | null = null;
+	/** Origin of the NEXT model response, set explicitly at response-creating
+	 *  call sites (text input, greeting, notifications, directives, re-elicit)
+	 *  and consumed by the next `onModelTurnStart`. `null` → derived: a response
+	 *  following a tool dispatch is `tool_continuation`, else `user_audio`.
+	 *  Powers the `response.started.origin` latency-eligibility fact (§11). */
+	private _pendingResponseOrigin: 'user_text' | 'assistant_initiated' | null = null;
 	/** Time (ms) of the current turn's first assistant audio chunk, or `null`
 	 *  between/before turns. Barge-in *eligibility* policy for the no-`liveGate`,
 	 *  `bufferedUncancellableAudio` shape (Gemini): a client-VAD barge-in is
@@ -527,6 +551,10 @@ export class VoiceSession {
 	// --- Server-turn finalization dedup (external-TTS turn completion).
 	//     See dev_docs/framework/design-external-tts-turn-completion.md. ---
 	private config: VoiceSessionConfig;
+	/** Injectable ms clock for metric/latency math (default `Date.now`). */
+	private readonly nowMs: () => number;
+	/** §11 latency-fact correlator (bus subscriber with an async-edge ring). */
+	private readonly turnLatencyTracker: TurnLatencyTracker;
 	private directiveManager = new DirectiveManager();
 	private transcriptManager!: TranscriptManager;
 	/** Whether a client WebSocket connection is currently active. */
@@ -577,6 +605,7 @@ export class VoiceSession {
 
 	constructor(config: VoiceSessionConfig) {
 		this.config = config;
+		this.nowMs = config.nowMs ?? Date.now;
 		this.ownsClientTransport = !config.clientSender;
 		this.eventBus = new EventBus();
 		this.hooks = new HooksManager();
@@ -592,6 +621,15 @@ export class VoiceSession {
 		// invoked at runtime (agentRouter is initialized before any transcript fires).
 		this.transcriptManager.onInputFinalized = (text) => {
 			this.turns.markInputFinalized();
+			// Latency: user transcript finalized (S2T anchor). textLength only — never text.
+			this.safeEmitHook('onTranscriptReady', () =>
+				this.hooks.onTranscriptReady?.({
+					sessionId: this.config.sessionId,
+					turnId: this.turns.current?.id,
+					atMs: this.nowMs(),
+					textLength: text.length,
+				}),
+			);
 			const activeId = this.interactionMode.getActiveToolCallId();
 			if (activeId) {
 				const session = this.agentRouter.getSubagentSession(activeId);
@@ -615,6 +653,7 @@ export class VoiceSession {
 						role: (t.role === 'model' ? 'assistant' : t.role) as 'user' | 'assistant',
 						text: t.parts[0]?.text ?? '',
 					}));
+					this._pendingResponseOrigin = 'assistant_initiated';
 					this.transport.sendContent(contentTurns, turnComplete);
 				},
 				(msg) => this.log(msg),
@@ -633,6 +672,23 @@ export class VoiceSession {
 		if (config.hooks) {
 			this.hooks.register(config.hooks);
 		}
+
+		// Correlates the raw latency facts published on the bus into per-turn
+		// segments (observability design §11). Pure subscriber — its only
+		// coupling to this session is the bus topics + the hook emitters.
+		this.turnLatencyTracker = new TurnLatencyTracker({
+			sessionId: config.sessionId,
+			bus: this.eventBus,
+			emitLatency: (turnId, segments) =>
+				this.safeEmitHook('onTurnLatency', () =>
+					this.hooks.onTurnLatency?.({ sessionId: config.sessionId, turnId, segments }),
+				),
+			emitDrop: (reason, turnId) =>
+				this.safeEmitHook('onTurnLatencyDropped', () =>
+					this.hooks.onTurnLatencyDropped?.({ sessionId: config.sessionId, turnId, reason }),
+				),
+			log: (msg) => this.log(msg),
+		});
 
 		this.sessionManager = new SessionManager(
 			{
@@ -790,6 +846,12 @@ export class VoiceSession {
 					// New segment ends the input-transcription log-dedup window.
 					this.lastInputTranscriptionLogText = '';
 					this.utteranceRetainer?.markSpeechStart();
+					// Raw latency fact (§11): the DETECTED edge, not publish time.
+					this.eventBus.publish('speech.user_started', {
+						sessionId: this.config.sessionId,
+						atMs: this.clientVadDetector.speechStartedAtMs,
+						source: 'client-vad',
+					});
 				},
 				onVoicedFrame: (now, maxAbs, avgAbs) => this.runClientVadBargeInPolicy(now, maxAbs, avgAbs),
 				onSegmentResolved: () => this.completionArbiter.resolveDeferredPlayback(),
@@ -799,6 +861,22 @@ export class VoiceSession {
 				onUserTurnCompleted: () => {
 					this.utteranceRetainer?.seal();
 					this.reconnector.armResponseWatchdog();
+					// Latency: end-of-user-speech (S2FA/S2T anchor) on the shared metric clock.
+					const atMs = this.clientVadDetector.lastSpeechCompletedMs || this.nowMs();
+					// Raw latency fact (§11): the DETECTED edge (speechEndMs = lastVoiceMs).
+					this.eventBus.publish('speech.user_ended', {
+						sessionId: this.config.sessionId,
+						atMs,
+						source: 'client-vad',
+					});
+					this.safeEmitHook('onUserSpeechEnd', () =>
+						this.hooks.onUserSpeechEnd?.({
+							sessionId: this.config.sessionId,
+							turnId: this.turns.current?.id,
+							atMs,
+							source: 'client-vad',
+						}),
+					);
 				},
 				// Ignored blip / forced reset: the segment can never seal — drop the
 				// in-progress retained audio (keeps the sealed replay candidate) and
@@ -809,6 +887,7 @@ export class VoiceSession {
 				},
 			},
 			(msg) => this.log(msg),
+			this.nowMs,
 		);
 
 		// Inbound client-audio fast path. Dependencies are read through
@@ -965,10 +1044,16 @@ export class VoiceSession {
 			} catch (e) {
 				this.log(`pre-attached onModelTurnStart threw: ${(e as Error).message}`);
 			}
+			// A response following a tool dispatch (in the same turn) is a
+			// continuation — capture BEFORE the flag resets below.
+			const wasToolContinuation = this._nativeResponseDispatchedToolCall;
 			// Native playback-end gate: a new model response begins clean.
 			this._nativeResponseDispatchedToolCall = false;
 			// A genuinely new model response: reset the barge-in eligibility window.
 			this._assistantAudioStartedAtMs = null;
+			// Latency: stamp provider-response start; reset first-audio for this response.
+			this._turnTiming.modelStartMs = this.nowMs();
+			this._turnTiming.firstAudioMs = null;
 			const modelTurn = this.turns.ensureCurrent();
 			// Correlated model activity consumed the pending utterance — clear the
 			// recovery-replay candidate and the replay stage. Trailing model-start
@@ -978,6 +1063,17 @@ export class VoiceSession {
 				this.utteranceRetainer?.clearAnswered();
 				this.reconnector.resetReplayState();
 			}
+			// Raw latency fact (§11): publish AFTER turn allocation so the payload
+			// carries the turn id; origin is the explicit pending one when set.
+			const origin =
+				this._pendingResponseOrigin ?? (wasToolContinuation ? 'tool_continuation' : 'user_audio');
+			this._pendingResponseOrigin = null;
+			this.eventBus.publish('response.started', {
+				sessionId: this.config.sessionId,
+				turnId: this.turns.current?.id ?? 'unknown',
+				atMs: this._turnTiming.modelStartMs,
+				origin,
+			});
 			this.logProviderUserTurnRecognition('model/tool processing started');
 			if (this.sttProvider && !this._commitFiredForTurn) {
 				this._commitFiredForTurn = true;
@@ -1421,6 +1517,69 @@ export class VoiceSession {
 	 *  (`wireTtsProvider` / the native gate's `installBargeIn`). */
 	private wireTransportCallbacks(): void {
 		this.transport.onAudioOutput = (data) => this.handleAudioOutput(data);
+		// Raw latency facts (§11) from the provider's server VAD. onSpeechStarted
+		// is chain-preserved by the later TTS/native-gate installers, so this
+		// publisher survives their wiring. Provider stamps are receipt time
+		// (bounded late bias — see the design doc).
+		const prevSpeechStarted = this.transport.onSpeechStarted;
+		this.transport.onSpeechStarted = () => {
+			try {
+				prevSpeechStarted?.();
+			} catch (e) {
+				this.log(`pre-attached onSpeechStarted threw: ${(e as Error).message}`);
+			}
+			this.eventBus.publish('speech.user_started', {
+				sessionId: this.config.sessionId,
+				atMs: this.nowMs(),
+				source: 'provider',
+			});
+		};
+		this.transport.onUserSpeechStopped = () => {
+			const atMs = this.nowMs();
+			this.eventBus.publish('speech.user_ended', {
+				sessionId: this.config.sessionId,
+				atMs,
+				source: 'provider',
+			});
+			// Bridge to the public hook too — hook-based consumers (S2T) would
+			// otherwise stay client-VAD-only and miss quiet-mic turns.
+			this.safeEmitHook('onUserSpeechEnd', () =>
+				this.hooks.onUserSpeechEnd?.({
+					sessionId: this.config.sessionId,
+					turnId: this.turns.current?.id,
+					atMs,
+					source: 'provider',
+				}),
+			);
+		};
+		// Latency: first audio chunk of the response (stop-to-first-audio anchor).
+		this.transport.onFirstAudioChunk = () => {
+			if (this._turnTiming.firstAudioMs !== null) return;
+			this._turnTiming.firstAudioMs = this.nowMs();
+			// Raw latency fact (§11).
+			this.eventBus.publish('response.first_audio', {
+				sessionId: this.config.sessionId,
+				turnId: this.turns.current?.id ?? 'unknown',
+				atMs: this._turnTiming.firstAudioMs,
+			});
+			// Re-entry latency: pause from the last interrupt (yield) to this audio.
+			if (this._lastInterruptAtMs !== null) {
+				const reentryMs = Math.max(0, this._turnTiming.firstAudioMs - this._lastInterruptAtMs);
+				this._lastInterruptAtMs = null;
+				this.safeEmitHook('onAgentReentry', () =>
+					this.hooks.onAgentReentry?.({ sessionId: this.config.sessionId, reentryMs }),
+				);
+			}
+			// JIR: agent audio began while the user is still speaking (false turn-end).
+			if (this.clientVadDetector.isSpeechActive) {
+				this.safeEmitHook('onJumpIn', () =>
+					this.hooks.onJumpIn?.({
+						sessionId: this.config.sessionId,
+						turnId: this.turns.current?.id,
+					}),
+				);
+			}
+		};
 		this.transport.onToolCall = (calls) => {
 			this.reconnector.disarmResponseWatchdog();
 			// Native playback-end gate: this response dispatched a tool call, so
@@ -1430,7 +1589,7 @@ export class VoiceSession {
 				const names = calls.map((c) => c.name).join(', ');
 				this.logProviderUserTurnRecognition('tool call received');
 				const sinceVadEnd = this.clientVadDetector.lastSpeechCompletedMs
-					? ` (${Date.now() - this.clientVadDetector.lastSpeechCompletedMs}ms after client audio VAD end)`
+					? ` (${this.nowMs() - this.clientVadDetector.lastSpeechCompletedMs}ms after client audio VAD end)`
 					: '';
 				this.log(`Tool calls from LLM: [${names}]${sinceVadEnd}`);
 				this.transcriptManager.flushInput();
@@ -1737,6 +1896,16 @@ export class VoiceSession {
 		// Flush any buffered transcription before closing
 		this.transcriptManager.flush();
 
+		// §11 close ordering: (1) flush — already-finalized buffered turns still
+		// emit; (2) session.reset quiesces the tracker; (3) the teardown turn.end
+		// below then lands on a quiesced tracker and can never emit a sample.
+		this.turnLatencyTracker.flush();
+		this.eventBus.publish('session.reset', {
+			sessionId: this.config.sessionId,
+			reason: 'close',
+		});
+		this.turnLatencyTracker.flush(); // process the reset synchronously
+
 		// Fire turn end if a turn is still active. Teardown only does the
 		// lifecycle transition — NOT finalizeTurn (its completion effects, e.g.
 		// reinforceDirectives, must not run against a closing transport).
@@ -1798,6 +1967,11 @@ export class VoiceSession {
 
 	private async _transferInner(toAgent: string): Promise<void> {
 		this.log(`Transferring to agent "${toAgent}"...`);
+		// Discard in-flight latency stamps — the transfer reconnects the transport (§11).
+		this.eventBus.publish('session.reset', {
+			sessionId: this.config.sessionId,
+			reason: 'transfer',
+		});
 		await this.agentRouter.transfer(toAgent);
 		this.log(`Transfer to "${toAgent}" complete`);
 
@@ -1826,6 +2000,9 @@ export class VoiceSession {
 
 		// Send the new agent's greeting if configured
 		if (this.clientConnected) {
+			if (this.agentRouter.activeAgent.greeting) {
+				this._pendingResponseOrigin = 'assistant_initiated';
+			}
 			this.greeting.sendGreeting();
 		}
 	}
@@ -1928,12 +2105,44 @@ export class VoiceSession {
 		// within a 1s grace would set the "fired" flag, and the `hasBargeInFired`
 		// guard above would skip the next loud frame at t=1100ms (post-grace),
 		// defeating real barge-ins. See dev_docs/framework/design-greeting-interrupt-grace.md §4.
-		if (!this.requestInterrupt('client-vad')) return;
+		if (!this.requestInterrupt('client-vad')) {
+			// Threshold-passing barge-in declined (e.g. greeting grace): a *missed*
+			// barge-in. Emit once per segment so the rate isn't inflated per-frame.
+			if (!this.clientVadDetector.hasBargeInMissed) {
+				this.clientVadDetector.markBargeInMissed();
+				const at = this.nowMs();
+				this.safeEmitHook('onBargeInDetected', () =>
+					this.hooks.onBargeInDetected?.({
+						sessionId: this.config.sessionId,
+						speechStartedAtMs: this.clientVadDetector.speechStartedAtMs,
+						detectedAtMs: now,
+						cancelRequestedAtMs: at,
+						latencyMs: Math.max(0, at - now),
+						successful: false,
+					}),
+				);
+			}
+			return;
+		}
 		this.clientVadDetector.markBargeInFired();
 		this.log(
 			`[Latency] client-VAD barge-in actuated (path=${this.liveGate() ? 'gate' : 'native-fallback'}; peak=${maxAbs}; avgAbs=${avgAbs})`,
 		);
+		// Barge-in latency = detection (`now`) → cancel actuation, on the metric clock.
+		// (Confirm delay is detectedAtMs − speechStartedAtMs; cancel latency is the
+		// detect→actuate span this hook reports.)
+		const cancelRequestedAtMs = this.nowMs();
 		this.handleClientTtsBargeIn();
+		this.safeEmitHook('onBargeInDetected', () =>
+			this.hooks.onBargeInDetected?.({
+				sessionId: this.config.sessionId,
+				speechStartedAtMs: this.clientVadDetector.speechStartedAtMs,
+				detectedAtMs: now,
+				cancelRequestedAtMs,
+				latencyMs: Math.max(0, cancelRequestedAtMs - now),
+				successful: true,
+			}),
+		);
 	}
 
 	private logInputTranscriptionLatency(text: string, source: string): void {
@@ -1941,7 +2150,7 @@ export class VoiceSession {
 		if (!trimmed || trimmed === this.lastInputTranscriptionLogText) return;
 		this.lastInputTranscriptionLogText = trimmed;
 		const sinceVadEnd = this.clientVadDetector.lastSpeechCompletedMs
-			? `; ${Date.now() - this.clientVadDetector.lastSpeechCompletedMs}ms after client audio VAD end`
+			? `; ${this.nowMs() - this.clientVadDetector.lastSpeechCompletedMs}ms after client audio VAD end`
 			: '';
 		const preview = trimmed.replace(/\s+/g, ' ').slice(0, 120);
 		this.log(
@@ -1974,7 +2183,7 @@ export class VoiceSession {
 			return;
 		this.lastGeminiRecognitionLoggedForSpeechEndMs = this.clientVadDetector.lastSpeechCompletedMs;
 		this.log(
-			`[Latency] Provider recognized user input completed (${reason}; ${Date.now() - this.clientVadDetector.lastSpeechCompletedMs}ms after client audio VAD end; clientSpeechDuration=${this.clientVadDetector.lastSpeechDurationMs}ms)`,
+			`[Latency] Provider recognized user input completed (${reason}; ${this.nowMs() - this.clientVadDetector.lastSpeechCompletedMs}ms after client audio VAD end; clientSpeechDuration=${this.clientVadDetector.lastSpeechDurationMs}ms)`,
 		);
 	}
 
@@ -1992,7 +2201,7 @@ export class VoiceSession {
 		// Mark the turn's first assistant audio — drives the client-VAD barge-in
 		// eligibility window (`isAssistantAudioActive`). Trailing-audio suppression
 		// after a barge-in is the transport's job (cancelResponse), not here.
-		if (this._assistantAudioStartedAtMs === null) this._assistantAudioStartedAtMs = Date.now();
+		if (this._assistantAudioStartedAtMs === null) this._assistantAudioStartedAtMs = this.nowMs();
 		this.reconnector.disarmResponseWatchdog();
 
 		// Greeting interrupt grace: arm on the first assistant audio chunk.
@@ -2059,7 +2268,14 @@ export class VoiceSession {
 		}
 		// Send greeting after memory/directives are loaded (no blocking of connect)
 		if (this.clientConnected) {
-			this._memoryReadyPromise.then(() => this.greeting.sendGreeting());
+			this._memoryReadyPromise.then(() => {
+				// Only mark the origin when a greeting will actually send — a stale
+				// pending origin would otherwise taint the next real response.
+				if (this.agentRouter.activeAgent.greeting) {
+					this._pendingResponseOrigin = 'assistant_initiated';
+				}
+				this.greeting.sendGreeting();
+			});
 		}
 	}
 
@@ -2193,6 +2409,8 @@ export class VoiceSession {
 
 		if (opts.interrupted) {
 			this.log('Interrupted by user');
+			// Re-entry latency anchor: time of this yield (next agent audio closes it).
+			this._lastInterruptAtMs = this.nowMs();
 			const estEnd = this.ttsPipeline?.gate.estimatedPlaybackEndMs ?? null;
 			if (estEnd !== null && Date.now() > estEnd) {
 				this.log('[Latency] barge-in finalized after the estimated playback end');
@@ -2234,6 +2452,8 @@ export class VoiceSession {
 		this._turnWasInterrupted = opts.interrupted;
 
 		safeStep('transcript.flush', () => this.transcriptManager.flush());
+		// onTurnLatency is emitted by the TurnLatencyTracker on its drain tick,
+		// driven by the turn.end publish below (§11) — no direct emission here.
 		this.turns.advance();
 		this.log(`Turn complete: ${turn.id}`);
 		safeStep('publish.turn_end', () => {
@@ -2243,6 +2463,13 @@ export class VoiceSession {
 			});
 			this.clientTransport.sendJsonToClient({ type: 'turn.end', turnId: turn.id });
 		});
+		safeStep('hook.onTurnFinalized', () =>
+			this.hooks.onTurnFinalized?.({
+				sessionId: this.config.sessionId,
+				turnId: turn.id,
+				interrupted: opts.interrupted,
+			}),
+		);
 
 		// Turn-bound usage sources reset per turn; non-turn-bound (`no_turn:*`)
 		// keep their session-scoped counter.
@@ -2338,6 +2565,11 @@ export class VoiceSession {
 	 *  points. The immediate (unbudgeted) GoAway reconnect lives in
 	 *  {@link TransportReconnector}. */
 	private handleGoAway(timeLeft: string): void {
+		// Discard in-flight latency stamps — a reconnect is coming (§11).
+		this.eventBus.publish('session.reset', {
+			sessionId: this.config.sessionId,
+			reason: 'reconnect',
+		});
 		this.reconnector.handleGoAway(timeLeft);
 	}
 
@@ -2375,7 +2607,7 @@ export class VoiceSession {
 		if (this.transport.capabilities.bufferedUncancellableAudio !== true) return false;
 		return (
 			this._assistantAudioStartedAtMs !== null &&
-			Date.now() - this._assistantAudioStartedAtMs >= NATIVE_BARGEIN_ECHO_SKIP_MS
+			this.nowMs() - this._assistantAudioStartedAtMs >= NATIVE_BARGEIN_ECHO_SKIP_MS
 		);
 	}
 
@@ -2448,6 +2680,7 @@ export class VoiceSession {
 			}
 
 			// Always send to main LLM so it stays informed of user messages
+			this._pendingResponseOrigin = 'user_text';
 			this.transport.sendContent([{ role: 'user', text: trimmed }], true);
 			this.conversationContext.addUserMessage(trimmed);
 		});
@@ -2489,7 +2722,14 @@ export class VoiceSession {
 
 		this.behaviorManager?.sendCatalog();
 		if (this.sessionManager.isActive) {
-			this._memoryReadyPromise.then(() => this.greeting.sendGreeting());
+			this._memoryReadyPromise.then(() => {
+				// Only mark the origin when a greeting will actually send — a stale
+				// pending origin would otherwise taint the next real response.
+				if (this.agentRouter.activeAgent.greeting) {
+					this._pendingResponseOrigin = 'assistant_initiated';
+				}
+				this.greeting.sendGreeting();
+			});
 		}
 	}
 
@@ -2556,18 +2796,43 @@ export class VoiceSession {
 	/** Thin delegator — a test invokes this private method directly. The reconnect
 	 *  logic lives in {@link TransportReconnector}. */
 	private handleTransportClose(code?: number, reason?: string): void {
+		// Discard in-flight latency stamps — unexpected close triggers a
+		// reconnect attempt (harmless duplicate after a session close: the
+		// tracker is already quiesced then). (§11)
+		this.eventBus.publish('session.reset', {
+			sessionId: this.config.sessionId,
+			reason: 'reconnect',
+		});
 		this.reconnector.handleTransportClose(code, reason);
 	}
 
 	private reportError(component: string, error: unknown): void {
 		const err = error instanceof Error ? error : new Error(String(error));
 		if (this.hooks.onError) {
-			this.hooks.onError({
-				sessionId: this.config.sessionId,
-				component,
-				error: err,
-				severity: 'error',
-			});
+			try {
+				this.hooks.onError({
+					sessionId: this.config.sessionId,
+					component,
+					error: err,
+					severity: 'error',
+				});
+			} catch (e) {
+				// onError is itself a user hook — a throw here must not escape the
+				// error-reporting path (it would defeat safeStep/safeEmitHook guards).
+				this.log(`onError hook threw: ${(e as Error).message}`);
+			}
+		}
+	}
+
+	/** Invoke an observability hook with throw isolation. FrameworkHooks are
+	 *  fire-and-forget: a throwing user-supplied hook must never disrupt the
+	 *  turn/VAD/transport path that emitted it. */
+	private safeEmitHook(name: string, fn: () => void): void {
+		try {
+			fn();
+		} catch (e) {
+			this.log(`hook ${name} threw: ${(e as Error).message}`);
+			this.reportError(`hook.${name}`, e);
 		}
 	}
 
@@ -2635,6 +2900,7 @@ export class VoiceSession {
 		if (!text) return Promise.resolve();
 		return this.enqueueDirectInput(async () => {
 			await this.preEmptForDirectInput();
+			this._pendingResponseOrigin = 'user_text';
 			this.transport.sendContent([{ role: 'user', text }], /* turnComplete */ true);
 			// Mirror the existing text-input path: persist into ConversationContext
 			// so the user turn shows up in history / memory / subagent context.
@@ -2678,6 +2944,7 @@ export class VoiceSession {
 				`TRANSCRIPTION_MODE_LOCKED: triggerGeneration is blocked while transcription mode is '${this.dictation.mode}'`,
 			);
 		}
+		this._pendingResponseOrigin = 'assistant_initiated';
 		this.transport.triggerGeneration(instructions, overrides);
 	}
 }

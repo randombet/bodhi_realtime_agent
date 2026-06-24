@@ -330,12 +330,14 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	onError?: (error: LLMTransportError) => void;
 	onClose?: (code?: number, reason?: string) => void;
 	onModelTurnStart?: () => void;
+	onFirstAudioChunk?: () => void;
 	onGoAway?: (timeLeft: string) => void;
 	onResumptionUpdate?: (handle: string, resumable: boolean) => void;
 	onGroundingMetadata?: (metadata: Record<string, unknown>) => void;
 	onTextOutput?: (text: string) => void;
 	onTextDone?: () => void;
 	onSpeechStarted?: () => void;
+	onUserSpeechStopped?: () => void;
 	onRealtimeLLMUsage?: (usage: RealtimeLLMUsageEvent) => void;
 	onReasoningStart?: () => void;
 	onReasoningDone?: (info: { durationMs: number; reasoningTokens?: number }) => void;
@@ -397,6 +399,8 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 
 	// when_idle scheduling: buffer tool results while model is generating
 	private _isModelGenerating = false;
+	/** Tracks whether onFirstAudioChunk has fired for the current response. */
+	private _firstAudioFired = false;
 	private _pendingWhenIdle: TransportToolResult[] = [];
 	private _interruptToolResultQueue: Promise<void> = Promise.resolve();
 
@@ -659,7 +663,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	 *  `LLMTransport.cancelResponse` JSDoc on the interface for the contract.
 	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §2, §7.
 	 *
-	 *  Returns Promise<void>. Never rejects — transient send failures are
+	 *  Returns `Promise<void>`. Never rejects — transient send failures are
 	 *  caught and logged internally. */
 	async cancelResponse(opts?: CancelResponseOptions): Promise<void> {
 		// Step 1 (no-op fast path): nothing to cancel AND nothing to truncate.
@@ -1571,6 +1575,10 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			// quiesce(); _suppressAudio is the per-turn interruption flag set
 			// by barge-in. Either dropping the audio is correct.
 			if (this._quiesced || this._suppressAudio) return;
+			if (!this._firstAudioFired) {
+				this._firstAudioFired = true;
+				this.onFirstAudioChunk?.();
+			}
 			if (this.onAudioOutput) this.onAudioOutput(event.delta);
 
 			// Track audio duration for interruption handling. Uses the resolved
@@ -1597,6 +1605,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		// --- Response lifecycle: track when a response is active ---
 		rt.on('response.created', () => {
 			this._isModelGenerating = true;
+			this._firstAudioFired = false;
 			// Arm the active-response waiter — idempotent. The waiter may
 			// already be armed by `markResponsePending()` if the framework
 			// sent `response.create` itself (sendContent/triggerGeneration/
@@ -1784,6 +1793,12 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			}
 			this._isModelGenerating = false;
 			if (this.onInterrupted) this.onInterrupted();
+		});
+
+		// Provider VAD end-of-speech — the preferred user-speech-end latency
+		// anchor (receipt time; see LLMTransport.onUserSpeechStopped JSDoc).
+		rt.on('input_audio_buffer.speech_stopped', () => {
+			if (this.onUserSpeechStopped) this.onUserSpeechStopped();
 		});
 
 		// --- Input transcription ---
