@@ -139,6 +139,50 @@ function createBackgroundToolAgent(): MainAgent {
 	};
 }
 
+function createMutableServerTurnTransport(): LLMTransport & {
+	activeServerTurnId: number | undefined;
+	reconnect: ReturnType<typeof vi.fn>;
+} {
+	return {
+		activeServerTurnId: undefined,
+		capabilities: {
+			messageTruncation: false,
+			turnDetection: true,
+			userTranscription: true,
+			inPlaceSessionUpdate: false,
+			sessionResumption: true,
+			contextCompression: true,
+			groundingMetadata: true,
+			textResponseModality: true,
+		} satisfies TransportCapabilities,
+		audioFormat: {
+			inputSampleRate: 16000,
+			outputSampleRate: 24000,
+			channels: 1,
+			bitDepth: 16,
+			encoding: 'pcm',
+		} satisfies AudioFormatSpec,
+		isConnected: false,
+		connect: vi.fn(async function (this: LLMTransport) {
+			this.onSessionReady?.('test-session');
+		}),
+		disconnect: vi.fn(async () => {}),
+		reconnect: vi.fn(async () => {}),
+		sendAudio: vi.fn(),
+		commitAudio: vi.fn(),
+		clearAudio: vi.fn(),
+		updateSession: vi.fn(async () => {}),
+		transferSession: vi.fn(async () => {}),
+		sendContent: vi.fn(),
+		sendFile: vi.fn(),
+		sendToolResult: vi.fn(),
+		triggerGeneration: vi.fn(),
+		getActiveServerTurnId() {
+			return this.activeServerTurnId;
+		},
+	};
+}
+
 describe('VoiceSession', () => {
 	let session: VoiceSession | null = null;
 
@@ -1486,6 +1530,78 @@ describe('VoiceSession', () => {
 			).toBe(true);
 		});
 
+		it('reinforcement injects the directive without triggering a new generation (turnComplete=false)', async () => {
+			// Regression: reinforceDirectives must NOT request a model response.
+			// A generation-triggering injection makes the model speak an unsolicited
+			// "self-talk" turn in reply to its own directive reminder. So the directive
+			// is appended with turnComplete=false (no response requested); the user's
+			// next audio turn commits it via server VAD.
+			session = new VoiceSession({
+				sessionId: 'sess_1',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [
+					{
+						name: 'directive-agent',
+						instructions: 'Agent with directive tool',
+						tools: [
+							{
+								name: 'set_pace',
+								description: 'Set pacing',
+								parameters: z.object({ speed: z.string() }),
+								execution: 'inline',
+								execute: async (_args, ctx) => {
+									ctx.setDirective?.('pacing', 'Speak slowly');
+									return { ok: true };
+								},
+							},
+						],
+					},
+				],
+				initialAgent: 'directive-agent',
+				port: 9892,
+				model: mockModel,
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const { _getMessageHandler, _getMockSession } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+			const mockGeminiSession = (
+				_getMockSession as unknown as () => Record<string, ReturnType<typeof vi.fn>>
+			)();
+
+			fire({
+				toolCall: {
+					functionCalls: [{ id: 'tc_d1', name: 'set_pace', args: { speed: 'slow' } }],
+				},
+			});
+
+			await new Promise((r) => setTimeout(r, 100));
+
+			mockGeminiSession.sendClientContent.mockClear();
+			mockGeminiSession.sendRealtimeInput.mockClear();
+			fire({ serverContent: { turnComplete: true } });
+
+			await new Promise((r) => setTimeout(r, 50));
+
+			// The directive is appended via sendClientContent...
+			const directiveCall = mockGeminiSession.sendClientContent.mock.calls.find((call) => {
+				const arg = call[0] as { turns?: Array<{ parts?: Array<{ text?: string }> }> };
+				return arg.turns?.some((t) => t.parts?.some((p) => p.text?.includes('Speak slowly')));
+			});
+			expect(directiveCall).toBeDefined();
+			// ...with turnComplete=false so it does NOT trigger a new generation.
+			expect((directiveCall?.[0] as { turnComplete?: boolean }).turnComplete).toBe(false);
+			// And it must NOT be sent via the generation-triggering realtime-input path.
+			expect(
+				mockGeminiSession.sendRealtimeInput.mock.calls.some((c) =>
+					(c[0] as { text?: string }).text?.includes('Speak slowly'),
+				),
+			).toBe(false);
+		});
+
 		it('clearing a directive stops injection on next turn', async () => {
 			session = new VoiceSession({
 				sessionId: 'sess_1',
@@ -1701,7 +1817,262 @@ describe('VoiceSession', () => {
 		});
 	});
 
+	describe('watchdog replay recovery — retained utterance lifecycle', () => {
+		function getRetainer(s: VoiceSession) {
+			return (
+				s as unknown as {
+					utteranceRetainer?: {
+						markSpeechStart(): void;
+						feed(data: Buffer): void;
+						seal(): boolean;
+						peek(maxAgeMs: number): unknown;
+					};
+				}
+			).utteranceRetainer;
+		}
+
+		it('does not construct the retainer when the flag is off (dark rollout)', () => {
+			session = new VoiceSession({
+				sessionId: 'sess_retainer_off',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+				model: mockModel,
+				transport: createMutableServerTurnTransport(),
+			});
+			expect(getRetainer(session)).toBeUndefined();
+		});
+
+		it('clears retained content on correlated model activity but NOT on a stale trailing model-start', () => {
+			const transport = createMutableServerTurnTransport();
+			session = new VoiceSession({
+				sessionId: 'sess_retainer_clear',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+				model: mockModel,
+				transport,
+				watchdogReplayRecovery: true,
+				responseWatchdogMs: 0,
+			});
+			session.sessionManager.transitionTo('CONNECTING');
+			session.sessionManager.transitionTo('ACTIVE');
+			const retainer = getRetainer(session);
+			expect(retainer).toBeDefined();
+			if (!retainer) return;
+
+			// Assistant turn 1 starts, then the user barges in (turn finalized).
+			transport.activeServerTurnId = 1;
+			transport.onModelTurnStart?.();
+			transport.onInterrupted?.(1);
+
+			// The barge-in utterance seals after finalization (VAD completes late).
+			retainer.markSpeechStart();
+			retainer.feed(Buffer.alloc(320, 1));
+			expect(retainer.seal()).toBe(true);
+			expect(retainer.peek(30_000)).not.toBeNull();
+
+			// Stale trailing model-start for the SAME finalized server turn —
+			// ensureCurrent() resolves to the just-finalized turn (null) and the
+			// retained utterance must survive (it is the recovery content).
+			transport.onModelTurnStart?.();
+			expect(retainer.peek(30_000)).not.toBeNull();
+
+			// Genuinely new model response (new server turn) — the utterance was
+			// consumed by the provider: cleared.
+			transport.activeServerTurnId = 2;
+			transport.onModelTurnStart?.();
+			expect(retainer.peek(30_000)).toBeNull();
+		});
+	});
+
 	describe('reconnect error handling', () => {
+		it('keeps the response watchdog armed across stale turnComplete for a finalized turn', async () => {
+			vi.useFakeTimers();
+			try {
+				const transport = createMutableServerTurnTransport();
+				session = new VoiceSession({
+					sessionId: 'sess_watchdog_stale_complete',
+					userId: 'user_1',
+					apiKey: 'test-key',
+					agents: [createEchoAgent()],
+					initialAgent: 'echo',
+					clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+					model: mockModel,
+					transport,
+					responseWatchdogMs: 10,
+				});
+				session.sessionManager.transitionTo('CONNECTING');
+				session.sessionManager.transitionTo('ACTIVE');
+				session.sessionManager.updateResumptionHandle('handle_watchdog');
+
+				transport.activeServerTurnId = 1;
+				transport.onModelTurnStart?.();
+				transport.onInterrupted?.(1);
+
+				(
+					session as unknown as { reconnector: { armResponseWatchdog: () => void } }
+				).reconnector.armResponseWatchdog();
+				const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+				transport.onTurnComplete?.(1);
+
+				// The stale completion must log that it did NOT disarm the watchdog.
+				expect(logSpy).toHaveBeenCalledWith(
+					expect.stringContaining(
+						'[Watchdog] Ignored turnComplete for already-finalized/superseded turn',
+					),
+				);
+				logSpy.mockRestore();
+
+				await vi.advanceTimersByTimeAsync(10);
+
+				expect(session.sessionManager.state).toBe('RECONNECTING');
+				expect(transport.reconnect).not.toHaveBeenCalled();
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it('keeps the response watchdog armed across stale interrupted for a finalized turn', async () => {
+			vi.useFakeTimers();
+			try {
+				const transport = createMutableServerTurnTransport();
+				session = new VoiceSession({
+					sessionId: 'sess_watchdog_stale_interrupt',
+					userId: 'user_1',
+					apiKey: 'test-key',
+					agents: [createEchoAgent()],
+					initialAgent: 'echo',
+					clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+					model: mockModel,
+					transport,
+					responseWatchdogMs: 10,
+				});
+				session.sessionManager.transitionTo('CONNECTING');
+				session.sessionManager.transitionTo('ACTIVE');
+				session.sessionManager.updateResumptionHandle('handle_watchdog');
+
+				transport.activeServerTurnId = 1;
+				transport.onModelTurnStart?.();
+				transport.onTurnComplete?.(1);
+
+				(
+					session as unknown as { reconnector: { armResponseWatchdog: () => void } }
+				).reconnector.armResponseWatchdog();
+				const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+				transport.onInterrupted?.(1);
+
+				// The stale interrupt must log that it did NOT disarm the watchdog.
+				expect(logSpy).toHaveBeenCalledWith(
+					expect.stringContaining(
+						'[Watchdog] Ignored interrupted for already-finalized/superseded turn',
+					),
+				);
+				logSpy.mockRestore();
+
+				await vi.advanceTimersByTimeAsync(10);
+
+				expect(session.sessionManager.state).toBe('RECONNECTING');
+				expect(transport.reconnect).not.toHaveBeenCalled();
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it('keeps the response watchdog armed across trailing output transcription for a finalized turn', async () => {
+			vi.useFakeTimers();
+			try {
+				const transport = createMutableServerTurnTransport();
+				session = new VoiceSession({
+					sessionId: 'sess_watchdog_stale_output_txn',
+					userId: 'user_1',
+					apiKey: 'test-key',
+					agents: [createEchoAgent()],
+					initialAgent: 'echo',
+					clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+					model: mockModel,
+					transport,
+					responseWatchdogMs: 10,
+				});
+				session.sessionManager.transitionTo('CONNECTING');
+				session.sessionManager.transitionTo('ACTIVE');
+				session.sessionManager.updateResumptionHandle('handle_watchdog');
+
+				transport.activeServerTurnId = 1;
+				transport.onModelTurnStart?.();
+				transport.onTurnComplete?.(1);
+
+				(
+					session as unknown as { reconnector: { armResponseWatchdog: () => void } }
+				).reconnector.armResponseWatchdog();
+				const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+				transport.onOutputTranscription?.('trailing text');
+
+				// Trailing output transcription for the finalized turn must NOT disarm the watchdog.
+				expect(logSpy).toHaveBeenCalledWith(
+					expect.stringContaining(
+						'[Watchdog] Ignored output transcription for already-finalized turn',
+					),
+				);
+				logSpy.mockRestore();
+
+				await vi.advanceTimersByTimeAsync(10);
+
+				expect(session.sessionManager.state).toBe('RECONNECTING');
+				expect(transport.reconnect).not.toHaveBeenCalled();
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it('keeps the response watchdog armed across trailing output audio for a finalized turn', async () => {
+			vi.useFakeTimers();
+			try {
+				const transport = createMutableServerTurnTransport();
+				session = new VoiceSession({
+					sessionId: 'sess_watchdog_stale_output_audio',
+					userId: 'user_1',
+					apiKey: 'test-key',
+					agents: [createEchoAgent()],
+					initialAgent: 'echo',
+					clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+					model: mockModel,
+					transport,
+					responseWatchdogMs: 10,
+				});
+				session.sessionManager.transitionTo('CONNECTING');
+				session.sessionManager.transitionTo('ACTIVE');
+				session.sessionManager.updateResumptionHandle('handle_watchdog');
+
+				transport.activeServerTurnId = 1;
+				transport.onModelTurnStart?.();
+				transport.onTurnComplete?.(1);
+
+				(
+					session as unknown as { reconnector: { armResponseWatchdog: () => void } }
+				).reconnector.armResponseWatchdog();
+				const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+				transport.onAudioOutput?.(Buffer.from([0, 0, 0, 0]).toString('base64'));
+
+				// Trailing output audio for the finalized turn must NOT disarm the watchdog.
+				expect(logSpy).toHaveBeenCalledWith(
+					expect.stringContaining('[Watchdog] Ignored output audio for already-finalized turn'),
+				);
+				logSpy.mockRestore();
+
+				await vi.advanceTimersByTimeAsync(10);
+
+				expect(session.sessionManager.state).toBe('RECONNECTING');
+				expect(transport.reconnect).not.toHaveBeenCalled();
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
 		it('logs when goAway reconnect completes', async () => {
 			const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 			try {

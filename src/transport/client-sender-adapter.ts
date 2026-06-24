@@ -62,6 +62,14 @@ export class ClientSenderAdapter implements IClientChannel {
 
 	stopBuffering(): Buffer[] {
 		this._buffering = false;
-		return this.audioBuffer.drain();
+		// This buffer holds OUTBOUND assistant audio — it belongs to the client.
+		// Flush it to the sender and return [] so the reconnector's drain loop
+		// (which pumps the return value into transport.sendAudio as user input)
+		// never receives assistant speech. The inbound-mic semantics of
+		// ClientTransport.stopBuffering are intentionally different.
+		for (const chunk of this.audioBuffer.drain()) {
+			this.sender.sendAudio(chunk);
+		}
+		return [];
 	}
 }

@@ -176,4 +176,19 @@ describe('buildVoiceWebSocketUrl', () => {
 		expect(u).toContain('ttsSpeed=1.15');
 		expect(u).toContain('ttsDescription=Warm%20and%20patient');
 	});
+
+	it('adds neutral and legacy avatar flags during Spatial migration', () => {
+		const u = buildVoiceWebSocketUrl({
+			baseUrl: 'ws://h',
+			clientUserId: 'x',
+			agentProfile: 'standard',
+			useSpatialWebAvatar: true,
+			spatialRealAvatarId: 'avatar-1',
+		});
+
+		expect(u).toContain('avatar=1');
+		expect(u).toContain('spatialReal=1');
+		expect(u).toContain('avatarProvider=spatialreal');
+		expect(u).toContain('spatialAvatarId=avatar-1');
+	});
 });

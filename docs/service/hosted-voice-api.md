@@ -263,7 +263,7 @@ curl -sS -H 'Authorization: Bearer <token>' \
 
 ### Related: browser avatar embed (Spatial Real)
 
-For a **first-party web embed** (iframe or hosted page on the same Bodhi origin) that shows the Spatial Real face plus voice on **`/ws`** (not `/ws/mobile`), see **`app/docs/avatar-integration.md` §2.5–2.6**: `POST /api/embed/avatar-sessions`, `POST /api/embed/spatial-session-token`, and the **`/embed/avatar`** route. That path uses short-lived **embed intents** on the WebSocket instead of shipping a long-lived `bsk_` secret to an untrusted browser. **§2.6** contrasts this with the normal **`/api/users/me/agents`** CRUD API (persistence vs bootstrap-only).
+For a **first-party web embed** (iframe or hosted page on the same Bodhi origin) that shows the avatar plus voice on **`/ws`** (not `/ws/mobile`), see **`app/docs/avatar-integration.md` §2.5–2.6**: `POST /api/embed/avatar-sessions`, `POST /api/embed/avatar-session-token` (legacy alias: `/api/embed/spatial-session-token`), and the **`/embed/avatar`** route. That path uses short-lived **embed intents** on the WebSocket instead of shipping a long-lived `bsk_` secret to an untrusted browser. **§2.6** contrasts this with the normal **`/api/users/me/agents`** CRUD API (persistence vs bootstrap-only).
 
 ### Related: remote coding worker from Agent Studio
 
@@ -280,6 +280,11 @@ If you use Agent Studio with `remote_persistent_worker` (main voice agent in Bod
 - **Bodhi integration keys (`bsk_`)** are **server-to-server or per-device secrets** for *your* product to call Bodhi on behalf of a builder’s account. Prefer storing them in your backend or secure device vault, not in screenshots or shared chat.
 - **Intent tokens** are short-lived; do not log them in analytics in plain text.
 - Use **TLS 1.2+** for all HTTP and WebSocket traffic (`https://` / `wss://`).
+- **Voice-recovery audio retention**: when watchdog-stall recovery is enabled for a session, the
+  server keeps the user's most recent utterance **in memory only** (bounded ≤ ~15 s of audio,
+  eligible for recovery replay for at most 30 s) so a stalled model turn can be recovered without
+  asking the user to repeat themselves. This audio is never written to disk or history stores and
+  is cleared as soon as the turn is answered and on session close.
 
 ---
 

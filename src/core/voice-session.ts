@@ -15,6 +15,7 @@ import { RuntimeOrchestrator } from '../runtime/runtime-orchestrator.js';
 import { decodeMulawToPcm } from '../telephony/audio-codec.js';
 import { ToolExecutor } from '../tools/tool-executor.js';
 import { createClientChannel } from '../transport/client-channel-factory.js';
+import { ClientTransport } from '../transport/client-transport.js';
 import { DirectRtcClientChannel } from '../transport/direct-rtc-client-channel.js';
 import {
 	DEFAULT_GEMINI_LIVE_MODEL,
@@ -42,8 +43,8 @@ import type { ArtifactRef, ArtifactStore, SaveArtifactParams } from '../types/wo
 import { AudioRouter } from './audio-router.js';
 import { BackgroundNotificationQueue } from './background-notification-queue.js';
 import { ClientMessageRouter } from './client-message-router.js';
-import { ClientVadDetector } from './client-vad-detector.js';
-import { DEFAULT_RESPONSE_WATCHDOG_MS } from './constants.js';
+import { ClientVadDetector, pcmChunksContainSpeech } from './client-vad-detector.js';
+import { DEFAULT_REPLAY_MAX_AGE_MS, DEFAULT_RESPONSE_WATCHDOG_MS } from './constants.js';
 import { ConversationContext } from './conversation-context.js';
 import { ConversationHistoryWriter } from './conversation-history-writer.js';
 import { DictationController } from './dictation-controller.js';
@@ -52,6 +53,7 @@ import { EventBus } from './event-bus.js';
 import { GreetingController } from './greeting-controller.js';
 import { HooksManager } from './hooks.js';
 import { InteractionModeManager } from './interaction-mode.js';
+import { LastUtteranceRetainer } from './last-utterance-retainer.js';
 import { MemoryCacheManager } from './memory-cache-manager.js';
 import { MultiplexConversationHistoryStore } from './multiplex-conversation-history-store.js';
 import {
@@ -235,8 +237,14 @@ export interface VoiceSessionConfig {
 	/** Listen timeout for local client WebSocket server startup (legacy/local mode). */
 	listenTimeoutMs?: number;
 	/** Model-silence watchdog (ms) after the user's turn ends. If the model emits
-	 *  nothing for this long, force a reconnect. Default 8000; `<= 0` disables. */
+	 *  nothing for this long, force a reconnect. Default 5000; `<= 0` disables. */
 	responseWatchdogMs?: number;
+	/** Watchdog-stall recovery via retained-utterance replay (see
+	 *  dev_docs/framework/design-retained-user-content-recovery.md). When true,
+	 *  the last routed user utterance is retained (bounded, memory-only) and a
+	 *  response-watchdog stall replays it — in-place first, then once more after
+	 *  a reconnect. Default false (ships dark until live-validated). */
+	watchdogReplayRecovery?: boolean;
 	/** LLM model name (e.g. "gemini-3.1-flash-live-preview"). */
 	geminiModel?: string;
 	/** Vercel AI SDK model for subagent text generation. */
@@ -431,6 +439,15 @@ export class VoiceSession {
 		getActiveServerTurnId: () => this.transport.getActiveServerTurnId?.(),
 	});
 	private sttProvider?: STTProvider;
+	/** Last routed user utterance for watchdog-stall recovery replay. Only
+	 *  constructed when `config.watchdogReplayRecovery` is true (dark rollout).
+	 *  See dev_docs/framework/design-retained-user-content-recovery.md. */
+	private utteranceRetainer?: LastUtteranceRetainer;
+	/** R7c reconnect-window freshness tee (hosted): frames/speech observed at
+	 *  `feedAudioFromClient` while RECONNECTING — captured BEFORE the router's
+	 *  `isSessionActive()` drop, the only place that speech is still visible. */
+	private _reconnectWindowFrames = 0;
+	private _reconnectWindowSpeech = false;
 	/** Resolved post-transport-construction from config.clientAudioInputRate
 	 *  (default: transport.audioFormat.inputSampleRate — the rate the
 	 *  framework instructs clients to send). */
@@ -815,11 +832,20 @@ export class VoiceSession {
 		// Client-VAD segment tracker. The detector owns the segment state and
 		// energy math; the barge-in *policy* (gate-pending + grace + actuation)
 		// and the playback-defer resolution stay here via these event handlers.
+		// Last-utterance retention (watchdog-stall recovery) — transport rate is
+		// known here, and retention must store the transport-normalized PCM.
+		if (config.watchdogReplayRecovery) {
+			this.utteranceRetainer = new LastUtteranceRetainer({
+				sampleRateHz: this.transport.audioFormat.inputSampleRate,
+			});
+		}
+
 		this.clientVadDetector = new ClientVadDetector(
 			{
 				onSpeechStart: () => {
 					// New segment ends the input-transcription log-dedup window.
 					this.lastInputTranscriptionLogText = '';
+					this.utteranceRetainer?.markSpeechStart();
 					// Raw latency fact (§11): the DETECTED edge, not publish time.
 					this.eventBus.publish('speech.user_started', {
 						sessionId: this.config.sessionId,
@@ -829,9 +855,11 @@ export class VoiceSession {
 				},
 				onVoicedFrame: (now, maxAbs, avgAbs) => this.runClientVadBargeInPolicy(now, maxAbs, avgAbs),
 				onSegmentResolved: () => this.completionArbiter.resolveDeferredPlayback(),
-				// User finished a turn → arm the response watchdog (the model now
+				// User finished a turn → seal the retained utterance (recovery
+				// replay candidate), then arm the response watchdog (the model now
 				// owes a reply; silence past the timeout forces a reconnect).
 				onUserTurnCompleted: () => {
+					this.utteranceRetainer?.seal();
 					this.reconnector.armResponseWatchdog();
 					// Latency: end-of-user-speech (S2FA/S2T anchor) on the shared metric clock.
 					const atMs = this.clientVadDetector.lastSpeechCompletedMs || this.nowMs();
@@ -849,6 +877,13 @@ export class VoiceSession {
 							source: 'client-vad',
 						}),
 					);
+				},
+				// Ignored blip / forced reset: the segment can never seal — drop the
+				// in-progress retained audio (keeps the sealed replay candidate) and
+				// let a deferred watchdog replay re-evaluate instead of stranding.
+				onSegmentAborted: () => {
+					this.utteranceRetainer?.abortSegment();
+					this.reconnector.notifySegmentAborted();
 				},
 			},
 			(msg) => this.log(msg),
@@ -869,6 +904,7 @@ export class VoiceSession {
 			isRtcAudioReady: () => this.directRtcChannel?.isRtcAudioReady ?? false,
 			getMode: () => this.dictation.mode,
 			shouldDropOutbound: () => this.greeting.shouldDropOutbound(),
+			retainer: this.utteranceRetainer,
 			routeExternalAudio: (data) => {
 				if (this.agentRouter.activeAgent.audioMode !== 'external') return false;
 				if (this.externalAudioHandler) {
@@ -1018,7 +1054,15 @@ export class VoiceSession {
 			// Latency: stamp provider-response start; reset first-audio for this response.
 			this._turnTiming.modelStartMs = this.nowMs();
 			this._turnTiming.firstAudioMs = null;
-			this.turns.ensureCurrent();
+			const modelTurn = this.turns.ensureCurrent();
+			// Correlated model activity consumed the pending utterance — clear the
+			// recovery-replay candidate and the replay stage. Trailing model-start
+			// for a just-finalized turn (ensureCurrent → null) must NOT clear it
+			// (correlate-before-mutate, same scoped rule as the disarm guards).
+			if (modelTurn) {
+				this.utteranceRetainer?.clearAnswered();
+				this.reconnector.resetReplayState();
+			}
 			// Raw latency fact (§11): publish AFTER turn allocation so the payload
 			// carries the turn id; origin is the explicit pending one when set.
 			const origin =
@@ -1206,6 +1250,35 @@ export class VoiceSession {
 				isAgentMode: () => this.dictation.isAgentMode(),
 				reportError: (context, error) => this.reportError(context, error),
 				log: (msg) => this.log(msg),
+				// Watchdog-stall recovery (watchdogReplayRecovery flag): without a
+				// retainer this returns null and recovery keeps today's behavior.
+				peekRetainedUtterance: () =>
+					this.utteranceRetainer?.peek(DEFAULT_REPLAY_MAX_AGE_MS) ?? null,
+				detectSpeech: (chunks) => pcmChunksContainSpeech(chunks),
+				// Mid-speech watchdog deferral (R7a) is ALWAYS wired: it only reads the
+				// client VAD's in-progress-segment flag and merely postpones recovery while
+				// the user is talking, so flag-off sessions must not force a reconnect under
+				// a live multi-segment utterance. The R7c hosted-freshness verdict below stays
+				// scoped to the retained-replay rollout flag.
+				isSpeechActive: () => this.clientVadDetector.isSpeechActive,
+				hostedReconnectSpeech: this.utteranceRetainer
+					? () => this.reconnectWindowSpeechVerdict()
+					: undefined,
+				onReconnectWindowStart: () => {
+					this._reconnectWindowFrames = 0;
+					this._reconnectWindowSpeech = false;
+				},
+				// R7b: a replayed turn emits no input transcription — promote the
+				// pending batch-STT/display partial so the user's words appear.
+				onReplayDispatched: this.utteranceRetainer
+					? () => {
+							if (this.transcriptManager.finalizeInterruptedInputPartial()) {
+								this.log(
+									'[Watchdog] Promoted pending input partial as the replayed turn transcript',
+								);
+							}
+						}
+					: undefined,
 			},
 			this.responseWatchdogMs,
 		);
@@ -1533,8 +1606,14 @@ export class VoiceSession {
 		this.transport.onTurnComplete = (serverTurnId) => this.handleTurnComplete(serverTurnId);
 		this.transport.onInterrupted = (serverTurnId) => this.handleInterrupted(serverTurnId);
 		this.transport.onOutputTranscription = (text) => {
+			const turn = this.turns.ensureCurrent();
+			if (!turn) {
+				this.log(
+					'[Watchdog] Ignored output transcription for already-finalized turn; watchdog NOT disarmed',
+				);
+				return;
+			}
 			this.reconnector.disarmResponseWatchdog();
-			this.turns.ensureCurrent();
 			this.transcriptManager.handleOutput(text);
 		};
 		this.transport.onSessionReady = (sessionId) => this.handleSetupComplete(sessionId);
@@ -1810,6 +1889,9 @@ export class VoiceSession {
 		// Actor mode: NotificationActor.onStop clears its own state when the
 		// runtime orchestrator stops below.
 		this.notificationQueue?.clear();
+		// Retained user audio is session-scoped and memory-only — drop it now.
+		this.utteranceRetainer?.clearAll();
+		this.reconnector.resetReplayState();
 
 		// Flush any buffered transcription before closing
 		this.transcriptManager.flush();
@@ -2111,6 +2193,11 @@ export class VoiceSession {
 		// implement quiesce(); guarantees no model audio leaks into dictation
 		// mode even if a quiesce race occurs.
 		if (!this.dictation.isAgentMode()) return;
+		const turn = this.turns.ensureCurrent();
+		if (!turn) {
+			this.log('[Watchdog] Ignored output audio for already-finalized turn; watchdog NOT disarmed');
+			return;
+		}
 		// Mark the turn's first assistant audio — drives the client-VAD barge-in
 		// eligibility window (`isAssistantAudioActive`). Trailing-audio suppression
 		// after a barge-in is the transport's job (cancelResponse), not here.
@@ -2121,7 +2208,6 @@ export class VoiceSession {
 		// Idempotent — subsequent chunks no-op inside the class.
 		this.maybeArmGraceOnFirstAudio();
 
-		this.turns.ensureCurrent();
 		this.signalAudioStarted();
 		const raw = Buffer.from(data, 'base64');
 		if (this.nativePlaybackGatingActive) this.nativeGate?.noteAudioChunk(raw.length);
@@ -2222,17 +2308,27 @@ export class VoiceSession {
 	}
 
 	private handleTurnComplete(serverTurnId?: number): void {
-		this.reconnector.disarmResponseWatchdog();
-		// A completed turn means the connection is healthy — reset reconnect counter
-		this.reconnector.resetAttempts();
-
 		// Correlate the completion to its Turn. `stale` → a long-gone turn,
 		// ignore; `new` → a turn that produced no model output, birth it.
 		const r = this.turns.resolve(serverTurnId, 'completion');
-		if (r.kind === 'stale') return;
+		if (r.kind === 'stale') {
+			this.log(
+				`[Watchdog] Ignored stale turnComplete (serverTurnId=${serverTurnId}); watchdog NOT disarmed`,
+			);
+			return;
+		}
 		const turn = r.kind === 'new' ? this.turns.ensureCurrent(serverTurnId) : r.turn;
 		// Drop a trailing / superseded completion before touching any gate state.
-		if (!turn || turn.isFinalized || turn !== this.turns.current) return;
+		if (!turn || turn.isFinalized || turn !== this.turns.current) {
+			this.log(
+				`[Watchdog] Ignored turnComplete for already-finalized/superseded turn (serverTurnId=${serverTurnId}); watchdog NOT disarmed`,
+			);
+			return;
+		}
+
+		this.reconnector.disarmResponseWatchdog();
+		// A completed turn means the connection is healthy — reset reconnect counter
+		this.reconnector.resetAttempts();
 
 		// TTS turn gating: when TTS is active, defer turn completion until TTS finishes
 		const ttsGate = this.ttsPipeline?.gate;
@@ -2410,24 +2506,41 @@ export class VoiceSession {
 		safeStep('notif.turn_complete', () => this.notificationSink.turnComplete());
 	}
 
-	/** Inject all active directives into the LLM's context to prevent behavioral drift. */
+	/** Inject all active directives into the LLM's context to prevent behavioral drift.
+	 *
+	 *  Sent with turnComplete=false: appends the directive to the conversation
+	 *  WITHOUT requesting a model response. A generation-triggering injection makes
+	 *  the model speak an unsolicited "self-talk" turn in reply to its own directive
+	 *  reminder, so we deliberately leave the turn open and let the user's next audio
+	 *  turn commit it via server VAD. Runs on every clean (non-interrupted) turn. */
 	private reinforceDirectives(): void {
 		const text = this.directiveManager.getReinforcementText();
 		if (!text) return;
 		this.log(`Reinforcing directives: ${text.slice(0, 120)}...`);
-		this._pendingResponseOrigin = 'assistant_initiated';
-		this.transport.sendContent([{ role: 'user', text }], true);
+		this.transport.sendContent([{ role: 'user', text }], false);
 	}
 
 	private handleInterrupted(serverTurnId?: number): void {
-		this.reconnector.disarmResponseWatchdog();
 		// Correlate the interrupt to its Turn. A `stale` interrupt for a
 		// long-gone turn is ignored; `new` (no turn / interrupt before any model
 		// output) births one via the no-turn net. The structural idempotency of
 		// finalizeTurn replaces the old trailing-interrupt / dedup-set guards.
 		const r = this.turns.resolve(serverTurnId, 'interrupt');
-		if (r.kind === 'stale') return;
+		if (r.kind === 'stale') {
+			this.log(
+				`[Watchdog] Ignored stale interrupted (serverTurnId=${serverTurnId}); watchdog NOT disarmed`,
+			);
+			return;
+		}
 		const turn = r.kind === 'new' ? this.turns.ensureCurrent(serverTurnId) : r.turn;
+		if (!turn || turn.isFinalized || turn !== this.turns.current) {
+			this.log(
+				`[Watchdog] Ignored interrupted for already-finalized/superseded turn (serverTurnId=${serverTurnId}); watchdog NOT disarmed`,
+			);
+			return;
+		}
+
+		this.reconnector.disarmResponseWatchdog();
 		this.finalizeTurn(turn, { interrupted: true });
 	}
 
@@ -2627,7 +2740,29 @@ export class VoiceSession {
 
 	/** Feed client audio into the session (LLM + STT). Used when the server owns the socket (multi-user). */
 	feedAudioFromClient(data: Buffer): void {
+		// R7c input-side freshness tee: while RECONNECTING the router drops input
+		// at the isSessionActive() gate, so the speech-energy verdict for the
+		// reconnect window must be captured here, before the drop.
+		if (this.utteranceRetainer && this.sessionManager.state === 'RECONNECTING') {
+			this._reconnectWindowFrames++;
+			if (!this._reconnectWindowSpeech && pcmChunksContainSpeech([data])) {
+				this._reconnectWindowSpeech = true;
+			}
+		}
 		this.audioRouter.handleFromClient(data, 'websocket');
+	}
+
+	/** R7c hosted reconnect-window verdict (consulted by the recovery controller
+	 *  when the channel drain returned no inbound chunks). Local `ClientTransport`
+	 *  sessions buffer inbound mic at the WS layer — there the drain is the
+	 *  authoritative signal and an empty drain proves the client sent nothing. */
+	private reconnectWindowSpeechVerdict(): 'none' | 'hosted-speech' | 'unknown' {
+		if (this.clientTransport instanceof ClientTransport) return 'none';
+		if (this._reconnectWindowSpeech) return 'hosted-speech';
+		// Hosted clients stream continuously (silence included): zero frames in
+		// the window means the forwarding path itself went quiet — unsafe to
+		// conclude the user stayed silent.
+		return this._reconnectWindowFrames > 0 ? 'none' : 'unknown';
 	}
 
 	/** Feed client JSON (text_input, file_upload, etc.) into the session. Used when the server owns the socket. */

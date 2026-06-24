@@ -63,10 +63,10 @@ describe('app-routes', () => {
 	});
 
 	it('uses product studio defaults on dedicated host surfaces', () => {
-		expect(defaultTabForHostSurface('avatar')).toBe('avatar_studio');
+		expect(defaultTabForHostSurface('avatar')).toBe('talk_avatar');
 		expect(defaultTabForHostSurface('recruiting')).toBe('recruiting_voice_studio');
-		expect(tabFromPathnameForHostSurface('/', 'avatar')).toBe('avatar_studio');
-		expect(tabFromPathnameForHostSurface('/talk', 'avatar')).toBe('avatar_studio');
+		expect(tabFromPathnameForHostSurface('/', 'avatar')).toBe('talk_avatar');
+		expect(tabFromPathnameForHostSurface('/talk', 'avatar')).toBe('talk_avatar');
 		expect(tabFromPathnameForHostSurface('/talk-avatar', 'avatar')).toBe('talk_avatar');
 		expect(tabFromPathnameForHostSurface('/', 'recruiting')).toBe('recruiting_voice_studio');
 		expect(tabFromPathnameForHostSurface('/screening-demo', 'recruiting')).toBe('screening_demo');

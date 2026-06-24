@@ -442,4 +442,71 @@ describe('TranscriptManager', () => {
 			expect(sink.userMessages).toEqual(['how are you']);
 		});
 	});
+
+	describe('finalizeInterruptedInputPartial (R7b — replayed-turn transcript)', () => {
+		it('promotes the interrupted display partial to a finalized user message', () => {
+			const sink = createSink();
+			const mgr = new TranscriptManager(sink);
+
+			mgr.showInterruptedInputPartial('how about ');
+			mgr.showInterruptedInputPartial('tomorrow?');
+			expect(sink.userMessages).toEqual([]); // display-only so far
+
+			expect(mgr.finalizeInterruptedInputPartial()).toBe(true);
+			expect(sink.userMessages).toEqual(['how about tomorrow?']);
+			expect(sink.messages.at(-1)).toMatchObject({
+				type: 'transcript',
+				role: 'user',
+				text: 'how about tomorrow?',
+				partial: false,
+				recovered: true,
+			});
+		});
+
+		it('prefers the authoritative inputBuffer over the display partial', () => {
+			const sink = createSink();
+			const mgr = new TranscriptManager(sink);
+
+			mgr.showInterruptedInputPartial('how bout tmrrow'); // garbled realtime delta
+			mgr.handleInput('How about tomorrow?', 3); // batch STT (authoritative)
+
+			expect(mgr.finalizeInterruptedInputPartial()).toBe(true);
+			expect(sink.userMessages).toEqual(['How about tomorrow?']);
+		});
+
+		it('returns false and emits nothing when no partial is pending', () => {
+			const sink = createSink();
+			const mgr = new TranscriptManager(sink);
+			expect(mgr.finalizeInterruptedInputPartial()).toBe(false);
+			expect(sink.userMessages).toEqual([]);
+			expect(sink.messages).toEqual([]);
+		});
+
+		it('locks the turn: late input after promotion does not duplicate the message', () => {
+			const sink = createSink();
+			const mgr = new TranscriptManager(sink);
+
+			mgr.showInterruptedInputPartial('hello there');
+			expect(mgr.finalizeInterruptedInputPartial()).toBe(true);
+
+			// A trailing batch transcript for the same (already promoted) utterance
+			// must not re-accumulate; a second promotion is a no-op; flush() adds
+			// no duplicate user message.
+			mgr.handleInput('hello there', 5);
+			expect(mgr.finalizeInterruptedInputPartial()).toBe(false);
+			mgr.flush();
+			expect(sink.userMessages).toEqual(['hello there']);
+		});
+
+		it('fires onInputFinalized with the promoted text', () => {
+			const sink = createSink();
+			const mgr = new TranscriptManager(sink);
+			const finalized: string[] = [];
+			mgr.onInputFinalized = (text) => finalized.push(text);
+
+			mgr.showInterruptedInputPartial('promote me');
+			mgr.finalizeInterruptedInputPartial();
+			expect(finalized).toEqual(['promote me']);
+		});
+	});
 });

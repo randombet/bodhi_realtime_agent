@@ -38,7 +38,7 @@ For **`voice + avatar`** (or switching an existing widget to that mode):
 ### 1.3 Create and publish the widget
 
 1. Under **Publishable widget**, use **New voice widget** or **New voice + avatar widget** (when enabled).
-2. Toggle **Published** when you want visitor sites to call **`POST /api/embed/widget-sessions`**.
+2. Set **allowed origins** for production sites, then toggle **Published** when you want visitor sites to call **`POST /api/embed/widget-sessions`**. An empty allowlist is permissive for local/dev compatibility; configured origins are enforced from the browser `Origin`/`Referer`.
 
 You can change **Mode** on an existing row with the dropdown; updates use **`PATCH`** to the same API origin as the rest of Agent Studio.
 
@@ -56,6 +56,7 @@ You can change **Mode** on an existing row with the dropdown; updates use **`PAT
 ```
 
 - **Validation:** widget must exist, be **published**, and match **mode** (for `voice_avatar`, the saved agent must have avatar enabled + preset on the server).
+- **Origin allowlist:** when `allowedOrigins` is non-empty, the request origin must match one configured HTTP(S) origin exactly.
 
 **Success (200)** — short-lived embed intent plus metadata:
 
@@ -67,17 +68,18 @@ You can change **Mode** on an existing row with the dropdown; updates use **`PAT
   "agentProfile": "ua_…",
   "widgetId": "wg_…",
   "embedMode": "voice_avatar",
+  "avatarPresetId": "…",
   "spatialAvatarId": "…",
   "avatarProviderId": "spatialreal",
   "embedPagePath": "/embed/avatar"
 }
 ```
 
-For `embedMode: "voice"`, `spatialAvatarId` and `avatarProviderId` are `null`. Load **`/embed/avatar`** on your **web** host with query params:
+For `embedMode: "voice"`, `avatarPresetId`, `spatialAvatarId`, and `avatarProviderId` are `null`. Load **`/embed/avatar`** on your **web** host with query params:
 
 - `embedSessionIntentId`, `embedToken`, `agentProfile`
 - `embedMode` (`voice` | `voice_avatar`)
-- `spatialAvatarId` when avatar mode
+- `avatarProviderId` and `avatarPresetId` when avatar mode (`spatialAvatarId` is still accepted for Spatial Real compatibility)
 
 ---
 
@@ -119,7 +121,7 @@ Open the printed URL (default `http://127.0.0.1:8765/`). Run your **API** (`pnpm
 
 Call **`POST /api/embed/widget-sessions`** (from the visitor browser with the widget script, or from your backend if you proxy), then set:
 
-`iframe.src = https://YOUR_BODHI_WEB_HOST/embed/avatar?embedSessionIntentId=…&embedToken=…&agentProfile=…&embedMode=…&spatialAvatarId=…`
+`iframe.src = https://YOUR_BODHI_WEB_HOST/embed/avatar?embedSessionIntentId=…&embedToken=…&agentProfile=…&embedMode=…&avatarProviderId=…&avatarPresetId=…`
 
 ---
 

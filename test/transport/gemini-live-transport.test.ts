@@ -16,7 +16,14 @@ let capturedConnectConfig: Record<string, unknown> = {};
 const mockSession = {
 	sendRealtimeInput: vi.fn(),
 	sendToolResponse: vi.fn(),
-	sendClientContent: vi.fn(),
+	// Replicates @google/genai validation: any non-null/non-undefined `turns` is
+	// parsed, and tContents([]) rejects an empty array — so `turns: []` throws
+	// exactly like the real SDK (the elicitResponse regression).
+	sendClientContent: vi.fn((params: { turns?: unknown }) => {
+		if (Array.isArray(params.turns) && params.turns.length === 0) {
+			throw new Error(`Failed to parse client content "turns", type: '${typeof params.turns}'`);
+		}
+	}),
 	close: vi.fn(),
 };
 
@@ -65,15 +72,56 @@ describe('GeminiLiveTransport', () => {
 			expect(config.inputAudioTranscription).toEqual({});
 		});
 
-		it('elicitResponse sends a content-less turnComplete', async () => {
+		it('replayUserTurn sends inline audio clientContent with an explicit turnComplete', async () => {
 			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
 			await transport.connect();
 			mockSession.sendClientContent.mockClear();
-			transport.elicitResponse?.();
+			const pcm = Buffer.alloc(640, 5);
+			const dispatched = transport.replayUserTurn?.({
+				pcm,
+				sampleRateHz: 16000,
+				utteranceId: 1,
+				sealedAtMs: 0,
+			});
+			expect(dispatched).toBe(true);
 			expect(mockSession.sendClientContent).toHaveBeenCalledWith({
-				turns: [],
+				turns: [
+					{
+						role: 'user',
+						parts: [
+							{
+								inlineData: {
+									data: pcm.toString('base64'),
+									mimeType: 'audio/pcm;rate=16000',
+								},
+							},
+						],
+					},
+				],
 				turnComplete: true,
 			});
+		});
+
+		it('replayUserTurn returns false when not connected', () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			expect(
+				transport.replayUserTurn?.({
+					pcm: Buffer.alloc(2),
+					sampleRateHz: 16000,
+					utteranceId: 1,
+					sealedAtMs: 0,
+				}),
+			).toBe(false);
+		});
+
+		it('elicitResponse sends a content-less turnComplete (no turns field)', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			mockSession.sendClientContent.mockClear();
+			// Must not throw: the SDK rejects an empty `turns` array, so the nudge
+			// has to omit the field entirely (mock replicates that validation).
+			expect(() => transport.elicitResponse?.()).not.toThrow();
+			expect(mockSession.sendClientContent).toHaveBeenCalledWith({ turnComplete: true });
 		});
 
 		it('includes system instruction when provided', async () => {
