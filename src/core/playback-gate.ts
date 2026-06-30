@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { AudioFormatSpec, LLMTransport } from '../types/transport.js';
 import type { TTSAudioConfig } from '../types/tts.js';
 import type { Turn } from './turn.js';

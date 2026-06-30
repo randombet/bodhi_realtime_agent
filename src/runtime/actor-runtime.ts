@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * In-process actor runtime with per-actor serialized mailbox processing.
  *

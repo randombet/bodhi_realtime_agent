@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Contract for sending data to one client. The server owns the socket and implements this;
  * VoiceSession sends audio and JSON through it. Input is fed via feedAudioFromClient / feedJsonFromClient.

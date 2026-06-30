@@ -1,10 +1,9 @@
-// SPDX-License-Identifier: MIT
-
 import { tool } from 'ai';
 import { z } from 'zod';
+import type { OpenClawTransport } from '../../app/lib/integrations/openclaw/openclaw-transport.js';
+import type { ArtifactRegistry } from '../../app/lib/media/artifact-registry.js';
 import type { SubagentConfig } from '../../src/types/agent.js';
 import type { ToolDefinition } from '../../src/types/tool.js';
-import type { ArtifactRegistry } from '../../app/lib/media/artifact-registry.js';
 import {
 	type AdapterLimits,
 	ArtifactResolutionError,
@@ -12,7 +11,6 @@ import {
 	resolveRequestedArtifactIds,
 } from './artifact-resolution.js';
 import { type ContentBlock, mergeText } from './openclaw-client.js';
-import type { OpenClawTransport } from '../../app/lib/integrations/openclaw/openclaw-transport.js';
 import { PersistentOpenClawSubagent } from './persistent-openclaw-subagent.js';
 
 // ---------------------------------------------------------------------------

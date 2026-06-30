@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { CLIENT_VAD_SILENCE_MS, type ClientVadDetector } from './client-vad-detector.js';
 import type {
 	ExternalTtsPlaybackGate,

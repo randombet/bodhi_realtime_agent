@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import OpenAI from 'openai';
 import { OpenAIRealtimeWS } from 'openai/realtime/ws';
 import type {

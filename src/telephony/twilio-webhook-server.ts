@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * HTTP + WebSocket server for Twilio voice webhooks and Media Streams.
  *

@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { Turn } from './turn.js';
 import type { TurnMatch, TurnSignalPurpose } from './turn.js';
 

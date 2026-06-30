@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { ProjectDocuments } from './project-documents.js';
 
 /**
@@ -226,7 +224,10 @@ export function buildOpeningGreetingPrompt(state: ProjectDeepdiveState): string 
 	const roleTitle = state.roleTitle ?? 'the engineering role';
 	const projectName = state.projectName ?? 'one of your projects';
 
-	return buildOpeningGreetingPromptFromContext({ candidateName, companyName, roleTitle }, projectName);
+	return buildOpeningGreetingPromptFromContext(
+		{ candidateName, companyName, roleTitle },
+		projectName,
+	);
 }
 
 export function buildOpeningGreetingPromptFromContext(
@@ -314,7 +315,9 @@ export function getProjectDeepdiveStatus(state: ProjectDeepdiveState): Record<st
 
 function validatePlan(plan: ProjectDeepdivePlan): void {
 	if (plan.questions.length !== ANCHOR_IDS.length) {
-		throw new Error(`Project deep-dive plan must contain exactly ${ANCHOR_IDS.length} anchor questions.`);
+		throw new Error(
+			`Project deep-dive plan must contain exactly ${ANCHOR_IDS.length} anchor questions.`,
+		);
 	}
 	for (let i = 0; i < ANCHOR_IDS.length; i++) {
 		if (plan.questions[i].id !== ANCHOR_IDS[i]) {

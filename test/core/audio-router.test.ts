@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it, vi } from 'vitest';
 import { AudioRouter, type AudioRouterDeps } from '../../src/core/audio-router.js';
 import type { ClientVadDetector } from '../../src/core/client-vad-detector.js';

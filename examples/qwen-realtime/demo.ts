@@ -37,14 +37,18 @@ import { WebSocket } from 'ws';
 
 const API_KEY = process.env.QWEN_API_KEY ?? process.env.DASHSCOPE_API_KEY ?? '';
 if (!API_KEY) {
-	console.error('Error: QWEN_API_KEY (or DASHSCOPE_API_KEY) is required (it lives in ~/.zshrc — run this from your shell).');
+	console.error(
+		'Error: QWEN_API_KEY (or DASHSCOPE_API_KEY) is required (it lives in ~/.zshrc — run this from your shell).',
+	);
 	process.exit(1);
 }
 
-const BASE_URL = process.env.QWEN_REALTIME_URL ?? 'wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime';
+const BASE_URL =
+	process.env.QWEN_REALTIME_URL ?? 'wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime';
 const MODEL = process.env.QWEN_REALTIME_MODEL ?? 'qwen3.5-omni-plus-realtime';
 const VOICE = process.env.QWEN_VOICE ?? ''; // empty → let the server pick its default voice
-const PROMPT = process.argv[2] ?? 'Hello! In one short sentence, what model are you and what can you do?';
+const PROMPT =
+	process.argv[2] ?? 'Hello! In one short sentence, what model are you and what can you do?';
 
 const IN_RATE = 16_000; // Qwen input: 16-bit mono PCM @ 16 kHz
 const OUT_RATE = 24_000; // Qwen output: 16-bit mono PCM @ 24 kHz
@@ -57,9 +61,13 @@ function synthPromptPcm(text: string): Buffer | null {
 	const pcm = join(tmpdir(), 'qwen_in.pcm');
 	try {
 		execFileSync('say', ['-o', aiff, text], { stdio: 'ignore' });
-		execFileSync('ffmpeg', ['-y', '-i', aiff, '-ar', String(IN_RATE), '-ac', '1', '-f', 's16le', pcm], {
-			stdio: 'ignore',
-		});
+		execFileSync(
+			'ffmpeg',
+			['-y', '-i', aiff, '-ar', String(IN_RATE), '-ac', '1', '-f', 's16le', pcm],
+			{
+				stdio: 'ignore',
+			},
+		);
 		return readFileSync(pcm);
 	} catch {
 		return null;
@@ -161,12 +169,16 @@ ws.on('message', (raw) => {
 			console.log('✓ session.updated — connection + auth + model name all valid');
 			const pcm = synthPromptPcm(PROMPT);
 			if (!pcm) {
-				console.log('\nℹ `say`/`ffmpeg` unavailable — skipping audio turn. Connectivity is confirmed.');
+				console.log(
+					'\nℹ `say`/`ffmpeg` unavailable — skipping audio turn. Connectivity is confirmed.',
+				);
 				finish(0);
 				return;
 			}
 			console.log(`\n🎤 prompt: "${PROMPT}"`);
-			console.log(`→ streaming ${(pcm.length / IN_RATE / 2).toFixed(2)}s of audio (${Math.ceil(pcm.length / CHUNK_BYTES)} chunks)`);
+			console.log(
+				`→ streaming ${(pcm.length / IN_RATE / 2).toFixed(2)}s of audio (${Math.ceil(pcm.length / CHUNK_BYTES)} chunks)`,
+			);
 			for (let i = 0; i < pcm.length; i += CHUNK_BYTES) {
 				const chunk = pcm.subarray(i, i + CHUNK_BYTES);
 				send(ws, { type: 'input_audio_buffer.append', audio: chunk.toString('base64') });

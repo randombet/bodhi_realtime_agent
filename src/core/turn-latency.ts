@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { TurnLatencySegments } from '../types/hooks.js';
 
 /**

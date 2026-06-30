@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentDefinition } from '../../src/runtime/actors/main-agent-actor.js';
 import { MainAgentActor } from '../../src/runtime/actors/main-agent-actor.js';

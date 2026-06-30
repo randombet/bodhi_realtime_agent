@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { readFileSync } from 'node:fs';
 
 export interface ProjectDocuments {

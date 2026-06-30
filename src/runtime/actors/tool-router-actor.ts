@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * ToolRouterActor — dispatches tool calls to the correct execution path:
  * inline execution, background subagent, or agent transfer.

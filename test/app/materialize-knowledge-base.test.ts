@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it, vi } from 'vitest';
 import type { AgentDefinitionV2 } from '../../app/agents/agent-definition.js';
 import { materializeKnowledgeBaseByAgentName } from '../../app/agents/kb/materialize-knowledge-base-attachments.js';

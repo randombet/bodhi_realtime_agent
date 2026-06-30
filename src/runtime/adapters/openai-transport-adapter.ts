@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * OpenAI Realtime API transport adapter.
  *

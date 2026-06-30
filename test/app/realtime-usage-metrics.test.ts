@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it } from 'vitest';
 import { deriveUsageMetricRowsFromRealtimeUsage } from '../../app/server/realtime-usage-metrics.js';
 

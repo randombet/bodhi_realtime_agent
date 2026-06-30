@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Transport adapter interface — bridges provider-specific callbacks to
  * canonical control-plane messages.

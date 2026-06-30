@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it } from 'vitest';
 import { tryParseRtcClientSignaling } from '../../src/types/rtc-signaling.js';
 

@@ -1,11 +1,5 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it, vi } from 'vitest';
-import {
-	assertMacOS,
-	buildEmailScript,
-	escapeAppleScript,
-} from '../lib/apple-mail-sender.js';
+import { assertMacOS, buildEmailScript, escapeAppleScript } from '../lib/apple-mail-sender.js';
 
 describe('apple-mail-sender', () => {
 	describe('escapeAppleScript', () => {

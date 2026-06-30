@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { TtsPipeline, type TtsPipelineDeps } from '../../src/core/tts-pipeline.js';
 import type { LLMTransport } from '../../src/types/transport.js';

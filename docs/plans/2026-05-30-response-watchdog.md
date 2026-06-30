@@ -10,7 +10,7 @@
 
 **Design doc:** `docs/plans/2026-05-30-response-watchdog-design.md`
 
-**Conventions:** First line of every `src/`/`test/` file is `// SPDX-License-Identifier: MIT`. Run a single test file with `pnpm test -- --run path/to/file.test.ts`. Each task ends with a commit.
+**Conventions:** First line of every `src/`/`test/` file is ``. Run a single test file with `pnpm test -- --run path/to/file.test.ts`. Each task ends with a commit.
 
 ---
 
@@ -161,7 +161,7 @@ git commit -m "refactor(voice-session): extract triggerReconnect() shared by clo
 Create `test/core/voice-session-response-watchdog.test.ts`. Model the harness on `test/core/voice-session-native-playback.test.ts` (mock transport, fake timers).
 
 ```ts
-// SPDX-License-Identifier: MIT
+
 
 import type { LanguageModelV1 } from 'ai';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';

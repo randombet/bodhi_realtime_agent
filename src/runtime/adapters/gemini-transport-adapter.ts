@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Gemini Live API transport adapter.
  *

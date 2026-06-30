@@ -42,9 +42,9 @@ import {
 	ensurePreparedWithFallback,
 } from './lib/project-deepdive-state.js';
 import {
+	ProjectDeepdiveSubagent,
 	createLowReasoningSubagentProviderOptions,
 	createProjectDeepdiveSubagentConfig,
-	ProjectDeepdiveSubagent,
 } from './lib/project-deepdive-subagent.js';
 import { loadProjectDocuments } from './lib/project-documents.js';
 

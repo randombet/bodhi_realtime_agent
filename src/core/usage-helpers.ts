@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { RealtimeLLMUsageEvent } from '../types/transport.js';
 
 /** Source identifier for a published `realtime.usage` EventBus event.

@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { InterviewDocuments } from './interview-documents.js';
 
 export const QUESTION_IDS = ['walk_resume', 'company_interest', 'technical_challenge'] as const;

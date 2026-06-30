@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { EventPayload, EventPayloadMap, EventType, Unsubscribe } from '../types/events.js';
 
 /** Callback function type for a specific event type. */

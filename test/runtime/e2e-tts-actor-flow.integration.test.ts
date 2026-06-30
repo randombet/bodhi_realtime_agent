@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { TransportCapabilities } from '../../src/types/transport.js';
 import type { TTSAudioConfig, TTSProvider } from '../../src/types/tts.js';

@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { ConversationContext } from '../core/conversation-context.js';
 import type { HooksManager } from '../core/hooks.js';
 import { processKnowledgeBase } from '../knowledge/knowledge-base-processor.js';

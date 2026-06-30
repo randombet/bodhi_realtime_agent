@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Wire-level parity test (Gemini-only): legacy `BackgroundNotificationQueue`
  * vs actor-mode `NotificationActor`.

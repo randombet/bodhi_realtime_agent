@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { Counter, Histogram, HistogramVec } from './histogram.js';
 import type { MetricsCollector } from './metrics-collector.js';
 

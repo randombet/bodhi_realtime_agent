@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Time-bounded suppression window armed on the session's first assistant
  * audio chunk. While active, `VoiceSession`:

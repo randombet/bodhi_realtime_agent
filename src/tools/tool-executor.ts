@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { DEFAULT_TOOL_TIMEOUT_MS } from '../core/constants.js';
 import { ToolExecutionError } from '../core/errors.js';
 import type { IEventBus } from '../core/event-bus.js';

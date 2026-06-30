@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Observability contract for the actor runtime.
  *

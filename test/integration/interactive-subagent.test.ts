@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Integration tests for the V2 interactive subagent system.
  * Tests the full flow across SubagentSession, InteractionModeManager,

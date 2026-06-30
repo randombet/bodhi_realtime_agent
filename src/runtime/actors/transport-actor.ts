@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * TransportActor — provider-agnostic control-plane actor for LLM transport.
  *

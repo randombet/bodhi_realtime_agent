@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it, vi } from 'vitest';
 import { createBodhiSessionConfig } from '../../app/agents/bodhi-session.js';
 

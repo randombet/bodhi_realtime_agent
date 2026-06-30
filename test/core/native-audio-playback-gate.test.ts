@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { NativeAudioPlaybackGate, type NativeGateDeps } from '../../src/core/playback-gate.js';
 import type { Turn } from '../../src/core/turn.js';

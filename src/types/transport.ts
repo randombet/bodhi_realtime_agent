@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { ToolDefinition } from './tool.js';
 
 /** Reasoning effort dial for reasoning-capable realtime models

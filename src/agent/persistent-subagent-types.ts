@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { SubagentConfig } from '../types/agent.js';
 
 /**

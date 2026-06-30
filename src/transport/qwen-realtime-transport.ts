@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * QwenRealtimeTransport — Qwen Omni Realtime via Alibaba DashScope.
  *

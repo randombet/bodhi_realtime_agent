@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * End-to-end actor flow integration test — Gemini provider variant.
  *

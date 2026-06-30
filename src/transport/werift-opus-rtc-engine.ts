@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Server-side WebRTC audio (Opus RTP) using werift + @evan/opus — no SFU / LiveKit.
  * Bridges PCM at LLM transport rates ↔ Opus at 48 kHz for the browser peer.

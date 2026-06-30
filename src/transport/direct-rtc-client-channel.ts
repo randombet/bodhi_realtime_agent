@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { IceServerEntry } from '../types/client-media.js';
 import type { RtcClientSignalingMessage } from '../types/rtc-signaling.js';
 import type { IClientChannel, SessionClientSender } from '../types/session-client.js';

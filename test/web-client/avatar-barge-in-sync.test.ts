@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: MIT
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { maybeSchedulePlaybackEnded } from '../../app/web-client/src/audio.js';
 import { clientActionHandlers } from '../../app/web-client/src/client-action-handlers.js';

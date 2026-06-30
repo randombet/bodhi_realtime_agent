@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { zodToJsonSchema } from '../../src/transport/zod-to-schema.js';

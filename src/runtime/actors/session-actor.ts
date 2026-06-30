@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * SessionActor — owns session-level orchestration flow.
  *

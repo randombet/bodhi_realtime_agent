@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it } from 'vitest';
 import { InterruptGraceWindow } from '../../src/core/interrupt-grace-window.js';
 

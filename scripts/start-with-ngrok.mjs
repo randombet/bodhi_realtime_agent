@@ -8,8 +8,8 @@
  * Usage: pnpm start:twilio-local
  */
 import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 
 const rootDir = fileURLToPath(new URL('..', import.meta.url));
 

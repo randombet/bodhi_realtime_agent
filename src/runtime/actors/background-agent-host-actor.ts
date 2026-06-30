@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * BackgroundAgentHostActor — hosts user-defined `BackgroundAgent`s.
  *

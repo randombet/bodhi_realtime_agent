@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { GoogleGenAI } from '@google/genai';
 import type { STTAudioConfig, STTProvider } from '../types/transport.js';
 

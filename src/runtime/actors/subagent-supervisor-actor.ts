@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * SubagentSupervisorActor — owns workflow-level coordination and registry
  * for background subagent workflows.

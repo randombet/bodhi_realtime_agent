@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Processes a KnowledgeBaseConfig into prompt text + an optional search tool.
  *

@@ -40,14 +40,14 @@ import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { GoogleGenAI } from '@google/genai';
 import { tool } from 'ai';
 import { z } from 'zod';
+import { OpenClawHttpClient } from '../../app/lib/integrations/openclaw/openclaw-http-client.js';
+import type { OpenClawTransport } from '../../app/lib/integrations/openclaw/openclaw-transport.js';
+import { ArtifactRegistry } from '../../app/lib/media/artifact-registry.js';
 import { MarkdownConversationHistoryStore } from '../../src/core/markdown-conversation-history-store.js';
 import { VoiceSession } from '../../src/core/voice-session.js';
 import { GeminiBatchSTTProvider } from '../../src/transport/gemini-batch-stt-provider.js';
 import type { MainAgent, SubagentConfig } from '../../src/types/agent.js';
 import type { ToolDefinition } from '../../src/types/tool.js';
-import { ArtifactRegistry } from '../../app/lib/media/artifact-registry.js';
-import { OpenClawHttpClient } from '../../app/lib/integrations/openclaw/openclaw-http-client.js';
-import type { OpenClawTransport } from '../../app/lib/integrations/openclaw/openclaw-transport.js';
 import { OpenClawClient } from '../lib/openclaw-client.js';
 import { loadOrCreateDeviceIdentity } from '../lib/openclaw-device-identity.js';
 import {
@@ -420,8 +420,7 @@ async function main() {
 	// Switch model for both sessions. Keep HTTP and WebSocket defaults aligned
 	// with gateway expectations for each transport mode.
 	const openclawModel =
-		process.env.OPENCLAW_MODEL ||
-		(OPENCLAW_HTTP_URL ? 'openclaw/default' : 'openai/gpt-5.4');
+		process.env.OPENCLAW_MODEL || (OPENCLAW_HTTP_URL ? 'openclaw/default' : 'openai/gpt-5.4');
 	const workSessionId = `${SESSION_ID}_work`;
 	const generalSessionId = `${SESSION_ID}_general`;
 	await openclawClient.setModel(openclawClient.sessionKey(workSessionId), openclawModel);

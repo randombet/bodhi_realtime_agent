@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it } from 'vitest';
 import { buildVoiceWebSocketUrl } from '../../app/web-client/src/voice-ws-url.js';
 

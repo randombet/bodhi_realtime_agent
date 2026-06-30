@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Per-model registry for QwenRealtimeTransport (Qwen Omni Realtime via Alibaba
  * DashScope). Mirrors `openai-realtime-models.ts`: one row per model, one column

@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Tests for `NotificationActor` (`src/runtime/actors/notification-actor.ts`).
  *

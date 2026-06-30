@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
 	ANAM_BYO_LLM_ID,

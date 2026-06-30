@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// SPDX-License-Identifier: MIT
+
 /**
  * Serves examples/embed-widget-dump/index.html on a separate port so
  * POST /api/embed/widget-sessions sees a distinct browser Origin from the Bodhi web app.

@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 // Bodhi Realtime Agent Framework
 // Public API barrel export
 

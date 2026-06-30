@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * TwilioBridge — manages the lifecycle of a Twilio outbound call and bridges
  * bidirectional audio between the framework's PCM pipeline and Twilio Media Streams.

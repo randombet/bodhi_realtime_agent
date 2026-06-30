@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Privacy / cardinality / sampling controls for the metrics collector.
  *

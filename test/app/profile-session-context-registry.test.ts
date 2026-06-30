@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it } from 'vitest';
 import { RECRUITING_DRAFT_SESSION_INPUT_KEY } from '../../app/agents/runtime/profile-session-inputs.js';
 import {

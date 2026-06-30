@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it } from 'vitest';
 import { GeminiLiveTransport } from '../../src/transport/gemini-live-transport.js';
 import { OpenAIRealtimeTransport } from '../../src/transport/openai-realtime-transport.js';

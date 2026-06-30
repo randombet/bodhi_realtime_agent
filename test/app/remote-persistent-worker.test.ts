@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RemotePersistentWorker } from '../../app/agents/runtime/remote-persistent-worker.js';
 

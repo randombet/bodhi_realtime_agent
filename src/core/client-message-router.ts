@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { RtcClientSignalingMessage } from '../types/rtc-signaling.js';
 import { tryParseRtcClientSignaling } from '../types/rtc-signaling.js';
 import type { ConversationContext } from './conversation-context.js';

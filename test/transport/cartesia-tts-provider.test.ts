@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CartesiaTTSProvider } from '../../src/transport/cartesia-tts-provider.js';
 

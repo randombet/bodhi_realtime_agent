@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: MIT
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SpatialAssistantAudioDrip } from '../../app/web-client/src/spatial-web-avatar/assistant-audio-drip.js';
 

@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Actor } from '../../src/runtime/actor-runtime.js';
 import { ActorRuntime } from '../../src/runtime/actor-runtime.js';

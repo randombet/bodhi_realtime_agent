@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Phase 0 probe — design-retained-user-content-recovery.md (Step R0).
  *
@@ -161,7 +159,12 @@ async function main() {
 
 	const replay = (payload: Buffer, mime: string) => {
 		session.sendClientContent({
-			turns: [{ role: 'user', parts: [{ inlineData: { data: payload.toString('base64'), mimeType: mime } }] as never[] }],
+			turns: [
+				{
+					role: 'user',
+					parts: [{ inlineData: { data: payload.toString('base64'), mimeType: mime } }] as never[],
+				},
+			],
 			turnComplete: true,
 		});
 	};
@@ -197,12 +200,16 @@ async function main() {
 	log('Phase C: provoking a barge-in-then-stop, then replaying...');
 	obs = freshObs();
 	session.sendClientContent({
-		turns: [{ role: 'user', parts: [{ text: 'Count slowly from one to thirty, one number at a time.' }] }],
+		turns: [
+			{ role: 'user', parts: [{ text: 'Count slowly from one to thirty, one number at a time.' }] },
+		],
 		turnComplete: true,
 	});
 	// Let the long response start streaming.
 	await waitFor(() => obs.modelAudioBytes > 50_000, 10_000);
-	log(`counting response streaming (${obs.modelAudioBytes}B) — barging in with realtime speech audio`);
+	log(
+		`counting response streaming (${obs.modelAudioBytes}B) — barging in with realtime speech audio`,
+	);
 	// Barge-in: stream the captured question as realtime mic audio (server VAD
 	// should fire), then go silent — the stall trigger shape.
 	const frame = 3_200; // 100 ms @ 16 kHz 16-bit

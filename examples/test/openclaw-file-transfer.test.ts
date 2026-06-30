@@ -1,10 +1,14 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it, vi } from 'vitest';
+import type {
+	ChatEvent,
+	OpenClawClient,
+} from '../../app/lib/integrations/openclaw/openclaw-client.js';
+import {
+	extractContentBlocks,
+	normalizeEvent,
+} from '../../app/lib/integrations/openclaw/openclaw-client.js';
 import { ArtifactRegistry } from '../../app/lib/media/artifact-registry.js';
 import { resolveArtifacts } from '../lib/artifact-resolution.js';
-import type { ChatEvent, OpenClawClient } from '../../app/lib/integrations/openclaw/openclaw-client.js';
-import { extractContentBlocks, normalizeEvent } from '../../app/lib/integrations/openclaw/openclaw-client.js';
 import { createOpenClawSubagentConfig } from '../lib/openclaw-tools.js';
 
 const TINY_PNG_B64 =

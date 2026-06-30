@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Probe — design-hosted-replay-recovery-rollout.md (H4, case A) and the
  * parent doc's R7a/R7b guards, end-to-end in the HOSTED session shape
@@ -95,8 +93,7 @@ async function main() {
 
 	const probeAgent: MainAgent = {
 		name: 'main',
-		instructions:
-			'You are a concise voice assistant. Answer every question in one short sentence.',
+		instructions: 'You are a concise voice assistant. Answer every question in one short sentence.',
 		greeting: 'Say exactly: "What is the largest planet in our solar system?" and nothing else.',
 		tools: [],
 	};
@@ -155,7 +152,9 @@ async function main() {
 			`transcriptPromoted=${s1Promoted ? 'YES' : 'NO'} modelAnswered=${s1ModelAnswered ? 'YES' : 'NO'} ` +
 			`reconnect=${s1Reconnect ? 'YES (unexpected)' : 'NO (expected)'} ` +
 			`[assistantAudio=${assistantBytesSinceMark}B]` +
-			(s1Replayed ? '' : ' — stall not forced (model beat the watchdog); rerun or lower PROBE_WATCHDOG_MS'),
+			(s1Replayed
+				? ''
+				: ' — stall not forced (model beat the watchdog); rerun or lower PROBE_WATCHDOG_MS'),
 	);
 	await feedSilence(session, 500);
 	await sleep(2_000);

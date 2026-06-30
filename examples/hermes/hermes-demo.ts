@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Bodhi + Hermes — Voice-Driven Remote Agent Demo
  *

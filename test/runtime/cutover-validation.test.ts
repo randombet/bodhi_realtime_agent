@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Step 87 cutover validation tests.
  *

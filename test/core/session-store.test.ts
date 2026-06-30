@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it } from 'vitest';
 import { InMemorySessionStore } from '../../src/core/session-store.js';
 import type { SessionCheckpoint } from '../../src/types/session.js';

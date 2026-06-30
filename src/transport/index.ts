@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 export { createClientChannel } from './client-channel-factory.js';
 export type {
 	CreateClientChannelParams,

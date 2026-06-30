@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it, vi } from 'vitest';
 import { TransportError } from '../../src/core/errors.js';
 import { createClientChannel } from '../../src/transport/client-channel-factory.js';

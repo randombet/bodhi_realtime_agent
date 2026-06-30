@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { isBodhiAvatarFeatureEnvEnabled } from '../../app/lib/bodhi-avatar-feature.js';
 

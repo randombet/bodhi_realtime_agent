@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Audio codec conversion for Twilio Media Streams ↔ framework PCM pipeline.
  *

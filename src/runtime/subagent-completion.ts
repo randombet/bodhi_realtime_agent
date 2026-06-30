@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * SubagentCompletion — structured completion contract for subagent workflows.
  *

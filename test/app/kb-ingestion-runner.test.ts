@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it, vi } from 'vitest';
 import { runIngestion } from '../../app/agents/kb/ingestion-runner.js';
 

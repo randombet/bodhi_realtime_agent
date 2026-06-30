@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { FrameworkHooks } from '../types/hooks.js';
 
 /**

@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it } from 'vitest';
 import type { InterviewDocuments } from '../../examples/interviewer/lib/interview-documents.js';
 import {

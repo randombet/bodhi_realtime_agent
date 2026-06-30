@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { MainAgent } from '../types/agent.js';
 import type { MemoryFact } from '../types/memory.js';
 import type { LLMTransport } from '../types/transport.js';

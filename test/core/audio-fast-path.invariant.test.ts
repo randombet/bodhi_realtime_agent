@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Audio Fast-Path Invariant Tests
  *

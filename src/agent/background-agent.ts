@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * BackgroundAgent — user-facing interface for always-on producers in actor mode.
  *

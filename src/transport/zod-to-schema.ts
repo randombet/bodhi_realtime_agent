@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { z } from 'zod';
 
 /** Schema output format: Gemini uses UPPERCASE type names, standard JSON Schema uses lowercase. */

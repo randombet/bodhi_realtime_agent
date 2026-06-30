@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { type WebSocket, WebSocketServer } from 'ws';
 import { AudioBuffer } from './audio-buffer.js';
 

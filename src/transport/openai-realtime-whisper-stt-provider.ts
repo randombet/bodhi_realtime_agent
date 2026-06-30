@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { WebSocket } from 'ws';
 import { TransportError } from '../core/errors.js';
 import type { STTAudioConfig, STTProvider } from '../types/transport.js';

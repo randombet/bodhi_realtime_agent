@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { FrameworkHooks } from '../types/hooks.js';
 import { Counter, Histogram, HistogramVec } from './histogram.js';
 import { DEFAULT_PRIVACY_CONFIG, LabelGuard, type PrivacyConfig, hashUnit } from './privacy.js';

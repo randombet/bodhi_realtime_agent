@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { type LanguageModelV1, generateObject } from 'ai';
 import { z } from 'zod';
 import { DEFAULT_EXTRACTION_TIMEOUT_MS } from '../core/constants.js';

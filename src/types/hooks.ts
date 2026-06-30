@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { ToolExecution } from './tool.js';
 import type { RealtimeLLMUsageEvent } from './transport.js';
 

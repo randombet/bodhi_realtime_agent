@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { FrameworkError } from '../core/errors.js';
 import type { SubagentConfig } from '../types/agent.js';
 import type {

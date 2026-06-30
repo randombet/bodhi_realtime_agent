@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { SessionClientSender } from '../types/session-client.js';
 import type { IClientChannel } from '../types/session-client.js';
 import { AudioBuffer } from './audio-buffer.js';

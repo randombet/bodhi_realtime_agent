@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { describe, expect, it } from 'vitest';
 import { userAgentRecordToAgentDefinitionV2 } from '../../app/agents/agent-definition-parse.js';

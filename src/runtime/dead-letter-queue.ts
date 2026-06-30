@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Dead-letter queue for the actor runtime.
  *

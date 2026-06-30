@@ -1,23 +1,21 @@
-// SPDX-License-Identifier: MIT
-
 import type { LanguageModelV1 } from 'ai';
 import { generateObject } from 'ai';
 import { z } from 'zod';
 import type { PersistentSubagentInstance } from '../../../src/agent/persistent-subagent-types.js';
 import type { SubagentConfig } from '../../../src/types/agent.js';
 import {
+	ANCHOR_IDS,
 	type AnchorAnswer,
 	type AnchorId,
 	type AnchorQuestion,
 	type AnchorQuestionKind,
-	ANCHOR_IDS,
-	applyDeepdivePlan,
 	type DynamicQuestion,
+	type ProjectDeepdivePlan,
+	type ProjectDeepdiveState,
+	applyDeepdivePlan,
 	extractProjectContext,
 	getNextAnchorQuestion,
 	normalizeDeepdivePlanWithDocuments,
-	type ProjectDeepdivePlan,
-	type ProjectDeepdiveState,
 	recordAnchorAnswer,
 } from './project-deepdive-state.js';
 import type { ProjectDocuments } from './project-documents.js';
