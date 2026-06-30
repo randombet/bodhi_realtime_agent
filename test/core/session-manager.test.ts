@@ -4,18 +4,45 @@ import { describe, expect, it, vi } from 'vitest';
 import { SessionError } from '../../src/core/errors.js';
 import { EventBus } from '../../src/core/event-bus.js';
 import { HooksManager } from '../../src/core/hooks.js';
-import { SessionManager } from '../../src/core/session-manager.js';
+import { SessionManager, type SessionPostProcessing } from '../../src/core/session-manager.js';
+import { InMemoryPostSessionPipeline } from '../../src/post-session/pipeline.js';
+import {
+	PostSessionProcessor,
+	type PostSessionSnapshot,
+	type PostSessionSnapshotBuilder,
+} from '../../src/post-session/types.js';
 
-function createManager() {
+function createManager(postSession?: SessionPostProcessing) {
 	const eventBus = new EventBus();
 	const hooks = new HooksManager();
 	const mgr = new SessionManager(
 		{ sessionId: 'sess_1', userId: 'user_1', initialAgent: 'general' },
 		eventBus,
 		hooks,
+		postSession,
 	);
 	return { mgr, eventBus, hooks };
 }
+
+const snapshotBuilder =
+	(opts?: { throwOnBuild?: boolean }): PostSessionSnapshotBuilder =>
+	(reason) => {
+		if (opts?.throwOnBuild) throw new Error('snapshot build failed');
+		const snapshot: PostSessionSnapshot = {
+			sessionId: 'sess_1',
+			userId: 'user_1',
+			initialAgentName: 'general',
+			finalAgentName: 'general',
+			transferPath: ['general'],
+			reason,
+			startedAt: 0,
+			endedAt: 1,
+			durationMs: 1,
+			conversation: { items: [] },
+			metrics: { turnCount: 0, toolCallCount: 0, agentTransferCount: 0 },
+		};
+		return { snapshot, stores: {} };
+	};
 
 describe('SessionManager', () => {
 	it('starts in CREATED state', () => {
@@ -293,6 +320,76 @@ describe('SessionManager', () => {
 			expect(onStart).toHaveBeenCalledOnce();
 			expect(mgr.state).toBe('ACTIVE');
 			spy.mockRestore();
+		});
+	});
+
+	describe('post-session dispatch (phase 4)', () => {
+		it('dispatches the pipeline once on close and reports accepted', async () => {
+			const pipeline = new InMemoryPostSessionPipeline();
+			pipeline.freeze();
+			const reports: string[] = [];
+			pipeline.events.onProcessed((r) => reports.push(r.outcome));
+			const { mgr } = createManager({ pipeline });
+			mgr.registerSnapshotBuilder(snapshotBuilder());
+
+			mgr.transitionTo('CONNECTING');
+			mgr.transitionTo('ACTIVE');
+			await mgr.closeWithReason('normal');
+
+			expect(reports).toEqual(['accepted']);
+		});
+
+		it('does not dispatch when no pipeline is configured (unchanged behavior)', async () => {
+			const { mgr } = createManager();
+			await mgr.closeWithReason('normal');
+			expect(mgr.state).toBe('CLOSED'); // closes fine; nothing to assert beyond no throw
+		});
+
+		it('drain mode awaits the run report before resolving', async () => {
+			const pipeline = new InMemoryPostSessionPipeline();
+			let ran = false;
+			class Slow extends PostSessionProcessor {
+				readonly name = 'slow';
+				async run() {
+					await new Promise((r) => setTimeout(r, 15));
+					ran = true;
+				}
+			}
+			pipeline.register(new Slow());
+			pipeline.freeze();
+			const { mgr } = createManager({ pipeline, drain: true });
+			mgr.registerSnapshotBuilder(snapshotBuilder());
+
+			await mgr.closeWithReason('normal');
+			expect(ran).toBe(true); // drain awaited the processor
+		});
+
+		it('build thunk throwing yields a failed_to_start report', async () => {
+			const pipeline = new InMemoryPostSessionPipeline();
+			pipeline.freeze();
+			const outcomes: Array<{ outcome: string; failureReason?: string }> = [];
+			pipeline.events.onProcessed((r) =>
+				outcomes.push({ outcome: r.outcome, failureReason: r.failureReason }),
+			);
+			const { mgr } = createManager({ pipeline });
+			mgr.registerSnapshotBuilder(snapshotBuilder({ throwOnBuild: true }));
+
+			await mgr.closeWithReason('normal');
+
+			expect(outcomes).toEqual([{ outcome: 'failed_to_start', failureReason: 'snapshot_failed' }]);
+		});
+
+		it('dispatches exactly once under duplicate close', async () => {
+			const pipeline = new InMemoryPostSessionPipeline();
+			pipeline.freeze();
+			const reports: string[] = [];
+			pipeline.events.onProcessed((r) => reports.push(r.outcome));
+			const { mgr } = createManager({ pipeline });
+			mgr.registerSnapshotBuilder(snapshotBuilder());
+
+			await mgr.closeWithReason('user_hangup');
+			await mgr.closeWithReason('error'); // no-op
+			expect(reports).toEqual(['accepted']);
 		});
 	});
 

@@ -1,10 +1,18 @@
 // SPDX-License-Identifier: MIT
 
+import type { PostSessionPipeline, PostSessionSnapshotBuilder } from '../post-session/types.js';
 import type { ClientMessage } from '../types/audio.js';
 import type { SessionConfig, SessionEndReason, SessionState } from '../types/session.js';
 import { SessionError } from './errors.js';
 import type { IEventBus } from './event-bus.js';
 import type { HooksManager } from './hooks.js';
+
+/** Optional post-session wiring: a process-scoped pipeline + drain preference. */
+export interface SessionPostProcessing {
+	readonly pipeline: PostSessionPipeline;
+	/** When true, closeWithReason awaits the run report before resolving (drain mode). */
+	readonly drain?: boolean;
+}
 
 /** Legal state transitions — any unlisted transition throws SessionError. */
 const VALID_TRANSITIONS: Record<SessionState, SessionState[]> = {
@@ -34,6 +42,8 @@ export class SessionManager {
 	private _finalizers: Array<() => void | Promise<void>> = [];
 	/** Memoized close completion, so repeated closeWithReason() calls share one promise. */
 	private _closePromise: Promise<void> | null = null;
+	/** Per-session snapshot builder used at dispatch time (phase 4 of close). */
+	private _snapshotBuilder: PostSessionSnapshotBuilder | null = null;
 
 	readonly sessionId: string;
 	readonly userId: string;
@@ -43,10 +53,17 @@ export class SessionManager {
 		config: SessionConfig,
 		private eventBus: IEventBus,
 		private hooks: HooksManager,
+		/** Optional post-session pipeline. When absent, close behaves exactly as before. */
+		private postSession?: SessionPostProcessing,
 	) {
 		this.sessionId = config.sessionId;
 		this.userId = config.userId;
 		this.initialAgent = config.initialAgent;
+	}
+
+	/** Millisecond timestamp of first ACTIVE, or null if never activated. */
+	get startedAtMs(): number | null {
+		return this.startedAt;
 	}
 
 	get state(): SessionState {
@@ -140,13 +157,26 @@ export class SessionManager {
 	}
 
 	/**
+	 * Register the per-session snapshot builder dispatched in phase 4 of close.
+	 * Register once, before the session goes active. No-op effect unless a
+	 * post-session pipeline was provided to the constructor.
+	 */
+	registerSnapshotBuilder(build: PostSessionSnapshotBuilder): void {
+		this._snapshotBuilder = build;
+	}
+
+	/**
 	 * The single reason-carrying entry point to CLOSED. Idempotent: the first call
 	 * claims close (sets the guard, records the reason); re-entrant or duplicate
 	 * calls — including a raced reconnect/transfer-fail path — return the same
 	 * promise, so `session.close` fires exactly once with the caller's reason.
 	 *
-	 * Fast path (no finalizers): transitions synchronously, preserving legacy
-	 * close timing. Otherwise finalizers run (awaited, all-settled) first.
+	 * Phases: (1) claim, (2) run pre-close finalizers (awaited, all-settled),
+	 * (3) transitionTo CLOSED (fires onSessionEnd + publishes session.close),
+	 * (4) dispatch the post-session pipeline (drain mode awaits its report).
+	 *
+	 * Fast path (no finalizers): phases 3–4 run synchronously, preserving legacy
+	 * close timing (dispatch returns a handle synchronously).
 	 */
 	closeWithReason(reason: SessionEndReason): Promise<void> {
 		if (this._closing || this._state === 'CLOSED') {
@@ -156,14 +186,18 @@ export class SessionManager {
 		this._pendingReason = reason;
 		if (this._finalizers.length === 0) {
 			this.transitionTo('CLOSED');
-			this._closePromise = Promise.resolve();
+			this._closePromise = this.dispatchPostSession(reason);
 			return this._closePromise;
 		}
-		this._closePromise = this.runFinalizersThenClose();
+		this._closePromise = (async () => {
+			await this.runFinalizers();
+			this.transitionTo('CLOSED');
+			await this.dispatchPostSession(reason);
+		})();
 		return this._closePromise;
 	}
 
-	private async runFinalizersThenClose(): Promise<void> {
+	private async runFinalizers(): Promise<void> {
 		// Wrap each in an async thunk so a synchronous throw becomes a rejection
 		// that allSettled captures (rather than escaping the map).
 		const results = await Promise.allSettled(this._finalizers.map(async (fn) => fn()));
@@ -172,7 +206,17 @@ export class SessionManager {
 				console.error('[SessionManager] pre-close finalizer threw:', r.reason);
 			}
 		}
-		this.transitionTo('CLOSED');
+	}
+
+	/** Phase 4: dispatch the post-session pipeline (if wired). Drain awaits the report. */
+	private dispatchPostSession(reason: SessionEndReason): Promise<void> {
+		if (!this.postSession || !this._snapshotBuilder) return Promise.resolve();
+		const run = this.postSession.pipeline.dispatch({
+			sessionId: this.sessionId,
+			reason,
+			build: this._snapshotBuilder,
+		});
+		return this.postSession.drain ? run.report.then(() => undefined) : Promise.resolve();
 	}
 
 	updateResumptionHandle(handle: string): void {

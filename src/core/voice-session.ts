@@ -8,6 +8,11 @@ import { PersistentSubagentManager } from '../agent/persistent-subagent-manager.
 import type { SubagentMessage } from '../agent/subagent-session.js';
 import { BehaviorManager } from '../behaviors/behavior-manager.js';
 import { MemoryDistiller } from '../memory/memory-distiller.js';
+import type {
+	PostSessionPipeline,
+	PostSessionSnapshot,
+	PostSessionStores,
+} from '../post-session/types.js';
 import type { ToolRoutingInfo } from '../runtime/actors/tool-router-actor.js';
 import { GeminiTransportAdapter } from '../runtime/adapters/gemini-transport-adapter.js';
 import type { KnownNotificationLabel } from '../runtime/messages.js';
@@ -336,6 +341,14 @@ export interface VoiceSessionConfig {
 	conversationHistoryStores?: ConversationHistoryStore[];
 	/** Application metadata persisted alongside the session record (e.g. channel, surface, callSid). */
 	sessionMetadata?: Record<string, unknown>;
+	/**
+	 * Optional process-scoped post-session pipeline. When provided, the session
+	 * registers a snapshot builder and `closeWithReason` dispatches the pipeline
+	 * once on close. Absent → no post-session processing (unchanged behavior).
+	 */
+	postSessionPipeline?: PostSessionPipeline;
+	/** Drain mode: await the post-session run before close() resolves (serverless hosts). */
+	drainPostSession?: boolean;
 	/** When provided, agents/tools can persist artifacts (images, docs, etc.) via session.workspace.saveArtifact(). */
 	artifactStore?: ArtifactStore;
 	/** External TTS provider for speech synthesis (actor-mode only).
@@ -699,7 +712,18 @@ export class VoiceSession {
 			},
 			this.eventBus,
 			this.hooks,
+			config.postSessionPipeline
+				? { pipeline: config.postSessionPipeline, drain: config.drainPostSession }
+				: undefined,
 		);
+		// Snapshot builder for the post-session pipeline (no-op unless a pipeline was
+		// provided). Bounded, in-memory: copies the conversation timeline + derived
+		// metrics frozen at close time.
+		if (config.postSessionPipeline) {
+			this.sessionManager.registerSnapshotBuilder((reason) =>
+				this.buildPostSessionSnapshot(reason),
+			);
+		}
 
 		this.subagentConfigs = config.subagentConfigs ?? {};
 
@@ -1885,6 +1909,49 @@ export class VoiceSession {
 	}
 
 	/** Gracefully shut down: disconnect Gemini, stop the WebSocket server, transition to CLOSED. */
+	/**
+	 * Build the immutable post-session snapshot + live stores. Bounded, in-memory:
+	 * copies the conversation timeline and derives metrics from it. Used only when a
+	 * post-session pipeline is wired (see VoiceSessionConfig.postSessionPipeline).
+	 */
+	private buildPostSessionSnapshot(reason: SessionEndReason): {
+		snapshot: PostSessionSnapshot;
+		stores: PostSessionStores;
+	} {
+		const items = [...this.conversationContext.items];
+		let finalAgentName = this.config.initialAgent;
+		try {
+			finalAgentName = this.agentRouter.activeAgent.name;
+		} catch {
+			// no active agent (never went active) — keep initial
+		}
+		const transferPath =
+			finalAgentName === this.config.initialAgent
+				? [this.config.initialAgent]
+				: [this.config.initialAgent, finalAgentName];
+		const startedAt = this.sessionManager.startedAtMs ?? Date.now();
+		const endedAt = Date.now();
+		const snapshot: PostSessionSnapshot = {
+			sessionId: this.config.sessionId,
+			userId: this.config.userId,
+			initialAgentName: this.config.initialAgent,
+			finalAgentName,
+			transferPath,
+			reason,
+			startedAt,
+			endedAt,
+			durationMs: Math.max(0, endedAt - startedAt),
+			metadata: this.config.sessionMetadata,
+			conversation: { items },
+			metrics: {
+				turnCount: items.filter((i) => i.role === 'assistant').length,
+				toolCallCount: items.filter((i) => i.role === 'tool_call').length,
+				agentTransferCount: items.filter((i) => i.role === 'transfer').length,
+			},
+		};
+		return { snapshot, stores: { memory: this.config.memory?.store } };
+	}
+
 	async close(reason: SessionEndReason = 'normal'): Promise<void> {
 		// Drop any queued background notifications — session is ending.
 		// Actor mode: NotificationActor.onStop clears its own state when the
