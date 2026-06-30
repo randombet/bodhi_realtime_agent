@@ -1,5 +1,7 @@
+// SPDX-License-Identifier: MIT
+
 import type { ClientMessage } from '../types/audio.js';
-import type { SessionConfig, SessionState } from '../types/session.js';
+import type { SessionConfig, SessionEndReason, SessionState } from '../types/session.js';
 import { SessionError } from './errors.js';
 import type { IEventBus } from './event-bus.js';
 import type { HooksManager } from './hooks.js';
@@ -24,6 +26,10 @@ export class SessionManager {
 	private _resumptionHandle: string | null = null;
 	private _bufferedMessages: ClientMessage[] = [];
 	private startedAt: number | null = null;
+	/** Close-in-progress guard — set synchronously so re-entrant/duplicate closes no-op. */
+	private _closing = false;
+	/** Caller-supplied close reason, consumed by the CLOSED transition. */
+	private _pendingReason: SessionEndReason | null = null;
 
 	readonly sessionId: string;
 	readonly userId: string;
@@ -90,18 +96,35 @@ export class SessionManager {
 
 		if (newState === 'CLOSED') {
 			const durationMs = this.startedAt ? Date.now() - this.startedAt : 0;
+			// Prefer the caller-supplied reason (via closeWithReason); fall back to the
+			// state-derived reason for legacy direct transitionTo('CLOSED') callers.
+			const reason: SessionEndReason =
+				this._pendingReason ?? (fromState === 'ACTIVE' ? 'normal' : fromState);
 			if (this.hooks.onSessionEnd) {
 				this.hooks.onSessionEnd({
 					sessionId: this.sessionId,
 					durationMs,
-					reason: fromState === 'ACTIVE' ? 'normal' : fromState,
+					reason,
 				});
 			}
 			this.eventBus.publish('session.close', {
 				sessionId: this.sessionId,
-				reason: fromState === 'ACTIVE' ? 'normal' : fromState,
+				reason,
 			});
 		}
+	}
+
+	/**
+	 * The single reason-carrying entry point to CLOSED. Idempotent: the first call
+	 * claims close (sets the guard, records the reason) and transitions; re-entrant
+	 * or duplicate calls — including a raced reconnect/transfer-fail path — become
+	 * no-ops, so `session.close` fires exactly once with the caller's reason.
+	 */
+	closeWithReason(reason: SessionEndReason): void {
+		if (this._closing || this._state === 'CLOSED') return;
+		this._closing = true;
+		this._pendingReason = reason;
+		this.transitionTo('CLOSED');
 	}
 
 	updateResumptionHandle(handle: string): void {

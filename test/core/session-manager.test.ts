@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import { describe, expect, it, vi } from 'vitest';
 import { SessionError } from '../../src/core/errors.js';
 import { EventBus } from '../../src/core/event-bus.js';
@@ -161,6 +163,63 @@ describe('SessionManager', () => {
 					reason: 'normal',
 				}),
 			);
+		});
+	});
+
+	describe('closeWithReason', () => {
+		it('transitions to CLOSED and preserves the caller reason on onSessionEnd + session.close', () => {
+			const { mgr, eventBus, hooks } = createManager();
+			const onSessionEnd = vi.fn();
+			const onClose = vi.fn();
+			hooks.register({ onSessionEnd });
+			eventBus.subscribe('session.close', onClose);
+
+			mgr.transitionTo('CONNECTING');
+			mgr.transitionTo('ACTIVE');
+			mgr.closeWithReason('reconnect_failed');
+
+			expect(mgr.state).toBe('CLOSED');
+			expect(onSessionEnd).toHaveBeenCalledWith(
+				expect.objectContaining({ sessionId: 'sess_1', reason: 'reconnect_failed' }),
+			);
+			expect(onClose).toHaveBeenCalledWith({ sessionId: 'sess_1', reason: 'reconnect_failed' });
+		});
+
+		it('is idempotent — duplicate/re-entrant calls fire session.close exactly once', () => {
+			const { mgr, eventBus } = createManager();
+			const onClose = vi.fn();
+			eventBus.subscribe('session.close', onClose);
+
+			mgr.closeWithReason('user_hangup');
+			mgr.closeWithReason('error'); // racing path — must be a no-op
+			mgr.closeWithReason('timeout');
+
+			expect(onClose).toHaveBeenCalledOnce();
+			expect(onClose).toHaveBeenCalledWith({ sessionId: 'sess_1', reason: 'user_hangup' });
+		});
+
+		it('is a no-op when already CLOSED via direct transitionTo', () => {
+			const { mgr, eventBus } = createManager();
+			const onClose = vi.fn();
+			eventBus.subscribe('session.close', onClose);
+
+			mgr.transitionTo('CLOSED'); // legacy direct close → derives reason
+			mgr.closeWithReason('user_hangup'); // already closed → no-op
+
+			expect(onClose).toHaveBeenCalledOnce();
+			expect(onClose).toHaveBeenCalledWith({ sessionId: 'sess_1', reason: 'CREATED' });
+		});
+
+		it('legacy transitionTo(CLOSED) still derives a reason when no caller reason set', () => {
+			const { mgr, eventBus } = createManager();
+			const onClose = vi.fn();
+			eventBus.subscribe('session.close', onClose);
+
+			mgr.transitionTo('CONNECTING');
+			mgr.transitionTo('ACTIVE');
+			mgr.transitionTo('CLOSED');
+
+			expect(onClose).toHaveBeenCalledWith({ sessionId: 'sess_1', reason: 'normal' });
 		});
 	});
 
