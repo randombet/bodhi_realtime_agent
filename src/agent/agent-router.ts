@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import type { LanguageModelV1 } from 'ai';
 import type { ConversationContext } from '../core/conversation-context.js';
 import { AgentError } from '../core/errors.js';
@@ -211,9 +213,9 @@ export class AgentRouter {
 				toAgent: toAgentName,
 			});
 		} catch (err) {
-			// Transfer failed — session is broken, clean up and transition to CLOSED
+			// Transfer failed — session is broken, clean up and close with a stable reason
 			this.clientTransport.stopBuffering();
-			this.sessionManager.transitionTo('CLOSED');
+			void this.sessionManager.closeWithReason('transfer_failed');
 			const error = new AgentError(
 				`Transfer to "${toAgentName}" failed: ${err instanceof Error ? err.message : String(err)}`,
 			);

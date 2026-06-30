@@ -24,6 +24,9 @@ function fakeSessionManager(initial: SessionState = 'ACTIVE', handle: string | n
 		transitionTo: vi.fn((s: SessionState) => {
 			state = s;
 		}),
+		closeWithReason: vi.fn(async (_reason: string) => {
+			state = 'CLOSED';
+		}),
 		updateResumptionHandle: vi.fn((h: string) => {
 			resumptionHandle = h;
 		}),
@@ -256,7 +259,7 @@ describe('TransportReconnector', () => {
 
 			// 4th: budget spent → immediate CLOSED, no further reconnect.
 			h.reconnector.triggerReconnect('transport-close');
-			expect(h.sm.transitionTo).toHaveBeenLastCalledWith('CLOSED');
+			expect(h.sm.closeWithReason).toHaveBeenCalledWith('reconnect_failed');
 			vi.advanceTimersByTime(4000);
 			await vi.runAllTimersAsync();
 			expect(h.transport.reconnect).toHaveBeenCalledTimes(3);
@@ -266,7 +269,7 @@ describe('TransportReconnector', () => {
 			const h = makeHarness({ handle: null });
 			h.reconnector.triggerReconnect('transport-close');
 			expect(h.transport.reconnect).not.toHaveBeenCalled();
-			expect(h.sm.transitionTo).toHaveBeenCalledWith('CLOSED');
+			expect(h.sm.closeWithReason).toHaveBeenCalledWith('reconnect_failed');
 		});
 
 		it('CLOSEs on a failed reconnect attempt', async () => {
@@ -278,7 +281,7 @@ describe('TransportReconnector', () => {
 			vi.advanceTimersByTime(1000);
 			await vi.runAllTimersAsync();
 			expect(h.reportError).toHaveBeenCalledWith('reconnect', expect.any(Error));
-			expect(h.sm.transitionTo).toHaveBeenLastCalledWith('CLOSED');
+			expect(h.sm.closeWithReason).toHaveBeenCalledWith('reconnect_failed');
 		});
 
 		it('no-ops when the session is not ACTIVE', () => {
@@ -298,7 +301,7 @@ describe('TransportReconnector', () => {
 			}
 			// Budget exhausted → next trigger gives up.
 			h.reconnector.triggerReconnect('transport-close');
-			expect(h.sm.transitionTo).toHaveBeenLastCalledWith('CLOSED');
+			expect(h.sm.closeWithReason).toHaveBeenCalledWith('reconnect_failed');
 
 			// Healthy turn → reset → reconnect works again with the 1000ms backoff.
 			// (A healthy completion implies the session is ACTIVE again.)

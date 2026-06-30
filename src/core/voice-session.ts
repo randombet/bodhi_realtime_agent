@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import type { LanguageModelV1 } from 'ai';
 import { resolveAgentWithKnowledgeBase } from '../agent/agent-context.js';
 import { AgentRouter } from '../agent/agent-router.js';
@@ -34,6 +36,7 @@ import type { ProcessedKnowledgeBase } from '../types/knowledge-base.js';
 import type { MemoryStore } from '../types/memory.js';
 import type { IClientChannel } from '../types/session-client.js';
 import type { SessionClientSender } from '../types/session-client.js';
+import type { SessionEndReason } from '../types/session.js';
 import type { ToolDefinition } from '../types/tool.js';
 import type { LLMTransport, LLMTransportError, STTProvider } from '../types/transport.js';
 import type { TTSProvider } from '../types/tts.js';
@@ -1882,7 +1885,7 @@ export class VoiceSession {
 	}
 
 	/** Gracefully shut down: disconnect Gemini, stop the WebSocket server, transition to CLOSED. */
-	async close(_reason = 'normal'): Promise<void> {
+	async close(reason: SessionEndReason = 'normal'): Promise<void> {
 		// Drop any queued background notifications — session is ending.
 		// Actor mode: NotificationActor.onStop clears its own state when the
 		// runtime orchestrator stops below.
@@ -1948,7 +1951,9 @@ export class VoiceSession {
 		await this.clientTransport.stop();
 
 		if (this.sessionManager.state !== 'CLOSED') {
-			this.sessionManager.transitionTo('CLOSED');
+			// Route through the single reason-carrying funnel so the caller's reason is
+			// preserved (no finalizers registered here → synchronous CLOSED, unchanged timing).
+			void this.sessionManager.closeWithReason(reason);
 		}
 
 		this.eventBus.clear();

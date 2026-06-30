@@ -30,6 +30,10 @@ export class SessionManager {
 	private _closing = false;
 	/** Caller-supplied close reason, consumed by the CLOSED transition. */
 	private _pendingReason: SessionEndReason | null = null;
+	/** Pre-close finalizers, run (awaited, all-settled) before `session.close` publishes. */
+	private _finalizers: Array<() => void | Promise<void>> = [];
+	/** Memoized close completion, so repeated closeWithReason() calls share one promise. */
+	private _closePromise: Promise<void> | null = null;
 
 	readonly sessionId: string;
 	readonly userId: string;
@@ -81,11 +85,16 @@ export class SessionManager {
 		if (newState === 'ACTIVE' && !this.startedAt) {
 			this.startedAt = Date.now();
 			if (this.hooks.onSessionStart) {
-				this.hooks.onSessionStart({
-					sessionId: this.sessionId,
-					userId: this.userId,
-					agentName: this.initialAgent,
-				});
+				// Isolated: a throwing hook must not abort the lifecycle transition.
+				try {
+					this.hooks.onSessionStart({
+						sessionId: this.sessionId,
+						userId: this.userId,
+						agentName: this.initialAgent,
+					});
+				} catch (error) {
+					console.error('[SessionManager] onSessionStart hook threw:', error);
+				}
 			}
 			this.eventBus.publish('session.start', {
 				sessionId: this.sessionId,
@@ -101,11 +110,17 @@ export class SessionManager {
 			const reason: SessionEndReason =
 				this._pendingReason ?? (fromState === 'ACTIVE' ? 'normal' : fromState);
 			if (this.hooks.onSessionEnd) {
-				this.hooks.onSessionEnd({
-					sessionId: this.sessionId,
-					durationMs,
-					reason,
-				});
+				// Isolated: a throwing hook must not prevent session.close from publishing
+				// (which would skip all post-session work).
+				try {
+					this.hooks.onSessionEnd({
+						sessionId: this.sessionId,
+						durationMs,
+						reason,
+					});
+				} catch (error) {
+					console.error('[SessionManager] onSessionEnd hook threw:', error);
+				}
 			}
 			this.eventBus.publish('session.close', {
 				sessionId: this.sessionId,
@@ -115,15 +130,48 @@ export class SessionManager {
 	}
 
 	/**
-	 * The single reason-carrying entry point to CLOSED. Idempotent: the first call
-	 * claims close (sets the guard, records the reason) and transitions; re-entrant
-	 * or duplicate calls — including a raced reconnect/transfer-fail path — become
-	 * no-ops, so `session.close` fires exactly once with the caller's reason.
+	 * Register a finalizer to run (awaited, all-settled) before `session.close`
+	 * publishes — transcript flush, turn finalize, snapshot-capture of
+	 * soon-to-be-disposed state. A throwing finalizer is logged, never blocks close.
+	 * Must be registered before close.
 	 */
-	closeWithReason(reason: SessionEndReason): void {
-		if (this._closing || this._state === 'CLOSED') return;
+	registerPreCloseFinalizer(fn: () => void | Promise<void>): void {
+		this._finalizers.push(fn);
+	}
+
+	/**
+	 * The single reason-carrying entry point to CLOSED. Idempotent: the first call
+	 * claims close (sets the guard, records the reason); re-entrant or duplicate
+	 * calls — including a raced reconnect/transfer-fail path — return the same
+	 * promise, so `session.close` fires exactly once with the caller's reason.
+	 *
+	 * Fast path (no finalizers): transitions synchronously, preserving legacy
+	 * close timing. Otherwise finalizers run (awaited, all-settled) first.
+	 */
+	closeWithReason(reason: SessionEndReason): Promise<void> {
+		if (this._closing || this._state === 'CLOSED') {
+			return this._closePromise ?? Promise.resolve();
+		}
 		this._closing = true;
 		this._pendingReason = reason;
+		if (this._finalizers.length === 0) {
+			this.transitionTo('CLOSED');
+			this._closePromise = Promise.resolve();
+			return this._closePromise;
+		}
+		this._closePromise = this.runFinalizersThenClose();
+		return this._closePromise;
+	}
+
+	private async runFinalizersThenClose(): Promise<void> {
+		// Wrap each in an async thunk so a synchronous throw becomes a rejection
+		// that allSettled captures (rather than escaping the map).
+		const results = await Promise.allSettled(this._finalizers.map(async (fn) => fn()));
+		for (const r of results) {
+			if (r.status === 'rejected') {
+				console.error('[SessionManager] pre-close finalizer threw:', r.reason);
+			}
+		}
 		this.transitionTo('CLOSED');
 	}
 

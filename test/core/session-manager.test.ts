@@ -223,6 +223,79 @@ describe('SessionManager', () => {
 		});
 	});
 
+	describe('pre-close finalizers + hook isolation', () => {
+		it('runs registered finalizers before session.close publishes', async () => {
+			const { mgr, eventBus } = createManager();
+			const order: string[] = [];
+			eventBus.subscribe('session.close', () => order.push('close'));
+			mgr.registerPreCloseFinalizer(() => {
+				order.push('finalizer-a');
+			});
+			mgr.registerPreCloseFinalizer(async () => {
+				order.push('finalizer-b');
+			});
+
+			await mgr.closeWithReason('normal');
+
+			expect(order).toEqual(['finalizer-a', 'finalizer-b', 'close']);
+			expect(mgr.state).toBe('CLOSED');
+		});
+
+		it('a throwing finalizer is logged but session.close still fires', async () => {
+			const { mgr, eventBus } = createManager();
+			const onClose = vi.fn();
+			eventBus.subscribe('session.close', onClose);
+			const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+			mgr.registerPreCloseFinalizer(() => {
+				throw new Error('finalizer boom');
+			});
+
+			await mgr.closeWithReason('normal');
+
+			expect(onClose).toHaveBeenCalledOnce();
+			expect(mgr.state).toBe('CLOSED');
+			expect(spy).toHaveBeenCalled();
+			spy.mockRestore();
+		});
+
+		it('a throwing onSessionEnd hook does not prevent session.close', () => {
+			const { mgr, eventBus, hooks } = createManager();
+			const onClose = vi.fn();
+			eventBus.subscribe('session.close', onClose);
+			const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+			hooks.register({
+				onSessionEnd: () => {
+					throw new Error('hook boom');
+				},
+			});
+
+			mgr.closeWithReason('normal');
+
+			expect(onClose).toHaveBeenCalledOnce();
+			expect(mgr.state).toBe('CLOSED');
+			spy.mockRestore();
+		});
+
+		it('a throwing onSessionStart hook does not prevent session.start', () => {
+			const { mgr, eventBus, hooks } = createManager();
+			const onStart = vi.fn();
+			eventBus.subscribe('session.start', onStart);
+			const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+			hooks.register({
+				onSessionStart: () => {
+					throw new Error('start boom');
+				},
+			});
+
+			mgr.transitionTo('CONNECTING');
+			mgr.transitionTo('ACTIVE');
+
+			expect(onStart).toHaveBeenCalledOnce();
+			expect(mgr.state).toBe('ACTIVE');
+			spy.mockRestore();
+		});
+	});
+
 	describe('resumption', () => {
 		it('starts with null handle', () => {
 			const { mgr } = createManager();
