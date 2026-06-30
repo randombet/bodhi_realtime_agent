@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { WebSocket } from 'ws';
 import { SentenceBuffer } from '../audio/sentence-buffer.js';
 import type { TTSAudioConfig, TTSProvider } from '../types/tts.js';

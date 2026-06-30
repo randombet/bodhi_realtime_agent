@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * RuntimeOrchestrator — convenience wiring for the full actor graph.
  *

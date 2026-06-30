@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { z } from 'zod';
 import type { MainAgent } from '../../../src/types/agent.js';
 

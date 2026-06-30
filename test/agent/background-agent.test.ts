@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Type-only tests for the BackgroundAgent public surface
  * (`src/agent/background-agent.ts`). The host actor's runtime behavior is

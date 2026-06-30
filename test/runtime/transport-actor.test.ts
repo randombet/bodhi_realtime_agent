@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { TransportActor } from '../../src/runtime/actors/transport-actor.js';
 import type { TransportAdapter } from '../../src/runtime/adapters/transport-adapter.js';

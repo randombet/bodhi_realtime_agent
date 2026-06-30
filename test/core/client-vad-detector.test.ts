@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { type FrameEnergy, analyzeFrameInto } from '../../src/core/audio-frame-analyzer.js';
 import {

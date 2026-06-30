@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * End-to-end integration test for long-lived (persistent) subagent workflows.
  *

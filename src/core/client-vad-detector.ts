@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { type FrameEnergy, analyzeFrameInto } from './audio-frame-analyzer.js';
 
 /** Energy thresholds for the client-side VAD. Exported so the completion

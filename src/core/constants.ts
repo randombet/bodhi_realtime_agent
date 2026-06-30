@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /** Default timeout for individual tool executions (ms). */
 export const DEFAULT_TOOL_TIMEOUT_MS = 30_000;
 

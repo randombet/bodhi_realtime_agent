@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Behavior-freeze regression tests.
  *

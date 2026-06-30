@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Phone-call path: POST /twilio/voice (TwiML) + WSS /twilio/media (Twilio protocol)
  * → session factory + feedAudioFromClient. No web client, no Gemini (stub session).

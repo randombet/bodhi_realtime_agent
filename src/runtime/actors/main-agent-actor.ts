@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * MainAgentActor — owns agent transfer orchestration and lifecycle hooks.
  *

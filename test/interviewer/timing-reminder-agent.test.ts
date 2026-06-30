@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Tests for `examples/interviewer/lib/timing-reminder-agent.ts`. The agent
  * is a thin BackgroundAgent — most of its behavior is "fire setInterval,

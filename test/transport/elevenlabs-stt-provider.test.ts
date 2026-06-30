@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ElevenLabsSTTProvider } from '../../src/transport/elevenlabs-stt-provider.js';
 

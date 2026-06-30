@@ -35,6 +35,7 @@ See per-demo sections below for env vars and run commands.
 | Interviewer | Document-driven software interview with a planning subagent | `interviewer/interviewer-demo.ts` | `pnpm tsx examples/interviewer/interviewer-demo.ts` |
 | Direct RTC | Gemini Live voice agent over Opus WebRTC (no tools/subagents) | `direct-rtc-demo/server.ts` | `pnpm demo:direct-rtc` (needs `GEMINI_API_KEY`) |
 | Widget embed dump | Static page on port 8765 to test `wg_*` + `bodhi-widget.js` from another origin | `embed-widget-dump/server.mjs` | `pnpm examples:embed-widget-dump` |
+| Post-Session Processor | Executable spec verifying the post-session pipeline design (no keys/network; exits non-zero on failure) | `post-session-processor/post-session-processor-demo.ts` | `pnpm tsx examples/post-session-processor/post-session-processor-demo.ts` |
 
 ## Standard Agent
 

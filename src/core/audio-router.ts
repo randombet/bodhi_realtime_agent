@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { resamplePcm } from '../audio/resample.js';
 import { encodePcmToMulaw } from '../telephony/audio-codec.js';
 import type { LLMTransport, STTProvider } from '../types/transport.js';

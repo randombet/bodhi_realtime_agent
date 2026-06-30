@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * LLM prompt template for extracting durable facts from a conversation transcript
  * and merging them with existing memory (merge-on-write).

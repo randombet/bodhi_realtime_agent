@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it, vi } from 'vitest';
 import { TranscriptManager } from '../../src/core/transcript-manager.js';
 import type { TranscriptSink } from '../../src/core/transcript-manager.js';

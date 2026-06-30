@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it } from 'vitest';
 import { DeadLetterQueue } from '../../src/runtime/dead-letter-queue.js';
 import { createEnvelope } from '../../src/runtime/envelope.js';

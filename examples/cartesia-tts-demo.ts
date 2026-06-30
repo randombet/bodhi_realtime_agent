@@ -38,10 +38,10 @@ import 'dotenv/config';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { z } from 'zod';
 import { VoiceSession } from '../src/core/voice-session.js';
-import { GeminiBatchSTTProvider } from '../src/transport/gemini-batch-stt-provider.js';
 import { CartesiaTTSProvider } from '../src/transport/cartesia-tts-provider.js';
+import { GeminiBatchSTTProvider } from '../src/transport/gemini-batch-stt-provider.js';
 import type { MainAgent } from '../src/types/agent.js';
-import type { ToolDefinition, ToolContext } from '../src/types/tool.js';
+import type { ToolContext, ToolDefinition } from '../src/types/tool.js';
 
 // =============================================================================
 // Helpers

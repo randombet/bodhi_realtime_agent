@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it, vi } from 'vitest';
 import { MultiplexConversationHistoryStore } from '../../src/core/multiplex-conversation-history-store.js';
 import type { ConversationItem } from '../../src/types/conversation.js';

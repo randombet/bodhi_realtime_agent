@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { MemoryFact, MemoryStore } from '../types/memory.js';
 
 /**

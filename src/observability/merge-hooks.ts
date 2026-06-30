@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { FrameworkHooks } from '../types/hooks.js';
 
 /** Merge multiple FrameworkHooks, invoking each hook for every source that

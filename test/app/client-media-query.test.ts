@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it } from 'vitest';
 import { parseClientMediaQuery } from '../../app/server/client-media-query.js';
 

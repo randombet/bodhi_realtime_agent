@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createEnvelope } from '../../src/runtime/envelope.js';
 import type { ObservableEvent } from '../../src/runtime/observability.js';

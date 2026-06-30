@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /** Parameters for saving an artifact produced by an agent or tool. */
 export interface SaveArtifactParams {
 	/** Session that produced the artifact (injected by session.workspace when omitted). */

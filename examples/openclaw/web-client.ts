@@ -822,9 +822,10 @@ const server = createServer((_req, res) => {
 });
 
 server.listen(HTTP_PORT, HTTP_HOST, () => {
-	const serverUrl = HTTP_HOST === '0.0.0.0' 
-		? `http://localhost:${HTTP_PORT} (or use your server's IP/DNS)`
-		: `http://${HTTP_HOST}:${HTTP_PORT}`;
+	const serverUrl =
+		HTTP_HOST === '0.0.0.0'
+			? `http://localhost:${HTTP_PORT} (or use your server's IP/DNS)`
+			: `http://${HTTP_HOST}:${HTTP_PORT}`;
 	console.log(`\n  Bodhi Voice Agent — Web Client`);
 	console.log(`  ────────────────────────────────`);
 	console.log(`  Open in browser:  ${serverUrl}`);

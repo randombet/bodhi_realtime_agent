@@ -1,8 +1,9 @@
-// SPDX-License-Identifier: MIT
-
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type {
+	ChatEvent,
+	OpenClawClient,
+} from '../../app/lib/integrations/openclaw/openclaw-client.js';
 import { ArtifactRegistry } from '../../app/lib/media/artifact-registry.js';
-import type { ChatEvent, OpenClawClient } from '../../app/lib/integrations/openclaw/openclaw-client.js';
 import { PersistentOpenClawSubagent } from '../lib/persistent-openclaw-subagent.js';
 
 const TINY_PNG_B64 =

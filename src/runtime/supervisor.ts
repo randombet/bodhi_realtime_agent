@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Supervision policies for the actor runtime.
  *

@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 // Types barrel export
 export type { BehaviorCategory, BehaviorPreset } from './behavior.js';
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// SPDX-License-Identifier: MIT
+
 /**
  * Remote persistent worker bridge (Node stdlib only).
  * POST /task — JSON { sessionId, task } + Authorization: Bearer <token>

@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Pure rendering functions for the WhatsApp-style markdown history.
  *

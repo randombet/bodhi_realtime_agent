@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { resamplePcm } from '../audio/resample.js';
 import type { IClientChannel } from '../types/session-client.js';
 import type { LLMTransport } from '../types/transport.js';

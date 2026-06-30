@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Optional observability module (`@bodhi_agent/realtime-agent-framework/observability`).
  *

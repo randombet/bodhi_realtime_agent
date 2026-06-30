@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { type Meter, type Tracer, context, trace } from '@opentelemetry/api';
 import type { FrameworkHooks } from '../types/hooks.js';
 

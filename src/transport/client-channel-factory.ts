@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { TransportError } from '../core/errors.js';
 import type { ClientMediaProfile } from '../types/client-media.js';
 import type { IClientChannel } from '../types/session-client.js';

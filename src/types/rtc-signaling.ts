@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * WebRTC signaling messages exchanged over the existing WebSocket JSON plane
  * (`sendJsonToClient` / `feedJsonFromClient`) while audio uses a direct RTC path.

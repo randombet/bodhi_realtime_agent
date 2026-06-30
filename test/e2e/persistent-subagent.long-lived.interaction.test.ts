@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Persistent Subagent — Long-Lived Interactive Session Tests
  *

@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * ClientGatewayActor — handles control-plane JSON and UI notifications
  * between the actor runtime and the client WebSocket.

@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { EventPayloadMap } from '../types/events.js';
 import type { TurnLatencyDropReason, TurnLatencySegments } from '../types/hooks.js';
 import type { IEventBus } from './event-bus.js';

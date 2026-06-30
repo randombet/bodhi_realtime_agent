@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { z } from 'zod';
 import type { VoiceSession } from '../core/voice-session.js';
 import type { ToolDefinition } from '../types/tool.js';

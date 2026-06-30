@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { beforeEach, describe, expect, it } from 'vitest';
 import { SubagentSupervisorActor } from '../../src/runtime/actors/subagent-supervisor-actor.js';
 import { createEnvelope } from '../../src/runtime/envelope.js';

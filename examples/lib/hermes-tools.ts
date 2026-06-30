@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { createOpenAI } from '@ai-sdk/openai';
 import type { LanguageModelV1 } from 'ai';
 import { z } from 'zod';

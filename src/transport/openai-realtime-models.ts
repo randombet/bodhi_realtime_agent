@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Per-model feature gating for OpenAIRealtimeTransport.
  *

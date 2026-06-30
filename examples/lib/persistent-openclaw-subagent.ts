@@ -1,8 +1,7 @@
-// SPDX-License-Identifier: MIT
-
 import { randomUUID } from 'node:crypto';
-import type { PersistentSubagentInstance } from '../../src/agent/persistent-subagent-types.js';
+import type { OpenClawTransport } from '../../app/lib/integrations/openclaw/openclaw-transport.js';
 import type { ArtifactRegistry } from '../../app/lib/media/artifact-registry.js';
+import type { PersistentSubagentInstance } from '../../src/agent/persistent-subagent-types.js';
 import {
 	type AdapterLimits,
 	resolveArtifacts,
@@ -10,7 +9,6 @@ import {
 } from './artifact-resolution.js';
 import type { ChatSendOptions, ContentBlock } from './openclaw-client.js';
 import { mergeText } from './openclaw-client.js';
-import type { OpenClawTransport } from '../../app/lib/integrations/openclaw/openclaw-transport.js';
 
 /**
  * A persistent OpenClaw subagent instance.
@@ -103,11 +101,7 @@ export class PersistentOpenClawSubagent implements PersistentSubagentInstance {
 				`[OpenClaw] Dispatching chatSend (persistent): sessionKey=${this.sessionKey} attachments=${attachmentCount}`,
 			);
 			try {
-				const result = await this.client.chatSend(
-					this.sessionKey,
-					message,
-					retrySafeSendOptions,
-				);
+				const result = await this.client.chatSend(this.sessionKey, message, retrySafeSendOptions);
 				runId = result.runId;
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
@@ -139,9 +133,7 @@ export class PersistentOpenClawSubagent implements PersistentSubagentInstance {
 						text = mergeText(text, event.text);
 						this.collectBlocks(event.contentBlocks, receivedBlocks, seenBlockHashes);
 						const status = event.finalDisposition ?? 'completed';
-						console.log(
-							`[OpenClaw] Run ${runId} completed (${status}): ${text.slice(0, 200)}`,
-						);
+						console.log(`[OpenClaw] Run ${runId} completed (${status}): ${text.slice(0, 200)}`);
 
 						const hasText = text.trim().length > 0;
 						const hasBlocks = receivedBlocks.length > 0;

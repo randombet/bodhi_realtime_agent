@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mockQuery = vi.fn();

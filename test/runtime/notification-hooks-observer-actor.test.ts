@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Tests for `NotificationHooksObserverActor` — the built-in observability
  * subscriber that fires `FrameworkHooks.onBackgroundNotification` for every

@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * A UI response sent by the client in reply to a UIPayload request.
  * Correlates back to the original request via requestId.

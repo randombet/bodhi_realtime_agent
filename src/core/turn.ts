@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Turn — the lifecycle entity for one conversational turn.
  *

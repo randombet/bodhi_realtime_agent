@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * OpenAI response state tracker.
  *

@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Per-frame energy result. Reused (mutated in place) by `ClientVadDetector` so
  * the audio hot path allocates nothing per frame — see `analyzeFrameInto`.

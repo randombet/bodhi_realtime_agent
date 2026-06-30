@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /** Callbacks fired by TranscriptManager when transcript state changes. */
 export interface TranscriptSink {
 	/** Send a JSON message to the connected client (partial or final transcript). */

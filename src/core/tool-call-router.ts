@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { AgentRouter } from '../agent/agent-router.js';
 import type { ToolExecutor } from '../tools/tool-executor.js';
 import type { SubagentConfig } from '../types/agent.js';

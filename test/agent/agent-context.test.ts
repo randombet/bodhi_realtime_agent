@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it } from 'vitest';
 import { resolveInstructions } from '../../src/agent/agent-context.js';
 import type { MainAgent } from '../../src/types/agent.js';

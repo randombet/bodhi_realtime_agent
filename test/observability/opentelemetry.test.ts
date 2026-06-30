@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { Meter, Tracer } from '@opentelemetry/api';
 import { describe, expect, it } from 'vitest';
 import {

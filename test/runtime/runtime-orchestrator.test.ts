@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * RuntimeOrchestrator tests — verifies convenience wiring and lifecycle.
  */

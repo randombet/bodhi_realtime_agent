@@ -10,7 +10,8 @@ import { join } from 'node:path';
 import { WebSocket } from 'ws';
 
 const API_KEY = process.env.QWEN_API_KEY ?? process.env.DASHSCOPE_API_KEY ?? '';
-const BASE = process.env.QWEN_REALTIME_URL ?? 'wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime';
+const BASE =
+	process.env.QWEN_REALTIME_URL ?? 'wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime';
 const MODEL = process.env.QWEN_REALTIME_MODEL ?? 'qwen3.5-omni-plus-realtime';
 const CHUNK = 3200;
 const SILENCE = Buffer.alloc(16000 * 2 * 1.5, 0);
@@ -19,7 +20,9 @@ function synth(text: string): Buffer {
 	const aiff = join(tmpdir(), 'qs.aiff');
 	const pcm = join(tmpdir(), 'qs.pcm');
 	execFileSync('say', ['-o', aiff, text], { stdio: 'ignore' });
-	execFileSync('ffmpeg', ['-y', '-i', aiff, '-ar', '16000', '-ac', '1', '-f', 's16le', pcm], { stdio: 'ignore' });
+	execFileSync('ffmpeg', ['-y', '-i', aiff, '-ar', '16000', '-ac', '1', '-f', 's16le', pcm], {
+		stdio: 'ignore',
+	});
 	return Buffer.concat([readFileSync(pcm), SILENCE]);
 }
 
@@ -27,7 +30,9 @@ type Ev = { type?: string; [k: string]: unknown };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function open(): Promise<WebSocket> {
-	const ws = new WebSocket(`${BASE}?model=${encodeURIComponent(MODEL)}`, { headers: { Authorization: `Bearer ${API_KEY}` } });
+	const ws = new WebSocket(`${BASE}?model=${encodeURIComponent(MODEL)}`, {
+		headers: { Authorization: `Bearer ${API_KEY}` },
+	});
 	return new Promise((res, rej) => {
 		ws.on('open', () => res(ws));
 		ws.on('error', rej);
@@ -59,8 +64,10 @@ function logger(tag: string) {
 				if (o && typeof o === 'object') {
 					for (const k of Object.keys(o as Record<string, unknown>)) {
 						const v = (o as Record<string, unknown>)[k];
-						if (k === 'delta' && typeof v === 'string' && v.length > 40) (o as Record<string, unknown>)[k] = `<${v.length} b64>`;
-						else if (k === 'audio' && typeof v === 'string') (o as Record<string, unknown>)[k] = `<audio>`;
+						if (k === 'delta' && typeof v === 'string' && v.length > 40)
+							(o as Record<string, unknown>)[k] = `<${v.length} b64>`;
+						else if (k === 'audio' && typeof v === 'string')
+							(o as Record<string, unknown>)[k] = `<audio>`;
 						else scrub(v);
 					}
 				}
@@ -78,10 +85,22 @@ async function audioTurn() {
 	const ws = await open();
 	ws.on('message', logger('A'));
 	const send = (m: Record<string, unknown>) => ws.send(JSON.stringify(m));
-	send({ type: 'session.update', session: { modalities: ['text', 'audio'], input_audio_format: 'pcm', output_audio_format: 'pcm', turn_detection: { type: 'server_vad' } } });
+	send({
+		type: 'session.update',
+		session: {
+			modalities: ['text', 'audio'],
+			input_audio_format: 'pcm',
+			output_audio_format: 'pcm',
+			turn_detection: { type: 'server_vad' },
+		},
+	});
 	await sleep(800);
 	const pcm = synth('In one short sentence, what is the capital of France?');
-	for (let i = 0; i < pcm.length; i += CHUNK) send({ type: 'input_audio_buffer.append', audio: pcm.subarray(i, i + CHUNK).toString('base64') });
+	for (let i = 0; i < pcm.length; i += CHUNK)
+		send({
+			type: 'input_audio_buffer.append',
+			audio: pcm.subarray(i, i + CHUNK).toString('base64'),
+		});
 	await sleep(12000);
 	ws.close();
 }
@@ -98,13 +117,28 @@ async function toolTurn() {
 			input_audio_format: 'pcm',
 			output_audio_format: 'pcm',
 			turn_detection: { type: 'server_vad' },
-			tools: [{ type: 'function', name: 'get_weather', description: 'Get current weather for a city', parameters: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'] } }],
+			tools: [
+				{
+					type: 'function',
+					name: 'get_weather',
+					description: 'Get current weather for a city',
+					parameters: {
+						type: 'object',
+						properties: { city: { type: 'string' } },
+						required: ['city'],
+					},
+				},
+			],
 			tool_choice: 'auto',
 		},
 	});
 	await sleep(800);
 	const pcm = synth('What is the current weather in Tokyo? Please use your weather tool.');
-	for (let i = 0; i < pcm.length; i += CHUNK) send({ type: 'input_audio_buffer.append', audio: pcm.subarray(i, i + CHUNK).toString('base64') });
+	for (let i = 0; i < pcm.length; i += CHUNK)
+		send({
+			type: 'input_audio_buffer.append',
+			audio: pcm.subarray(i, i + CHUNK).toString('base64'),
+		});
 	await sleep(13000);
 	ws.close();
 }

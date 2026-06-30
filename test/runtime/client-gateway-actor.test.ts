@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ClientGatewayActor } from '../../src/runtime/actors/client-gateway-actor.js';
 import { createEnvelope } from '../../src/runtime/envelope.js';

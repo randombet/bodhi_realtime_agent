@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Knowledge base types for grounding voice agents with domain-specific documents.
  *

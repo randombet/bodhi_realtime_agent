@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it } from 'vitest';
 import { ArtifactRegistry } from '../../app/lib/media/artifact-registry.js';
 

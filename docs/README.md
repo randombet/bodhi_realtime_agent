@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+
 
 # Documentation index
 

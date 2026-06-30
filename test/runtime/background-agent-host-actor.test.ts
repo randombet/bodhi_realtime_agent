@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Tests for `BackgroundAgentHostActor`
  * (`src/runtime/actors/background-agent-host-actor.ts`).

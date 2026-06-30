@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Shared message-send callback type used by every actor in the runtime.
  *

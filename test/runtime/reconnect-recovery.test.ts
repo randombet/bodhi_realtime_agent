@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { RecoverableWorkflow } from '../../src/runtime/reconnect-recovery.js';
 import { ReconnectRecovery } from '../../src/runtime/reconnect-recovery.js';

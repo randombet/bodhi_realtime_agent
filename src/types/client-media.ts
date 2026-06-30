@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * How the framework attaches to one end-user client for the realtime **media** plane.
  * Control JSON (UI, files, text, session signals) stays on WebSocket unless a channel

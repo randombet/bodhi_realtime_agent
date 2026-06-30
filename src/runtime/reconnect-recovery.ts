@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Session-scoped reconnect recovery.
  *

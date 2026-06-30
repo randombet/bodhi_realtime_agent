@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it } from 'vitest';
 import { MetricsCollector } from '../../src/observability/metrics-collector.js';
 

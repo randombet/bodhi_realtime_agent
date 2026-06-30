@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * TimingReminderBackgroundAgent — wall-clock reminder for the interviewer demo.
  *
@@ -26,7 +24,10 @@
  * "publish on a wall clock."
  */
 
-import type { BackgroundAgent, BackgroundAgentContext } from '../../../src/agent/background-agent.js';
+import type {
+	BackgroundAgent,
+	BackgroundAgentContext,
+} from '../../../src/agent/background-agent.js';
 import type { InterviewState } from './interview-state.js';
 
 const FIVE_MINUTES_MS = 5 * 60_000;

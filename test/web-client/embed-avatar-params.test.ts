@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it } from 'vitest';
 import { parseEmbedParams } from '../../app/web-client/src/pages/EmbedAvatarPage.js';
 

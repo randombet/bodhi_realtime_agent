@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it } from 'vitest';
 import { validateInterviewAnchorsForDraft } from '../../app/web-client/src/interview-anchors-validate.js';
 

@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { OpenAIRealtimeWhisperSTTProvider } from '../../src/transport/openai-realtime-whisper-stt-provider.js';
 

@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * NotificationActor — actor-mode home of the background notification queue.
  *

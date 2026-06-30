@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it } from 'vitest';
 import { LastUtteranceRetainer } from '../../src/core/last-utterance-retainer.js';
 

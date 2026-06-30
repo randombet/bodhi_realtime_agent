@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 export {
 	createAgentContext,
 	resolveAgentWithKnowledgeBase,

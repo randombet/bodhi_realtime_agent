@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * LastUtteranceRetainer — session-scoped retention of the user's most recent
  * routed utterance, for watchdog-stall recovery replay.

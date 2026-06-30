@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: MIT
 import { describe, expect, it } from 'vitest';
 import { parseIntegrationApiKeyToken } from '../../app/server/stores/integration-api-key-repository.js';
 

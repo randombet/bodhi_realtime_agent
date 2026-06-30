@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { LanguageModelV1 } from 'ai';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {

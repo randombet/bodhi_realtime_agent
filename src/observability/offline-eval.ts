@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Offline / out-of-band evaluation metrics (Phase 5): WER, MOS, task success
  * (TSR), first-call resolution (FCR), and sentiment. These are NOT live —

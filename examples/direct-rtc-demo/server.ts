@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: MIT
 /**
  * Voice agent over direct RTC — end-to-end Gemini Live conversation.
  *

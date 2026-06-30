@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Canonical message type union for the actor runtime.
  *

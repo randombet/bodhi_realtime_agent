@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { beforeEach, describe, expect, it } from 'vitest';
 import { OpenAIFunctionCallAssembler } from '../../src/transport/openai-function-call-assembler.js';
 

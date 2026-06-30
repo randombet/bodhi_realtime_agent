@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Gemini Persistent Subagent — Integration Test
  *

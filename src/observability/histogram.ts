@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Dependency-free metric primitives for the observability module.
  *

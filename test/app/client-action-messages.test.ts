@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it } from 'vitest';
 import { buildSessionReady } from '../../app/lib/client/client-action-messages.js';
 

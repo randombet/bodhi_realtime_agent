@@ -20,7 +20,8 @@ if (!API_KEY) {
 	console.error('QWEN_API_KEY (or DASHSCOPE_API_KEY) required');
 	process.exit(1);
 }
-const BASE = process.env.QWEN_REALTIME_URL ?? 'wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime';
+const BASE =
+	process.env.QWEN_REALTIME_URL ?? 'wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime';
 const MODEL = process.env.QWEN_REALTIME_MODEL ?? 'qwen3.5-omni-plus-realtime';
 const CHUNK = 3200; // 100ms @ 16k mono s16le
 
@@ -34,7 +35,9 @@ function synth(text: string): Buffer | null {
 	const pcm = join(tmpdir(), 'qp.pcm');
 	try {
 		execFileSync('say', ['-o', aiff, text], { stdio: 'ignore' });
-		execFileSync('ffmpeg', ['-y', '-i', aiff, '-ar', '16000', '-ac', '1', '-f', 's16le', pcm], { stdio: 'ignore' });
+		execFileSync('ffmpeg', ['-y', '-i', aiff, '-ar', '16000', '-ac', '1', '-f', 's16le', pcm], {
+			stdio: 'ignore',
+		});
 		// Append trailing silence so server_vad sees end-of-turn.
 		return Buffer.concat([readFileSync(pcm), SILENCE]);
 	} catch {
@@ -86,7 +89,10 @@ class Conn {
 	}
 	streamAudio(pcm: Buffer): void {
 		for (let i = 0; i < pcm.length; i += CHUNK) {
-			this.send({ type: 'input_audio_buffer.append', audio: pcm.subarray(i, i + CHUNK).toString('base64') });
+			this.send({
+				type: 'input_audio_buffer.append',
+				audio: pcm.subarray(i, i + CHUNK).toString('base64'),
+			});
 		}
 	}
 	async sessionUpdate(session: Record<string, unknown>, timeoutMs = 5000): Promise<Ev | null> {
@@ -127,7 +133,12 @@ async function probe01_serverVad(general: Buffer | null) {
 		['create_response:true', { type: 'server_vad', create_response: true }],
 	] as const) {
 		const c = await Conn.open();
-		await c.sessionUpdate({ modalities: ['text', 'audio'], input_audio_format: 'pcm', output_audio_format: 'pcm', turn_detection: td });
+		await c.sessionUpdate({
+			modalities: ['text', 'audio'],
+			input_audio_format: 'pcm',
+			output_audio_format: 'pcm',
+			turn_detection: td,
+		});
 		c.streamAudio(general);
 		const started = await c.waitFor((e) => e.type === 'input_audio_buffer.speech_started', 8000);
 		const stopped = await c.waitFor((e) => e.type === 'input_audio_buffer.speech_stopped', 8000);
@@ -135,10 +146,18 @@ async function probe01_serverVad(general: Buffer | null) {
 		const audio = await c.waitFor((e) => e.type === 'response.audio.delta', 12000);
 		c.close();
 		if (created) {
-			record('0.1 server_vad', 'PASS', `[${label}] speech_started=${!!started} speech_stopped=${!!stopped} response.created=true audio=${!!audio}`);
+			record(
+				'0.1 server_vad',
+				'PASS',
+				`[${label}] speech_started=${!!started} speech_stopped=${!!stopped} response.created=true audio=${!!audio}`,
+			);
 			return true;
 		}
-		record('0.1 server_vad', 'try', `[${label}] speech_started=${!!started} speech_stopped=${!!stopped} response.created=false`);
+		record(
+			'0.1 server_vad',
+			'try',
+			`[${label}] speech_started=${!!started} speech_stopped=${!!stopped} response.created=false`,
+		);
 		await sleep(200);
 	}
 	record('0.1 server_vad', 'FAIL', 'no auto response.created in either variant');
@@ -172,7 +191,12 @@ async function probe03_tools(weather: Buffer | null) {
 			},
 		},
 	];
-	const upd = await c.sessionUpdate({ modalities: ['text', 'audio'], turn_detection: SERVER_VAD, tools, tool_choice: 'auto' });
+	const upd = await c.sessionUpdate({
+		modalities: ['text', 'audio'],
+		turn_detection: SERVER_VAD,
+		tools,
+		tool_choice: 'auto',
+	});
 	if (upd?.type === 'error') {
 		record('0.3 tools (T1)', 'NO', `session.update rejected tools: ${errText(upd)}`);
 		c.close();
@@ -201,8 +225,14 @@ async function probe03_tools(weather: Buffer | null) {
 			(fc as { item?: { call_id?: string } }).item?.call_id ??
 			(fc as { item?: { id?: string } }).item?.id ??
 			'unknown';
-		c.send({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId, output: '{"tempC":21,"sky":"clear"}' } });
-		const itemAck = await c.waitFor((e) => e.type === 'conversation.item.created' || e.type === 'error', 5000);
+		c.send({
+			type: 'conversation.item.create',
+			item: { type: 'function_call_output', call_id: callId, output: '{"tempC":21,"sky":"clear"}' },
+		});
+		const itemAck = await c.waitFor(
+			(e) => e.type === 'conversation.item.created' || e.type === 'error',
+			5000,
+		);
 		c.send({ type: 'response.create' });
 		const resp = await c.waitFor((e) => e.type === 'response.created' || e.type === 'error', 6000);
 		followUp = `item=${errText(itemAck)} resp=${errText(resp)} callId=${callId} fcEvent=${fc.type}`;
@@ -216,8 +246,18 @@ async function probe04_o1text() {
 	const c = await Conn.open();
 	// Manual mode so nothing auto-responds; isolate the item-create itself.
 	await c.sessionUpdate({ modalities: ['text', 'audio'], turn_detection: null });
-	c.send({ type: 'conversation.item.create', item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Say a one word greeting.' }] } });
-	const r = await c.waitFor((e) => e.type === 'conversation.item.created' || e.type === 'error', 6000);
+	c.send({
+		type: 'conversation.item.create',
+		item: {
+			type: 'message',
+			role: 'user',
+			content: [{ type: 'input_text', text: 'Say a one word greeting.' }],
+		},
+	});
+	const r = await c.waitFor(
+		(e) => e.type === 'conversation.item.created' || e.type === 'error',
+		6000,
+	);
 	const ok = r?.type === 'conversation.item.created';
 	record('0.4 text-item injection (O1-text)', ok ? 'YES' : 'NO', errText(r));
 	c.close();
@@ -230,8 +270,13 @@ async function probe06_o3() {
 	const i = await c.sessionUpdate({ instructions: 'You are terse.' });
 	const v = await c.sessionUpdate({ voice: 'Tina' });
 	const m = await c.sessionUpdate({ modalities: ['text'] });
-	const ok = i?.type === 'session.updated' && v?.type === 'session.updated' && m?.type === 'session.updated';
-	record('0.6 in-place session.update (O3)', ok ? 'YES' : 'PARTIAL/NO', `instructions=${errText(i)} voice=${errText(v)} modality=${errText(m)}`);
+	const ok =
+		i?.type === 'session.updated' && v?.type === 'session.updated' && m?.type === 'session.updated';
+	record(
+		'0.6 in-place session.update (O3)',
+		ok ? 'YES' : 'PARTIAL/NO',
+		`instructions=${errText(i)} voice=${errText(v)} modality=${errText(m)}`,
+	);
 	c.close();
 	return ok;
 }
@@ -249,25 +294,52 @@ async function probe07_o4() {
 
 async function probe08_c5(general: Buffer | null) {
 	const c = await Conn.open();
-	await c.sessionUpdate({ modalities: ['text', 'audio'], turn_detection: SERVER_VAD, input_audio_transcription: null });
+	await c.sessionUpdate({
+		modalities: ['text', 'audio'],
+		turn_detection: SERVER_VAD,
+		input_audio_transcription: null,
+	});
 	if (!general) {
 		record('0.8 transcription disable (C5)', 'SKIP', 'no audio tooling');
 		c.close();
 		return;
 	}
 	c.streamAudio(general);
-	const tr = await c.waitFor((e) => typeof e.type === 'string' && e.type.includes('input_audio_transcription'), 8000);
-	record('0.8 transcription disable (C5)', tr ? 'STILL-EMITS' : 'SUPPRESSED', tr ? (tr.type ?? '') : 'no transcription events');
+	const tr = await c.waitFor(
+		(e) => typeof e.type === 'string' && e.type.includes('input_audio_transcription'),
+		8000,
+	);
+	record(
+		'0.8 transcription disable (C5)',
+		tr ? 'STILL-EMITS' : 'SUPPRESSED',
+		tr ? (tr.type ?? '') : 'no transcription events',
+	);
 	c.close();
 }
 
 async function probe09_voices() {
-	const candidates = ['Tina', 'Cherry', 'Ethan', 'Chelsie', 'Serena', 'Jada', 'Dylan', 'Sunny', 'Kiki', 'Eric', 'Nofish'];
+	const candidates = [
+		'Tina',
+		'Cherry',
+		'Ethan',
+		'Chelsie',
+		'Serena',
+		'Jada',
+		'Dylan',
+		'Sunny',
+		'Kiki',
+		'Eric',
+		'Nofish',
+	];
 	const okv: string[] = [];
 	const badv: string[] = [];
 	for (const v of candidates) {
 		const c = await Conn.open();
-		const r = await c.sessionUpdate({ modalities: ['text', 'audio'], voice: v, turn_detection: SERVER_VAD });
+		const r = await c.sessionUpdate({
+			modalities: ['text', 'audio'],
+			voice: v,
+			turn_detection: SERVER_VAD,
+		});
 		if (r?.type === 'session.updated') okv.push(v);
 		else badv.push(v);
 		c.close();
@@ -293,7 +365,11 @@ async function probe05_c3(general: Buffer | null) {
 		6000,
 	);
 	const speechDuringGen = c.events.some((e) => e.type === 'input_audio_buffer.speech_started');
-	record('0.5 interrupt ownership (C3)', cancelled ? 'PROVIDER-AUTO-CANCEL' : 'NO-AUTO-CANCEL', `speech_started seen=${speechDuringGen}; cancelled=${!!cancelled}`);
+	record(
+		'0.5 interrupt ownership (C3)',
+		cancelled ? 'PROVIDER-AUTO-CANCEL' : 'NO-AUTO-CANCEL',
+		`speech_started seen=${speechDuringGen}; cancelled=${!!cancelled}`,
+	);
 	c.close();
 }
 
@@ -302,7 +378,9 @@ async function main() {
 	const general = synth('Hello, please tell me a short fun fact about the ocean.');
 	const weather = synth('What is the current weather in Tokyo? Use your tools.');
 
-	const vad = await probe01_serverVad(general).catch((e) => (record('0.1 server_vad', 'ERR', String(e)), false));
+	const vad = await probe01_serverVad(general).catch(
+		(e) => (record('0.1 server_vad', 'ERR', String(e)), false),
+	);
 	await probe02_c6(general).catch((e) => record('0.2 C6', 'ERR', String(e)));
 	await probe03_tools(weather).catch((e) => record('0.3 tools', 'ERR', String(e)));
 	await probe04_o1text().catch((e) => record('0.4 O1-text', 'ERR', String(e)));

@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it, vi } from 'vitest';
 import { ClientSenderAdapter } from '../../src/transport/client-sender-adapter.js';
 import type { SessionClientSender } from '../../src/types/session-client.js';

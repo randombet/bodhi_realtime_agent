@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { BackgroundNotificationQueue } from './background-notification-queue.js';
 
 /** Delivery priority for a published notification. */

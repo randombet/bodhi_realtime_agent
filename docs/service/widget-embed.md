@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+
 
 # Bodhi publishable web widget (`wg_*`)
 

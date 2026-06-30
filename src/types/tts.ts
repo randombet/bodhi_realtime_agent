@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Audio format descriptor for TTS output.
  * Returned by TTSProvider.configure() to indicate the actual output format.

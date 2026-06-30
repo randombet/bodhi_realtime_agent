@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Base transport adapter — shared callback chaining and outbound commands.
  *

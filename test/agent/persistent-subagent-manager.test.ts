@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { PersistentSubagentManager } from '../../src/agent/persistent-subagent-manager.js';
 import type {

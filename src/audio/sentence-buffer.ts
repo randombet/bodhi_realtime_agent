@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /** Maximum characters to buffer before forcing a flush, even without a sentence boundary. */
 const MAX_BUFFER_CHARS = 200;
 

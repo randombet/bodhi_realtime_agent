@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Probe — R7c reconnect-window freshness verdicts on a REAL Gemini reconnect
  * (design-retained-user-content-recovery.md R7c; rollout doc P5), in the
@@ -77,8 +75,7 @@ async function runScenario(kind: 'silence' | 'speech' | 'none'): Promise<void> {
 
 	const probeAgent: MainAgent = {
 		name: 'main',
-		instructions:
-			'You are a concise voice assistant. Answer every question in one short sentence.',
+		instructions: 'You are a concise voice assistant. Answer every question in one short sentence.',
 		greeting: 'Say exactly: "What is the largest planet in our solar system?" and nothing else.',
 		tools: [],
 	};
@@ -150,9 +147,7 @@ async function runScenario(kind: 'silence' | 'speech' | 'none'): Promise<void> {
 		if (kind === 'silence') {
 			session.feedAudioFromClient(silent);
 		} else if (kind === 'speech') {
-			session.feedAudioFromClient(
-				speech16k.subarray(speechOffset, speechOffset + FRAME_BYTES),
-			);
+			session.feedAudioFromClient(speech16k.subarray(speechOffset, speechOffset + FRAME_BYTES));
 			speechOffset = (speechOffset + FRAME_BYTES) % Math.max(FRAME_BYTES, speech16k.length);
 		} // 'none': feed nothing — forwarding went dark
 		await sleep(FRAME_MS);

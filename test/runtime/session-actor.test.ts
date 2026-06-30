@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SessionActor } from '../../src/runtime/actors/session-actor.js';
 import { createEnvelope } from '../../src/runtime/envelope.js';

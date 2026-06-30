@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Typed envelope for actor-to-actor messaging.
  *

@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { resolveTtsForSession } from '../../app/lib/media/tts-config.js';
 

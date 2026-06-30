@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /** Classification categories for extracted memory facts. */
 export type MemoryCategory = 'preference' | 'entity' | 'decision' | 'requirement';
 

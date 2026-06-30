@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: MIT
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { isBodhiAvatarStudioNavEnabled } from '../../app/lib/bodhi-web-public-ui.js';
 
