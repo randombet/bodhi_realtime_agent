@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { LanguageModelV1 } from 'ai';
 import { resolveAgentWithKnowledgeBase } from '../agent/agent-context.js';
 import { AgentRouter } from '../agent/agent-router.js';

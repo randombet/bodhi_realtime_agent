@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { IClientChannel } from '../types/session-client.js';
 import type { LLMTransport, ReplayItem, RetainedUserTurn } from '../types/transport.js';
 import type { EventBus } from './event-bus.js';

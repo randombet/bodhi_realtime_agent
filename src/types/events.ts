@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { ExternalEvent } from './agent.js';
 import type { SubagentResult, ToolCall, ToolResult, UIPayload } from './conversation.js';
 import type { TurnLatencySegments } from './hooks.js';

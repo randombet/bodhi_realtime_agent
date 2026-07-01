@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { PostSessionProcessor } from '../types.js';
 import type { PostSessionContext } from '../types.js';
 

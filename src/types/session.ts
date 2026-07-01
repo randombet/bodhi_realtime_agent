@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { ClientMessage } from './audio.js';
 import type { ConversationItem } from './conversation.js';
 

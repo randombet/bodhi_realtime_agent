@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { InMemoryPostSessionPipeline, type PostSessionPipelineOptions } from './pipeline.js';
 import { MemoryDistillationProcessor } from './processors/memory-distillation.js';
 import type { PostSessionPipeline } from './types.js';

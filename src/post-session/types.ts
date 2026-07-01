@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { ConversationItem } from '../types/conversation.js';
 import type { MemoryStore } from '../types/memory.js';
 import type { SessionEndReason } from '../types/session.js';

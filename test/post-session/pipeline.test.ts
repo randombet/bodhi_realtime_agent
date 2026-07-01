@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it } from 'vitest';
 import { InMemoryPostSessionPipeline } from '../../src/post-session/pipeline.js';
 import type {

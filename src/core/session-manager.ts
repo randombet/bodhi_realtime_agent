@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { PostSessionPipeline, PostSessionSnapshotBuilder } from '../post-session/types.js';
 import type { ClientMessage } from '../types/audio.js';
 import type { SessionConfig, SessionEndReason, SessionState } from '../types/session.js';

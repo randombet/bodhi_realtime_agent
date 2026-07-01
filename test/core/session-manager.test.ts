@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it, vi } from 'vitest';
 import { SessionError } from '../../src/core/errors.js';
 import { EventBus } from '../../src/core/event-bus.js';
