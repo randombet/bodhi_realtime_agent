@@ -2036,10 +2036,11 @@ export class VoiceSession {
 		//    flush, turn.end, reset), publishes session.close, and dispatches the
 		//    post-session pipeline (drain mode awaits it) — all BEFORE the fallible
 		//    teardown below, so a teardown failure can never prevent close/dispatch.
-		//    No-op if a failure path (reconnect/transfer) already closed the session.
-		if (this.sessionManager.state !== 'CLOSED') {
-			await this.sessionManager.closeWithReason(reason);
-		}
+		//    Awaited UNCONDITIONALLY: closeWithReason is idempotent and returns the
+		//    memoized close promise, so if a failure path (reconnect/transfer) already
+		//    claimed close with a still-pending drain, we await THAT before teardown /
+		//    eventBus.clear() rather than racing it.
+		await this.sessionManager.closeWithReason(reason);
 
 		// 2. Fallible resource teardown, each isolated so one failure doesn't abort
 		//    the rest (the session is already CLOSED and post-session work dispatched).

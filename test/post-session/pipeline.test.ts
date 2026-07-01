@@ -356,5 +356,58 @@ describe('InMemoryPostSessionPipeline', () => {
 			const report = await run.report;
 			expect(result(report, 'hang')?.detail?.reason).toBe('drain_timeout');
 		});
+
+		it('drain awaits AND cancels a still-queued required run (not just executing ones)', async () => {
+			// Capacity 1: first run occupies the slot forever; a second REQUIRED run is
+			// stuck waiting. drain(timeout) must include the waiter, cancel its wait, and
+			// resolve its report — otherwise shutdown returns with a run still queued.
+			const p = new InMemoryPostSessionPipeline({
+				maxConcurrentRuns: 1,
+				runBudgetMs: 60_000,
+				requiredWaitMs: 60_000,
+			});
+			p.register(new TestProcessor('memory', () => new Promise<void>(() => {}), [], true));
+			p.freeze();
+			const first = p.dispatch({ sessionId: 's1', reason: 'normal', build: makeBuilder('s1') });
+			const second = p.dispatch({ sessionId: 's2', reason: 'normal', build: makeBuilder('s2') });
+			expect(p.stats().queued).toBe(1); // second is waiting for a slot
+
+			const reports = await p.drain(20);
+			expect(reports).toHaveLength(2); // both the executing and the queued run
+			const r1 = await first.report;
+			const r2 = await second.report;
+			expect(result(r1, 'memory')?.detail?.reason).toBe('drain_timeout'); // executing → aborted
+			expect(r2.failureReason).toBe('required_capacity_timeout'); // queued → wait cancelled
+		});
+
+		it('drain(timeout, {cancelOnTimeout:false}) returns partial reports and leaves work running', async () => {
+			const p = new InMemoryPostSessionPipeline({ runBudgetMs: 60_000 });
+			let resolveHang!: () => void;
+			p.register(
+				new TestProcessor(
+					'hang',
+					() =>
+						new Promise<void>((r) => {
+							resolveHang = () => r();
+						}),
+				),
+			);
+			p.freeze();
+			const run = p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') });
+
+			const reports = await p.drain(20, { cancelOnTimeout: false });
+			expect(reports).toHaveLength(0); // nothing settled by the deadline
+
+			// The run was NOT aborted — it's still running and completes normally once unblocked.
+			let settled = false;
+			void run.report.then(() => {
+				settled = true;
+			});
+			await new Promise((r) => setTimeout(r, 5));
+			expect(settled).toBe(false); // still running after drain returned
+			resolveHang();
+			const report = await run.report;
+			expect(result(report, 'hang')?.status).toBe('completed'); // finished cleanly, never drain_timeout
+		});
 	});
 });

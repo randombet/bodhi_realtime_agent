@@ -58,14 +58,16 @@ export class InMemoryPostSessionPipeline implements PostSessionPipeline {
 	private readonly hasRequired = (): boolean => this.processors.some((p) => p.required);
 
 	private running = 0;
-	/** Required runs waiting for a slot at capacity (FIFO). */
+	/** Slot-handoff callbacks for required runs waiting at capacity (FIFO). */
 	private readonly waiters: Array<() => void> = [];
 	private readonly counters = { dropped: 0, completed: 0, failed: 0 };
 	private readonly listeners = new Set<(r: PostSessionReport) => void>();
-	private readonly inFlight = new Set<{
-		report: Promise<PostSessionReport>;
-		controller: AbortController;
-	}>();
+	/** Every still-pending run report (immediate AND waiting) — what drain() awaits. */
+	private readonly pendingReports = new Set<Promise<PostSessionReport>>();
+	/** AbortControllers of runs whose processors are executing (drain cancels these). */
+	private readonly activeControllers = new Set<AbortController>();
+	/** Cancel hooks for runs still waiting for a slot (drain cancels these too). */
+	private readonly waitCancels = new Set<() => void>();
 
 	private readonly maxConcurrentRuns: number;
 	private readonly requiredWaitMs: number;
@@ -133,7 +135,7 @@ export class InMemoryPostSessionPipeline implements PostSessionPipeline {
 		if (this.running < this.maxConcurrentRuns) {
 			// Slot available → run immediately.
 			this.running++;
-			return { sessionId, outcome: 'accepted', report: this.runReserved(built) };
+			return { sessionId, outcome: 'accepted', report: this.track(this.runReserved(built)) };
 		}
 		if (!this.hasRequired()) {
 			// At capacity, optional-only → drop.
@@ -142,10 +144,14 @@ export class InMemoryPostSessionPipeline implements PostSessionPipeline {
 			});
 		}
 		// At capacity, has a required processor → bounded-wait for a slot. Reported
-		// `accepted` (admitted to the wait queue); if the wait budget expires before
-		// a slot frees, `report` resolves `dropped` / `required_capacity_timeout`.
+		// `accepted` (admitted to the wait queue); if the wait budget expires (or drain
+		// cancels the wait) before a slot frees, `report` resolves
+		// `dropped` / `required_capacity_timeout`.
+		const wait = this.reserveOrWait(this.requiredWaitMs);
+		this.waitCancels.add(wait.cancel);
 		const report = (async (): Promise<PostSessionReport> => {
-			const acquired = await this.reserveOrWait(this.requiredWaitMs);
+			const acquired = await wait.acquired;
+			this.waitCancels.delete(wait.cancel);
 			if (!acquired) {
 				this.counters.dropped++;
 				const timedOut: PostSessionReport = {
@@ -160,7 +166,14 @@ export class InMemoryPostSessionPipeline implements PostSessionPipeline {
 			}
 			return this.runReserved(built);
 		})();
-		return { sessionId, outcome: 'accepted', report };
+		return { sessionId, outcome: 'accepted', report: this.track(report) };
+	}
+
+	/** Add a run's report to the pending set (for drain) until it settles. */
+	private track(report: Promise<PostSessionReport>): Promise<PostSessionReport> {
+		this.pendingReports.add(report);
+		report.finally(() => this.pendingReports.delete(report));
+		return report;
 	}
 
 	/** Execute a run for which a slot is already reserved; release it on completion. */
@@ -174,34 +187,48 @@ export class InMemoryPostSessionPipeline implements PostSessionPipeline {
 			stores: built.stores,
 			signal: controller.signal,
 		};
-		const entry = { report: Promise.resolve<PostSessionReport>(undefined as never), controller };
-		entry.report = this.execute(ctx, controller).finally(() => {
-			this.inFlight.delete(entry);
+		this.activeControllers.add(controller);
+		return this.execute(ctx, controller).finally(() => {
+			this.activeControllers.delete(controller);
 			this.releaseSlot();
 		});
-		this.inFlight.add(entry);
-		return entry.report;
 	}
 
-	/** Reserve a slot now, or wait up to `timeoutMs` for one. Resolves false on timeout. */
-	private reserveOrWait(timeoutMs: number): Promise<boolean> {
+	/**
+	 * Reserve a slot now, or wait up to `timeoutMs` for one. Returns the acquisition
+	 * promise plus a `cancel()` that forces the wait to resolve `false` early (used
+	 * by drain). `acquired` resolves `true` (slot taken, `running` incremented) or
+	 * `false` (timeout/cancel).
+	 */
+	private reserveOrWait(timeoutMs: number): { acquired: Promise<boolean>; cancel: () => void } {
 		if (this.running < this.maxConcurrentRuns) {
 			this.running++;
-			return Promise.resolve(true);
+			return { acquired: Promise.resolve(true), cancel: () => {} };
 		}
-		return new Promise<boolean>((resolve) => {
-			const waiter = () => {
-				clearTimeout(timer);
-				this.running++; // take the slot handed off by releaseSlot()
-				resolve(true);
-			};
-			const timer = setTimeout(() => {
-				const i = this.waiters.indexOf(waiter);
-				if (i >= 0) this.waiters.splice(i, 1);
-				resolve(false);
-			}, timeoutMs);
-			this.waiters.push(waiter);
+		let settle!: (ok: boolean) => void;
+		const acquired = new Promise<boolean>((resolve) => {
+			settle = resolve;
 		});
+		const drop = () => {
+			const i = this.waiters.indexOf(waiter);
+			if (i >= 0) this.waiters.splice(i, 1);
+		};
+		const waiter = () => {
+			clearTimeout(timer);
+			this.running++; // take the slot handed off by releaseSlot()
+			settle(true);
+		};
+		const timer = setTimeout(() => {
+			drop();
+			settle(false); // no-op if already settled true
+		}, timeoutMs);
+		this.waiters.push(waiter);
+		const cancel = () => {
+			clearTimeout(timer);
+			drop();
+			settle(false); // no-op if the slot was already handed off
+		};
+		return { acquired, cancel };
 	}
 
 	/** Free a slot and hand it to the next waiting required run, if any. */
@@ -216,22 +243,36 @@ export class InMemoryPostSessionPipeline implements PostSessionPipeline {
 		opts?: { cancelOnTimeout?: boolean },
 	): Promise<readonly PostSessionReport[]> {
 		const cancelOnTimeout = opts?.cancelOnTimeout ?? true;
-		const entries = [...this.inFlight];
-		const reports = entries.map((e) => e.report);
+		// Snapshot ALL outstanding runs — both executing and still-waiting for a slot.
+		const reports = [...this.pendingReports];
+
 		if (timeoutMs == null) return Promise.all(reports);
-		let timer: ReturnType<typeof setTimeout> | undefined;
+
 		if (cancelOnTimeout) {
-			timer = setTimeout(() => {
-				for (const e of entries) e.controller.abort();
+			// On the deadline, cancel everything (abort executing runs; cancel waits) so
+			// every report resolves (→ drain_timeout / required_capacity_timeout), then
+			// await them all.
+			const timer = setTimeout(() => {
+				for (const c of this.activeControllers) c.abort();
+				for (const cancel of [...this.waitCancels]) cancel();
 			}, timeoutMs);
+			try {
+				return await Promise.all(reports);
+			} finally {
+				clearTimeout(timer);
+			}
 		}
-		try {
-			// Every run resolves its report even when aborted (budget/abort → drain_timeout),
-			// so awaiting all is bounded once the timer has fired.
-			return await Promise.all(reports);
-		} finally {
-			if (timer) clearTimeout(timer);
-		}
+
+		// cancelOnTimeout === false: wait only until the deadline, leave unfinished work
+		// running, and return the reports that settled in time (partial).
+		const settled: PostSessionReport[] = [];
+		const tracked = reports.map((p) => p.then((r) => settled.push(r)));
+		const timedOut = Symbol('drain-timeout');
+		const deadline = new Promise<typeof timedOut>((resolve) =>
+			setTimeout(() => resolve(timedOut), timeoutMs),
+		);
+		await Promise.race([Promise.all(tracked), deadline]);
+		return [...settled];
 	}
 
 	stats(): PostSessionStats {
