@@ -43,6 +43,8 @@ export interface PostSessionStores {
 	 * `conversation` + `memory` + a model directly and this can retire.
 	 */
 	readonly memoryExtraction?: () => Promise<void>;
+	/** Optional sink for the AnalyticsProcessor's per-session summary (metrics, reason). */
+	readonly analyticsSink?: (summary: Record<string, unknown>) => void | Promise<void>;
 }
 
 /**

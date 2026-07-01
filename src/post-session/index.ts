@@ -7,3 +7,4 @@ export {
 	getDefaultPostSessionPipeline,
 } from './default-pipeline.js';
 export { MemoryDistillationProcessor } from './processors/memory-distillation.js';
+export { AnalyticsProcessor } from './processors/analytics.js';
