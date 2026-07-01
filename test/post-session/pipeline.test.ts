@@ -299,14 +299,39 @@ describe('InMemoryPostSessionPipeline', () => {
 			expect(p.stats().dropped).toBe(1);
 		});
 
-		it('admits a required run even at zero capacity', async () => {
-			const p = new InMemoryPostSessionPipeline({ maxConcurrentRuns: 0 });
+		it('required run bounded-waits for a slot, then runs when one frees', async () => {
+			// Capacity 1: an occupying run holds the only slot; a second required run
+			// must wait, then run once the first completes.
+			const p = new InMemoryPostSessionPipeline({ maxConcurrentRuns: 1, requiredWaitMs: 1000 });
+			let release!: () => void;
+			const gate = new Promise<void>((r) => {
+				release = r;
+			});
+			p.register(new TestProcessor('memory', () => gate, [], true));
+			p.freeze();
+
+			const first = p.dispatch({ sessionId: 's1', reason: 'normal', build: makeBuilder('s1') });
+			const second = p.dispatch({ sessionId: 's2', reason: 'normal', build: makeBuilder('s2') });
+			expect(second.outcome).toBe('accepted'); // admitted to the wait queue
+			expect(p.stats().queued).toBe(1); // waiting for a slot
+
+			release(); // free the first run's slot
+			const [r1, r2] = await Promise.all([first.report, second.report]);
+			expect(r1.outcome).toBe('accepted');
+			expect(r2.outcome).toBe('accepted');
+			expect(p.stats().queued).toBe(0);
+		});
+
+		it('required run times out waiting for a slot → required_capacity_timeout', async () => {
+			// Capacity 0 with a short wait budget: no slot ever frees.
+			const p = new InMemoryPostSessionPipeline({ maxConcurrentRuns: 0, requiredWaitMs: 20 });
 			p.register(new TestProcessor('memory', async () => {}, [], true));
 			p.freeze();
 			const run = p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') });
 			const report = await run.report;
-			expect(run.outcome).toBe('accepted');
-			expect(report.outcome).toBe('accepted');
+			expect(report.outcome).toBe('dropped');
+			expect(report.failureReason).toBe('required_capacity_timeout');
+			expect(report.results).toHaveLength(0);
 		});
 	});
 

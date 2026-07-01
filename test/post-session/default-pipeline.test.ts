@@ -57,15 +57,32 @@ describe('default post-session pipeline', () => {
 		expect(memory?.status).toBe('skipped');
 	});
 
-	it('admits the run even at zero capacity (memory is required)', async () => {
-		const pipeline = createDefaultPostSessionPipeline({ maxConcurrentRuns: 0 });
-		const run = pipeline.dispatch({
-			sessionId: 's',
+	it('memory run bounded-waits at capacity rather than being dropped', async () => {
+		// Capacity 1 + generous wait: the required memory run queues behind an
+		// occupying run and completes once a slot frees (not dropped like optional).
+		const pipeline = createDefaultPostSessionPipeline({
+			maxConcurrentRuns: 1,
+			requiredWaitMs: 1000,
+		});
+		let release!: () => void;
+		const gate = new Promise<void>((r) => {
+			release = r;
+		});
+		const first = pipeline.dispatch({
+			sessionId: 's1',
+			reason: 'normal',
+			build: builder({ memoryExtraction: () => gate }),
+		});
+		const second = pipeline.dispatch({
+			sessionId: 's2',
 			reason: 'normal',
 			build: builder({ memoryExtraction: async () => {} }),
 		});
-		expect(run.outcome).toBe('accepted');
-		await run.report;
+		expect(second.outcome).toBe('accepted');
+		release();
+		const [r1, r2] = await Promise.all([first.report, second.report]);
+		expect(r1.outcome).toBe('accepted');
+		expect(r2.outcome).toBe('accepted');
 	});
 
 	it('getDefaultPostSessionPipeline returns a stable singleton', () => {

@@ -9,17 +9,25 @@ import type {
 	PostSessionReport,
 	PostSessionResult,
 	PostSessionRun,
+	PostSessionSnapshot,
 	PostSessionStats,
+	PostSessionStores,
 } from './types.js';
 
 /** Tuning knobs for {@link InMemoryPostSessionPipeline}. */
 export interface PostSessionPipelineOptions {
 	/**
-	 * Soft cap on concurrent in-flight runs. When at capacity, an optional-only
-	 * run is `dropped` (`queue_overflow`). A run containing a `required` processor
-	 * bypasses the cap (required work is never dropped by capacity). Default 16.
+	 * Cap on concurrent in-flight runs. When at capacity, an optional-only run is
+	 * `dropped` (`queue_overflow`); a run with a `required` processor instead
+	 * bounded-waits for a slot (see `requiredWaitMs`). Default 16.
 	 */
 	maxConcurrentRuns?: number;
+	/**
+	 * How long a required run waits for a slot when at capacity before failing with
+	 * `dropped` / `required_capacity_timeout` (never silent, never unbounded).
+	 * Default 30_000.
+	 */
+	requiredWaitMs?: number;
 	/**
 	 * Per-run wall-clock budget (ms). On expiry the run's `signal` is aborted and
 	 * any still-pending processor is recorded `failed` (`detail.reason: drain_timeout`).
@@ -52,6 +60,8 @@ export class InMemoryPostSessionPipeline implements PostSessionPipeline {
 	private readonly hasRequired = (): boolean => this.processors.some((p) => p.required);
 
 	private running = 0;
+	/** Required runs waiting for a slot at capacity (FIFO). */
+	private readonly waiters: Array<() => void> = [];
 	private readonly counters = { dropped: 0, completed: 0, failed: 0 };
 	private readonly listeners = new Set<(r: PostSessionReport) => void>();
 	private readonly inFlight = new Set<{
@@ -60,11 +70,13 @@ export class InMemoryPostSessionPipeline implements PostSessionPipeline {
 	}>();
 
 	private readonly maxConcurrentRuns: number;
+	private readonly requiredWaitMs: number;
 	private readonly runBudgetMs: number;
 	private readonly onError: (error: unknown, where: string) => void;
 
 	constructor(options: PostSessionPipelineOptions = {}) {
 		this.maxConcurrentRuns = options.maxConcurrentRuns ?? 16;
+		this.requiredWaitMs = options.requiredWaitMs ?? 30_000;
 		this.runBudgetMs = options.runBudgetMs ?? 30_000;
 		this.onError =
 			options.onError ?? ((error, where) => console.error(`[post-session] ${where}:`, error));
@@ -119,29 +131,86 @@ export class InMemoryPostSessionPipeline implements PostSessionPipeline {
 			});
 		}
 
-		// (b) admission. Optional-only runs drop at capacity; required runs bypass it.
-		// (`required_capacity_timeout` is reserved for a future hard-cap variant.)
-		if (this.running >= this.maxConcurrentRuns && !this.hasRequired()) {
+		// (b) admission.
+		if (this.running < this.maxConcurrentRuns) {
+			// Slot available → run immediately.
+			this.running++;
+			return { sessionId, outcome: 'accepted', report: this.runReserved(built) };
+		}
+		if (!this.hasRequired()) {
+			// At capacity, optional-only → drop.
 			return this.terminalRun(sessionId, 'dropped', 'queue_overflow', () => {
 				this.counters.dropped++;
 			});
 		}
+		// At capacity, has a required processor → bounded-wait for a slot. Reported
+		// `accepted` (admitted to the wait queue); if the wait budget expires before
+		// a slot frees, `report` resolves `dropped` / `required_capacity_timeout`.
+		const report = (async (): Promise<PostSessionReport> => {
+			const acquired = await this.reserveOrWait(this.requiredWaitMs);
+			if (!acquired) {
+				this.counters.dropped++;
+				const timedOut: PostSessionReport = {
+					sessionId,
+					outcome: 'dropped',
+					failureReason: 'required_capacity_timeout',
+					results: [],
+					totalDurationMs: 0,
+				};
+				this.emit(timedOut);
+				return timedOut;
+			}
+			return this.runReserved(built);
+		})();
+		return { sessionId, outcome: 'accepted', report };
+	}
 
-		// (c) accepted — pipeline owns the cancellation signal (hence the budget).
+	/** Execute a run for which a slot is already reserved; release it on completion. */
+	private runReserved(built: {
+		snapshot: PostSessionSnapshot;
+		stores: PostSessionStores;
+	}): Promise<PostSessionReport> {
 		const controller = new AbortController();
 		const ctx: PostSessionContext = {
 			...built.snapshot,
 			stores: built.stores,
 			signal: controller.signal,
 		};
-		this.running++;
 		const entry = { report: Promise.resolve<PostSessionReport>(undefined as never), controller };
 		entry.report = this.execute(ctx, controller).finally(() => {
-			this.running--;
 			this.inFlight.delete(entry);
+			this.releaseSlot();
 		});
 		this.inFlight.add(entry);
-		return { sessionId, outcome: 'accepted', report: entry.report };
+		return entry.report;
+	}
+
+	/** Reserve a slot now, or wait up to `timeoutMs` for one. Resolves false on timeout. */
+	private reserveOrWait(timeoutMs: number): Promise<boolean> {
+		if (this.running < this.maxConcurrentRuns) {
+			this.running++;
+			return Promise.resolve(true);
+		}
+		return new Promise<boolean>((resolve) => {
+			const waiter = () => {
+				clearTimeout(timer);
+				this.running++; // take the slot handed off by releaseSlot()
+				resolve(true);
+			};
+			const timer = setTimeout(() => {
+				const i = this.waiters.indexOf(waiter);
+				if (i >= 0) this.waiters.splice(i, 1);
+				resolve(false);
+			}, timeoutMs);
+			this.waiters.push(waiter);
+		});
+	}
+
+	/** Free a slot and hand it to the next waiting required run, if any. */
+	private releaseSlot(): void {
+		this.running--;
+		const next = this.waiters.shift();
+		if (next) next();
 	}
 
 	async drain(
@@ -168,7 +237,7 @@ export class InMemoryPostSessionPipeline implements PostSessionPipeline {
 	}
 
 	stats(): PostSessionStats {
-		return { queued: 0, running: this.running, ...this.counters };
+		return { queued: this.waiters.length, running: this.running, ...this.counters };
 	}
 
 	// ── internals ────────────────────────────────────────────────────────────
