@@ -581,8 +581,11 @@ describe('VoiceSession', () => {
 
 		await new Promise((r) => setTimeout(r, 50));
 
-		expect(received).toHaveLength(1);
-		expect(JSON.parse(received[0])).toEqual({
+		// Filter to gui.update: other client frames can race into the window; there
+		// must be exactly one forwarded gui.update (still catches a double-forward).
+		const updates = received.map((m) => JSON.parse(m)).filter((m) => m.type === 'gui.update');
+		expect(updates).toHaveLength(1);
+		expect(updates[0]).toEqual({
 			type: 'gui.update',
 			payload: { sessionId: 'sess_1', data: { screen: 'dashboard' } },
 		});
@@ -621,8 +624,14 @@ describe('VoiceSession', () => {
 
 		await new Promise((r) => setTimeout(r, 50));
 
-		expect(received).toHaveLength(1);
-		expect(JSON.parse(received[0])).toEqual({
+		// Filter to gui.notification specifically: other client frames (e.g. an initial
+		// agent turn) can race into the window, but there must be exactly one forwarded
+		// gui.notification (this still catches a double-forward regression).
+		const notifications = received
+			.map((m) => JSON.parse(m))
+			.filter((m) => m.type === 'gui.notification');
+		expect(notifications).toHaveLength(1);
+		expect(notifications[0]).toEqual({
 			type: 'gui.notification',
 			payload: { sessionId: 'sess_1', message: 'Task completed' },
 		});
@@ -661,8 +670,11 @@ describe('VoiceSession', () => {
 
 		await new Promise((r) => setTimeout(r, 50));
 
-		expect(received).toHaveLength(1);
-		expect(JSON.parse(received[0])).toEqual({
+		// Filter to ui.payload: other client frames can race into the window; there
+		// must be exactly one forwarded ui.payload (still catches a double-forward).
+		const payloads = received.map((m) => JSON.parse(m)).filter((m) => m.type === 'ui.payload');
+		expect(payloads).toHaveLength(1);
+		expect(payloads[0]).toEqual({
 			type: 'ui.payload',
 			payload: { type: 'choice', requestId: 'req_1', data: { options: ['A', 'B'] } },
 		});
