@@ -35,6 +35,14 @@ export interface SessionMetricsSnapshot {
 export interface PostSessionStores {
 	/** Per-user durable memory facts (e.g. for memory distillation). */
 	readonly memory?: MemoryStore;
+	/**
+	 * Per-session memory-extraction capability, provided by the snapshot builder.
+	 * v1 bridge: closes over the session's distiller so the process-scoped
+	 * MemoryDistillationProcessor stays reentrant (it holds no session state; the
+	 * capability arrives via ctx). A future stateless service will consume
+	 * `conversation` + `memory` + a model directly and this can retire.
+	 */
+	readonly memoryExtraction?: () => Promise<void>;
 }
 
 /**

@@ -8,6 +8,7 @@ import { PersistentSubagentManager } from '../agent/persistent-subagent-manager.
 import type { SubagentMessage } from '../agent/subagent-session.js';
 import { BehaviorManager } from '../behaviors/behavior-manager.js';
 import { MemoryDistiller } from '../memory/memory-distiller.js';
+import { getDefaultPostSessionPipeline } from '../post-session/default-pipeline.js';
 import type {
 	PostSessionPipeline,
 	PostSessionSnapshot,
@@ -704,6 +705,16 @@ export class VoiceSession {
 			log: (msg) => this.log(msg),
 		});
 
+		// Resolve the post-session pipeline: an explicit one wins; otherwise fall back
+		// to the process-scoped default pipeline whenever memory is configured, so
+		// final memory distillation runs for every session (replacing the old inline
+		// forceExtract in close()). The built-in default drains (awaits) to preserve
+		// the legacy "extraction attempted before close resolves" guarantee.
+		const usingDefaultPipeline = !config.postSessionPipeline && !!config.memory;
+		const postSessionPipeline =
+			config.postSessionPipeline ?? (config.memory ? getDefaultPostSessionPipeline() : undefined);
+		const drainPostSession = config.drainPostSession ?? usingDefaultPipeline;
+
 		this.sessionManager = new SessionManager(
 			{
 				sessionId: config.sessionId,
@@ -712,14 +723,13 @@ export class VoiceSession {
 			},
 			this.eventBus,
 			this.hooks,
-			config.postSessionPipeline
-				? { pipeline: config.postSessionPipeline, drain: config.drainPostSession }
-				: undefined,
+			postSessionPipeline ? { pipeline: postSessionPipeline, drain: drainPostSession } : undefined,
 		);
-		// Snapshot builder for the post-session pipeline (no-op unless a pipeline was
-		// provided). Bounded, in-memory: copies the conversation timeline + derived
-		// metrics frozen at close time.
-		if (config.postSessionPipeline) {
+		// Snapshot builder for the post-session pipeline (no-op unless a pipeline is
+		// active). Bounded, in-memory: copies the conversation timeline + derived
+		// metrics frozen at close time, plus the per-session memory-extraction
+		// capability the MemoryDistillationProcessor invokes.
+		if (postSessionPipeline) {
 			this.sessionManager.registerSnapshotBuilder((reason) =>
 				this.buildPostSessionSnapshot(reason),
 			);
@@ -1949,7 +1959,18 @@ export class VoiceSession {
 				agentTransferCount: items.filter((i) => i.role === 'transfer').length,
 			},
 		};
-		return { snapshot, stores: { memory: this.config.memory?.store } };
+		return {
+			snapshot,
+			stores: {
+				memory: this.config.memory?.store,
+				// v1 bridge: the MemoryDistillationProcessor invokes this per-session
+				// capability (closing over the session's distiller) instead of the
+				// removed inline forceExtract in close().
+				memoryExtraction: this.memoryDistiller
+					? () => this.memoryDistiller?.forceExtract() ?? Promise.resolve()
+					: undefined,
+			},
+		};
 	}
 
 	async close(reason: SessionEndReason = 'normal'): Promise<void> {
@@ -1985,16 +2006,10 @@ export class VoiceSession {
 			});
 		}
 
-		// Final memory extraction before closing
-		if (this.memoryDistiller) {
-			this.log('Running final memory extraction...');
-			try {
-				await this.memoryDistiller.forceExtract();
-				this.log('Final memory extraction complete');
-			} catch {
-				this.log('Final memory extraction failed (best-effort)');
-			}
-		}
+		// Final memory extraction is now owned by the post-session pipeline
+		// (MemoryDistillationProcessor), dispatched from closeWithReason below in
+		// drain mode — preserving the "extraction attempted before close resolves"
+		// behavior without an inline call here.
 
 		await this.sttProvider?.stop();
 		// Phase 3: stop the dictation-mode Whisper provider so prewarmed or
@@ -2019,8 +2034,9 @@ export class VoiceSession {
 
 		if (this.sessionManager.state !== 'CLOSED') {
 			// Route through the single reason-carrying funnel so the caller's reason is
-			// preserved (no finalizers registered here → synchronous CLOSED, unchanged timing).
-			void this.sessionManager.closeWithReason(reason);
+			// preserved. Awaited so drain-mode post-session work (e.g. memory
+			// distillation) completes before the session bus is cleared.
+			await this.sessionManager.closeWithReason(reason);
 		}
 
 		this.eventBus.clear();
