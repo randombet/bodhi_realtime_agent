@@ -1,7 +1,7 @@
 import type { ExternalEvent } from './agent.js';
 import type { SubagentResult, ToolCall, ToolResult, UIPayload } from './conversation.js';
 import type { TurnLatencySegments } from './hooks.js';
-import type { SessionState } from './session.js';
+import type { SessionEndReason, SessionState } from './session.js';
 import type { RealtimeLLMUsageEvent } from './transport.js';
 import type { UIResponse } from './ui.js';
 
@@ -132,7 +132,7 @@ export interface EventPayloadMap {
 
 	// Session events
 	'session.start': { sessionId: string; userId: string; agentName: string };
-	'session.close': { sessionId: string; reason: string };
+	'session.close': { sessionId: string; reason: SessionEndReason };
 	'session.stateChange': {
 		sessionId: string;
 		fromState: SessionState;

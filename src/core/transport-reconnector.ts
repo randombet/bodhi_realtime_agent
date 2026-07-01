@@ -8,6 +8,7 @@ export interface ReconnectSessionManager {
 	readonly state: SessionManager['state'];
 	readonly resumptionHandle: string | null;
 	transitionTo(state: Parameters<SessionManager['transitionTo']>[0]): void;
+	closeWithReason(reason: Parameters<SessionManager['closeWithReason']>[0]): Promise<void>;
 	updateResumptionHandle(handle: string): void;
 	clearResumptionHandle(): void;
 }
@@ -262,7 +263,7 @@ export class TransportReconnector {
 					.catch((err) => {
 						this.deps.clientTransport.stopBuffering();
 						this.deps.reportError('reconnect', err);
-						this.deps.sessionManager.transitionTo('CLOSED');
+						void this.deps.sessionManager.closeWithReason('reconnect_failed');
 					});
 			}, delay);
 		} else {
@@ -271,7 +272,7 @@ export class TransportReconnector {
 					`Reconnect limit reached (${TransportReconnector.MAX_RECONNECT_ATTEMPTS} attempts), giving up`,
 				);
 			}
-			this.deps.sessionManager.transitionTo('CLOSED');
+			void this.deps.sessionManager.closeWithReason('reconnect_failed');
 		}
 	}
 
@@ -365,7 +366,7 @@ export class TransportReconnector {
 				.catch((err) => {
 					this.deps.clientTransport.stopBuffering();
 					this.deps.reportError('reconnect', err);
-					this.deps.sessionManager.transitionTo('CLOSED');
+					void this.deps.sessionManager.closeWithReason('reconnect_failed');
 				});
 		}
 	}

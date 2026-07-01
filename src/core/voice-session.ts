@@ -6,6 +6,12 @@ import { PersistentSubagentManager } from '../agent/persistent-subagent-manager.
 import type { SubagentMessage } from '../agent/subagent-session.js';
 import { BehaviorManager } from '../behaviors/behavior-manager.js';
 import { MemoryDistiller } from '../memory/memory-distiller.js';
+import { getDefaultPostSessionPipeline } from '../post-session/default-pipeline.js';
+import type {
+	PostSessionPipeline,
+	PostSessionSnapshot,
+	PostSessionStores,
+} from '../post-session/types.js';
 import type { ToolRoutingInfo } from '../runtime/actors/tool-router-actor.js';
 import { GeminiTransportAdapter } from '../runtime/adapters/gemini-transport-adapter.js';
 import type { KnownNotificationLabel } from '../runtime/messages.js';
@@ -34,6 +40,7 @@ import type { ProcessedKnowledgeBase } from '../types/knowledge-base.js';
 import type { MemoryStore } from '../types/memory.js';
 import type { IClientChannel } from '../types/session-client.js';
 import type { SessionClientSender } from '../types/session-client.js';
+import type { SessionEndReason } from '../types/session.js';
 import type { ToolDefinition } from '../types/tool.js';
 import type { LLMTransport, LLMTransportError, STTProvider } from '../types/transport.js';
 import type { TTSProvider } from '../types/tts.js';
@@ -333,6 +340,14 @@ export interface VoiceSessionConfig {
 	conversationHistoryStores?: ConversationHistoryStore[];
 	/** Application metadata persisted alongside the session record (e.g. channel, surface, callSid). */
 	sessionMetadata?: Record<string, unknown>;
+	/**
+	 * Optional process-scoped post-session pipeline. When provided, the session
+	 * registers a snapshot builder and `closeWithReason` dispatches the pipeline
+	 * once on close. Absent → no post-session processing (unchanged behavior).
+	 */
+	postSessionPipeline?: PostSessionPipeline;
+	/** Drain mode: await the post-session run before close() resolves (serverless hosts). */
+	drainPostSession?: boolean;
 	/** When provided, agents/tools can persist artifacts (images, docs, etc.) via session.workspace.saveArtifact(). */
 	artifactStore?: ArtifactStore;
 	/** External TTS provider for speech synthesis (actor-mode only).
@@ -688,6 +703,16 @@ export class VoiceSession {
 			log: (msg) => this.log(msg),
 		});
 
+		// Resolve the post-session pipeline: an explicit one wins; otherwise fall back
+		// to the process-scoped default pipeline whenever memory is configured, so
+		// final memory distillation runs for every session (replacing the old inline
+		// forceExtract in close()). The built-in default drains (awaits) to preserve
+		// the legacy "extraction attempted before close resolves" guarantee.
+		const usingDefaultPipeline = !config.postSessionPipeline && !!config.memory;
+		const postSessionPipeline =
+			config.postSessionPipeline ?? (config.memory ? getDefaultPostSessionPipeline() : undefined);
+		const drainPostSession = config.drainPostSession ?? usingDefaultPipeline;
+
 		this.sessionManager = new SessionManager(
 			{
 				sessionId: config.sessionId,
@@ -696,7 +721,23 @@ export class VoiceSession {
 			},
 			this.eventBus,
 			this.hooks,
+			postSessionPipeline ? { pipeline: postSessionPipeline, drain: drainPostSession } : undefined,
 		);
+		// Shared close-time finalization for EVERY path to CLOSED (graceful close,
+		// reconnect-fail, transfer-fail). Runs inside closeWithReason before
+		// session.close publishes and before the pipeline dispatches, so the
+		// snapshot always reflects flushed transcript + finalized turn. This is the
+		// only place these run — close() no longer does them inline.
+		this.sessionManager.registerPreCloseFinalizer(() => this.finalizeForClose());
+		// Snapshot builder for the post-session pipeline (no-op unless a pipeline is
+		// active). Bounded, in-memory: copies the conversation timeline + derived
+		// metrics frozen at close time, plus the per-session memory-extraction
+		// capability the MemoryDistillationProcessor invokes.
+		if (postSessionPipeline) {
+			this.sessionManager.registerSnapshotBuilder((reason) =>
+				this.buildPostSessionSnapshot(reason),
+			);
+		}
 
 		this.subagentConfigs = config.subagentConfigs ?? {};
 
@@ -1882,16 +1923,79 @@ export class VoiceSession {
 	}
 
 	/** Gracefully shut down: disconnect Gemini, stop the WebSocket server, transition to CLOSED. */
-	async close(_reason = 'normal'): Promise<void> {
+	/**
+	 * Build the immutable post-session snapshot + live stores. Bounded, in-memory:
+	 * copies the conversation timeline and derives metrics from it. Used only when a
+	 * post-session pipeline is wired (see VoiceSessionConfig.postSessionPipeline).
+	 */
+	private buildPostSessionSnapshot(reason: SessionEndReason): {
+		snapshot: PostSessionSnapshot;
+		stores: PostSessionStores;
+	} {
+		const items = [...this.conversationContext.items];
+		let finalAgentName = this.config.initialAgent;
+		try {
+			finalAgentName = this.agentRouter.activeAgent.name;
+		} catch {
+			// no active agent (never went active) — keep initial
+		}
+		// Reconstruct the full agent path from the recorded transfer timeline
+		// (`Transfer: <from> → <to>`), preserving multi-hop and A→B→A returns.
+		const transferPath = [this.config.initialAgent];
+		for (const item of items) {
+			if (item.role !== 'transfer') continue;
+			const match = /→\s*(.+)$/.exec(item.content);
+			if (match) transferPath.push(match[1].trim());
+		}
+		const startedAt = this.sessionManager.startedAtMs ?? Date.now();
+		const endedAt = Date.now();
+		const snapshot: PostSessionSnapshot = {
+			sessionId: this.config.sessionId,
+			userId: this.config.userId,
+			initialAgentName: this.config.initialAgent,
+			finalAgentName,
+			transferPath,
+			reason,
+			startedAt,
+			endedAt,
+			durationMs: Math.max(0, endedAt - startedAt),
+			metadata: this.config.sessionMetadata,
+			conversation: { items },
+			metrics: {
+				turnCount: items.filter((i) => i.role === 'assistant').length,
+				toolCallCount: items.filter((i) => i.role === 'tool_call').length,
+				agentTransferCount: items.filter((i) => i.role === 'transfer').length,
+			},
+		};
+		return {
+			snapshot,
+			stores: {
+				memory: this.config.memory?.store,
+				// v1 bridge: the MemoryDistillationProcessor invokes this per-session
+				// capability (closing over the session's distiller) instead of the
+				// removed inline forceExtract in close().
+				memoryExtraction: this.memoryDistiller
+					? () => this.memoryDistiller?.forceExtract() ?? Promise.resolve()
+					: undefined,
+			},
+		};
+	}
+
+	/**
+	 * Close-time finalization, registered as SessionManager's pre-close finalizer so
+	 * it runs for EVERY path to CLOSED before session.close publishes and the
+	 * post-session pipeline dispatches. Non-fallible, quick, in-memory: quiesce
+	 * session-scoped state, flush the transcript, reset the latency tracker, and
+	 * finalize any in-flight turn — so the post-session snapshot is complete.
+	 */
+	private finalizeForClose(): void {
 		// Drop any queued background notifications — session is ending.
-		// Actor mode: NotificationActor.onStop clears its own state when the
-		// runtime orchestrator stops below.
 		this.notificationQueue?.clear();
 		// Retained user audio is session-scoped and memory-only — drop it now.
 		this.utteranceRetainer?.clearAll();
 		this.reconnector.resetReplayState();
 
-		// Flush any buffered transcription before closing
+		// Flush any buffered transcription before closing.
 		this.transcriptManager.flush();
 
 		// §11 close ordering: (1) flush — already-finalized buffered turns still
@@ -1914,42 +2018,60 @@ export class VoiceSession {
 				turnId: teardownTurn.id,
 			});
 		}
+	}
 
-		// Final memory extraction before closing
-		if (this.memoryDistiller) {
-			this.log('Running final memory extraction...');
-			try {
-				await this.memoryDistiller.forceExtract();
-				this.log('Final memory extraction complete');
-			} catch {
-				this.log('Final memory extraction failed (best-effort)');
-			}
+	/** Run one best-effort teardown step; a throw is logged, never aborts the rest. */
+	private async safeTeardown(label: string, fn: () => unknown): Promise<void> {
+		try {
+			await fn();
+		} catch (err) {
+			this.log(
+				`close teardown '${label}' failed (best-effort): ${err instanceof Error ? err.message : String(err)}`,
+			);
 		}
+	}
 
-		await this.sttProvider?.stop();
-		// Phase 3: stop the dictation-mode Whisper provider so prewarmed or
-		// active sockets don't survive session close. Idempotent.
-		await this.dictation.stopWhisper();
-		this.ttsPipeline?.gate.clearTimers();
-		this.reconnector.disarmResponseWatchdog();
-		// close() bypasses finalizeTurn — tear down the native gate directly so
-		// no native playback timer outlives the session.
+	async close(reason: SessionEndReason = 'normal'): Promise<void> {
+		// 1. Close funnel FIRST: runs the shared pre-close finalizer (transcript
+		//    flush, turn.end, reset), publishes session.close, and dispatches the
+		//    post-session pipeline (drain mode awaits it) — all BEFORE the fallible
+		//    teardown below, so a teardown failure can never prevent close/dispatch.
+		//    Awaited UNCONDITIONALLY: closeWithReason is idempotent and returns the
+		//    memoized close promise, so if a failure path (reconnect/transfer) already
+		//    claimed close with a still-pending drain, we await THAT before teardown /
+		//    eventBus.clear() rather than racing it.
+		await this.sessionManager.closeWithReason(reason);
+
+		// 2. Fallible resource teardown, each isolated so one failure doesn't abort
+		//    the rest (the session is already CLOSED and post-session work dispatched).
+		await this.safeTeardown('stt.stop', () => this.sttProvider?.stop());
+		// Stop the dictation-mode Whisper provider so prewarmed/active sockets don't
+		// survive session close. Idempotent.
+		await this.safeTeardown('dictation.stopWhisper', () => this.dictation.stopWhisper());
+		await this.safeTeardown('ttsGate.clearTimers', () => this.ttsPipeline?.gate.clearTimers());
+		await this.safeTeardown('disarmResponseWatchdog', () =>
+			this.reconnector.disarmResponseWatchdog(),
+		);
+		// close() bypasses finalizeTurn — tear down the native gate directly so no
+		// native playback timer outlives the session.
 		if (this.nativePlaybackGatingActive) {
-			this.nativeGate?.clear();
-			this.completionArbiter.clearDefer();
+			await this.safeTeardown('nativeGate.clear', () => {
+				this.nativeGate?.clear();
+				this.completionArbiter.clearDefer();
+			});
 		}
-		await this.ttsPipeline?.provider.stop();
+		await this.safeTeardown('tts.stop', () => this.ttsPipeline?.provider.stop());
 		if (this.runtimeOrchestrator) {
-			await this.runtimeOrchestrator.stop();
+			await this.safeTeardown('runtimeOrchestrator.stop', () => this.runtimeOrchestrator?.stop());
 		}
-		await this.persistentSubagents.disposeAllPersistent();
-		this.config.artifactRegistry?.dispose();
-		await this.transport.disconnect();
-		await this.clientTransport.stop();
-
-		if (this.sessionManager.state !== 'CLOSED') {
-			this.sessionManager.transitionTo('CLOSED');
-		}
+		await this.safeTeardown('subagents.dispose', () =>
+			this.persistentSubagents.disposeAllPersistent(),
+		);
+		await this.safeTeardown('artifactRegistry.dispose', () =>
+			this.config.artifactRegistry?.dispose(),
+		);
+		await this.safeTeardown('transport.disconnect', () => this.transport.disconnect());
+		await this.safeTeardown('clientTransport.stop', () => this.clientTransport.stop());
 
 		this.eventBus.clear();
 	}
