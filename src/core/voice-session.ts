@@ -725,6 +725,12 @@ export class VoiceSession {
 			this.hooks,
 			postSessionPipeline ? { pipeline: postSessionPipeline, drain: drainPostSession } : undefined,
 		);
+		// Shared close-time finalization for EVERY path to CLOSED (graceful close,
+		// reconnect-fail, transfer-fail). Runs inside closeWithReason before
+		// session.close publishes and before the pipeline dispatches, so the
+		// snapshot always reflects flushed transcript + finalized turn. This is the
+		// only place these run — close() no longer does them inline.
+		this.sessionManager.registerPreCloseFinalizer(() => this.finalizeForClose());
 		// Snapshot builder for the post-session pipeline (no-op unless a pipeline is
 		// active). Bounded, in-memory: copies the conversation timeline + derived
 		// metrics frozen at close time, plus the per-session memory-extraction
@@ -1935,10 +1941,14 @@ export class VoiceSession {
 		} catch {
 			// no active agent (never went active) — keep initial
 		}
-		const transferPath =
-			finalAgentName === this.config.initialAgent
-				? [this.config.initialAgent]
-				: [this.config.initialAgent, finalAgentName];
+		// Reconstruct the full agent path from the recorded transfer timeline
+		// (`Transfer: <from> → <to>`), preserving multi-hop and A→B→A returns.
+		const transferPath = [this.config.initialAgent];
+		for (const item of items) {
+			if (item.role !== 'transfer') continue;
+			const match = /→\s*(.+)$/.exec(item.content);
+			if (match) transferPath.push(match[1].trim());
+		}
 		const startedAt = this.sessionManager.startedAtMs ?? Date.now();
 		const endedAt = Date.now();
 		const snapshot: PostSessionSnapshot = {
@@ -1973,16 +1983,21 @@ export class VoiceSession {
 		};
 	}
 
-	async close(reason: SessionEndReason = 'normal'): Promise<void> {
+	/**
+	 * Close-time finalization, registered as SessionManager's pre-close finalizer so
+	 * it runs for EVERY path to CLOSED before session.close publishes and the
+	 * post-session pipeline dispatches. Non-fallible, quick, in-memory: quiesce
+	 * session-scoped state, flush the transcript, reset the latency tracker, and
+	 * finalize any in-flight turn — so the post-session snapshot is complete.
+	 */
+	private finalizeForClose(): void {
 		// Drop any queued background notifications — session is ending.
-		// Actor mode: NotificationActor.onStop clears its own state when the
-		// runtime orchestrator stops below.
 		this.notificationQueue?.clear();
 		// Retained user audio is session-scoped and memory-only — drop it now.
 		this.utteranceRetainer?.clearAll();
 		this.reconnector.resetReplayState();
 
-		// Flush any buffered transcription before closing
+		// Flush any buffered transcription before closing.
 		this.transcriptManager.flush();
 
 		// §11 close ordering: (1) flush — already-finalized buffered turns still
@@ -2005,39 +2020,59 @@ export class VoiceSession {
 				turnId: teardownTurn.id,
 			});
 		}
+	}
 
-		// Final memory extraction is now owned by the post-session pipeline
-		// (MemoryDistillationProcessor), dispatched from closeWithReason below in
-		// drain mode — preserving the "extraction attempted before close resolves"
-		// behavior without an inline call here.
-
-		await this.sttProvider?.stop();
-		// Phase 3: stop the dictation-mode Whisper provider so prewarmed or
-		// active sockets don't survive session close. Idempotent.
-		await this.dictation.stopWhisper();
-		this.ttsPipeline?.gate.clearTimers();
-		this.reconnector.disarmResponseWatchdog();
-		// close() bypasses finalizeTurn — tear down the native gate directly so
-		// no native playback timer outlives the session.
-		if (this.nativePlaybackGatingActive) {
-			this.nativeGate?.clear();
-			this.completionArbiter.clearDefer();
+	/** Run one best-effort teardown step; a throw is logged, never aborts the rest. */
+	private async safeTeardown(label: string, fn: () => unknown): Promise<void> {
+		try {
+			await fn();
+		} catch (err) {
+			this.log(
+				`close teardown '${label}' failed (best-effort): ${err instanceof Error ? err.message : String(err)}`,
+			);
 		}
-		await this.ttsPipeline?.provider.stop();
-		if (this.runtimeOrchestrator) {
-			await this.runtimeOrchestrator.stop();
-		}
-		await this.persistentSubagents.disposeAllPersistent();
-		this.config.artifactRegistry?.dispose();
-		await this.transport.disconnect();
-		await this.clientTransport.stop();
+	}
 
+	async close(reason: SessionEndReason = 'normal'): Promise<void> {
+		// 1. Close funnel FIRST: runs the shared pre-close finalizer (transcript
+		//    flush, turn.end, reset), publishes session.close, and dispatches the
+		//    post-session pipeline (drain mode awaits it) — all BEFORE the fallible
+		//    teardown below, so a teardown failure can never prevent close/dispatch.
+		//    No-op if a failure path (reconnect/transfer) already closed the session.
 		if (this.sessionManager.state !== 'CLOSED') {
-			// Route through the single reason-carrying funnel so the caller's reason is
-			// preserved. Awaited so drain-mode post-session work (e.g. memory
-			// distillation) completes before the session bus is cleared.
 			await this.sessionManager.closeWithReason(reason);
 		}
+
+		// 2. Fallible resource teardown, each isolated so one failure doesn't abort
+		//    the rest (the session is already CLOSED and post-session work dispatched).
+		await this.safeTeardown('stt.stop', () => this.sttProvider?.stop());
+		// Stop the dictation-mode Whisper provider so prewarmed/active sockets don't
+		// survive session close. Idempotent.
+		await this.safeTeardown('dictation.stopWhisper', () => this.dictation.stopWhisper());
+		await this.safeTeardown('ttsGate.clearTimers', () => this.ttsPipeline?.gate.clearTimers());
+		await this.safeTeardown('disarmResponseWatchdog', () =>
+			this.reconnector.disarmResponseWatchdog(),
+		);
+		// close() bypasses finalizeTurn — tear down the native gate directly so no
+		// native playback timer outlives the session.
+		if (this.nativePlaybackGatingActive) {
+			await this.safeTeardown('nativeGate.clear', () => {
+				this.nativeGate?.clear();
+				this.completionArbiter.clearDefer();
+			});
+		}
+		await this.safeTeardown('tts.stop', () => this.ttsPipeline?.provider.stop());
+		if (this.runtimeOrchestrator) {
+			await this.safeTeardown('runtimeOrchestrator.stop', () => this.runtimeOrchestrator?.stop());
+		}
+		await this.safeTeardown('subagents.dispose', () =>
+			this.persistentSubagents.disposeAllPersistent(),
+		);
+		await this.safeTeardown('artifactRegistry.dispose', () =>
+			this.config.artifactRegistry?.dispose(),
+		);
+		await this.safeTeardown('transport.disconnect', () => this.transport.disconnect());
+		await this.safeTeardown('clientTransport.stop', () => this.clientTransport.stop());
 
 		this.eventBus.clear();
 	}

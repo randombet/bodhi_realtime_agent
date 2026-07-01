@@ -2,6 +2,8 @@ import type { LanguageModelV1 } from 'ai';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { VoiceSession } from '../../src/core/voice-session.js';
+import { InMemoryPostSessionPipeline } from '../../src/post-session/pipeline.js';
+import { type PostSessionContext, PostSessionProcessor } from '../../src/post-session/types.js';
 import { DEFAULT_GEMINI_REALTIME_INPUT_CONFIG } from '../../src/transport/gemini-live-transport.js';
 import type { MainAgent } from '../../src/types/agent.js';
 import type {
@@ -265,6 +267,65 @@ describe('VoiceSession', () => {
 		await session.close();
 
 		expect(session.sessionManager.state).toBe('CLOSED');
+	});
+
+	it('close reaches CLOSED and resolves even when a teardown step throws', async () => {
+		// P1: the close funnel (session.close + post-session dispatch) runs BEFORE
+		// fallible teardown, and teardown is isolated — a throwing disconnect must
+		// not prevent CLOSED nor reject close().
+		session = new VoiceSession({
+			sessionId: 'sess_td',
+			userId: 'user_1',
+			apiKey: 'test-key',
+			agents: [createEchoAgent()],
+			initialAgent: 'echo',
+			port: 9873,
+			model: mockModel,
+		});
+		await session.start();
+		await new Promise((r) => setTimeout(r, 50));
+
+		const transportRef = (session as unknown as { transport: { disconnect: () => Promise<void> } })
+			.transport;
+		vi.spyOn(transportRef, 'disconnect').mockRejectedValueOnce(new Error('disconnect boom'));
+
+		await expect(session.close()).resolves.toBeUndefined();
+		expect(session.sessionManager.state).toBe('CLOSED');
+	});
+
+	it('post-session snapshot transferPath reflects multi-hop transfers', async () => {
+		// P3: transferPath is reconstructed from the transfer timeline, preserving
+		// multi-hop and A→B→A returns.
+		let captured: readonly string[] | undefined;
+		class CaptureProcessor extends PostSessionProcessor {
+			readonly name = 'capture';
+			async run(ctx: PostSessionContext) {
+				captured = ctx.transferPath;
+			}
+		}
+		const pipeline = new InMemoryPostSessionPipeline();
+		pipeline.register(new CaptureProcessor());
+		pipeline.freeze();
+
+		session = new VoiceSession({
+			sessionId: 'sess_tp',
+			userId: 'user_1',
+			apiKey: 'test-key',
+			agents: [createEchoAgent()],
+			initialAgent: 'echo',
+			port: 9874,
+			model: mockModel,
+			postSessionPipeline: pipeline,
+			drainPostSession: true,
+		});
+		await session.start();
+		await new Promise((r) => setTimeout(r, 50));
+
+		session.conversationContext.addAgentTransfer('echo', 'specialist');
+		session.conversationContext.addAgentTransfer('specialist', 'echo');
+		await session.close();
+
+		expect(captured).toEqual(['echo', 'specialist', 'echo']);
 	});
 
 	it('registers hooks from config', async () => {
