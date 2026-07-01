@@ -20,11 +20,44 @@ close-in-progress guard provides exactly-once dispatch.
 ## Run
 
 ```bash
+# Verification harness (invariants, EmailProcessor with a capturing fake sender):
 pnpm tsx examples/post-session-processor/post-session-processor-demo.ts
+
+# Email a session summary to a specific address (see "Email summary example" below):
+pnpm tsx examples/post-session-processor/email-summary.ts you@example.com
 ```
 
-No API keys or network needed. The process exits non-zero if any invariant fails, so it
-doubles as a smoke test.
+No API keys or network needed for either. The demo exits non-zero if any invariant fails,
+so it doubles as a smoke test.
+
+## Email summary example
+
+[`email-summary.ts`](./email-summary.ts) is a runnable example of the **`EmailSender`
+capability**: it drives the **real** `InMemoryPostSessionPipeline` from `src/post-session/`
+with an `EmailSummaryProcessor` that summarizes a (sample) ended session's conversation and
+sends the summary + full transcript to a chosen recipient via a pluggable sender.
+
+Senders:
+
+- **console** (default) — prints the composed email; safe, no network.
+- **apple** — sends (or drafts) through macOS Mail.app via
+  [`examples/lib/apple-mail-sender.ts`](../lib/apple-mail-sender.ts).
+
+```bash
+# Print the email that would be sent (default recipient demo@example.com):
+pnpm tsx examples/post-session-processor/email-summary.ts you@example.com
+POST_SESSION_EMAIL_TO=you@example.com pnpm tsx examples/post-session-processor/email-summary.ts
+
+# macOS: create a Mail.app draft (safe) or actually send:
+pnpm tsx examples/post-session-processor/email-summary.ts you@example.com --apple --draft
+pnpm tsx examples/post-session-processor/email-summary.ts you@example.com --apple
+```
+
+The `EmailSummaryProcessor` takes its `EmailSender` + recipient as constructor config
+(shared across sessions → reentrant) and reads the frozen `ctx.conversation` snapshot for
+the summary — no LLM, so it runs offline. A production build would swap the deterministic
+summary for an LLM `SummaryProcessor` and expose the sender as an `email` capability on
+`PostSessionStores`.
 
 ## What it verifies
 
