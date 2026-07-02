@@ -269,6 +269,58 @@ describe('VoiceSession', () => {
 		expect(session.sessionManager.state).toBe('CLOSED');
 	});
 
+	describe('no-TTS text mode (responseModality: "text")', () => {
+		it('routes model text output to the transcript and marks the router text-mode', () => {
+			const transport = createMutableServerTurnTransport();
+			session = new VoiceSession({
+				sessionId: 'sess_text',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9899,
+				model: mockModel,
+				transport,
+				responseModality: 'text',
+			});
+
+			const internals = session as unknown as {
+				agentRouter: { responseModality: string };
+				transcriptManager: { handleOutput: (t: string) => void };
+			};
+			// Router is in text mode without any TTS provider.
+			expect(internals.agentRouter.responseModality).toBe('text');
+			// onTextOutput is wired at construction (wireTransportCallbacks).
+			expect(typeof transport.onTextOutput).toBe('function');
+
+			// Model text flows to the transcript manager (which emits the normal
+			// `{ type:'transcript', role:'assistant' }` client events).
+			const spy = vi.spyOn(internals.transcriptManager, 'handleOutput');
+			transport.onTextOutput?.('Hello from the model');
+			expect(spy).toHaveBeenCalledWith('Hello from the model');
+		});
+
+		it('start() rejects when the transport lacks textResponseModality', async () => {
+			const transport = createMutableServerTurnTransport();
+			(transport as { capabilities: TransportCapabilities }).capabilities = {
+				...transport.capabilities,
+				textResponseModality: false,
+			};
+			session = new VoiceSession({
+				sessionId: 'sess_text2',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9898,
+				model: mockModel,
+				transport,
+				responseModality: 'text',
+			});
+			await expect(session.start()).rejects.toThrow(/textResponseModality/);
+		});
+	});
+
 	it('close reaches CLOSED and resolves even when a teardown step throws', async () => {
 		// P1: the close funnel (session.close + post-session dispatch) runs BEFORE
 		// fallible teardown, and teardown is isolated — a throwing disconnect must

@@ -108,6 +108,16 @@ describe('ConversationContext', () => {
 			expect(ctx.getItemsSinceCheckpoint()).toHaveLength(1);
 			expect(ctx.getItemsSinceCheckpoint()[0].content).toBe('new');
 		});
+
+		it('{ alreadyPersisted: false } leaves the checkpoint so loaded items re-flush', () => {
+			const ctx = new ConversationContext();
+			ctx.loadItems([{ role: 'user' as const, content: 'resumed', timestamp: 1000 }], {
+				alreadyPersisted: false,
+			});
+			expect(ctx.items).toHaveLength(1);
+			// checkpoint NOT advanced → the loaded item is still pending flush (copy-mode)
+			expect(ctx.getItemsSinceCheckpoint()).toHaveLength(1);
+		});
 	});
 
 	describe('setSummary', () => {
@@ -229,6 +239,32 @@ describe('ConversationContext', () => {
 				fromAgent: 'general',
 				toAgent: 'booking',
 			});
+		});
+
+		it('carries error through on an errored tool_result', () => {
+			const ctx = new ConversationContext();
+			ctx.addToolResult({ toolCallId: 'tc', toolName: 'fn', result: null, error: 'boom' });
+			const content = ctx.toReplayContent();
+			expect(content[0]).toEqual({
+				type: 'tool_result',
+				id: 'tc',
+				name: 'fn',
+				result: null,
+				error: 'boom',
+			});
+		});
+
+		it('drops + logs a malformed tool row instead of demoting it to assistant text', () => {
+			const ctx = new ConversationContext();
+			ctx.loadItems([
+				{ role: 'tool_call' as const, content: '{not valid json', timestamp: 1 },
+				{ role: 'user' as const, content: 'ok', timestamp: 2 },
+			]);
+			const logs: string[] = [];
+			const content = ctx.toReplayContent({ log: (m) => logs.push(m) });
+			// the malformed tool_call is NOT emitted (neither as tool_call nor as assistant text)
+			expect(content).toEqual([{ type: 'text', role: 'user', text: 'ok' }]);
+			expect(logs.some((l) => l.includes('tool_call'))).toBe(true);
 		});
 	});
 

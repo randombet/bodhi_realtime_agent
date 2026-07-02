@@ -73,6 +73,21 @@ export interface PaginationOptions {
 export interface ConversationHistoryStore {
 	/** Create a new session record. */
 	createSession(session: SessionRecord): Promise<void>;
+	/**
+	 * Ensure a session record exists **without destroying existing items** — create it if missing,
+	 * else leave the stored record/items intact — and return the existing-or-created record.
+	 * Used by resume (`attach` mode): unlike `createSession` (which may reset items) it is safe to
+	 * call against a prior session. Optional — a store that cannot support non-destructive attach
+	 * omits it (such a store cannot be used as an `attach` target). Returns the record so a resumed
+	 * run can read the original `startedAt`/`metadata`.
+	 */
+	ensureSession?(session: SessionRecord): Promise<SessionRecord>;
+	/**
+	 * Re-open a previously-ended record: set `status: 'active'` and clear the terminal fields
+	 * (`endedAt`/`durationMs`/`disconnectReason`). A dedicated method because `updateSession` with
+	 * `undefined` values cannot null a column on some backends. Optional (paired with `ensureSession`).
+	 */
+	reactivateSession?(sessionId: string): Promise<void>;
 	/** Update fields on an existing session record. */
 	updateSession(sessionId: string, update: Partial<SessionRecord>): Promise<void>;
 	/** Append conversation items to a session's history. */

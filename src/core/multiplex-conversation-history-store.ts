@@ -58,6 +58,42 @@ export class MultiplexConversationHistoryStore implements ConversationHistorySto
 		await this.fanOut('createSession', (s) => s.createSession(session));
 	}
 
+	async ensureSession(session: SessionRecord): Promise<SessionRecord> {
+		// Fan out to every backing store that supports ensureSession; a store lacking it cannot be a
+		// non-destructive attach target, so skip it (with a log) rather than createSession-wiping it.
+		// Return the first store's record when it supports ensureSession, else the passed-in record.
+		let firstRecord: SessionRecord | undefined;
+		const results = await Promise.allSettled(
+			this.opts.stores.map(async (s, i) => {
+				if (!s.ensureSession) {
+					this.opts.log?.(
+						`MultiplexConversationHistoryStore: store[${i}] has no ensureSession (skipped for attach)`,
+					);
+					return;
+				}
+				const rec = await s.ensureSession(session);
+				if (i === 0) firstRecord = rec;
+			}),
+		);
+		for (let i = 0; i < results.length; i++) {
+			const r = results[i];
+			if (r.status === 'rejected') {
+				const reason = r.reason instanceof Error ? r.reason.message : String(r.reason);
+				this.opts.log?.(
+					`MultiplexConversationHistoryStore: store[${i}] ensureSession failed: ${reason}`,
+				);
+			}
+		}
+		return firstRecord ?? session;
+	}
+
+	async reactivateSession(sessionId: string): Promise<void> {
+		await this.fanOut(
+			'reactivateSession',
+			(s) => s.reactivateSession?.(sessionId) ?? Promise.resolve(),
+		);
+	}
+
 	async updateSession(sessionId: string, update: Partial<SessionRecord>): Promise<void> {
 		await this.fanOut('updateSession', (s) => s.updateSession(sessionId, update));
 	}
