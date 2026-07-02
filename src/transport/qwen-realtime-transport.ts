@@ -321,7 +321,7 @@ export class QwenRealtimeTransport implements LLMTransport {
 	async reconnect(state?: ReconnectState): Promise<void> {
 		await this.disconnect();
 		await this.connect();
-		if (state?.conversationHistory?.length) this.replayHistory(state.conversationHistory);
+		if (state?.conversationHistory?.length) this.#replayHistory(state.conversationHistory);
 	}
 
 	private cleanupOnClose(): void {
@@ -657,7 +657,9 @@ export class QwenRealtimeTransport implements LLMTransport {
 		return session;
 	}
 
-	private replayHistory(history: ReplayItem[]): void {
+	// ES-private (`#`) so the optional public `LLMTransport.replayHistory?` member does not collide;
+	// reconnect recovery calls this directly (unguarded). Public initial-connect wrapper deferred.
+	#replayHistory(history: ReplayItem[]): void {
 		for (const item of history) {
 			if (item.type === 'text') {
 				const contentType = item.role === 'user' ? 'input_text' : 'output_text';

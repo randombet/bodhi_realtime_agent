@@ -482,7 +482,7 @@ export class GeminiLiveTransport implements LLMTransport {
 				typeof stateOrHandle === 'object' &&
 				stateOrHandle?.conversationHistory?.length
 			) {
-				this.replayHistory(stateOrHandle.conversationHistory);
+				this.#replayHistory(stateOrHandle.conversationHistory);
 			}
 		} finally {
 			clearTimeout(timer);
@@ -744,7 +744,7 @@ export class GeminiLiveTransport implements LLMTransport {
 		// If Gemini resumes the previous Live session, server-side context is already
 		// present. Only replay for a fresh session that has no resumption handle.
 		if (!resumingSession && state?.conversationHistory?.length) {
-			this.replayHistory(state.conversationHistory);
+			this.#replayHistory(state.conversationHistory);
 		}
 	}
 
@@ -792,8 +792,11 @@ export class GeminiLiveTransport implements LLMTransport {
 		}
 	}
 
-	/** Convert ReplayItem[] to Gemini Content format and send as client content. */
-	private replayHistory(items: ReplayItem[]): void {
+	/** Convert ReplayItem[] to Gemini Content format and send as client content.
+	 *  ES-private (`#`) so the optional public `LLMTransport.replayHistory?` interface member does
+	 *  not collide; reconnect/transfer recovery calls this directly (unguarded, may run per session).
+	 *  A public initial-connect wrapper is deferred (see design-composer-resume-history.md). */
+	#replayHistory(items: ReplayItem[]): void {
 		if (!this.session || items.length === 0) return;
 		const turns: Array<{ role: string; parts: Array<Record<string, unknown>> }> = [];
 

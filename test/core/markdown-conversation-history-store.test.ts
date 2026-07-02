@@ -386,3 +386,34 @@ describe('MarkdownConversationHistoryStore — tool result and assistant after p
 		expect(md.indexOf('<details>')).toBeLessThan(md.indexOf('Got it.'));
 	});
 });
+
+describe('MarkdownConversationHistoryStore — ensureSession (E3)', () => {
+	it('appends after ensureSession across a fresh process (does not wipe the file)', async () => {
+		// First "process": create + append one message.
+		const s1 = new MarkdownConversationHistoryStore({ baseDir });
+		await s1.createSession(baseRecord);
+		await s1.addItems('sess_42', [
+			{ role: 'user', content: 'first message', timestamp: TS_USER_1 },
+		]);
+
+		// Second "process": a brand-new store instance has empty in-memory state, so a bare
+		// addItems would drop. ensureSession re-initializes state non-destructively, then append works.
+		const s2 = new MarkdownConversationHistoryStore({ baseDir });
+		const returned = await s2.ensureSession(baseRecord);
+		expect(returned.id).toBe('sess_42');
+		await s2.addItems('sess_42', [
+			{ role: 'user', content: 'second message', timestamp: TS_ASSISTANT_1 },
+		]);
+
+		const md = await readFile(join(baseDir, 'sess_42.md'), 'utf-8');
+		expect(md).toContain('first message'); // original not wiped
+		expect(md).toContain('second message'); // appended after a fresh-process ensureSession
+		expect(md.indexOf('first message')).toBeLessThan(md.indexOf('second message'));
+	});
+
+	it('reactivateSession is a no-op that does not throw', async () => {
+		const s = new MarkdownConversationHistoryStore({ baseDir });
+		await s.createSession(baseRecord);
+		await expect(s.reactivateSession('sess_42')).resolves.toBeUndefined();
+	});
+});

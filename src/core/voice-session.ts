@@ -34,7 +34,8 @@ import {
 	DEFAULT_CLIENT_MEDIA_PROFILE,
 	describeClientTransport,
 } from '../types/client-media.js';
-import type { ConversationHistoryStore } from '../types/history.js';
+import type { ConversationItem } from '../types/conversation.js';
+import type { ConversationHistoryStore, SessionAnalytics } from '../types/history.js';
 import type { FrameworkHooks } from '../types/hooks.js';
 import type { ProcessedKnowledgeBase } from '../types/knowledge-base.js';
 import type { MemoryStore } from '../types/memory.js';
@@ -210,6 +211,8 @@ export interface VoiceSessionConfig {
 	subagentConfigs?: Record<string, SubagentConfig>;
 	/** Lifecycle hooks for observability. */
 	hooks?: FrameworkHooks;
+	/** Optional diagnostic logger. Defaults to console.log. */
+	log?: (message: string) => void;
 	/**
 	 * Injectable time source (milliseconds) for all metric/latency duration math.
 	 * Defaults to `Date.now`. Shared with `ClientVadDetector` so session-side and
@@ -340,6 +343,21 @@ export interface VoiceSessionConfig {
 	conversationHistoryStores?: ConversationHistoryStore[];
 	/** Application metadata persisted alongside the session record (e.g. channel, surface, callSid). */
 	sessionMetadata?: Record<string, unknown>;
+	/** Resume: prior conversation turns to load into `ConversationContext` at `start()` and replay
+	 *  into the transport's model. Supplied by the host (which owns fetch + authorization); the
+	 *  full timeline for `attach`, or any subset for `copy`. See `historyResumeMode`. */
+	initialHistory?: ConversationItem[];
+	/** Resume persistence policy (default `'copy'`):
+	 *  - `'copy'`: prior items are re-flushed into THIS session's record (checkpoint kept at 0);
+	 *    the writer uses `createSession` (host typically supplies a fresh `sessionId`).
+	 *  - `'attach'`: prior items are treated as already persisted (checkpoint advanced, not
+	 *    re-flushed); the writer uses `ensureSession` + `reactivateSession` and appends only new
+	 *    turns (host typically reuses the prior `sessionId`). Requires a store supporting
+	 *    `ensureSession`. */
+	historyResumeMode?: 'copy' | 'attach';
+	/** Resume: prior aggregate analytics (the source `SessionRecord.analytics`) so the close report
+	 *  reflects the full record (incl. `totalTokens`, which items cannot reconstruct). Optional. */
+	initialAnalytics?: SessionAnalytics;
 	/**
 	 * Optional process-scoped post-session pipeline. When provided, the session
 	 * registers a snapshot builder and `closeWithReason` dispatches the pipeline
@@ -355,6 +373,12 @@ export interface VoiceSessionConfig {
 	 *  When omitted, LLM-native audio generation is used (default).
 	 *  Requires orchestrationMode: 'actor'. Ignored in legacy mode. */
 	ttsProvider?: TTSProvider;
+	/** Response modality. Default `'audio'` (LLM-native speech). Set to `'text'` to run the
+	 *  model in TEXT mode WITHOUT a TTS provider — the assistant's text is surfaced via the
+	 *  normal transcript events and no audio is produced. Used by text-only consumers (e.g.
+	 *  the Agent Composer CLI). When `ttsProvider` is set, text mode is implied regardless of
+	 *  this field. Requires a transport advertising `textResponseModality`. */
+	responseModality?: 'audio' | 'text';
 	/** Pre-constructed LLM transport. If provided, apiKey/geminiModel/speechConfig/compressionConfig are ignored. */
 	transport?: LLMTransport;
 	/** Orchestration engine for tool routing/subagent lifecycle (default: legacy). */
@@ -423,6 +447,10 @@ export class VoiceSession {
 	readonly sessionManager: SessionManager;
 	readonly conversationContext: ConversationContext;
 	readonly hooks: HooksManager;
+	/** Retained so `start()`/`close()` can await its resume start-phase and drain (see E5). */
+	private historyWriter?: ConversationHistoryWriter;
+	/** Resume: guards the one-time initial-connect model prefill (see handleSetupComplete). */
+	private initialHistoryReplayed = false;
 	private transport: LLMTransport;
 	/** Assigned in `buildClientChannelAndGating`, called unconditionally from the constructor. */
 	private clientTransport!: IClientChannel;
@@ -547,6 +575,14 @@ export class VoiceSession {
 	 *  Present only when a `ttsProvider` is configured in actor mode; a session
 	 *  is TTS *or* native, never both. See `tts-pipeline.ts`. */
 	private ttsPipeline?: TtsPipeline;
+	/** True when the model runs in TEXT mode (either via TTS, or the no-TTS text path). */
+	private get isTextMode(): boolean {
+		return this.ttsPipeline != null || this.config.responseModality === 'text';
+	}
+	/** True for the no-TTS text path: `responseModality: 'text'` with no TTS provider. */
+	private get isNoTtsTextMode(): boolean {
+		return this.config.responseModality === 'text' && this.ttsPipeline == null;
+	}
 	/** Playback-completion arbiter — owns the source-neutral playback-defer flag
 	 *  and the completePlayback / finishOrDeferForVad routing. Constructed after
 	 *  the gates. See `playback-completion-arbiter.ts`. */
@@ -804,7 +840,7 @@ export class VoiceSession {
 							stores: historyStores,
 							log: (msg) => this.log(msg),
 						});
-			new ConversationHistoryWriter(
+			this.historyWriter = new ConversationHistoryWriter(
 				config.sessionId,
 				config.userId,
 				config.initialAgent,
@@ -812,6 +848,12 @@ export class VoiceSession {
 				this.conversationContext,
 				resolvedStore,
 				config.sessionMetadata,
+				// Resume options (E5): mode + prior aggregates drive attach vs copy persistence.
+				{
+					historyResumeMode: config.historyResumeMode,
+					initialAnalytics: config.initialAnalytics,
+					initialItemCount: config.initialHistory?.length ?? 0,
+				},
 			);
 		}
 
@@ -1366,7 +1408,7 @@ export class VoiceSession {
 		);
 		this.agentRouter.registerAgents(config.agents);
 		this.agentRouter.setInitialAgent(config.initialAgent);
-		if (this.ttsPipeline) {
+		if (this.isTextMode) {
 			this.agentRouter.responseModality = 'text';
 		}
 	}
@@ -1556,6 +1598,18 @@ export class VoiceSession {
 	 *  (`wireTtsProvider` / the native gate's `installBargeIn`). */
 	private wireTransportCallbacks(): void {
 		this.transport.onAudioOutput = (data) => this.handleAudioOutput(data);
+		// No-TTS text mode: the model emits text (not audio). Surface each chunk via the
+		// normal transcript path (which the client-sender already emits as
+		// `{ type:'transcript', role:'assistant', partial }`); turn finalization still flows
+		// through the transport's `onTurnComplete` wired below. (TTS mode wires these in
+		// TtsPipeline.wire() instead, so this branch only runs when there is no TTS.)
+		if (this.isNoTtsTextMode) {
+			this.transport.onTextOutput = (text) => {
+				this.turns.ensureCurrent();
+				this.transcriptManager.handleOutput(text);
+			};
+			this.transport.onTextDone = () => {};
+		}
 		// Raw latency facts (§11) from the provider's server VAD. onSpeechStarted
 		// is chain-preserved by the later TTS/native-gate installers, so this
 		// publisher survives their wiring. Provider stamps are receipt time
@@ -1653,6 +1707,10 @@ export class VoiceSession {
 				return;
 			}
 			this.reconnector.disarmResponseWatchdog();
+			// No-TTS text mode: the assistant text already arrives via `onTextOutput`
+			// (`part.text`). Gemini also echoes it as `outputTranscription`, so feeding it
+			// here too would double every chunk. Skip it (onTextOutput is the source).
+			if (this.isNoTtsTextMode) return;
 			this.transcriptManager.handleOutput(text);
 		};
 		this.transport.onSessionReady = (sessionId) => this.handleSetupComplete(sessionId);
@@ -1842,6 +1900,22 @@ export class VoiceSession {
 				);
 			}
 		}
+		// No-TTS text mode: same capability requirement, without a TTS provider.
+		if (this.isNoTtsTextMode && !this.transport.capabilities.textResponseModality) {
+			throw new Error(
+				'responseModality: "text" requires a transport that supports textResponseModality',
+			);
+		}
+		// Resume (§2): populate the conversation timeline BEFORE connect/persistence so
+		// ConversationContext-derived features (summary, subagent snapshots, analytics) are
+		// history-aware. `attach` marks the loaded items as already-persisted (checkpoint advanced,
+		// not re-flushed mid-session); `copy` leaves the checkpoint so the writer re-persists them.
+		const hasResume = (this.config.initialHistory?.length ?? 0) > 0;
+		if (hasResume && this.config.initialHistory) {
+			this.conversationContext.loadItems(this.config.initialHistory, {
+				alreadyPersisted: this.config.historyResumeMode === 'attach',
+			});
+		}
 		await this.sttProvider?.start();
 		await this.ttsPipeline?.provider.start();
 		// Phase 3: when constructed with initial transcriptionMode='transcription',
@@ -1859,7 +1933,7 @@ export class VoiceSession {
 		this.log('Connecting to LLM transport...');
 		this.sessionManager.transitionTo('CONNECTING');
 		if (this.config.transport) {
-			if (this.ttsPipeline) {
+			if (this.isTextMode) {
 				await this.transport.updateSession({ responseModality: 'text' });
 			}
 			await this.transport.connect();
@@ -1872,9 +1946,17 @@ export class VoiceSession {
 							realtimeInputConfig: this.resolvedRealtimeInputConfig as Record<string, unknown>,
 						}
 					: {}),
-				...(this.ttsPipeline ? { responseModality: 'text' as const } : {}),
+				...(this.isTextMode ? { responseModality: 'text' as const } : {}),
 			});
 		}
+		// (Resume model prefill happens in handleSetupComplete, before the ACTIVE transition /
+		// greeting — see the transport.replayHistory?.() call there.)
+		//
+		// Ordered persistence (E5): the ACTIVE transition above published `session.start`
+		// synchronously, so the writer has enqueued its start-phase (copy: createSession; attach:
+		// ensureSession + reactivateSession). Await it so a resumed `attach` record reads `active`
+		// (terminal fields cleared) by the time `start()` resolves.
+		await this.historyWriter?.drain();
 		this.log('LLM transport connected and setup complete');
 	}
 
@@ -2072,6 +2154,11 @@ export class VoiceSession {
 		);
 		await this.safeTeardown('transport.disconnect', () => this.transport.disconnect());
 		await this.safeTeardown('clientTransport.stop', () => this.clientTransport.stop());
+
+		// Ordered persistence (E5): the CLOSED transition published `session.close` synchronously,
+		// enqueueing the final flush + saveSessionReport. Await the writer's queue to drain before
+		// tearing down the event bus, so the report always lands (it is otherwise fire-and-forget).
+		await this.historyWriter?.drain();
 
 		this.eventBus.clear();
 	}
@@ -2376,6 +2463,22 @@ export class VoiceSession {
 		// practice runs once per VoiceSession lifecycle.
 		// See dev_docs/framework/design-greeting-interrupt-grace.md §5.
 		this.finalizeGreetingInterruptGrace();
+		// Resume (§2): prefill the model with the loaded history on the INITIAL connect, BEFORE the
+		// ACTIVE transition and any greeting/first send — so the first turn always sees the prior
+		// conversation. `state === 'CONNECTING'` scopes this to the initial connect (not
+		// transfer/reconnect, where transports self-replay from ReconnectState); the flag + the
+		// transport's own guard keep it to exactly one seeding. `replayHistory?.` is a no-op on a
+		// transport that does not implement the optional method.
+		if (
+			this.sessionManager.state === 'CONNECTING' &&
+			!this.initialHistoryReplayed &&
+			(this.config.initialHistory?.length ?? 0) > 0
+		) {
+			this.initialHistoryReplayed = true;
+			this.transport.replayHistory?.(
+				this.conversationContext.toReplayContent({ log: (m) => this.log(m) }),
+			);
+		}
 		if (this.sessionManager.state === 'CONNECTING') {
 			this.sessionManager.transitionTo('ACTIVE');
 		}
@@ -2959,7 +3062,9 @@ export class VoiceSession {
 	/** Compact diagnostic log: HH:MM:SS.mmm [VoiceSession] message */
 	private log(msg: string): void {
 		const t = new Date().toISOString().slice(11, 23);
-		console.log(`${t} [VoiceSession] ${msg}`);
+		const line = `${t} [VoiceSession] ${msg}`;
+		if (this.config.log) this.config.log(line);
+		else console.log(line);
 	}
 
 	// ───────────────────────────────────────────────────────────────────────
