@@ -1,0 +1,19 @@
+{
+  "name": "@bodhi/web-voice-client",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Browser voice client for bodhi voice sessions: PCM capture/playback, mic gating, barge-in flush, playback-state handshake, typed protocol dispatch. Consumed as TypeScript source by each app's bundler.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@bodhi/client-protocol": "link:../client-protocol"
+  }
+}

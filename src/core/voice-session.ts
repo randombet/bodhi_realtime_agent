@@ -34,6 +34,7 @@ import {
 	DEFAULT_CLIENT_MEDIA_PROFILE,
 	describeClientTransport,
 } from '../types/client-media.js';
+import { MIN_PLAYBACK_RATE } from '../types/client-protocol.js';
 import type { AnyServerToClientMessage } from '../types/client-protocol.js';
 import type { ConversationItem } from '../types/conversation.js';
 import type { ConversationHistoryStore, SessionAnalytics } from '../types/history.js';
@@ -651,7 +652,7 @@ export class VoiceSession {
 	 *  synthesized (1.0×) audio duration by this so slowed playback cannot
 	 *  pre-empt a healthy client's `playback.ended`. Must track the web
 	 *  client's rate map (`slow | normal | fast → 0.85 | 1.0 | 1.2`). */
-	private static readonly MIN_PLAYBACK_RATE = 0.85;
+	private static readonly MIN_PLAYBACK_RATE = MIN_PLAYBACK_RATE;
 
 	constructor(config: VoiceSessionConfig) {
 		this.config = config;
@@ -2944,9 +2945,13 @@ export class VoiceSession {
 			});
 		}
 
-		this.behaviorManager?.sendCatalog();
 		if (this.sessionManager.isActive) {
 			this._memoryReadyPromise.then(() => {
+				// Catalog AFTER memory restore (restorePreset updates state without
+				// notifying) and BEFORE the greeting triggers generation — a
+				// restored pacing preset must reach the client before the first
+				// assistant audio. See the reuse plan's B5 (catalog-after-restore).
+				this.behaviorManager?.sendCatalog();
 				// Only mark the origin when a greeting will actually send — a stale
 				// pending origin would otherwise taint the next real response.
 				if (this.agentRouter.activeAgent.greeting) {
@@ -2954,6 +2959,13 @@ export class VoiceSession {
 				}
 				this.greeting.sendGreeting();
 			});
+		} else {
+			// Client connected before the session went ACTIVE (or without a
+			// manager): still defer the catalog to memoryReady so restored
+			// presets are reflected. handleSetupComplete's greeting chain
+			// registers on the same promise LATER, so catalog-before-greeting
+			// ordering holds on this path too (promise callbacks run FIFO).
+			this._memoryReadyPromise.then(() => this.behaviorManager?.sendCatalog());
 		}
 	}
 
