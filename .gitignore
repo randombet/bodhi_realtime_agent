@@ -32,3 +32,4 @@ app/lib/spatialreal/bridge/.venv/
 examples/spatialreal_avatar_websdk/bridge/.venv/
 **/spatialreal/**/__pycache__/
 examples/spatialreal_avatar_websdk/**/__pycache__/
+clients/*/dist/

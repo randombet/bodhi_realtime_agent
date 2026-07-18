@@ -204,26 +204,11 @@ export type ReplayItem =
 	| { type: 'transfer'; fromAgent: string; toAgent: string };
 
 /** Audio format specification advertised by a transport.
- *  Input and output rates / encodings may differ — e.g. Gemini: 16 kHz in /
- *  24 kHz out (both PCM); OpenAI telephony may mix `audio/pcmu` input with
- *  `audio/pcm` output for some bridges. */
-export interface AudioFormatSpec {
-	inputSampleRate: number;
-	outputSampleRate: number;
-	channels: number;
-	/** Bits per sample, INPUT side. Mirror via `outputBitDepth` for the
-	 *  output side when input and output differ. Single-sided value retained
-	 *  for backwards compat with consumers that don't care about the split. */
-	bitDepth: number;
-	/** Wire encoding, INPUT side. `'pcm'` is signed 16-bit linear; `'pcmu'`
-	 *  is G.711 μ-law for telephony bridges. A-law (`'pcma'`) is future work. */
-	encoding: 'pcm' | 'pcmu';
-	/** OUTPUT side bit depth. Defaults to `bitDepth` if omitted (single-sided).
-	 *  Set explicitly when input and output encodings differ. */
-	outputBitDepth?: number;
-	/** OUTPUT side encoding. Defaults to `encoding` if omitted (single-sided). */
-	outputEncoding?: 'pcm' | 'pcmu';
-}
+ *  Canonically owned by `@bodhi/client-protocol` (it rides in the
+ *  `session.config` wire frame); re-exported here so transport-side
+ *  importers are unchanged. */
+export type { AudioFormatSpec } from '@bodhi/client-protocol';
+import type { AudioFormatSpec } from '@bodhi/client-protocol';
 
 /** Bytes per audio sample for a given encoding. PCM16 is 2; G.711 μ-law is 1. */
 export function bytesPerSample(encoding: AudioFormatSpec['encoding']): number {
