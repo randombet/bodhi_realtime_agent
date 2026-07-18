@@ -28,8 +28,9 @@ export interface AgentContext {
 	/** Stop buffering client audio and drain buffered chunks through the handler.
 	 *  Used by external audio agents (e.g., Twilio) to flush audio accumulated during the dial gap. */
 	stopBufferingAndDrain(handler: (chunk: Buffer) => void): void;
-	/** Send a JSON message to the connected client. */
-	sendJsonToClient(message: Record<string, unknown>): void;
+	/** Send a JSON message to the connected client (core frames + registered
+	 *  `ClientProtocolServerExtensions`; unregistered frames fail to compile). */
+	sendJsonToClient(message: import('./client-protocol.js').AnyServerToClientMessage): void;
 	/** Send raw PCM audio to the connected client as a binary frame. */
 	sendAudioToClient?(data: Buffer): void;
 	/** Register/unregister an external audio handler for client mic frames. */

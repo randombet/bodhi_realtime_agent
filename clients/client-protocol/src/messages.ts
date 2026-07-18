@@ -69,6 +69,12 @@ export interface TranscriptMessage {
 	text: string;
 	/** True while the utterance/turn is still accumulating. */
 	partial?: boolean;
+	/** True when this frame replaces earlier partial text with a provider
+	 *  correction (client should overwrite, not append). */
+	corrected?: boolean;
+	/** True when this text was recovered after a reconnect (replayed from
+	 *  retained context rather than transcribed live). */
+	recovered?: boolean;
 }
 
 export interface TurnEndMessage {
@@ -127,9 +133,44 @@ export interface BehaviorChangedMessage {
 	preset: string;
 }
 
+/** Interactive subagent asks the user a question (actor mode). */
+export interface SubagentQuestionMessage {
+	type: 'subagent.question';
+	toolCallId: string;
+	workflowId: string;
+	question?: string;
+	requestId?: string;
+}
+
+/** Terminal notification for a background subagent workflow (actor mode).
+ *  NOTE: the emitter currently sends `failure` when a completion envelope
+ *  exists but `failed` on the fallback path — both appear on the wire today;
+ *  the union is honest about that (repairing the emit is a runtime protocol
+ *  change tracked in the audit table, not silently "fixed" here). */
+export interface SubagentCompletionMessage {
+	type: 'subagent.completion';
+	toolCallId: string;
+	status: 'success' | 'failure' | 'failed' | 'cancelled';
+	summaryText?: string;
+	uiPayload?: Record<string, unknown>;
+	artifacts?: unknown[];
+	metadata?: unknown;
+}
+
+/** Progress update from a background subagent workflow (actor mode). */
+export interface SubagentProgressMessage {
+	type: 'subagent.progress';
+	toolCallId: string;
+	workflowId: string;
+	text: string;
+}
+
 export type CoreServerToClientMessage =
 	| SessionConfigMessage
 	| SessionReadyMessage
+	| SubagentQuestionMessage
+	| SubagentCompletionMessage
+	| SubagentProgressMessage
 	| TranscriptMessage
 	| TurnEndMessage
 	| TurnInterruptedMessage

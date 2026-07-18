@@ -1,4 +1,5 @@
 import { type WebSocket, WebSocketServer } from 'ws';
+import type { AnyServerToClientMessage } from '../types/client-protocol.js';
 import { AudioBuffer } from './audio-buffer.js';
 
 /** Callbacks fired by ClientTransport when client events occur. */
@@ -116,7 +117,7 @@ export class ClientTransport {
 	}
 
 	/** Send a JSON message to the client as a text frame. */
-	sendJsonToClient(message: Record<string, unknown>): void {
+	sendJsonToClient(message: AnyServerToClientMessage): void {
 		if (this.client?.readyState === 1) {
 			this.client.send(JSON.stringify(message));
 		}
@@ -125,7 +126,7 @@ export class ClientTransport {
 	/** Playback-state protocol: deliver JSON in order after the turn's audio.
 	 *  Binary and text frames go out on the one socket synchronously in call
 	 *  order, so this is `sendJsonToClient` issued after the audio sends. */
-	sendJsonAfterAudio(message: Record<string, unknown>): void {
+	sendJsonAfterAudio(message: AnyServerToClientMessage): void {
 		this.sendJsonToClient(message);
 	}
 

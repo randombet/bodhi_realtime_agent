@@ -34,6 +34,7 @@ import {
 	DEFAULT_CLIENT_MEDIA_PROFILE,
 	describeClientTransport,
 } from '../types/client-media.js';
+import type { AnyServerToClientMessage } from '../types/client-protocol.js';
 import type { ConversationItem } from '../types/conversation.js';
 import type { ConversationHistoryStore, SessionAnalytics } from '../types/history.js';
 import type { FrameworkHooks } from '../types/hooks.js';
@@ -2247,7 +2248,7 @@ export class VoiceSession {
 					handler(chunk);
 				}
 			},
-			sendJsonToClient: (message: Record<string, unknown>) => {
+			sendJsonToClient: (message: AnyServerToClientMessage) => {
 				this.clientTransport.sendJsonToClient(message);
 			},
 			sendAudioToClient: (data: Buffer) => {
@@ -3114,7 +3115,7 @@ export class VoiceSession {
 	 *  Whisper transcript fragments to a web UI during transcription mode.
 	 *
 	 *  Safe to call any time after `start()`; no-op when no client is connected. */
-	sendJsonToClient(message: Record<string, unknown>): void {
+	sendJsonToClient(message: AnyServerToClientMessage): void {
 		this.clientTransport.sendJsonToClient(message);
 	}
 

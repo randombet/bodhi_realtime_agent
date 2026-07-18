@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ClientGatewayActor } from '../../src/runtime/actors/client-gateway-actor.js';
 import { createEnvelope } from '../../src/runtime/envelope.js';
 import type { SubagentCompletion } from '../../src/runtime/subagent-completion.js';
+import type { AnyServerToClientMessage } from '../../src/types/client-protocol.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -19,8 +20,8 @@ function setup() {
 		messages.push({ type, payload, to });
 	};
 
-	const clientMessages: Record<string, unknown>[] = [];
-	const clientSend = vi.fn((msg: Record<string, unknown>) => {
+	const clientMessages: AnyServerToClientMessage[] = [];
+	const clientSend = vi.fn((msg: AnyServerToClientMessage) => {
 		clientMessages.push(msg);
 	});
 
@@ -37,7 +38,7 @@ describe('ClientGatewayActor', () => {
 	let actor: ClientGatewayActor;
 	let messages: SentMessage[];
 	let clientSend: ReturnType<typeof vi.fn>;
-	let clientMessages: Record<string, unknown>[];
+	let clientMessages: AnyServerToClientMessage[];
 
 	beforeEach(() => {
 		const s = setup();

@@ -34,7 +34,7 @@ const SKIP = new Set(['node_modules', 'dist', '.next', '.worktrees', 'data', 'pu
 const EXT = /\.(ts|tsx|mts)$/;
 
 const SEND_API =
-	/\b(sendJsonToClient|sendJsonAfterAudio|sendJson|sendToClient|emitServerJson|broadcast)(?:\?\.)?\s*\(|\bws\.send\s*\(\s*JSON\.stringify|\bfeedJsonFromClient(?:\?\.)?\s*\(/;
+	/\b(sendJsonToClient|sendJsonAfterAudio|sendJson|sendToClient|emitServerJson|broadcast|clientSend)(?:\?\.)?\s*\(|\bws\.send\s*\(\s*JSON\.stringify|\bfeedJsonFromClient(?:\?\.)?\s*\(/;
 const TYPE_LITERAL = /\btype:\s*['"]([A-Za-z0-9_.-]+)['"]/g;
 const DISPATCH = /\.type\s*===\s*['"]([A-Za-z0-9_.-]+)['"]/g;
 const CASE_ARM = /\bcase\s+['"]([A-Za-z0-9_.-]+)['"]\s*:/g;

@@ -110,12 +110,18 @@ describe('ClientTransport', () => {
 			if (!isBinary) received.push(data.toString());
 		});
 
-		transport.sendJsonToClient({ type: 'gui.update', payload: { foo: 'bar' } });
+		transport.sendJsonToClient({
+			type: 'gui.update',
+			payload: { sessionId: 's1', data: { foo: 'bar' } },
+		});
 
 		await new Promise((r) => setTimeout(r, 50));
 
 		expect(received).toHaveLength(1);
-		expect(JSON.parse(received[0])).toEqual({ type: 'gui.update', payload: { foo: 'bar' } });
+		expect(JSON.parse(received[0])).toEqual({
+			type: 'gui.update',
+			payload: { sessionId: 's1', data: { foo: 'bar' } },
+		});
 
 		ws.close();
 		await new Promise<void>((r) => ws.on('close', r));
