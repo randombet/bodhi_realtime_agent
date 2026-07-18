@@ -9,6 +9,7 @@
 import type { IncomingMessage } from 'node:http';
 import type { Server as HttpServer } from 'node:http';
 import { type WebSocket, WebSocketServer } from 'ws';
+import type { AnyServerToClientMessage } from '../types/client-protocol.js';
 
 export interface ConnectionContext {
 	webSocketId: string;
@@ -181,7 +182,7 @@ export class MultiClientTransport {
 	/**
 	 * Send a JSON message to a specific WebSocket connection.
 	 */
-	sendJsonToClient(ws: WebSocket, message: Record<string, unknown>): void {
+	sendJsonToClient(ws: WebSocket, message: AnyServerToClientMessage): void {
 		if (ws.readyState === 1) {
 			// WebSocket.OPEN
 			ws.send(JSON.stringify(message));
@@ -191,7 +192,7 @@ export class MultiClientTransport {
 	/**
 	 * Broadcast a message to all connected clients.
 	 */
-	broadcast(message: Record<string, unknown>): void {
+	broadcast(message: AnyServerToClientMessage): void {
 		const json = JSON.stringify(message);
 		for (const [ws] of this.connections.entries()) {
 			if (ws.readyState === 1) {

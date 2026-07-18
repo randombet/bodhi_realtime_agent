@@ -69,6 +69,7 @@
     "lint:composer": "biome check composer/",
     "typecheck": "pnpm ensure:client-protocol && tsc --noEmit",
     "typecheck:tests": "pnpm ensure:client-protocol && tsc -p tsconfig.test.json",
+    "typecheck:app": "pnpm ensure:client-protocol && tsc -p tsconfig.app.json",
     "typecheck:composer": "tsc -p tsconfig.composer.json",
     "typecheck:examples": "pnpm ensure:client-protocol && tsc -p tsconfig.examples.json",
     "composer:cli": "tsx composer/src/cli.ts",
