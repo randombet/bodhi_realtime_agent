@@ -154,6 +154,35 @@ If the deployment uses another LLM provider, the first JSON message **`session.c
 
 ### 4.3 JSON (text frames)
 
+> **Source of truth:** this section is checked in CI against the typed
+> hosted-mobile profile (`app/lib/client/hosted-mobile-profile.ts`, composed
+> from `@bodhi/client-protocol`). The machine-readable manifest below is
+> diffed against the profile's message and field lists by
+> `test/app/hosted-mobile-manifest.test.ts` — **a profile change must update
+> this section in the same PR** (a core-protocol change first forces a hosted
+> disposition in the profile's exhaustive map).
+
+<!-- hosted-mobile-manifest:server
+session.config type,audioFormat,clientMedia,clientSignalSource,clientAudioSource
+session.ready type,userId,sessionId,agentProfile,clientMedia,clientSignalSource,clientAudioSource
+session.error type,code,message
+transcript type,role,text,partial,corrected,recovered
+turn.end type,turnId
+turn.interrupted type
+audio.done type,playbackId
+behavior.catalog type,categories
+behavior.changed type,key,preset
+gui.update type,payload
+gui.notification type,payload
+-->
+<!-- hosted-mobile-manifest:client
+text_input type,text
+playback.ended type,playbackId
+behavior.set type,key,preset
+ui.response type,payload
+file_upload type,data
+-->
+
 Each **text** frame is **one** UTF-8 JSON object.
 
 **Server → client (examples):**
@@ -163,7 +192,9 @@ Each **text** frame is **one** UTF-8 JSON object.
 - `session.error` — `code`, `message`.
 - `transcript` — user or assistant text; may include `"partial": true` while streaming.
 - `audio.done` — end of a turn's audio, when the optional playback-state protocol is enabled (see §4.4).
-- Additional types may include behavior catalogs, GUI updates, and turn/tool-related events aligned with the web client protocol.
+- `turn.end` / `turn.interrupted` — turn lifecycle (interruption ends the current audio).
+- `behavior.catalog` / `behavior.changed` — tunable behavior presets (e.g. speech pacing).
+- `gui.update` / `gui.notification` — structured GUI payloads aligned with the web client protocol.
 
 **Client → server (examples):**
 
