@@ -54,7 +54,7 @@
     "start": "pnpm ensure:client-protocol && VOICE_TOOLS_PORT=${VOICE_TOOLS_PORT:-9910} tsx app/server/index.ts",
     "build": "pnpm ensure:client-protocol && tsup",
     "build:protocol": "tsc -p clients/client-protocol/tsconfig.json",
-    "ensure:client-protocol": "tsc -p clients/client-protocol/tsconfig.json",
+    "ensure:client-protocol": "tsc -p clients/client-protocol/tsconfig.json && tsc -p clients/web-voice/tsconfig.json",
     "web-client:build": "pnpm ensure:client-protocol && vite build --config app/web-client/vite.config.ts",
     "web-client:dev": "CLIENT_PORT=${CLIENT_PORT:-8090} vite --config app/web-client/vite.config.ts",
     "web-client:typecheck": "pnpm ensure:client-protocol && tsc --noEmit -p app/web-client/tsconfig.json",
@@ -76,7 +76,7 @@
     "docs:dev": "vitepress dev docs",
     "docs:build": "pnpm ensure:client-protocol && typedoc && vitepress build docs",
     "docs:preview": "vitepress preview docs",
-    "prepare": "git config core.hooksPath .githooks && tsc -p clients/client-protocol/tsconfig.json"
+    "prepare": "git config core.hooksPath .githooks && tsc -p clients/client-protocol/tsconfig.json && tsc -p clients/web-voice/tsconfig.json"
   },
   "engines": {
     "node": ">=22.0.0"
