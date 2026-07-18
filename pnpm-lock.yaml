@@ -26,6 +26,9 @@ importers:
       '@bodhi/client-protocol':
         specifier: link:clients/client-protocol
         version: link:clients/client-protocol
+      '@bodhi/web-voice-client':
+        specifier: link:clients/web-voice
+        version: link:clients/web-voice
       '@emotion/react':
         specifier: ^11.14.0
         version: 11.14.0(@types/react@19.2.14)(react@19.2.5)

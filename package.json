@@ -85,6 +85,7 @@
   "dependencies": {
     "@ai-sdk/anthropic": "^1.2.12",
     "@bodhi/client-protocol": "link:clients/client-protocol",
+    "@bodhi/web-voice-client": "link:clients/web-voice",
     "@ai-sdk/google": "^1.2.0",
     "@ai-sdk/openai": "^1.3.24",
     "@anam-ai/js-sdk": "^4.15.0",
