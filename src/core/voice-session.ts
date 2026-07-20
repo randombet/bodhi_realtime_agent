@@ -1817,12 +1817,16 @@ export class VoiceSession {
 	}
 
 	/**
-	 * Internal helper for actor-mode SYSTEM notifications. Centralizes the
+	 * Actor-mode SYSTEM notifications. Centralizes the
 	 * `runtime.tell('notification.publish', ...)` call shape used by the
 	 * background-tool completion path. Caller passes only the body text;
 	 * TransportActor wraps it as `[SYSTEM]: text` at the wire-out boundary.
+	 *
+	 * Public so integrations with out-of-band signals (e.g. the Sutando
+	 * adapter's offline-Mac notice — see examples/lib/sutando-tools.ts) can
+	 * bind their notify hooks to the same delivery path the runtime uses.
 	 */
-	private publishSystemNotification(text: string): void {
+	publishSystemNotification(text: string): void {
 		// Actor-only callers (the background-tool completion path, guarded by the
 		// actor-construction block). Routed through the sink for uniformity; the
 		// legacy sink is never reached from here.
