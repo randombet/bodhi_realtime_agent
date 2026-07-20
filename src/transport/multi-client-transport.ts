@@ -91,10 +91,16 @@ export interface GuardedLifecycle<TAppContext = unknown> {
 	 * Build the app session for a validated connection. Runs before any
 	 * inbound frame is dispatched. Structured rejection closes with the given
 	 * code (e.g. capacity 4409 vs failure 4500); a thrown error maps to 4500.
-	 * Cancellation: `context` is live — check `signal`-free invariants via the
-	 * teardown that follows if the client vanished mid-setup.
+	 * `signal` aborts when the client disconnects or the server stops. Setup
+	 * implementations must stop committing app state after abort and release
+	 * partially-created resources before resolving; the transport then invokes
+	 * `teardown` exactly once for the terminal cause.
 	 */
-	setup(ws: WebSocket, context: ConnectionContext<TAppContext>): Promise<SetupResult>;
+	setup(
+		ws: WebSocket,
+		context: ConnectionContext<TAppContext>,
+		signal: AbortSignal,
+	): Promise<SetupResult>;
 	/**
 	 * Release a validated-but-never-setup context (client closed or server
 	 * stopped between claim and setup). Exactly once; awaited by `stop()`.
@@ -139,8 +145,10 @@ export class MultiClientTransport<TAppContext = unknown> {
 	private disconnectNotified = new WeakSet<WebSocket>();
 	/** Guarded exactly-once guard for teardown. */
 	private tornDown = new WeakSet<WebSocket>();
+	/** Entire guarded pre-live pipelines (validation + setup). */
 	private pendingValidations = new Set<Promise<void>>();
 	private pendingWork = new Set<Promise<void>>();
+	/** Lifecycle cancellation remains armed until setup has finished. */
 	private validationAborts = new Set<AbortController>();
 	private readonly log: (message: string, level?: 'info' | 'error') => void;
 
@@ -378,6 +386,17 @@ export class MultiClientTransport<TAppContext = unknown> {
 	 * Handle a new WebSocket connection.
 	 */
 	private handleConnection(ws: WebSocket, req: IncomingMessage): void {
+		// A standalone WebSocketServer can emit a connection that was already in
+		// the accept queue when stop() began. Do not start a lifecycle after the
+		// shutdown snapshots have been taken.
+		if (this.stopping) {
+			try {
+				ws.close(1001, 'server stopping');
+			} catch {
+				// The peer may already have disappeared.
+			}
+			return;
+		}
 		if (this.options.guarded) {
 			const work = this.handleGuardedConnection(ws, req, this.options.guarded).catch((error) => {
 				this.log(
@@ -426,19 +445,30 @@ export class MultiClientTransport<TAppContext = unknown> {
 		const abort = new AbortController();
 		this.validationAborts.add(abort);
 		let clientGone = false;
+		let preLiveCause: TeardownCause | null = null;
 		const preClose = () => {
 			clientGone = true;
+			preLiveCause ??= { kind: 'disconnect' };
 			abort.abort();
 		};
+		const preError = (error: Error) => {
+			clientGone = true;
+			preLiveCause ??= { kind: 'error', error };
+			abort.abort();
+		};
+		const detachPreLiveHandlers = () => {
+			ws.off('close', preClose);
+			ws.off('error', preError);
+		};
 		ws.once('close', preClose);
-		ws.once('error', preClose);
+		ws.once('error', preError);
 
 		let result: ValidateResult<TAppContext>;
 		try {
 			result = await guarded.validateUpgrade(req, abort.signal);
 		} catch (error) {
 			this.validationAborts.delete(abort);
-			ws.off('close', preClose);
+			detachPreLiveHandlers();
 			this.log(
 				`validateUpgrade threw: ${error instanceof Error ? error.message : String(error)}`,
 				'error',
@@ -446,18 +476,18 @@ export class MultiClientTransport<TAppContext = unknown> {
 			ws.close(4500, 'validation failed');
 			return;
 		}
-		this.validationAborts.delete(abort);
-
 		if (!result.ok) {
 			// Zero app callbacks for rejected validation.
-			ws.off('close', preClose);
+			this.validationAborts.delete(abort);
+			detachPreLiveHandlers();
 			ws.close(result.closeCode, result.reason);
 			return;
 		}
 
 		if (clientGone || this.stopping || ws.readyState !== 1) {
 			// Validated but can never enter setup — release what validation acquired.
-			ws.off('close', preClose);
+			this.validationAborts.delete(abort);
+			detachPreLiveHandlers();
 			const reason = clientGone ? 'client_closed' : 'stopping';
 			const disposal = Promise.resolve(
 				guarded.disposeValidatedContext?.(result.appContext, reason),
@@ -482,11 +512,11 @@ export class MultiClientTransport<TAppContext = unknown> {
 		context.appContext = result.appContext;
 		this.connections.set(ws, context);
 
-		// Setup phase: still no app dispatch; the pre-close listener stays armed
-		// so a mid-setup disconnect is observed.
+		// Setup phase: still no app dispatch; the close/error listener and the
+		// same cancellation signal remain armed until setup has settled.
 		let setupResult: SetupResult;
 		try {
-			setupResult = await guarded.setup(ws, context);
+			setupResult = await guarded.setup(ws, context, abort.signal);
 		} catch (error) {
 			setupResult = {
 				ok: false,
@@ -494,11 +524,15 @@ export class MultiClientTransport<TAppContext = unknown> {
 				reason: error instanceof Error ? error.message : 'setup failed',
 			};
 		}
-		ws.off('close', preClose);
-		ws.off('error', preClose);
+		this.validationAborts.delete(abort);
 
-		if (clientGone || this.stopping) {
-			this.teardownOnce(ws, context, clientGone ? { kind: 'disconnect' } : { kind: 'shutdown' });
+		if (clientGone || this.stopping || ws.readyState !== 1) {
+			detachPreLiveHandlers();
+			this.teardownOnce(
+				ws,
+				context,
+				this.stopping ? { kind: 'shutdown' } : (preLiveCause ?? { kind: 'disconnect' }),
+			);
 			try {
 				ws.close(1001, 'gone during setup');
 			} catch {
@@ -508,6 +542,7 @@ export class MultiClientTransport<TAppContext = unknown> {
 		}
 
 		if (!setupResult.ok) {
+			detachPreLiveHandlers();
 			ws.close(setupResult.closeCode, setupResult.reason);
 			this.teardownOnce(ws, context, {
 				kind: 'setup_rejected',
@@ -517,16 +552,31 @@ export class MultiClientTransport<TAppContext = unknown> {
 			return;
 		}
 
-		// Live: register dispatch + terminal handlers.
-		this.registerDispatch(ws, context);
-		ws.on('close', () => {
+		// Live handoff: install terminal handlers before removing the pre-live
+		// handlers. If close/error fires during the overlap, teardownOnce makes the
+		// duplicate observations harmless; if it fired just before the overlap,
+		// the readiness/clientGone check below performs the teardown explicitly.
+		const onLiveClose = () => {
 			this.teardownOnce(ws, context, { kind: 'disconnect' });
-		});
-		ws.on('error', (error) => {
+		};
+		const onLiveError = (error: Error) => {
 			this.log(`WebSocket error for ${context.webSocketId}: ${error.message}`, 'error');
 			this.callbacks.onError?.(ws, error, context);
 			this.teardownOnce(ws, context, { kind: 'error', error });
-		});
+		};
+		ws.on('close', onLiveClose);
+		ws.on('error', onLiveError);
+		this.registerDispatch(ws, context);
+		detachPreLiveHandlers();
+
+		if (clientGone || this.stopping || ws.readyState !== 1 || this.tornDown.has(ws)) {
+			this.teardownOnce(
+				ws,
+				context,
+				this.stopping ? { kind: 'shutdown' } : (preLiveCause ?? { kind: 'disconnect' }),
+			);
+			return;
+		}
 		await Promise.resolve(this.callbacks.onConnection?.(ws, context)).catch((error: unknown) => {
 			this.log(
 				`Connection callback error: ${error instanceof Error ? error.message : String(error)}`,

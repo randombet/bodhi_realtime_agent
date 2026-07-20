@@ -24,6 +24,7 @@ describe('remote_persistent_worker compile + factory', () => {
 				mainAgents: [
 					{
 						name: 'main',
+						googleSearch: false,
 						instructions: 'You are helpful.',
 						toolIds: ['get_current_time', 'ask_remote_code'],
 					},

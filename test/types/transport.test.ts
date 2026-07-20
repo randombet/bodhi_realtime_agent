@@ -52,7 +52,8 @@ describe('LLMTransport type definitions', () => {
 
 	it('AudioFormatSpec specifies PCM audio format', () => {
 		const format: AudioFormatSpec = {
-			sampleRate: 16000,
+			inputSampleRate: 16000,
+			outputSampleRate: 24000,
 			channels: 1,
 			bitDepth: 16,
 			encoding: 'pcm',

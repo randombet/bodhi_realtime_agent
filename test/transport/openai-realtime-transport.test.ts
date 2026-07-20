@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
-import { OpenAIRealtimeTransport } from '../../src/transport/openai-realtime-transport.js';
+import {
+	type OpenAIRealtimeConfig,
+	OpenAIRealtimeTransport,
+} from '../../src/transport/openai-realtime-transport.js';
 import type { ToolDefinition } from '../../src/types/tool.js';
 
 /**
@@ -1476,7 +1479,7 @@ describe('OpenAIRealtimeTransport — Phase 1 features (gpt-realtime-2)', () => 
 	let transport: OpenAIRealtimeTransport;
 	let mockRt: ReturnType<typeof createMockRt>;
 
-	function setup(config: Parameters<typeof OpenAIRealtimeTransport.prototype.constructor>[0]) {
+	function setup(config: OpenAIRealtimeConfig) {
 		transport = new OpenAIRealtimeTransport(config);
 		mockRt = createMockRt();
 		// biome-ignore lint/suspicious/noExplicitAny: test mock injection
@@ -2317,7 +2320,7 @@ describe('OpenAIRealtimeTransport — Phase 1 features (gpt-realtime-2)', () => 
 				const origSend = (mockRt as any).send.bind(mockRt);
 				// biome-ignore lint/suspicious/noExplicitAny: deliberate mock override
 				(mockRt as any).send = (m: Record<string, unknown>) => {
-					(mockRt as Record<string, unknown[]>).sent.push(m);
+					mockRt.sent.push(m);
 					if (
 						m.type === 'session.update' &&
 						(m.session as Record<string, unknown>).instructions === 'rejected'

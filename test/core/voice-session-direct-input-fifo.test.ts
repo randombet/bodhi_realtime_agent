@@ -108,6 +108,14 @@ async function buildSession(transport: LLMTransport): Promise<VoiceSession> {
 	return session;
 }
 
+function handleTextInput(session: VoiceSession, text: string): Promise<void> {
+	return (
+		session as unknown as {
+			handleTextInput(input: string): Promise<void>;
+		}
+	).handleTextInput(text);
+}
+
 describe('VoiceSession direct-input FIFO', () => {
 	let logSpy: ReturnType<typeof vi.spyOn>;
 
@@ -124,7 +132,7 @@ describe('VoiceSession direct-input FIFO', () => {
 		const session = await buildSession(transport);
 		try {
 			const beforeCount = transport.__sentContent.length;
-			await session.handleTextInput?.('hello');
+			await handleTextInput(session, 'hello');
 			// At least one cancelResponse call, and it asked for waitForDone.
 			const aCancels = transport.__cancelCalls;
 			expect(aCancels.length).toBeGreaterThan(0);
@@ -145,8 +153,8 @@ describe('VoiceSession direct-input FIFO', () => {
 		try {
 			const beforeCount = transport.__sentContent.length;
 			// Fire two without await.
-			const p1 = session.handleTextInput?.('first');
-			const p2 = session.handleTextInput?.('second');
+			const p1 = handleTextInput(session, 'first');
+			const p2 = handleTextInput(session, 'second');
 			// While the first is still in flight (cancel waits 30ms), nothing
 			// new should be sent yet.
 			expect(transport.__sentContent.length).toBe(beforeCount);
@@ -200,12 +208,12 @@ describe('VoiceSession direct-input FIFO', () => {
 		try {
 			// Sequential awaits — proves the FIFO blocks the second body until
 			// the first finishes its full cancel→finalize→sendContent body.
-			await session.handleTextInput?.('one');
+			await handleTextInput(session, 'one');
 			const onlyOneContent = transport.__sentContent.filter(
 				(c) => Array.isArray(c[0]) && JSON.stringify(c[0]).includes('"one"'),
 			).length;
 			expect(onlyOneContent).toBe(1);
-			await session.handleTextInput?.('two');
+			await handleTextInput(session, 'two');
 			const twoContents = transport.__sentContent.filter(
 				(c) => Array.isArray(c[0]) && JSON.stringify(c[0]).includes('"two"'),
 			);
@@ -222,7 +230,7 @@ describe('VoiceSession direct-input FIFO', () => {
 		const session = await buildSession(transport);
 		try {
 			const beforeCount = transport.__sentContent.length;
-			await session.handleTextInput?.('hi');
+			await handleTextInput(session, 'hi');
 			expect(transport.__sentContent.length).toBe(beforeCount + 1);
 			expect(transport.__cancelCalls).toHaveLength(0);
 		} finally {
@@ -235,7 +243,7 @@ describe('VoiceSession direct-input FIFO', () => {
 		const session = await buildSession(transport);
 		try {
 			const beforeCount = transport.__sentContent.length;
-			const p1 = session.handleTextInput?.('A');
+			const p1 = handleTextInput(session, 'A');
 			const p2 = session.injectTranscript?.('B');
 			await Promise.all([p1, p2]);
 			const sent = transport.__sentContent.slice(beforeCount);

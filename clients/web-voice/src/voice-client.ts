@@ -110,11 +110,23 @@ export class VoiceClient {
 		this.ws = ws;
 
 		ws.onopen = async () => {
+			// A socket can finish opening after the user has already hung up, or
+			// after a reconnect replaced it. Never let that stale callback start a
+			// fresh permission request and reactivate microphone capture.
+			if (gen !== this.generation || this.ws !== ws || this.closedByUs) return;
 			try {
 				await this.audio.startMic((pcm) => {
-					if (ws.readyState === WebSocket.OPEN) ws.send(pcm);
+					if (
+						gen === this.generation &&
+						this.ws === ws &&
+						!this.closedByUs &&
+						ws.readyState === WebSocket.OPEN
+					) {
+						ws.send(pcm);
+					}
 				});
 			} catch (err) {
+				if (gen !== this.generation || this.ws !== ws || this.closedByUs) return;
 				this.callbacks.onStatus(
 					'error',
 					err instanceof Error ? err.message : 'Microphone access failed',
@@ -172,6 +184,10 @@ export class VoiceClient {
 	disconnect(): void {
 		this.closedByUs = true;
 		this.gate.clear();
+		// Invalidate a pending getUserMedia request immediately. Waiting for the
+		// socket's close event leaves the microphone permission promise able to
+		// resolve and install a live stream after the user has hung up.
+		this.audio.teardown();
 		this.ws?.close();
 		this.ws = null;
 	}

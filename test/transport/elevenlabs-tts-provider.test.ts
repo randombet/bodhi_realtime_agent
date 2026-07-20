@@ -78,9 +78,11 @@ vi.mock('ws', () => ({
 	WebSocket: MockWebSocket,
 }));
 
+type MockWebSocketInstance = InstanceType<typeof MockWebSocket>;
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function lastInstance(): MockWebSocket {
+function lastInstance(): MockWebSocketInstance {
 	return MockWebSocket.instances[MockWebSocket.instances.length - 1];
 }
 
@@ -105,7 +107,7 @@ function createProvider(
 }
 
 /** Connect provider: open WebSocket. */
-async function startProvider(p: ElevenLabsTTSProvider): Promise<MockWebSocket> {
+async function startProvider(p: ElevenLabsTTSProvider): Promise<MockWebSocketInstance> {
 	const startPromise = p.start();
 	const ws = lastInstance();
 	ws.triggerOpen();
@@ -114,7 +116,7 @@ async function startProvider(p: ElevenLabsTTSProvider): Promise<MockWebSocket> {
 }
 
 /** Parse all sent JSON messages from a WebSocket. */
-function parseSent(ws: MockWebSocket): Record<string, unknown>[] {
+function parseSent(ws: MockWebSocketInstance): Record<string, unknown>[] {
 	return ws.sent.map((s) => JSON.parse(s));
 }
 

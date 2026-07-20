@@ -71,9 +71,10 @@ function pcm(ms: number): string {
 	return Buffer.alloc(Math.round(ms * 48)).toString('base64');
 }
 
-type JsonCall = [Record<string, unknown>];
 function countJson(sendJson: ReturnType<typeof vi.fn>, type: string): number {
-	return sendJson.mock.calls.filter((c: JsonCall) => c[0]?.type === type).length;
+	return sendJson.mock.calls.filter(
+		(c) => (c[0] as Record<string, unknown> | undefined)?.type === type,
+	).length;
 }
 
 function setup() {

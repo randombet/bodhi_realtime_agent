@@ -45,15 +45,16 @@ function makeDeps(over: Partial<TtsPipelineDeps> = {}) {
 		sendAudioToClient,
 		sendJsonToClient,
 		sendJsonAfterAudio,
-	} as never;
+	};
 	const completionArbiter = {
 		clearDefer: vi.fn(),
 		completePlayback: vi.fn(),
 		finishOrDeferForVad: vi.fn(),
-	} as never;
+	};
 	const deps: TtsPipelineDeps = {
 		transport: makeTransport(),
-		getClientTransport: () => clientTransport,
+		getClientTransport: () =>
+			clientTransport as unknown as ReturnType<TtsPipelineDeps['getClientTransport']>,
 		hooks: {} as never,
 		sessionId: 'sess_tts',
 		fallbackMarginMs: 50,
@@ -63,7 +64,8 @@ function makeDeps(over: Partial<TtsPipelineDeps> = {}) {
 		handleTranscriptOutput: vi.fn(),
 		isAgentMode: () => true,
 		isPlaybackStateProtocolActive: () => true,
-		getCompletionArbiter: () => completionArbiter,
+		getCompletionArbiter: () =>
+			completionArbiter as unknown as ReturnType<TtsPipelineDeps['getCompletionArbiter']>,
 		maybeArmGraceOnFirstAudio: vi.fn(),
 		signalAudioStarted: vi.fn(),
 		requestInterrupt: vi.fn(() => true),

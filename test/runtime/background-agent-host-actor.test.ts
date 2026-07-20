@@ -176,12 +176,12 @@ describe('BackgroundAgentHostActor — agent transfer', () => {
 	it('aborts signal + calls onStop("transfer") only when cancelOnTransfer === true', async () => {
 		const stopA = vi.fn();
 		const stopB = vi.fn();
-		let signalA: AbortSignal | null = null;
-		let signalB: AbortSignal | null = null;
+		const signalA: { current: AbortSignal | null } = { current: null };
+		const signalB: { current: AbortSignal | null } = { current: null };
 		const a: BackgroundAgent = {
 			name: 'a',
 			onStart: (ctx) => {
-				signalA = ctx.signal;
+				signalA.current = ctx.signal;
 			},
 			onStop: stopA,
 		};
@@ -189,7 +189,7 @@ describe('BackgroundAgentHostActor — agent transfer', () => {
 			name: 'b',
 			cancelOnTransfer: true,
 			onStart: (ctx) => {
-				signalB = ctx.signal;
+				signalB.current = ctx.signal;
 			},
 			onStop: stopB,
 		};
@@ -204,11 +204,11 @@ describe('BackgroundAgentHostActor — agent transfer', () => {
 
 		// a: cancelOnTransfer=false → not stopped, signal not aborted.
 		expect(stopA).not.toHaveBeenCalled();
-		expect(signalA?.aborted).toBe(false);
+		expect(signalA.current?.aborted).toBe(false);
 
 		// b: cancelOnTransfer=true → stopped with reason='transfer', signal aborted.
 		expect(stopB).toHaveBeenCalledWith('transfer');
-		expect(signalB?.aborted).toBe(true);
+		expect(signalB.current?.aborted).toBe(true);
 	});
 
 	it('updates cache.activeAgent so subsequent ctx.session reads see the new value', async () => {
@@ -243,11 +243,11 @@ describe('BackgroundAgentHostActor — agent transfer', () => {
 describe('BackgroundAgentHostActor — onStop', () => {
 	it('aborts signal + calls onStop on session.close_requested with the reason', async () => {
 		const stop = vi.fn();
-		let signal: AbortSignal | null = null;
+		const signal: { current: AbortSignal | null } = { current: null };
 		const agent: BackgroundAgent = {
 			name: 'a',
 			onStart: (ctx) => {
-				signal = ctx.signal;
+				signal.current = ctx.signal;
 			},
 			onStop: stop,
 		};
@@ -257,7 +257,7 @@ describe('BackgroundAgentHostActor — onStop', () => {
 		await tell(host, 'session.close_requested', { reason: 'user-initiated' });
 
 		expect(stop).toHaveBeenCalledWith('user-initiated');
-		expect(signal?.aborted).toBe(true);
+		expect(signal.current?.aborted).toBe(true);
 	});
 
 	it('aborts signal + calls onStop on transport.closed with the reason', async () => {

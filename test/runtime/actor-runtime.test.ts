@@ -37,7 +37,11 @@ function makeActor(
 		onStart: async () => {
 			started = true;
 		},
-		onMessage: handler ?? (async (env) => messages.push(env)),
+		onMessage:
+			handler ??
+			(async (env) => {
+				messages.push(env);
+			}),
 		onStop: async (reason) => {
 			stopped = true;
 			stopReason = reason;
@@ -419,7 +423,7 @@ describe('ActorRuntime + Supervisor integration', () => {
 
 describe('RuntimeMessage exhaustiveness', () => {
 	it('assertNever throws for unhandled message types', () => {
-		const fakeMsg = { type: 'unknown.message' } as RuntimeMessage;
+		const fakeMsg = { type: 'unknown.message' } as unknown as RuntimeMessage;
 		expect(() => assertNever(fakeMsg as never)).toThrow('Unhandled message type');
 	});
 });

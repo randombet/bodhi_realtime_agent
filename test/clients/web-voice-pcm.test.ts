@@ -1,5 +1,5 @@
 import { MIN_PLAYBACK_RATE } from '@bodhi/client-protocol';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
 	PcmAudio,
 	downsample,
@@ -44,5 +44,62 @@ describe('PcmAudio.playbackRate', () => {
 		expect(audio.playbackRate).toBe(MIN_PLAYBACK_RATE);
 		audio.playbackRate = 1.2;
 		expect(audio.playbackRate).toBe(1.2);
+	});
+});
+
+describe('PcmAudio lifecycle', () => {
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.unstubAllGlobals();
+	});
+
+	it('stops a microphone stream granted after teardown without creating an audio graph', async () => {
+		let resolvePermission!: (stream: MediaStream) => void;
+		const permission = new Promise<MediaStream>((resolve) => {
+			resolvePermission = resolve;
+		});
+		const stop = vi.fn();
+		const stream = { getTracks: () => [{ stop }] } as unknown as MediaStream;
+		const AudioContextCtor = vi.fn();
+		vi.stubGlobal('AudioContext', AudioContextCtor);
+		vi.stubGlobal('navigator', {
+			mediaDevices: { getUserMedia: vi.fn(() => permission) },
+		});
+
+		const audio = new PcmAudio();
+		const start = audio.startMic(vi.fn());
+		audio.teardown();
+		resolvePermission(stream);
+		await start;
+
+		expect(stop).toHaveBeenCalledOnce();
+		expect(AudioContextCtor).not.toHaveBeenCalled();
+		expect(audio.contextState).toBe('none');
+	});
+
+	it('reuses the pending AudioContext when reconnecting inside the close window', () => {
+		vi.useFakeTimers();
+		const close = vi.fn(() => Promise.resolve());
+		const resume = vi.fn(() => Promise.resolve());
+		const context = {
+			state: 'running',
+			sampleRate: 48000,
+			currentTime: 0,
+			close,
+			resume,
+		} as unknown as AudioContext;
+		const AudioContextCtor = vi.fn(() => context);
+		vi.stubGlobal('AudioContext', AudioContextCtor);
+
+		const audio = new PcmAudio();
+		audio.primeAudioContext();
+		audio.teardown();
+		audio.primeAudioContext();
+		vi.advanceTimersByTime(3000);
+
+		expect(AudioContextCtor).toHaveBeenCalledOnce();
+		expect(close).not.toHaveBeenCalled();
+		expect(audio.contextState).toBe('running');
+		expect(audio.contextSampleRate).toBe(48000);
 	});
 });

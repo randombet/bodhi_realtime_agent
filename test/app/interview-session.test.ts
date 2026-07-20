@@ -326,7 +326,9 @@ describe('structured-interview config helpers', () => {
 	it('buildStructuredInterviewConfig: no custom duration ⇒ fixed screening duration + fixed reminder minutes', () => {
 		const cfg = buildStructuredInterviewConfig({ texts, subagentLanguageModel: fakeModel });
 		expect(cfg.durationMinutes).toBe(30);
-		expect(cfg.reminderSchedule).toEqual([5, 10, 15, 20, 25]);
+		expect('reminderSchedule' in cfg ? cfg.reminderSchedule : undefined).toEqual([
+			5, 10, 15, 20, 25,
+		]);
 		expect(cfg.reasoning.model).toBe(fakeModel);
 		// merged over STRUCTURED_SCREENING_PRESET (maxSections 3)
 		expect(cfg.structure.maxSections).toBe(3);
@@ -340,7 +342,7 @@ describe('structured-interview config helpers', () => {
 			structure: { interviewerBrief: 'hi' },
 		});
 		expect(cfg.durationMinutes).toBe(12);
-		expect(cfg.reminderSchedule).toBeUndefined(); // uses default reminderFractions, not a fixed schedule
+		expect('reminderSchedule' in cfg ? cfg.reminderSchedule : undefined).toBeUndefined(); // uses default reminderFractions, not a fixed schedule
 		expect(cfg.structure.interviewerBrief).toBe('hi');
 	});
 

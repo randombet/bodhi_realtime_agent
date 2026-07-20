@@ -66,12 +66,14 @@ vi.mock('ws', () => ({
 	WebSocket: MockWebSocket,
 }));
 
-function lastInstance(): MockWebSocket {
+type MockWebSocketInstance = InstanceType<typeof MockWebSocket>;
+
+function lastInstance(): MockWebSocketInstance {
 	return MockWebSocket.instances[MockWebSocket.instances.length - 1];
 }
 
 /** Open + send the update acknowledgement so start() resolves. */
-function bringUp(ws: MockWebSocket): void {
+function bringUp(ws: MockWebSocketInstance): void {
 	ws.triggerOpen();
 	ws.triggerMessage({ type: 'transcription_session.updated' });
 }

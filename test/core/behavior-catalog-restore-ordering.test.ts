@@ -83,7 +83,7 @@ describe('behavior.catalog restore ordering (reuse plan B5)', () => {
 		logSpy.mockRestore();
 	});
 
-	it('sends the catalog with the RESTORED preset, before greeting generation, despite delayed directives', async () => {
+	it('sends restored pacing before config admits immediate client input or greeting generation', async () => {
 		const transport = createMockTransport();
 		const sendContentMock = transport.sendContent as ReturnType<typeof vi.fn>;
 		const sequence: string[] = [];
@@ -115,6 +115,11 @@ describe('behavior.catalog restore ordering (reuse plan B5)', () => {
 			await session.start();
 			session.notifyClientConnected();
 			transport.onSessionReady?.('mock_session');
+			// A raw/overeager client can write as soon as the socket opens. The
+			// server must not admit it while directives are still restoring.
+			session.feedJsonFromClient({ type: 'text_input', text: 'hello immediately' });
+			expect(sequence).not.toContain('json:session.config');
+			expect(sequence).not.toContain('generation');
 			// Longer than the directive delay so restore + greeting both settle.
 			await new Promise((r) => setTimeout(r, 60));
 
@@ -123,11 +128,77 @@ describe('behavior.catalog restore ordering (reuse plan B5)', () => {
 			expect(pacing?.active).toBe('slow');
 
 			const catalogIdx = sequence.indexOf('json:behavior.catalog');
+			const configIdx = sequence.indexOf('json:session.config');
 			const generationIdx = sequence.indexOf('generation');
 			expect(catalogIdx).toBeGreaterThanOrEqual(0);
+			expect(configIdx).toBeGreaterThanOrEqual(0);
 			expect(generationIdx).toBeGreaterThanOrEqual(0);
-			expect(catalogIdx, `sequence: ${sequence.join(' → ')}`).toBeLessThan(generationIdx);
+			expect(catalogIdx, `sequence: ${sequence.join(' → ')}`).toBeLessThan(configIdx);
+			expect(configIdx, `sequence: ${sequence.join(' → ')}`).toBeLessThan(generationIdx);
 		} finally {
+			await session.close();
+		}
+	});
+
+	it('keeps pre-notify input queued when restore finishes before provider startup', async () => {
+		const transport = createMockTransport();
+		let releaseConnect!: () => void;
+		const connectGate = new Promise<void>((resolve) => {
+			releaseConnect = resolve;
+		});
+		transport.connect = vi.fn(async () => {
+			await connectGate;
+			transport.onSessionReady?.('mock_session');
+		});
+		const sequence: string[] = [];
+		const sendContentMock = transport.sendContent as ReturnType<typeof vi.fn>;
+		sendContentMock.mockImplementation(() => sequence.push('generation'));
+
+		const session = new VoiceSession({
+			sessionId: 'sess_b5_pre_notify',
+			userId: 'user_1',
+			apiKey: 'test-key',
+			agents: [{ name: 'main', instructions: 'assistant', tools: [], greeting: 'Hi!' }],
+			initialAgent: 'main',
+			model: mockModel,
+			transport,
+			orchestrationMode: 'actor',
+			behaviors: [speechSpeed()],
+			memory: { store: slowDirectiveStore(5) },
+			clientSender: {
+				sendAudio: vi.fn(),
+				sendJson: (message) => sequence.push(`json:${message.type}`),
+			},
+		});
+		const starting = session.start();
+		try {
+			// Let directives finish while provider connect is still deliberately
+			// blocked, matching app/server's pre-notify exposure window.
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			session.feedJsonFromClient({ type: 'text_input', text: 'queued before notify' });
+			await Promise.resolve();
+			expect(sequence).toEqual([]);
+
+			releaseConnect();
+			await starting;
+			expect(sequence).toEqual([]);
+
+			session.notifyClientConnected();
+			await new Promise((resolve) => setTimeout(resolve, 10));
+
+			const catalogIdx = sequence.indexOf('json:behavior.catalog');
+			const configIdx = sequence.indexOf('json:session.config');
+			const generationIdx = sequence.indexOf('generation');
+			expect(catalogIdx).toBeGreaterThanOrEqual(0);
+			expect(configIdx).toBeGreaterThan(catalogIdx);
+			expect(generationIdx).toBeGreaterThan(configIdx);
+			expect(sendContentMock).toHaveBeenCalledWith(
+				[{ role: 'user', text: 'queued before notify' }],
+				true,
+			);
+		} finally {
+			releaseConnect();
+			await starting.catch(() => {});
 			await session.close();
 		}
 	});

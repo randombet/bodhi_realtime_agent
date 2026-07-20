@@ -80,6 +80,51 @@ function makeClient(opts?: {
 }
 
 describe('VoiceClient dispatch', () => {
+	afterEach(() => vi.unstubAllGlobals());
+
+	it('tears down audio synchronously on disconnect', () => {
+		const { client } = makeClient();
+		const teardown = vi.spyOn(client.audio, 'teardown');
+
+		client.disconnect();
+
+		expect(teardown).toHaveBeenCalledOnce();
+	});
+
+	it('does not start the microphone when a socket opens after disconnect', async () => {
+		const sockets: ControlledWebSocket[] = [];
+		class ControlledWebSocket {
+			static readonly OPEN = OPEN;
+			binaryType = '';
+			readyState = 0;
+			onopen: (() => Promise<void>) | null = null;
+			onmessage: ((event: MessageEvent<ArrayBuffer | string>) => void) | null = null;
+			onclose: ((event: CloseEvent) => void) | null = null;
+			onerror: (() => void) | null = null;
+			readonly close = vi.fn();
+			readonly send = vi.fn();
+
+			constructor(_url: string) {
+				sockets.push(this);
+			}
+		}
+		vi.stubGlobal('WebSocket', ControlledWebSocket);
+		const audio = new PcmAudio();
+		const startMic = vi.spyOn(audio, 'startMic');
+		const client = new VoiceClient({ onStatus: vi.fn(), onTranscript: vi.fn() }, { audio });
+
+		await client.connect('ws://example.test/voice');
+		const socket = sockets[0];
+		expect(socket).toBeDefined();
+		if (!socket) throw new Error('WebSocket was not constructed');
+		client.disconnect();
+		const staleOpen = socket.onopen;
+		await staleOpen?.();
+
+		expect(socket.close).toHaveBeenCalledOnce();
+		expect(startMic).not.toHaveBeenCalled();
+	});
+
 	it('session.config sets rates, opens the mic gate, reports live', () => {
 		const { client, statuses } = makeClient();
 		client.handleJson({

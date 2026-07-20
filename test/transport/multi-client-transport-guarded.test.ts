@@ -1,4 +1,4 @@
-import { type Server, createServer } from 'node:http';
+import { type IncomingMessage, type Server, createServer } from 'node:http';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import WebSocket from 'ws';
 import {
@@ -232,13 +232,15 @@ describe('MultiClientTransport guarded lifecycle', () => {
 		expect(h.teardowns[0].cause.kind).toBe('setup_rejected');
 	});
 
-	it('client close during setup: teardown cause disconnect, exactly once', async () => {
+	it('client close during setup: aborts setup and tears down exactly once', async () => {
 		let releaseSetup: () => void = () => {};
 		const gate = new Promise<void>((r) => {
 			releaseSetup = r;
 		});
+		let setupSignal: AbortSignal | undefined;
 		const h = await harness({
-			setup: async () => {
+			setup: async (_ws, _context, signal) => {
+				setupSignal = signal;
 				await gate;
 				return { ok: true };
 			},
@@ -248,10 +250,89 @@ describe('MultiClientTransport guarded lifecycle', () => {
 		await new Promise<void>((r) => ws.on('open', () => r()));
 		await new Promise((r) => setTimeout(r, 20));
 		ws.close();
-		await new Promise((r) => setTimeout(r, 20));
+		await vi.waitFor(() => expect(setupSignal?.aborted).toBe(true));
 		releaseSetup();
 		await vi.waitFor(() => expect(h.teardowns).toHaveLength(1));
 		expect(h.teardowns[0].cause).toEqual({ kind: 'disconnect' });
+		expect(h.events).toEqual([]);
+	});
+
+	it('disconnect during setup releases a claimed record so a retry can connect', async () => {
+		let status: 'created' | 'connecting' | 'live' = 'created';
+		let setupAttempts = 0;
+		const h = await harness({
+			validateUpgrade: async () => {
+				if (status !== 'created') {
+					return { ok: false, closeCode: 4409, reason: 'already claimed' };
+				}
+				status = 'connecting';
+				return { ok: true, appContext: { claim: 'c1' } };
+			},
+			setup: async (_ws, _context, signal) => {
+				setupAttempts++;
+				if (setupAttempts === 1) {
+					await new Promise<void>((resolve) => {
+						if (signal.aborted) resolve();
+						else signal.addEventListener('abort', () => resolve(), { once: true });
+					});
+					return { ok: false, closeCode: 4409, reason: 'connection ended' };
+				}
+				if (signal.aborted) return { ok: false, closeCode: 4409, reason: 'connection ended' };
+				status = 'live';
+				return { ok: true };
+			},
+			teardown: (_ws, context, cause) => {
+				if (status === 'connecting') status = 'created';
+				h.teardowns.push({ claim: context.appContext?.claim, cause });
+			},
+		});
+		active = h;
+
+		const first = connect(h.port);
+		await vi.waitFor(() => expect(setupAttempts).toBe(1));
+		first.close();
+		await vi.waitFor(() => expect(status).toBe('created'));
+
+		connect(h.port);
+		await vi.waitFor(() => expect(h.events).toContain('connect:c1'));
+		expect(setupAttempts).toBe(2);
+		expect(status).toBe('live');
+	});
+
+	it('stop() aborts awaited setup and waits for setup cleanup plus teardown', async () => {
+		let setupEntered = false;
+		let setupCleanupDone = false;
+		let teardownDone = false;
+		const h = await harness({
+			setup: async (_ws, _context, signal) => {
+				setupEntered = true;
+				await new Promise<void>((resolve) => {
+					const finish = () => {
+						setTimeout(() => {
+							setupCleanupDone = true;
+							resolve();
+						}, 20);
+					};
+					if (signal.aborted) finish();
+					else signal.addEventListener('abort', finish, { once: true });
+				});
+				return { ok: true };
+			},
+			teardown: async (_ws, context, cause) => {
+				await new Promise((resolve) => setTimeout(resolve, 20));
+				teardownDone = true;
+				h.teardowns.push({ claim: context.appContext?.claim, cause });
+			},
+		});
+		active = h;
+		connect(h.port);
+		await vi.waitFor(() => expect(setupEntered).toBe(true));
+
+		await h.transport.stop();
+
+		expect(setupCleanupDone).toBe(true);
+		expect(teardownDone).toBe(true);
+		expect(h.teardowns).toEqual([{ claim: 'c1', cause: { kind: 'shutdown' } }]);
 		expect(h.events).toEqual([]);
 	});
 
@@ -304,6 +385,26 @@ describe('MultiClientTransport guarded lifecycle', () => {
 			ws.on('error', () => resolve());
 			ws.on('close', () => resolve());
 		});
+		expect(h.events).toEqual([]);
+	});
+
+	it('a queued connection delivered after stop snapshots starts no guarded lifecycle', async () => {
+		const validateUpgrade = vi.fn(async () => ({
+			ok: true as const,
+			appContext: { claim: 'too-late' },
+		}));
+		const h = await harness({ validateUpgrade });
+		active = h;
+		await h.transport.stop();
+
+		const lateSocket = { close: vi.fn() } as unknown as WebSocket;
+		const deliver = h.transport as unknown as {
+			handleConnection(ws: WebSocket, req: IncomingMessage): void;
+		};
+		deliver.handleConnection(lateSocket, { url: '/voice' } as IncomingMessage);
+
+		expect(lateSocket.close).toHaveBeenCalledExactlyOnceWith(1001, 'server stopping');
+		expect(validateUpgrade).not.toHaveBeenCalled();
 		expect(h.events).toEqual([]);
 	});
 });

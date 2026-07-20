@@ -74,6 +74,10 @@ export class PcmAudio {
 	private nextPlayTime = 0;
 	private micStream: MediaStream | null = null;
 	private processor: ScriptProcessorNode | null = null;
+	/** Invalidates an in-flight getUserMedia request when capture is stopped or
+	 *  replaced. Browsers do not expose a way to abort the permission prompt,
+	 *  so a late stream must be recognized and stopped after it resolves. */
+	private micGeneration = 0;
 	private pendingCloseTimer: ReturnType<typeof setTimeout> | null = null;
 	private pendingCloseContext: AudioContext | null = null;
 	private _playbackRate = 1.0;
@@ -113,10 +117,19 @@ export class PcmAudio {
 			clearTimeout(this.pendingCloseTimer);
 			this.pendingCloseTimer = null;
 		}
-		if (this.pendingCloseContext && this.pendingCloseContext !== this.audioCtx) {
-			void this.pendingCloseContext.close().catch(() => {});
-		}
+		const pending = this.pendingCloseContext;
 		this.pendingCloseContext = null;
+		if (pending && pending.state !== 'closed') {
+			if (!opts?.fresh && (!this.audioCtx || this.audioCtx.state === 'closed')) {
+				// teardown() detached this context from the instance while its close
+				// timer was pending. A reconnect inside the grace window owns it now.
+				this.audioCtx = pending;
+				this.outputGain = null;
+				this.nextPlayTime = 0;
+			} else if (pending !== this.audioCtx) {
+				void pending.close().catch(() => {});
+			}
+		}
 		if (opts?.fresh && this.audioCtx && this.audioCtx.state !== 'closed') {
 			// Fresh-per-call semantics (a new user gesture wants a cold AEC/
 			// clean graph): discard the old context instead of reviving it.
@@ -136,6 +149,7 @@ export class PcmAudio {
 	/** Stop capture only (mic stream + processor); playback and the context
 	 *  are untouched. `teardown()` calls this. */
 	stopMic(): void {
+		this.micGeneration += 1;
 		if (this.processor) {
 			this.processor.disconnect();
 			this.processor = null;
@@ -172,9 +186,25 @@ export class PcmAudio {
 				'Microphone access is not available — use HTTPS or localhost in a modern browser.',
 			);
 		}
-		this.micStream = await navigator.mediaDevices.getUserMedia({
-			audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-		});
+		// Replace existing capture and invalidate any older permission request.
+		this.stopMic();
+		const generation = this.micGeneration;
+		let stream: MediaStream;
+		try {
+			stream = await navigator.mediaDevices.getUserMedia({
+				audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+			});
+		} catch (error) {
+			// A rejected permission prompt from a call that has already ended must
+			// not surface as an error on a newer connection.
+			if (generation !== this.micGeneration) return;
+			throw error;
+		}
+		if (generation !== this.micGeneration) {
+			for (const track of stream.getTracks()) track.stop();
+			return;
+		}
+		this.micStream = stream;
 		// primeAudioContext() from the gesture is the normal path; this is the
 		// fallback for callers that skipped it (audio arriving before this
 		// point was dropped for them).

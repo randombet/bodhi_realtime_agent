@@ -8,7 +8,7 @@ function baseOptions() {
 			addFacts: vi.fn(),
 			getAll: vi.fn(async () => []),
 			replaceAll: vi.fn(),
-			getDirectives: vi.fn(async () => null),
+			getDirectives: vi.fn(async () => ({})),
 			setDirectives: vi.fn(),
 		},
 		clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },

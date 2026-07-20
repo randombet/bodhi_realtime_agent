@@ -8,15 +8,19 @@ const TYPE_MAP = {
 		object: 'OBJECT',
 		string: 'STRING',
 		number: 'NUMBER',
+		integer: 'INTEGER',
 		boolean: 'BOOLEAN',
 		array: 'ARRAY',
+		null: 'NULL',
 	},
 	standard: {
 		object: 'object',
 		string: 'string',
 		number: 'number',
+		integer: 'integer',
 		boolean: 'boolean',
 		array: 'array',
+		null: 'null',
 	},
 } as const;
 
@@ -66,14 +70,19 @@ function convertDef(def: any, format: SchemaFormat): Record<string, unknown> {
 
 			const result: Record<string, unknown> = { type: t.object, properties };
 			if (required.length > 0) result.required = required;
+			if (format === 'standard' && def.unknownKeys === 'strict') {
+				result.additionalProperties = false;
+			}
 			return result;
 		}
 
 		case 'ZodString':
 			return { type: t.string };
 
-		case 'ZodNumber':
-			return { type: t.number };
+		case 'ZodNumber': {
+			const integer = def.checks?.some((check: { kind?: string }) => check.kind === 'int');
+			return { type: integer ? t.integer : t.number };
+		}
 
 		case 'ZodBoolean':
 			return { type: t.boolean };
@@ -85,6 +94,7 @@ function convertDef(def: any, format: SchemaFormat): Record<string, unknown> {
 			};
 
 		case 'ZodLiteral':
+			if (def.value === null) return { type: t.null };
 			return {
 				type:
 					typeof def.value === 'number'
@@ -104,7 +114,58 @@ function convertDef(def: any, format: SchemaFormat): Record<string, unknown> {
 		case 'ZodOptional':
 			return convertDef(def.innerType._def, format);
 
+		case 'ZodNullable': {
+			const inner = convertDef(def.innerType._def, format);
+			return format === 'gemini'
+				? { ...inner, nullable: true }
+				: { anyOf: [inner, { type: t.null }] };
+		}
+
+		case 'ZodNull':
+			return { type: t.null };
+
+		case 'ZodUnion':
+			return {
+				anyOf: (def.options as Array<{ _def: unknown }>).map((option) =>
+					convertDef(option._def, format),
+				),
+			};
+
+		case 'ZodDiscriminatedUnion':
+			return {
+				anyOf: [...def.options.values()].map((option) => convertDef(option._def, format)),
+			};
+
+		case 'ZodRecord': {
+			const result: Record<string, unknown> = { type: t.object };
+			if (format === 'standard') {
+				result.additionalProperties = convertDef(def.valueType._def, format);
+			}
+			return result;
+		}
+
+		case 'ZodUnknown':
+		case 'ZodAny':
+			return {};
+
+		case 'ZodEffects':
+			return convertDef(def.schema._def, format);
+
+		case 'ZodDefault':
+		case 'ZodCatch':
+		case 'ZodReadonly':
+			return convertDef(def.innerType._def, format);
+
+		case 'ZodBranded':
+			return convertDef(def.type._def, format);
+
+		case 'ZodLazy':
+			return convertDef(def.getter()._def, format);
+
 		default:
-			return { type: t.string };
+			// Unknown validator constructs must not be falsely advertised as a
+			// string. An empty schema is permissive in standard JSON Schema and is
+			// safer than a contract that disagrees with runtime validation.
+			return {};
 	}
 }

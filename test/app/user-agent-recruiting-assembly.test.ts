@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
+	applyRecruitingMacrosToMainAgents,
 	applyUserAgentRecruitingStudioSyncLayer,
 	expandRecruitingStudioMacros,
 	resolveUserAgentRecruitingMacroDocuments,
@@ -42,6 +43,28 @@ describe('user-agent-recruiting-assembly', () => {
 			},
 		);
 		expect(s).toBe('Co A / Jo B / Re C');
+	});
+
+	it('preserves lazy instruction factories while expanding each result', () => {
+		let revision = 0;
+		const factory = vi.fn(() => `revision ${++revision}: {{COMPANY_INFO}}`);
+		const [main] = applyRecruitingMacrosToMainAgents(
+			[
+				{
+					name: 'main',
+					instructions: factory,
+					tools: [],
+				},
+			],
+			{ company: 'Bodhi', job: '', resume: '' },
+		);
+
+		expect(factory).not.toHaveBeenCalled();
+		expect(typeof main?.instructions).toBe('function');
+		if (typeof main?.instructions !== 'function') throw new Error('expected lazy instructions');
+		expect(main.instructions()).toBe('revision 1: Bodhi');
+		expect(main.instructions()).toBe('revision 2: Bodhi');
+		expect(factory).toHaveBeenCalledTimes(2);
 	});
 
 	it('with draft only: prepends three screening pillar docs', () => {
