@@ -1,22 +1,19 @@
+import type { PcmAudio } from '@bodhi/web-voice-client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-	clearPendingPlaybackEnded,
-	maybeSchedulePlaybackEnded,
-	teardownPlayback,
-} from '../../app/web-client/src/audio.js';
+import { clearPendingPlaybackEnded, teardownPlayback } from '../../app/web-client/src/audio.js';
+import { clientActionHandlers } from '../../app/web-client/src/client-action-handlers.js';
+import { playbackGate } from '../../app/web-client/src/playback-gate.js';
 import { state } from '../../app/web-client/src/state.js';
 
 /**
- * Web-client playback-state primitives (design-playback-state-protocol.md,
- * execution-plan steps 15–17). The settle delay falls back to 250 ms whenever
- * the AudioContext latency fields are unavailable, which is the case here since
- * `state.audioCtx` is null in the test environment.
+ * Web-client playback-state protocol (design-playback-state-protocol.md),
+ * post-D3: the handshake mechanics live in the shared PlaybackEndedGate
+ * (unit-tested in test/clients/); these tests cover the APP wiring — the
+ * `audio.done` handler → gate → typed send facade path, and the
+ * AppPlaybackRenderer's capability decisions over live app state.
+ * The settle delay falls back to 250 ms (no AudioContext in this env).
  */
 const SETTLE_MS = 250;
-
-function fakeSource(): AudioBufferSourceNode {
-	return { stop: vi.fn() } as unknown as AudioBufferSourceNode;
-}
 
 function mockWs(): WebSocket & { send: ReturnType<typeof vi.fn> } {
 	return { readyState: WebSocket.OPEN, send: vi.fn() } as unknown as WebSocket & {
@@ -24,197 +21,110 @@ function mockWs(): WebSocket & { send: ReturnType<typeof vi.fn> } {
 	};
 }
 
-describe('web-client playback-state protocol', () => {
-	let ws: WebSocket & { send: ReturnType<typeof vi.fn> };
+/** Controllable stand-in for the shared audio engine. */
+function fakePcm(): PcmAudio & { playing: boolean; flushed: number } {
+	const fake = {
+		playing: false,
+		flushed: 0,
+		settleDelayMs: () => SETTLE_MS,
+		muteAndFlush() {
+			fake.flushed += 1;
+		},
+		unmute() {},
+		onAllSourcesEnded: null as (() => void) | null,
+		gateOpen: false,
+		inputRate: 16000,
+		outputRate: 24000,
+	};
+	return fake as unknown as PcmAudio & { playing: boolean; flushed: number };
+}
+
+describe('web-client playback-state protocol (app wiring)', () => {
+	let ws: ReturnType<typeof mockWs>;
+	let pcm: ReturnType<typeof fakePcm>;
+	let realPcm: PcmAudio;
 
 	beforeEach(() => {
 		vi.useFakeTimers();
 		ws = mockWs();
-		state.audioDonePlaybackId = null;
-		state.playbackEndedTimer = null;
-		state.connectionGeneration = 0;
-		state.activeSources = [];
-		state.nextPlayTime = 0;
-		state.audioCtx = null;
+		pcm = fakePcm();
+		realPcm = state.pcm;
+		state.pcm = pcm;
+		state.ws = ws as unknown as WebSocket;
 		state.clientAudioSource = 'websocket_pcm';
 		state.useSpatialWebAvatar = false;
-		state.ws = ws;
+		playbackGate.clear();
 	});
 
 	afterEach(() => {
+		playbackGate.clear();
+		state.pcm = realPcm;
+		state.ws = null;
 		vi.useRealTimers();
 	});
 
-	it('emits playback.ended after the settle delay once a turn is marked done', () => {
-		state.audioDonePlaybackId = 7;
-		maybeSchedulePlaybackEnded();
-		expect(state.playbackEndedTimer).not.toBeNull();
+	function audioDone(playbackId: number): void {
+		clientActionHandlers['audio.done']?.({ type: 'audio.done', playbackId });
+	}
 
+	it('emits playback.ended after the settle delay once a turn is marked done', () => {
+		audioDone(7);
 		vi.advanceTimersByTime(SETTLE_MS - 1);
 		expect(ws.send).not.toHaveBeenCalled();
-
 		vi.advanceTimersByTime(1);
 		expect(ws.send).toHaveBeenCalledExactlyOnceWith(
 			JSON.stringify({ type: 'playback.ended', playbackId: 7 }),
 		);
-		expect(state.audioDonePlaybackId).toBeNull();
-		expect(state.playbackEndedTimer).toBeNull();
 	});
 
-	it('does not schedule before an audio.done has been received', () => {
-		maybeSchedulePlaybackEnded();
-		expect(state.playbackEndedTimer).toBeNull();
+	it('emits exactly once per consumed audio.done', () => {
+		audioDone(7);
 		vi.advanceTimersByTime(SETTLE_MS);
-		expect(ws.send).not.toHaveBeenCalled();
-	});
-
-	it('does not schedule while assistant audio is still playing', () => {
-		state.audioDonePlaybackId = 7;
-		state.activeSources = [fakeSource()];
-		maybeSchedulePlaybackEnded();
-		expect(state.playbackEndedTimer).toBeNull();
-	});
-
-	it('does not double-schedule when a timer is already pending', () => {
-		state.audioDonePlaybackId = 7;
-		maybeSchedulePlaybackEnded();
-		const first = state.playbackEndedTimer;
-		maybeSchedulePlaybackEnded();
-		expect(state.playbackEndedTimer).toBe(first);
-	});
-
-	it('suppresses the emit when audio resumes mid-settle, then reschedules on drain', () => {
-		state.audioDonePlaybackId = 7;
-		maybeSchedulePlaybackEnded();
-
-		vi.advanceTimersByTime(100);
-		state.activeSources = [fakeSource()]; // audio resumed during the wait
-		vi.advanceTimersByTime(SETTLE_MS);
-		expect(ws.send).not.toHaveBeenCalled();
-		expect(state.audioDonePlaybackId).toBe(7); // id kept for a later drain
-		expect(state.playbackEndedTimer).toBeNull();
-
-		state.activeSources = []; // buffer drains again
-		maybeSchedulePlaybackEnded();
-		vi.advanceTimersByTime(SETTLE_MS);
-		expect(ws.send).toHaveBeenCalledExactlyOnceWith(
-			JSON.stringify({ type: 'playback.ended', playbackId: 7 }),
-		);
-	});
-
-	it('drops a stale signal when the connection generation changed', () => {
-		state.audioDonePlaybackId = 7;
-		maybeSchedulePlaybackEnded();
-		state.connectionGeneration = 1; // a reconnect happened
-		vi.advanceTimersByTime(SETTLE_MS);
-		expect(ws.send).not.toHaveBeenCalled();
-		expect(state.audioDonePlaybackId).toBeNull();
-	});
-
-	it('drops a stale signal when the socket was replaced', () => {
-		state.audioDonePlaybackId = 7;
-		maybeSchedulePlaybackEnded();
-		state.ws = mockWs(); // a new socket took over
-		vi.advanceTimersByTime(SETTLE_MS);
-		expect(ws.send).not.toHaveBeenCalled();
-		expect(state.audioDonePlaybackId).toBeNull();
-	});
-
-	it('does not schedule for a non-playChunk render path (multi-sink gate)', () => {
-		state.clientAudioSource = 'rtc_opus';
-		state.audioDonePlaybackId = 7;
-		maybeSchedulePlaybackEnded();
-		expect(state.playbackEndedTimer).toBeNull();
-	});
-
-	it('does not schedule while an avatar sink absorbs assistant PCM', async () => {
-		const { setSpatialWebAvatarSink } = await import(
-			'../../app/web-client/src/spatial-web-avatar/sink.js'
-		);
-		setSpatialWebAvatarSink({
-			onAssistantPcm: () => {},
-			onTurnEnd: () => {},
-			onTurnInterrupted: () => {},
-			onKeyframes: () => {},
-		});
-		state.audioDonePlaybackId = 7;
-		maybeSchedulePlaybackEnded();
-		expect(state.playbackEndedTimer).toBeNull();
-		setSpatialWebAvatarSink(null);
-	});
-
-	it('emits exactly once per turn even if scheduled again afterwards', () => {
-		state.audioDonePlaybackId = 7;
-		maybeSchedulePlaybackEnded();
-		vi.advanceTimersByTime(SETTLE_MS);
-		expect(ws.send).toHaveBeenCalledTimes(1);
-
-		maybeSchedulePlaybackEnded(); // id already consumed
 		vi.advanceTimersByTime(SETTLE_MS);
 		expect(ws.send).toHaveBeenCalledTimes(1);
 	});
 
-	it('handles the audio.done-then-drain arrival order', () => {
-		state.activeSources = [fakeSource()]; // audio still playing
-		state.audioDonePlaybackId = 7; // audio.done arrives first
-		maybeSchedulePlaybackEnded();
-		expect(state.playbackEndedTimer).toBeNull();
-
-		state.activeSources = []; // buffer drains afterwards
-		maybeSchedulePlaybackEnded();
+	it('defers while assistant audio is still playing (audio.done-then-drain order)', () => {
+		pcm.playing = true;
+		audioDone(7);
 		vi.advanceTimersByTime(SETTLE_MS);
-		expect(ws.send).toHaveBeenCalledExactlyOnceWith(
-			JSON.stringify({ type: 'playback.ended', playbackId: 7 }),
-		);
+		expect(ws.send).not.toHaveBeenCalled();
 	});
 
 	it('handles the drain-then-audio.done arrival order', () => {
-		state.activeSources = []; // buffer already drained
-		state.audioDonePlaybackId = 9; // audio.done arrives after
-		maybeSchedulePlaybackEnded();
+		pcm.playing = false; // buffer already drained
+		audioDone(9);
 		vi.advanceTimersByTime(SETTLE_MS);
 		expect(ws.send).toHaveBeenCalledExactlyOnceWith(
 			JSON.stringify({ type: 'playback.ended', playbackId: 9 }),
 		);
 	});
 
+	it('does not emit for the rtc_opus render path', () => {
+		state.clientAudioSource = 'rtc_opus';
+		audioDone(7);
+		vi.advanceTimersByTime(SETTLE_MS);
+		expect(ws.send).not.toHaveBeenCalled();
+	});
+
+	it('a stale settle timer from a previous connection generation never emits', () => {
+		audioDone(7);
+		playbackGate.newGeneration(); // connectWs() ran — reconnect
+		vi.advanceTimersByTime(SETTLE_MS);
+		expect(ws.send).not.toHaveBeenCalled();
+	});
+
 	it('clearPendingPlaybackEnded cancels a pending emit', () => {
-		state.audioDonePlaybackId = 7;
-		maybeSchedulePlaybackEnded();
+		audioDone(7);
 		clearPendingPlaybackEnded();
-		expect(state.playbackEndedTimer).toBeNull();
-		expect(state.audioDonePlaybackId).toBeNull();
 		vi.advanceTimersByTime(SETTLE_MS);
 		expect(ws.send).not.toHaveBeenCalled();
 	});
 
-	it('teardownPlayback stops sources, resets the cursor, and cancels a pending emit', () => {
-		state.audioDonePlaybackId = 7;
-		maybeSchedulePlaybackEnded();
-		const src = fakeSource();
-		state.activeSources = [src];
-		state.nextPlayTime = 5;
-
+	it('teardownPlayback flushes scheduled audio and cancels a pending emit', () => {
+		audioDone(7);
 		teardownPlayback();
-
-		expect(src.stop).toHaveBeenCalledOnce();
-		expect(state.activeSources).toHaveLength(0);
-		expect(state.nextPlayTime).toBe(0);
-		expect(state.playbackEndedTimer).toBeNull();
-		expect(state.audioDonePlaybackId).toBeNull();
-
-		vi.advanceTimersByTime(SETTLE_MS);
-		expect(ws.send).not.toHaveBeenCalled();
-	});
-
-	it('a settle timer scheduled before a reconnect teardown never emits', () => {
-		state.audioDonePlaybackId = 7;
-		maybeSchedulePlaybackEnded();
-
-		// connectWs() runs teardownPlayback() then bumps the generation.
-		teardownPlayback();
-		state.connectionGeneration += 1;
-
+		expect(pcm.flushed).toBeGreaterThan(0);
 		vi.advanceTimersByTime(SETTLE_MS);
 		expect(ws.send).not.toHaveBeenCalled();
 	});

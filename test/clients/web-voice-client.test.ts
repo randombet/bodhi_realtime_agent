@@ -217,8 +217,9 @@ describe('playback-state handshake × renderer capability matrix (B4)', () => {
 		const renderer = fakeRenderer();
 		const { client, ws } = makeClient({ renderer });
 		client.handleJson({ type: 'audio.done', playbackId: 12 });
-		// New connection generation begins before the settle timer fires.
-		(client as unknown as { generation: number }).generation += 1;
+		// New connection generation begins before the settle timer fires (the
+		// gate owns the handshake generation — see playback-ended-gate.ts).
+		(client as unknown as { gate: { generation: number } }).gate.generation += 1;
 		vi.advanceTimersByTime(100);
 		expect(ws.sent).toHaveLength(0);
 	});

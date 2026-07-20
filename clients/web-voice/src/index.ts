@@ -9,5 +9,6 @@
 
 export * from './pacing.js';
 export * from './pcm-audio.js';
+export * from './playback-ended-gate.js';
 export * from './renderer.js';
 export * from './voice-client.js';

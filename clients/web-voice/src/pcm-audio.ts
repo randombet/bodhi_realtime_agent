@@ -82,6 +82,14 @@ export class PcmAudio {
 		return this.activeSources.length > 0;
 	}
 
+	/** Context introspection for status UIs. */
+	get contextState(): AudioContextState | 'none' {
+		return this.audioCtx?.state ?? 'none';
+	}
+	get contextSampleRate(): number | null {
+		return this.audioCtx?.sampleRate ?? null;
+	}
+
 	/** Web Audio playback rate for assistant audio (speech pacing). Clamped to
 	 *  the protocol floor — the server's playback-duration fallback assumes
 	 *  audio never plays slower than MIN_PLAYBACK_RATE. Applies to newly
@@ -100,7 +108,7 @@ export class PcmAudio {
 	 * is audible instead of silently dropped. Reuses a context pending delayed
 	 * close (fast reconnect); closes a truly orphaned one.
 	 */
-	primeAudioContext(): void {
+	primeAudioContext(opts?: { fresh?: boolean }): void {
 		if (this.pendingCloseTimer !== null) {
 			clearTimeout(this.pendingCloseTimer);
 			this.pendingCloseTimer = null;
@@ -109,6 +117,12 @@ export class PcmAudio {
 			void this.pendingCloseContext.close().catch(() => {});
 		}
 		this.pendingCloseContext = null;
+		if (opts?.fresh && this.audioCtx && this.audioCtx.state !== 'closed') {
+			// Fresh-per-call semantics (a new user gesture wants a cold AEC/
+			// clean graph): discard the old context instead of reviving it.
+			void this.audioCtx.close().catch(() => {});
+			this.audioCtx = null;
+		}
 		if (!this.audioCtx || this.audioCtx.state === 'closed') {
 			this.audioCtx = new AudioContext();
 			this.outputGain = null;
@@ -116,6 +130,19 @@ export class PcmAudio {
 		}
 		if (this.audioCtx.state === 'suspended') {
 			void this.audioCtx.resume();
+		}
+	}
+
+	/** Stop capture only (mic stream + processor); playback and the context
+	 *  are untouched. `teardown()` calls this. */
+	stopMic(): void {
+		if (this.processor) {
+			this.processor.disconnect();
+			this.processor = null;
+		}
+		if (this.micStream) {
+			for (const t of this.micStream.getTracks()) t.stop();
+			this.micStream = null;
 		}
 	}
 
@@ -235,16 +262,11 @@ export class PcmAudio {
 	 */
 	teardown(): void {
 		this.gateOpen = false;
-		if (this.processor) {
-			this.processor.disconnect();
-			this.processor = null;
-		}
-		if (this.micStream) {
-			for (const t of this.micStream.getTracks()) t.stop();
-			this.micStream = null;
-		}
+		this.stopMic();
 		this.muteAndFlush();
-		this.onAllSourcesEnded = null;
+		// NOTE: onAllSourcesEnded intentionally survives teardown — the
+		// playback-ended gate binds it once for the lifetime of the renderer,
+		// and a reconnect (prime + startMic) must keep drain events flowing.
 		const ctx = this.audioCtx;
 		this.audioCtx = null;
 		this.outputGain = null;

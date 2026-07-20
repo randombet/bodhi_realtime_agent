@@ -29,6 +29,7 @@ import type {
 } from '@bodhi/client-protocol';
 import { type PacingRates, rateForBehaviorChange, rateFromCatalog } from './pacing.js';
 import { PcmAudio } from './pcm-audio.js';
+import { PlaybackEndedGate } from './playback-ended-gate.js';
 import { PcmPlaybackRenderer, type PlaybackRenderer } from './renderer.js';
 
 export type VoiceStatus = 'idle' | 'connecting' | 'live' | 'ended' | 'error';
@@ -71,12 +72,11 @@ export class VoiceClient {
 	/** undefined ⇒ protocol default table; false ⇒ pacing handling disabled. */
 	private readonly pacingRates: PacingRates | false | undefined;
 	private ws: WebSocket | null = null;
-	private audioDonePlaybackId: number | null = null;
-	private settleTimer: ReturnType<typeof setTimeout> | null = null;
+	private readonly gate: PlaybackEndedGate;
 	private closedByUs = false;
 	/** Connection generation — bumped per connect(); async callbacks compare
-	 *  against it so a stale settle timer or drain event from a previous
-	 *  connection can never act on the current one. */
+	 *  against it so a frame from a previous connection can never act on the
+	 *  current one (the gate keeps its own for settle timers). */
 	private generation = 0;
 
 	constructor(callbacks: VoiceClientCallbacks, options?: VoiceClientOptions) {
@@ -86,11 +86,11 @@ export class VoiceClient {
 			? options.renderer(this.audio)
 			: new PcmPlaybackRenderer(this.audio);
 		this.pacingRates = options?.pacingRates;
-		// Wired once here (not per-connect): the renderer outlives connections,
-		// and maybeSchedulePlaybackEnded reads the generation at fire time.
-		this.renderer.setOnAllPlaybackDrained(() => {
-			this.maybeSchedulePlaybackEnded(this.generation);
-		});
+		// The gate owns the audio.done → drain → settle → playback.ended
+		// ordering (shared with socket-owning apps; see playback-ended-gate.ts).
+		this.gate = new PlaybackEndedGate(this.renderer, (playbackId) =>
+			this.sendClientMessage({ type: 'playback.ended', playbackId }),
+		);
 	}
 
 	/** Create/revive the AudioContext. Call synchronously from the user
@@ -103,7 +103,7 @@ export class VoiceClient {
 		this.generation += 1;
 		const gen = this.generation;
 		this.closedByUs = false;
-		this.clearSettleTimer();
+		this.gate.newGeneration();
 		this.callbacks.onStatus('connecting');
 		const ws = new WebSocket(wsUrl);
 		ws.binaryType = 'arraybuffer';
@@ -140,7 +140,7 @@ export class VoiceClient {
 
 		ws.onclose = (e) => {
 			if (gen !== this.generation) return;
-			this.clearSettleTimer();
+			this.gate.clear();
 			this.audio.teardown();
 			if (this.closedByUs) {
 				this.callbacks.onStatus('ended');
@@ -171,7 +171,7 @@ export class VoiceClient {
 
 	disconnect(): void {
 		this.closedByUs = true;
-		this.clearSettleTimer();
+		this.gate.clear();
 		this.ws?.close();
 		this.ws = null;
 	}
@@ -185,7 +185,7 @@ export class VoiceClient {
 					| undefined;
 				if (fmt?.inputSampleRate) this.audio.inputRate = fmt.inputSampleRate;
 				if (fmt?.outputSampleRate) this.audio.outputRate = fmt.outputSampleRate;
-				this.clearSettleTimer();
+				this.gate.clear();
 				this.audio.gateOpen = true;
 				this.callbacks.onStatus('live');
 				break;
@@ -201,25 +201,18 @@ export class VoiceClient {
 			}
 			case 'turn.interrupted': {
 				this.renderer.interrupt();
-				this.clearSettleTimer();
+				this.gate.clear();
 				break;
 			}
 			case 'turn.end': {
 				// Fallback bookkeeping only — see the header note on semantics.
 				this.renderer.onTurnEnd?.();
-				this.clearSettleTimer();
+				this.gate.clear();
 				break;
 			}
 			case 'audio.done': {
-				if (typeof msg.playbackId !== 'number' || !this.renderer.canSignalPlaybackEnded) break;
-				const decision = this.renderer.audioDoneDecision();
-				if (decision === 'ignore') break;
-				if (decision === 'ack-now') {
-					this.sendClientMessage({ type: 'playback.ended', playbackId: msg.playbackId });
-					break;
-				}
-				this.audioDonePlaybackId = msg.playbackId;
-				this.maybeSchedulePlaybackEnded(gen);
+				if (typeof msg.playbackId !== 'number') break;
+				this.gate.audioDone(msg.playbackId);
 				break;
 			}
 			case 'behavior.catalog': {
@@ -247,37 +240,5 @@ export class VoiceClient {
 				break;
 			}
 		}
-	}
-
-	/** playback.ended handshake: once the server marked the turn's audio done
-	 *  AND the renderer drained, wait one settle delay (OS output buffer + a
-	 *  mic quantum) and acknowledge, so the server can complete the turn. */
-	private maybeSchedulePlaybackEnded(gen: number): void {
-		if (this.settleTimer !== null) return;
-		if (this.audioDonePlaybackId === null) return;
-		if (this.renderer.playing) return;
-		const playbackId = this.audioDonePlaybackId;
-		const ws = this.ws;
-		this.settleTimer = setTimeout(() => {
-			this.settleTimer = null;
-			if (gen !== this.generation) return; // stale timer from a prior connection
-			if (!ws || ws.readyState !== WebSocket.OPEN || this.ws !== ws) {
-				this.audioDonePlaybackId = null;
-				return;
-			}
-			// Audio resumed during the settle wait — a later drain reschedules.
-			if (this.renderer.playing) return;
-			if (this.audioDonePlaybackId !== playbackId) return;
-			ws.send(JSON.stringify({ type: 'playback.ended', playbackId }));
-			this.audioDonePlaybackId = null;
-		}, this.renderer.settleDelayMs());
-	}
-
-	private clearSettleTimer(): void {
-		if (this.settleTimer !== null) {
-			clearTimeout(this.settleTimer);
-			this.settleTimer = null;
-		}
-		this.audioDonePlaybackId = null;
 	}
 }
