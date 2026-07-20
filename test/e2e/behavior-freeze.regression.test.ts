@@ -120,13 +120,19 @@ describe('Behavior-freeze regression', () => {
 			const spawn = messages.find((m) => m.type === 'subagent.spawn_requested');
 			expect(spawn).toBeDefined();
 
-			// Snapshot: spawn payload must match this shape
+			// Snapshot: spawn payload must match this shape.
+			// pendingResultSent added deliberately (design-sutando-persistent-subagent.md,
+			// M1 step 1): tool routing tells the supervisor whether the immediate pending
+			// tool result already filled the function-response slot. `false` here (no
+			// pendingMessage on this tool) preserves the exact pre-change user-facing
+			// behavior — the supervisor still sends the terminal tool result.
 			expect(spawn?.payload).toEqual({
 				toolCallId: 'tc-1',
 				toolName: 'ask_coder',
 				args: { task: 'write code' },
 				configName: 'coder',
 				lifetime: 'persistent_session',
+				pendingResultSent: false,
 			});
 		});
 	});
