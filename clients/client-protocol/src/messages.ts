@@ -143,14 +143,14 @@ export interface SubagentQuestionMessage {
 }
 
 /** Terminal notification for a background subagent workflow (actor mode).
- *  NOTE: the emitter currently sends `failure` when a completion envelope
- *  exists but `failed` on the fallback path — both appear on the wire today;
- *  the union is honest about that (repairing the emit is a runtime protocol
- *  change tracked in the audit table, not silently "fixed" here). */
+ *  Both emit paths send `failure` for a failed workflow (unified — audit
+ *  issue #2). `failed` remains in the union as a DEPRECATED member for one
+ *  release so consumers compiled against the historical wire value keep
+ *  building; no emitter sends it anymore — remove next release. */
 export interface SubagentCompletionMessage {
 	type: 'subagent.completion';
 	toolCallId: string;
-	status: 'success' | 'failure' | 'failed' | 'cancelled';
+	status: 'success' | 'failure' | /** @deprecated no longer emitted; use 'failure' */ 'failed' | 'cancelled';
 	summaryText?: string;
 	uiPayload?: Record<string, unknown>;
 	artifacts?: unknown[];

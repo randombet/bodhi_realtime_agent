@@ -157,7 +157,10 @@ export class ClientGatewayActor implements Actor {
 			this.clientSend({
 				type: 'subagent.completion',
 				toolCallId,
-				status: event === 'completed' ? 'success' : event,
+				// Match the completion-envelope path's SubagentCompletionStatus
+				// value: 'failed' events map to 'failure' on the wire (the two
+				// paths historically disagreed — audit issue #2).
+				status: event === 'completed' ? 'success' : event === 'failed' ? 'failure' : event,
 			});
 		}
 	}
