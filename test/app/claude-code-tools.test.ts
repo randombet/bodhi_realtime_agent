@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ClaudeCodeSessionState } from '../../app/lib/integrations/claude-code/claude-code-tools.js';
 
 // Mock the SDK before importing the module under test
 const mockQuery = vi.fn();
@@ -538,7 +539,7 @@ describe('createClaudeCodeSubagentConfig', () => {
 					createMockQuery([createMockInitMessage('sdk-third'), createMockResultMessage()]),
 				);
 
-			const sharedState = {
+			const sharedState: ClaudeCodeSessionState = {
 				threads: {},
 				sessionToThread: {},
 				maxHistoryPerThread: 5,
@@ -595,7 +596,7 @@ describe('createClaudeCodeSubagentConfig', () => {
 				]),
 			);
 
-			const sharedState = {
+			const sharedState: ClaudeCodeSessionState = {
 				threads: {},
 				sessionToThread: {},
 				maxHistoryPerThread: 10,
@@ -643,7 +644,7 @@ describe('createClaudeCodeSubagentConfig', () => {
 				]);
 			});
 
-			const sharedState = {
+			const sharedState: ClaudeCodeSessionState = {
 				threads: {},
 				sessionToThread: {},
 				maxHistoryPerThread: 2,
@@ -728,6 +729,7 @@ describe('createPersistentClaudeCodeSubagentConfig', () => {
 
 		const instance = await config.persistentFactory?.('test-key', config);
 		expect(instance).toBeDefined();
+		if (!instance) throw new Error('expected persistent Claude instance');
 		expect(instance.key).toBe('test-key');
 		expect(instance.invoke).toBeTypeOf('function');
 		expect(instance.dispose).toBeTypeOf('function');
@@ -747,6 +749,7 @@ describe('createPersistentClaudeCodeSubagentConfig', () => {
 
 		// Factory should succeed without throwing
 		const instance = await config.persistentFactory?.('key-1', config);
+		if (!instance) throw new Error('expected persistent Claude instance');
 		expect(instance.key).toBe('key-1');
 		await instance.dispose();
 	});

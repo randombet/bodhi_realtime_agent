@@ -113,6 +113,9 @@ export function createHumanAgent(config: HumanAgentConfig): MainAgent {
 					ctx.sendJsonToClient({
 						type: 'session.config',
 						audioFormat: clientAudioFormat(16000),
+						clientMedia: { kind: 'websocket' },
+						clientSignalSource: 'websocket_json',
+						clientAudioSource: 'websocket_pcm',
 					});
 					ctx.sendJsonToClient({
 						type: 'agent.human_transfer',
@@ -189,6 +192,9 @@ export function createHumanAgent(config: HumanAgentConfig): MainAgent {
 			_ctx.sendJsonToClient({
 				type: 'session.config',
 				audioFormat: clientAudioFormat(24000),
+				clientMedia: { kind: 'websocket' },
+				clientSignalSource: 'websocket_json',
+				clientAudioSource: 'websocket_pcm',
 			});
 		},
 	};

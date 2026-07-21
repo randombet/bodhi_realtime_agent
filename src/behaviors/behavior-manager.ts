@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { BehaviorCategory } from '../types/behavior.js';
+import type { AnyServerToClientMessage } from '../types/client-protocol.js';
 import type { ToolDefinition } from '../types/tool.js';
 
 /**
@@ -19,13 +20,13 @@ export class BehaviorManager {
 		value: string | null,
 		scope?: 'session' | 'agent',
 	) => void;
-	private readonly sendJsonToClient?: (msg: Record<string, unknown>) => void;
+	private readonly sendJsonToClient?: (msg: AnyServerToClientMessage) => void;
 	private readonly onPresetChange?: (key: string, presetName: string) => void;
 
 	constructor(
 		categories: BehaviorCategory[],
 		setDirective: (key: string, value: string | null, scope?: 'session' | 'agent') => void,
-		sendJsonToClient?: (msg: Record<string, unknown>) => void,
+		sendJsonToClient?: (msg: AnyServerToClientMessage) => void,
 		onPresetChange?: (key: string, presetName: string) => void,
 	) {
 		this.categories = categories;

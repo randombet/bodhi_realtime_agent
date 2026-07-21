@@ -28,7 +28,9 @@ export interface WeriftOpusRtcEngineOptions {
 	readonly inputPcmSampleRate: number;
 	readonly outputPcmSampleRate: number;
 	readonly onInboundPcm: (pcm: Buffer) => void;
-	readonly emitServerJson: (msg: Record<string, unknown>) => void;
+	readonly emitServerJson: (
+		msg: import('../types/client-protocol.js').CoreServerToClientMessage,
+	) => void;
 	readonly onLog?: (message: string) => void;
 	/** Fired once when outbound Opus RTP is wired (flush any pre-negotiation assistant PCM). */
 	readonly onMediaReady?: () => void;

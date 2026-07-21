@@ -12,6 +12,7 @@
  */
 
 import 'dotenv/config';
+import type { AnyServerToClientMessage } from '../../src/types/client-protocol.js';
 import { readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { dirname, join } from 'node:path';
@@ -64,7 +65,7 @@ async function main(): Promise<void> {
 				activeWs.send(data, { binary: true });
 			}
 		},
-		sendJson(message: Record<string, unknown>) {
+		sendJson(message: AnyServerToClientMessage) {
 			if (activeWs?.readyState === WebSocket.OPEN) {
 				activeWs.send(JSON.stringify(message));
 			}

@@ -34,7 +34,7 @@ describe('ArtifactRegistry', () => {
 		expect(list[0].source).toBe('generated');
 		expect(list[0].fileName).toBe('test.png');
 		// list() should NOT contain base64
-		expect((list[0] as Record<string, unknown>).base64).toBeUndefined();
+		expect('base64' in list[0]).toBe(false);
 	});
 
 	it('FIFO eviction at count limit', () => {

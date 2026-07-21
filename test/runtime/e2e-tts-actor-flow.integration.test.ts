@@ -181,10 +181,10 @@ describe('TTS Actor Flow Integration', () => {
 
 	describe('startup validation', () => {
 		it('TTS requires actor orchestration mode', () => {
-			const orchestrationMode = 'legacy';
-			const hasTTS = true;
+			const requiresActorMode = (orchestrationMode: 'legacy' | 'actor', hasTTS: boolean) =>
+				hasTTS && orchestrationMode !== 'actor';
 
-			if (hasTTS && orchestrationMode !== 'actor') {
+			if (requiresActorMode('legacy', true)) {
 				expect(true).toBe(true); // Would throw in VoiceSession.start()
 			}
 		});

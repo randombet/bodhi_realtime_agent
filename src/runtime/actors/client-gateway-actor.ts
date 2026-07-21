@@ -11,13 +11,16 @@
  * Ensures no duplicate user notifications per toolCallId.
  */
 
+import type { AnyServerToClientMessage } from '../../types/client-protocol.js';
 import type { Actor } from '../actor-runtime.js';
 import type { ActorSendFn } from '../actor-send-fn.js';
 import type { ActorId, Envelope } from '../envelope.js';
 import type { SubagentCompletion } from '../subagent-completion.js';
 
 /** Callback to send a JSON message to the connected client. */
-export type ClientSendFn = (message: Record<string, unknown>) => void;
+/** Send a JSON frame to the client — core protocol frames plus registered
+ *  `ClientProtocolServerExtensions` (module augmentation). */
+export type ClientSendFn = (message: AnyServerToClientMessage) => void;
 
 export class ClientGatewayActor implements Actor {
 	readonly id: ActorId;
@@ -154,7 +157,10 @@ export class ClientGatewayActor implements Actor {
 			this.clientSend({
 				type: 'subagent.completion',
 				toolCallId,
-				status: event === 'completed' ? 'success' : event,
+				// Match the completion-envelope path's SubagentCompletionStatus
+				// value: 'failed' events map to 'failure' on the wire (the two
+				// paths historically disagreed — audit issue #2).
+				status: event === 'completed' ? 'success' : event === 'failed' ? 'failure' : event,
 			});
 		}
 	}

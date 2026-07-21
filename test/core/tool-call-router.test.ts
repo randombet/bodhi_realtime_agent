@@ -22,7 +22,7 @@ function createBackgroundTool(name: string, pendingMessage?: string): ToolDefini
 describe('ToolCallRouter', () => {
 	it('uses createInstance() and records tool_call before handoff completion', async () => {
 		const createInstance = vi.fn();
-		let resolveHandoff: ((value: { text: string }) => void) | null = null;
+		let resolveHandoff!: (value: { text: string }) => void;
 		const handoff = vi.fn(
 			() =>
 				new Promise<{ text: string }>((resolve) => {
@@ -83,7 +83,7 @@ describe('ToolCallRouter', () => {
 		});
 		expect(addToolResult).not.toHaveBeenCalled();
 
-		resolveHandoff?.({ text: 'done' });
+		resolveHandoff({ text: 'done' });
 		await flushMicrotasks();
 
 		expect(addToolResult).toHaveBeenCalledWith({
@@ -146,9 +146,11 @@ describe('ToolCallRouter', () => {
 	});
 
 	it('acknowledges local background tools immediately before execution completes', async () => {
-		let resolveTool:
-			| ((value: { toolCallId: string; toolName: string; result: unknown }) => void)
-			| null = null;
+		let resolveTool!: (value: {
+			toolCallId: string;
+			toolName: string;
+			result: unknown;
+		}) => void;
 		const handleToolCall = vi.fn(
 			() =>
 				new Promise<{ toolCallId: string; toolName: string; result: unknown }>((resolve) => {
@@ -202,7 +204,7 @@ describe('ToolCallRouter', () => {
 		});
 		expect(addToolResult).not.toHaveBeenCalled();
 
-		resolveTool?.({
+		resolveTool({
 			toolCallId: 'tc_3',
 			toolName: 'record_answer',
 			result: { status: 'recorded' },

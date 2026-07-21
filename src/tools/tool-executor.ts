@@ -2,6 +2,7 @@ import { DEFAULT_TOOL_TIMEOUT_MS } from '../core/constants.js';
 import { ToolExecutionError } from '../core/errors.js';
 import type { IEventBus } from '../core/event-bus.js';
 import type { HooksManager } from '../core/hooks.js';
+import type { AnyServerToClientMessage } from '../types/client-protocol.js';
 import type { ToolCall, ToolResult } from '../types/conversation.js';
 import type { ToolContext, ToolDefinition } from '../types/tool.js';
 
@@ -28,7 +29,7 @@ export class ToolExecutor {
 		private eventBus: IEventBus,
 		private sessionId: string,
 		private agentName: string,
-		private sendJsonToClient?: (message: Record<string, unknown>) => void,
+		private sendJsonToClient?: (message: AnyServerToClientMessage) => void,
 		private setDirective?: (key: string, value: string | null, scope?: 'session' | 'agent') => void,
 	) {}
 

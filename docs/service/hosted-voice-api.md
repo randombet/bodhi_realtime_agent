@@ -150,9 +150,53 @@ Default contract when the realtime provider is Gemini-class:
 | **Client → server** | Raw **PCM**, 16-bit **little-endian**, **mono**, **16 kHz**. One WebSocket **binary** message per chunk (e.g. 20–40 ms). **No** WAV header. |
 | **Server → client** | Raw **PCM**, 16-bit LE, **mono**, **24 kHz**. |
 
-If the deployment uses another LLM provider, the first JSON message **`session.config`** carries the authoritative `audioFormat` (sample rates, channels, `encoding: "pcm"`). Always honor that message when present.
+If the deployment uses another LLM provider, **`session.config`** carries the authoritative `audioFormat` (sample rates, channels, `encoding: "pcm"`). A behavior catalog or another control frame may precede it while restored session state is applied; clients must tolerate those frames and honor `session.config` when it arrives.
 
 ### 4.3 JSON (text frames)
+
+> **Source of truth:** this section is checked in CI against the typed
+> hosted-mobile profile (`app/lib/client/hosted-mobile-profile.ts`, composed
+> from `@bodhi/client-protocol`). The machine-readable manifest below is
+> diffed against the profile's message and field lists by
+> `test/app/hosted-mobile-manifest.test.ts` — **a profile change must update
+> this section in the same PR** (a core-protocol change first forces a hosted
+> disposition in the profile's exhaustive map).
+
+<!-- hosted-mobile-manifest:server
+session.config type!:enum(session.config),audioFormat!:object,clientMedia!:object,clientSignalSource!:enum(websocket_json),clientAudioSource!:enum(websocket_pcm)
+session.ready type!:enum(session.ready),userId!:string,sessionId!:string,agentProfile!:string,clientMedia!:object,clientSignalSource!:enum(websocket_json),clientAudioSource!:enum(websocket_pcm)
+session.error type!:enum(session.error),code!:string,message!:string
+session.notice type!:enum(session.notice),code!:string,message!:string,remainingMs?:number
+transcript type!:enum(transcript),role!:enum(user|assistant),text!:string,partial?:boolean,corrected?:boolean,recovered?:boolean
+turn.end type!:enum(turn.end),turnId?:string
+turn.interrupted type!:enum(turn.interrupted)
+audio.done type!:enum(audio.done),playbackId!:number
+behavior.catalog type!:enum(behavior.catalog),categories!:array<object>
+behavior.changed type!:enum(behavior.changed),key!:string,preset!:string
+gui.update type!:enum(gui.update),payload!:object
+gui.notification type!:enum(gui.notification),payload!:object
+ui.payload type!:enum(ui.payload),payload!:object
+word_boundary type!:enum(word_boundary),word!:string,offsetMs!:number,requestId!:number
+grounding type!:enum(grounding),payload!:object
+subagent.question type!:enum(subagent.question),toolCallId!:string,workflowId!:string,question?:string,requestId?:string
+subagent.completion type!:enum(subagent.completion),toolCallId!:string,status!:enum(success|failure|failed|cancelled),summaryText?:string,uiPayload?:object,artifacts?:array<unknown>,metadata?:unknown
+subagent.progress type!:enum(subagent.progress),toolCallId!:string,workflowId!:string,text!:string
+sessions_list type!:enum(sessions_list),sessions!:array<object>,error?:string
+conversation_history type!:enum(conversation_history),data!:object
+session_end type!:enum(session_end),reason?:string
+-->
+<!-- hosted-mobile-manifest:client
+text_input type!:enum(text_input),text!:string
+playback.ended type!:enum(playback.ended),playbackId!:number
+behavior.set type!:enum(behavior.set),key!:string,preset!:string
+ui.response type!:enum(ui.response),payload!:object
+file_upload type!:enum(file_upload),data!:object
+list_sessions type!:enum(list_sessions)
+-->
+
+In the manifest, `!` means required, `?` means optional, and the suffix records
+the normalized value or container shape. This is the CI drift contract; the
+examples below are illustrative.
 
 Each **text** frame is **one** UTF-8 JSON object.
 
@@ -161,15 +205,25 @@ Each **text** frame is **one** UTF-8 JSON object.
 - `session.config` — audio format.
 - `session.ready` — includes `userId`, `sessionId`, `agentProfile` when the voice session is live.
 - `session.error` — `code`, `message`.
+- `session.notice` — non-fatal notice with `code`, `message`, and optional `remainingMs`.
 - `transcript` — user or assistant text; may include `"partial": true` while streaming.
 - `audio.done` — end of a turn's audio, when the optional playback-state protocol is enabled (see §4.4).
-- Additional types may include behavior catalogs, GUI updates, and turn/tool-related events aligned with the web client protocol.
+- `turn.end` / `turn.interrupted` — turn lifecycle (interruption ends the current audio).
+- `behavior.catalog` / `behavior.changed` — tunable behavior presets (e.g. speech pacing).
+- `gui.update` / `gui.notification` — structured GUI payloads aligned with the web client protocol.
+- `ui.payload`, `subagent.question`, `subagent.progress`, `subagent.completion` — optional
+  structured/agent UI events; clients may ignore them when they do not expose those surfaces.
+- `word_boundary` / `grounding` — optional caption timing and model grounding metadata.
+- `sessions_list` — response to `list_sessions`.
+- `conversation_history` — an agent-requested conversation export payload.
+- `session_end` — final reason frame. The server sends it and then closes the WebSocket normally.
 
 **Client → server (examples):**
 
 - `text_input` — user text to the model.
 - `behavior.set`, `ui.response`, `file_upload` — when exposed by your deployment.
 - `playback.ended` — reports turn audio finished playing, when the optional playback-state protocol is enabled (see §4.4).
+- `list_sessions` — requests a `sessions_list` snapshot for the authenticated user.
 
 Voice-first apps usually send **only binary PCM** on the socket and use **`POST /api/mobile/device-events`** for structured context.
 

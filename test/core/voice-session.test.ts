@@ -13,6 +13,11 @@ import type {
 	TransportCapabilities,
 } from '../../src/types/transport.js';
 
+declare module '@google/genai' {
+	function _getMessageHandler(): ((message: unknown) => void) | null;
+	function _getMockSession(): Record<string, ReturnType<typeof vi.fn>> | null;
+}
+
 // Mock the external deps
 vi.mock('@google/genai', () => {
 	let messageHandler: ((msg: unknown) => void) | null = null;
@@ -1505,6 +1510,8 @@ describe('VoiceSession', () => {
 			// Verify sendToolResponse was called with an error (not left hanging)
 			expect(mockSess.sendToolResponse).toHaveBeenCalled();
 			const lastCall = mockSess.sendToolResponse.mock.calls.at(-1);
+			expect(lastCall).toBeDefined();
+			if (!lastCall) throw new Error('expected tool response');
 			const response = lastCall[0].functionResponses[0];
 			expect(response.id).toBe('tc_err');
 			expect(response.name).toBe('broken_tool');
@@ -1545,7 +1552,10 @@ describe('VoiceSession', () => {
 			// Should get an immediate pending response so the LLM is not blocked.
 			expect(mockSess.sendToolResponse).toHaveBeenCalled();
 			const calls = mockSess.sendToolResponse.mock.calls;
-			const lastResponse = calls.at(-1)[0].functionResponses[0];
+			const lastCall = calls.at(-1);
+			expect(lastCall).toBeDefined();
+			if (!lastCall) throw new Error('expected tool response');
+			const lastResponse = lastCall[0].functionResponses[0];
 			expect(lastResponse.id).toBe('tc_bg');
 			expect(lastResponse.response).toMatchObject({ status: 'still_in_progress' });
 		});

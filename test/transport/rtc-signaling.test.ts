@@ -14,11 +14,8 @@ describe('tryParseRtcClientSignaling', () => {
 		});
 	});
 
-	it('parses rtc.answer', () => {
-		expect(tryParseRtcClientSignaling({ type: 'rtc.answer', sdp: 'v=0\r\n' })).toEqual({
-			type: 'rtc.answer',
-			sdp: 'v=0\r\n',
-		});
+	it('rejects rtc.answer inbound (server→client only after directionality fix)', () => {
+		expect(tryParseRtcClientSignaling({ type: 'rtc.answer', sdp: 'v=0\r\n' })).toBeNull();
 	});
 
 	it('parses rtc.ice_candidate', () => {

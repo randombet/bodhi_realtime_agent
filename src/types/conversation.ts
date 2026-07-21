@@ -81,12 +81,8 @@ export interface SubagentContextSnapshot {
 	knowledgeBaseContext?: string;
 }
 
-/** Structured UI payload for dual-channel delivery (voice + UI). */
-export interface UIPayload {
-	/** The kind of UI element to render on the client. */
-	type: 'choice' | 'confirmation' | 'status' | 'form' | 'image';
-	/** Identifier for correlating UI responses back to the originating request. */
-	requestId?: string;
-	/** Type-specific data for rendering the UI element. */
-	data: Record<string, unknown>;
-}
+/** Structured UI payload for dual-channel delivery (voice + UI).
+ *  Canonically owned by `@bodhi/client-protocol` (it rides in the
+ *  `ui.payload` wire frame); re-exported here for framework importers. */
+export type { UIPayload } from '@bodhi/client-protocol';
+import type { UIPayload } from '@bodhi/client-protocol';
