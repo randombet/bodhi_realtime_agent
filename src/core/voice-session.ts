@@ -34,6 +34,8 @@ import {
 	DEFAULT_CLIENT_MEDIA_PROFILE,
 	describeClientTransport,
 } from '../types/client-media.js';
+import { MIN_PLAYBACK_RATE } from '../types/client-protocol.js';
+import type { AnyServerToClientMessage } from '../types/client-protocol.js';
 import type { ConversationItem } from '../types/conversation.js';
 import type { ConversationHistoryStore, SessionAnalytics } from '../types/history.js';
 import type { FrameworkHooks } from '../types/hooks.js';
@@ -609,6 +611,21 @@ export class VoiceSession {
 	/** Whether a client WebSocket connection is currently active. */
 	private clientConnected = false;
 	/**
+	 * Input admission follows the server bootstrap, not merely socket acceptance.
+	 * A restored pacing preset must be sent before `session.config` opens the
+	 * browser mic; this flag also protects server-owned clients that send early.
+	 */
+	private clientInputReady = true;
+	/** Invalidates delayed memory/bootstrap callbacks across disconnect/reconnect. */
+	private clientConnectionGeneration = 0;
+	/** Prevents setup-complete and connect callbacks from greeting the same client twice. */
+	private greetingClientGeneration = -1;
+	/** JSON received after socket acceptance but before the restored behavior
+	 * catalog/config bootstrap. Bounded to avoid an overeager client growing
+	 * memory while provider setup is slow. */
+	private pendingClientJson: Record<string, unknown>[] = [];
+	private static readonly MAX_PENDING_CLIENT_JSON = 64;
+	/**
 	 * Legacy in-process notification queue. Constructed only when
 	 * `orchestrationMode !== 'actor'`; in actor mode NotificationActor
 	 * (`src/runtime/actors/notification-actor.ts`) takes over. Notification
@@ -627,6 +644,7 @@ export class VoiceSession {
 	private _isActorMode = false;
 	/** Resolves when memory/directives are loaded; used so greeting is sent after load without blocking connect. */
 	private _memoryReadyPromise: Promise<void> = Promise.resolve();
+	private memoryAndDirectivesReady = true;
 	private externalAudioHandler: ((data: Buffer) => void) | null = null;
 	/** Client-side energy-VAD segment tracker. Owns the `audioVad*` /
 	 *  `lastClientSpeech*` state; barge-in policy stays here (see the
@@ -650,7 +668,7 @@ export class VoiceSession {
 	 *  synthesized (1.0×) audio duration by this so slowed playback cannot
 	 *  pre-empt a healthy client's `playback.ended`. Must track the web
 	 *  client's rate map (`slow | normal | fast → 0.85 | 1.0 | 1.2`). */
-	private static readonly MIN_PLAYBACK_RATE = 0.85;
+	private static readonly MIN_PLAYBACK_RATE = MIN_PLAYBACK_RATE;
 
 	constructor(config: VoiceSessionConfig) {
 		this.config = config;
@@ -981,7 +999,7 @@ export class VoiceSession {
 			clientAudioInputRate: this.clientAudioInputRate,
 			getSttProvider: () => this.sttProvider,
 			getWhisperProvider: () => this.dictation.whisper,
-			isSessionActive: () => this.sessionManager.isActive,
+			isSessionActive: () => this.sessionManager.isActive && this.clientInputReady,
 			isRtcAudioReady: () => this.directRtcChannel?.isRtcAudioReady ?? false,
 			getMode: () => this.dictation.mode,
 			shouldDropOutbound: () => this.greeting.shouldDropOutbound(),
@@ -1926,8 +1944,29 @@ export class VoiceSession {
 			await this.runtimeOrchestrator.start();
 		}
 
-		// Load memory and directives in parallel with Gemini connect so session starts fast
-		this._memoryReadyPromise = this.loadMemoryAndDirectives();
+		// Load memory and directives in parallel with the provider connect. Client
+		// bootstrap/input admission waits on this promise so restored pacing is
+		// observable before a client can trigger the first response.
+		if (this.config.memory) {
+			this.memoryAndDirectivesReady = false;
+			this.clientInputReady = false;
+			this._memoryReadyPromise = this.loadMemoryAndDirectives().then(
+				() => {
+					this.memoryAndDirectivesReady = true;
+				},
+				(error) => {
+					// Memory is best-effort. A store failure must not strand a connected
+					// client behind the input gate forever.
+					this.memoryAndDirectivesReady = true;
+					this.log(
+						`Memory/directive restore failed: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				},
+			);
+		} else {
+			this.memoryAndDirectivesReady = true;
+			this._memoryReadyPromise = Promise.resolve();
+		}
 
 		await this.clientTransport.start();
 		this.log('Connecting to LLM transport...');
@@ -2247,7 +2286,7 @@ export class VoiceSession {
 					handler(chunk);
 				}
 			},
-			sendJsonToClient: (message: Record<string, unknown>) => {
+			sendJsonToClient: (message: AnyServerToClientMessage) => {
 				this.clientTransport.sendJsonToClient(message);
 			},
 			sendAudioToClient: (data: Buffer) => {
@@ -2489,16 +2528,14 @@ export class VoiceSession {
 		) {
 			return;
 		}
-		// Send greeting after memory/directives are loaded (no blocking of connect)
+		// Send the greeting only after the same post-restore bootstrap that admits
+		// client input. Both setup-complete and client-connect can reach this path;
+		// the generation guard keeps it exactly once for the live connection.
 		if (this.clientConnected) {
-			this._memoryReadyPromise.then(() => {
-				// Only mark the origin when a greeting will actually send — a stale
-				// pending origin would otherwise taint the next real response.
-				if (this.agentRouter.activeAgent.greeting) {
-					this._pendingResponseOrigin = 'assistant_initiated';
-				}
-				this.greeting.sendGreeting();
-			});
+			const generation = this.clientConnectionGeneration;
+			const greet = () => this.maybeSendGreetingForClient(generation);
+			if (this.memoryAndDirectivesReady) greet();
+			else void this._memoryReadyPromise.then(greet);
 		}
 	}
 
@@ -2804,6 +2841,21 @@ export class VoiceSession {
 	 * may too); the actual dispatch lives in {@link ClientMessageRouter}.
 	 */
 	private handleJsonFromClient(message: Record<string, unknown>): void {
+		// RTC negotiation does not generate model output and must remain available
+		// while the media channel is being established. All other client input waits
+		// for the post-restore bootstrap; registration order guarantees that the
+		// bootstrap callback sends the catalog/config before this callback dispatches.
+		const isRtcSignaling =
+			typeof message.type === 'string' &&
+			(message.type === 'rtc.offer' || message.type === 'rtc.ice_candidate');
+		if (!this.clientInputReady && !isRtcSignaling) {
+			if (this.pendingClientJson.length >= VoiceSession.MAX_PENDING_CLIENT_JSON) {
+				this.log('Dropping client JSON while bootstrap queue is full');
+				return;
+			}
+			this.pendingClientJson.push(message);
+			return;
+		}
 		this.clientMessageRouter.dispatch(message);
 	}
 
@@ -2912,6 +2964,8 @@ export class VoiceSession {
 	private handleClientConnected(): void {
 		this.log(`Client connected (geminiActive=${this.sessionManager.isActive})`);
 		this.clientConnected = true;
+		this.clientInputReady = false;
+		const generation = ++this.clientConnectionGeneration;
 		// Greeting interrupt grace: a fresh browser tab / RTC audio context
 		// typically means a cold AEC. Reset the window so the next first
 		// audio chunk re-arms cleanly. Leaving any prior session's grace
@@ -2920,45 +2974,67 @@ export class VoiceSession {
 		// different audio context.
 		// See dev_docs/framework/design-greeting-interrupt-grace.md §6.
 		this.greeting.resetForClientConnected();
-		const transportInfo = describeClientTransport(this.config.clientMedia);
+		const bootstrap = () => {
+			if (!this.clientConnected || generation !== this.clientConnectionGeneration) return;
+			const transportInfo = describeClientTransport(this.config.clientMedia);
 
-		// Send audio format config so the client can negotiate correct sample rates
-		this.clientTransport.sendJsonToClient({
-			type: 'session.config',
-			audioFormat: this.transport.audioFormat,
-			clientMedia: transportInfo.clientMedia,
-			clientSignalSource: transportInfo.clientSignalSource,
-			clientAudioSource: transportInfo.clientAudioSource,
-		});
-
-		if (this.ownsClientTransport) {
+			// Restore is complete here. Send pacing before `session.config`, because
+			// receiving config is the browser's signal to open its microphone gate.
+			this.behaviorManager?.sendCatalog();
 			this.clientTransport.sendJsonToClient({
-				type: 'session.ready',
-				userId: this.config.userId,
-				sessionId: this.config.sessionId,
-				agentProfile: this.agentRouter.activeAgent.name,
+				type: 'session.config',
+				audioFormat: this.transport.audioFormat,
 				clientMedia: transportInfo.clientMedia,
 				clientSignalSource: transportInfo.clientSignalSource,
 				clientAudioSource: transportInfo.clientAudioSource,
 			});
-		}
 
-		this.behaviorManager?.sendCatalog();
-		if (this.sessionManager.isActive) {
-			this._memoryReadyPromise.then(() => {
-				// Only mark the origin when a greeting will actually send — a stale
-				// pending origin would otherwise taint the next real response.
-				if (this.agentRouter.activeAgent.greeting) {
-					this._pendingResponseOrigin = 'assistant_initiated';
-				}
-				this.greeting.sendGreeting();
-			});
+			if (this.ownsClientTransport) {
+				this.clientTransport.sendJsonToClient({
+					type: 'session.ready',
+					userId: this.config.userId,
+					sessionId: this.config.sessionId,
+					agentProfile: this.agentRouter.activeAgent.name,
+					clientMedia: transportInfo.clientMedia,
+					clientSignalSource: transportInfo.clientSignalSource,
+					clientAudioSource: transportInfo.clientAudioSource,
+				});
+			}
+
+			this.clientInputReady = true;
+			const pending = this.pendingClientJson.splice(0);
+			for (const message of pending) this.clientMessageRouter.dispatch(message);
+			if (this.sessionManager.isActive) this.maybeSendGreetingForClient(generation);
+		};
+
+		if (this.memoryAndDirectivesReady) bootstrap();
+		else void this._memoryReadyPromise.then(bootstrap);
+	}
+
+	private maybeSendGreetingForClient(generation: number): void {
+		if (
+			!this.clientConnected ||
+			!this.clientInputReady ||
+			generation !== this.clientConnectionGeneration ||
+			this.greetingClientGeneration === generation
+		) {
+			return;
 		}
+		this.greetingClientGeneration = generation;
+		// Only mark the origin when a greeting will actually send — a stale
+		// pending origin would otherwise taint the next real response.
+		if (this.agentRouter.activeAgent.greeting) {
+			this._pendingResponseOrigin = 'assistant_initiated';
+		}
+		this.greeting.sendGreeting();
 	}
 
 	private handleClientDisconnected(): void {
 		this.log('Client disconnected');
 		this.clientConnected = false;
+		this.clientInputReady = false;
+		this.pendingClientJson = [];
+		this.clientConnectionGeneration++;
 	}
 
 	/** Feed client audio into the session (LLM + STT). Used when the server owns the socket (multi-user). */
@@ -3114,7 +3190,7 @@ export class VoiceSession {
 	 *  Whisper transcript fragments to a web UI during transcription mode.
 	 *
 	 *  Safe to call any time after `start()`; no-op when no client is connected. */
-	sendJsonToClient(message: Record<string, unknown>): void {
+	sendJsonToClient(message: AnyServerToClientMessage): void {
 		this.clientTransport.sendJsonToClient(message);
 	}
 

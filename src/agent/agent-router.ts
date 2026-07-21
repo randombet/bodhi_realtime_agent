@@ -5,6 +5,7 @@ import type { IEventBus } from '../core/event-bus.js';
 import type { HooksManager } from '../core/hooks.js';
 import type { SessionManager } from '../core/session-manager.js';
 import type { MainAgent, SubagentConfig } from '../types/agent.js';
+import type { AnyServerToClientMessage } from '../types/client-protocol.js';
 import type { SubagentResult, ToolCall } from '../types/conversation.js';
 import type { MemoryFact } from '../types/memory.js';
 import type { IClientChannel } from '../types/session-client.js';
@@ -380,7 +381,7 @@ export class AgentRouter {
 					handler(chunk);
 				}
 			},
-			sendJsonToClient: (message: Record<string, unknown>) => {
+			sendJsonToClient: (message: AnyServerToClientMessage) => {
 				this.clientTransport.sendJsonToClient(message);
 			},
 			sendAudioToClient: (data: Buffer) => {

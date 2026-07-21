@@ -266,7 +266,7 @@ describe('runSubagent', () => {
 			// Abort the caller while generateText is still in-flight
 			controller.abort();
 			expect(capturedSignal?.aborted).toBe(true);
-			return { text: 'done' } as ReturnType<typeof generateText>;
+			return { text: 'done' } as Awaited<ReturnType<typeof generateText>>;
 		});
 
 		await runSubagent({

@@ -6,8 +6,12 @@
 import { createServer, request as httpRequest } from 'node:http';
 import { describe, expect, it, vi } from 'vitest';
 import WebSocket from 'ws';
+import { z } from 'zod';
 import { TwilioInboundBridge } from '../../app/server/twilio-inbound-bridge.js';
+import { EventBus } from '../../src/core/event-bus.js';
+import { HooksManager } from '../../src/core/hooks.js';
 import type { VoiceSession } from '../../src/core/voice-session.js';
+import { ToolExecutor } from '../../src/tools/tool-executor.js';
 import { MultiClientTransport } from '../../src/transport/multi-client-transport.js';
 
 function parseAuthNonce(twiml: string): string {
@@ -45,6 +49,118 @@ function postVoice(port: number, callSid: string, from: string): Promise<string>
 }
 
 describe('TwilioInboundBridge phone path', () => {
+	it('hangs up once with the tool-provided reason when a session tool emits session_end', async () => {
+		const feedAudioFromClient = vi.fn();
+		const closeOwningSession = vi.fn();
+		const cleanup = vi.fn((reason?: string) => closeOwningSession(reason));
+		const createSession = vi.fn(async () => ({
+			session: { feedAudioFromClient } as unknown as VoiceSession,
+			sessionId: 'sess_tool_ended_phone',
+			cleanup,
+		}));
+		const bridge = new TwilioInboundBridge({
+			webhookUrl: 'https://bodhiagent.live',
+			sessionFactory: { createSession },
+			logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+		});
+		const server = createServer((req, res) => {
+			const path = new URL(req.url ?? '/', 'http://127.0.0.1').pathname.replace(/\/+$/, '');
+			if (path.startsWith('/twilio/')) bridge.handleRequest(req, res);
+			else {
+				res.writeHead(404);
+				res.end();
+			}
+		});
+		bridge.attach(server);
+		const port = await new Promise<number>((resolve, reject) => {
+			server.listen(0, '127.0.0.1', () => {
+				const address = server.address();
+				if (address && typeof address === 'object') resolve(address.port);
+				else reject(new Error('no port'));
+			});
+			server.on('error', reject);
+		});
+
+		try {
+			const callSid = 'CA_tool_end_001';
+			const twiml = await postVoice(port, callSid, '+15551112222');
+			const nonce = parseAuthNonce(twiml);
+
+			await new Promise<void>((resolve, reject) => {
+				const ws = new WebSocket(`ws://127.0.0.1:${port}/twilio/media`);
+				const timeout = setTimeout(() => reject(new Error('session_end timeout')), 8000);
+				ws.on('error', reject);
+				ws.on('open', () => {
+					ws.send(JSON.stringify({ event: 'connected', protocol: 'Call', version: '1.0.0' }));
+					ws.send(
+						JSON.stringify({
+							event: 'start',
+							start: {
+								streamSid: 'MZ_tool_end',
+								callSid,
+								customParameters: { auth: nonce },
+							},
+							streamSid: 'MZ_tool_end',
+						}),
+					);
+				});
+
+				const poll = setInterval(async () => {
+					if (createSession.mock.calls.length === 0) return;
+					clearInterval(poll);
+					await new Promise((r) => setImmediate(r));
+					const sender = bridge.createClientSenderForCallSid(callSid);
+					if (!sender) {
+						reject(new Error('phone session sender missing'));
+						return;
+					}
+
+					const executor = new ToolExecutor(
+						new HooksManager(),
+						new EventBus(),
+						'sess_tool_ended_phone',
+						'main',
+						(message) => sender.sendJson(message),
+					);
+					executor.register([
+						{
+							name: 'finish_call',
+							description: 'Finish the phone session',
+							parameters: z.object({}),
+							execution: 'inline',
+							execute: async (_args, ctx) => {
+								ctx.sendJsonToClient?.({
+									type: 'session_end',
+									reason: 'interview_completed',
+								});
+								return { ended: true };
+							},
+						},
+					]);
+					await executor.handleToolCall({
+						toolCallId: 'tc_finish_call',
+						toolName: 'finish_call',
+						args: {},
+					});
+				}, 10);
+
+				ws.on('close', (code) => {
+					clearTimeout(timeout);
+					expect(code).toBe(1000);
+					resolve();
+				});
+			});
+
+			expect(cleanup).toHaveBeenCalledTimes(1);
+			expect(cleanup).toHaveBeenCalledWith('interview_completed');
+			expect(closeOwningSession).toHaveBeenCalledExactlyOnceWith('interview_completed');
+			expect(bridge.activeCallCount).toBe(0);
+		} finally {
+			bridge.dispose();
+			await new Promise<void>((resolve) => server.close(() => resolve()));
+		}
+	}, 15_000);
+
 	it('POST /twilio/voice returns TwiML with Stream and auth nonce', async () => {
 		const feedAudioFromClient = vi.fn();
 		const cleanup = vi.fn();

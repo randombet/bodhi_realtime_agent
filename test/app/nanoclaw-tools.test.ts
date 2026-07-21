@@ -63,6 +63,7 @@ describe('createPersistentNanoClawSubagentConfig', () => {
 
 			const instance = await config.persistentFactory?.('nc-key', config);
 			expect(instance).toBeDefined();
+			if (!instance) throw new Error('expected persistent NanoClaw instance');
 			expect(instance.key).toBe('nc-key');
 			expect(instance.invoke).toBeTypeOf('function');
 			expect(instance.dispose).toBeTypeOf('function');

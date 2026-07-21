@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { maybeSchedulePlaybackEnded } from '../../app/web-client/src/audio.js';
 import { clientActionHandlers } from '../../app/web-client/src/client-action-handlers.js';
+import { playbackGate } from '../../app/web-client/src/playback-gate.js';
 import { SpatialAssistantAudioDrip } from '../../app/web-client/src/spatial-web-avatar/assistant-audio-drip.js';
 import {
 	type SpatialWebAvatarSink,
@@ -10,12 +10,14 @@ import {
 import { state } from '../../app/web-client/src/state.js';
 
 describe('avatar barge-in sync', () => {
-	beforeEach(() => vi.useFakeTimers());
+	beforeEach(() => {
+		vi.useFakeTimers();
+		playbackGate.clear();
+	});
 	afterEach(() => {
 		vi.useRealTimers();
+		playbackGate.clear();
 		setSpatialWebAvatarSink(null);
-		state.audioDonePlaybackId = null;
-		state.playbackEndedTimer = null;
 		state.useSpatialWebAvatar = false;
 		state.clientAudioSource = 'websocket_pcm';
 		state.ws = null;
@@ -83,20 +85,22 @@ describe('avatar barge-in sync', () => {
 			onKeyframes: () => {},
 		});
 
-		clientActionHandlers['audio.done']?.({ playbackId: 11 });
+		clientActionHandlers['audio.done']?.({ type: 'audio.done', playbackId: 11 });
 		expect(ws.send).toHaveBeenCalledWith(
 			JSON.stringify({ type: 'playback.ended', playbackId: 11 }),
 		);
 		expect(getSpatialWebAvatarSink()).not.toBeNull();
 	});
 
-	it('does not schedule playChunk playback.ended while any avatar sink is active', () => {
+	it('does not schedule playChunk playback.ended while an avatar-aware sink is active', () => {
 		const ws = {
 			readyState: WebSocket.OPEN,
 			send: vi.fn(),
 		} as unknown as WebSocket;
 		state.ws = ws;
-		state.audioDonePlaybackId = 3;
+		// Avatar-aware server (useSpatialWebAvatar) — no client ack at all;
+		// the renderer decision is 'ignore' and the server uses its fallback.
+		state.useSpatialWebAvatar = true;
 		setSpatialWebAvatarSink({
 			onAssistantPcm: () => {},
 			onTurnEnd: () => {},
@@ -104,7 +108,7 @@ describe('avatar barge-in sync', () => {
 			onKeyframes: () => {},
 		});
 
-		maybeSchedulePlaybackEnded();
+		clientActionHandlers['audio.done']?.({ type: 'audio.done', playbackId: 3 });
 		vi.advanceTimersByTime(500);
 		expect(ws.send).not.toHaveBeenCalled();
 	});
@@ -115,21 +119,20 @@ describe('avatar barge-in sync', () => {
 			send: vi.fn(),
 		} as unknown as WebSocket;
 		state.ws = ws;
-		state.audioDonePlaybackId = 5;
-		state.activeSources = [];
 		const onTurnInterrupted = vi.fn();
+		// No sink while audio.done arrives (defer path schedules), then the
+		// sink handles the barge-in — the gate must be cleared before the
+		// settle timer can fire a stale ack.
+		clientActionHandlers['audio.done']?.({ type: 'audio.done', playbackId: 5 });
 		setSpatialWebAvatarSink({
 			onAssistantPcm: () => {},
 			onTurnEnd: () => {},
 			onTurnInterrupted,
 			onKeyframes: () => {},
 		});
-
-		maybeSchedulePlaybackEnded();
 		clientActionHandlers['turn.interrupted']?.({});
 		vi.advanceTimersByTime(500);
 
-		expect(state.audioDonePlaybackId).toBeNull();
 		expect(ws.send).not.toHaveBeenCalled();
 		expect(onTurnInterrupted).toHaveBeenCalledOnce();
 	});

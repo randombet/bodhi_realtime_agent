@@ -4,9 +4,11 @@
     "noEmit": true,
     "rootDir": ".",
     "outDir": null,
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
     "noUnusedLocals": false,
     "noUnusedParameters": false
   },
-  "include": ["src", "test"],
+  "include": ["src", "test", "app/web-client/src/vite-env.d.ts", "app/web-client/src/theme.ts"],
   "exclude": ["node_modules", "dist"]
 }

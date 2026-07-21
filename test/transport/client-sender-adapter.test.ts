@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ClientSenderAdapter } from '../../src/transport/client-sender-adapter.js';
+import type { AnyServerToClientMessage } from '../../src/types/client-protocol.js';
 import type { SessionClientSender } from '../../src/types/session-client.js';
 
 function mockSender(): SessionClientSender & { calls: string[] } {
@@ -9,7 +10,7 @@ function mockSender(): SessionClientSender & { calls: string[] } {
 		sendAudio: vi.fn(() => {
 			calls.push('audio');
 		}),
-		sendJson: vi.fn((m: Record<string, unknown>) => {
+		sendJson: vi.fn((m: AnyServerToClientMessage) => {
 			calls.push(`json:${String(m.type)}`);
 		}),
 	};
@@ -20,7 +21,7 @@ describe('ClientSenderAdapter — playback-state protocol', () => {
 		const sender = mockSender();
 		const adapter = new ClientSenderAdapter(sender);
 		adapter.sendAudioToClient(Buffer.from([1, 2]));
-		adapter.sendJsonAfterAudio({ type: 'audio.done' });
+		adapter.sendJsonAfterAudio({ type: 'audio.done', playbackId: 1 });
 		expect(sender.calls).toEqual(['audio', 'json:audio.done']);
 	});
 
@@ -29,7 +30,7 @@ describe('ClientSenderAdapter — playback-state protocol', () => {
 		const adapter = new ClientSenderAdapter(sender);
 		adapter.startBuffering();
 		adapter.sendAudioToClient(Buffer.from([1, 2]));
-		adapter.sendJsonAfterAudio({ type: 'audio.done' });
+		adapter.sendJsonAfterAudio({ type: 'audio.done', playbackId: 1 });
 		// Audio buffered for replay, audio.done dropped — turn falls to fallback.
 		expect(sender.sendJson).not.toHaveBeenCalled();
 		expect(sender.calls).toEqual([]);

@@ -23,6 +23,7 @@ import type {
 import { TransportActor } from '../../src/runtime/actors/transport-actor.js';
 import type { TransportAdapter } from '../../src/runtime/adapters/transport-adapter.js';
 import { createEnvelope } from '../../src/runtime/envelope.js';
+import type { AnyServerToClientMessage } from '../../src/types/client-protocol.js';
 
 // ---------------------------------------------------------------------------
 // Helpers — Gemini-like mock adapter
@@ -48,8 +49,8 @@ function createGeminiAdapter(): TransportAdapter {
 
 /** Collects all messages sent to the client. */
 function createClientRecorder() {
-	const messages: Record<string, unknown>[] = [];
-	return { send: vi.fn((msg: Record<string, unknown>) => messages.push(msg)), messages };
+	const messages: AnyServerToClientMessage[] = [];
+	return { send: vi.fn((msg: AnyServerToClientMessage) => messages.push(msg)), messages };
 }
 
 // ---------------------------------------------------------------------------
@@ -354,7 +355,9 @@ describe('E2E Gemini actor flow', () => {
 			// Give second message time to be processed
 			await new Promise((r) => setTimeout(r, 50));
 
-			expect(g.client.messages.filter((m) => m.toolCallId === 'tc-dup')).toHaveLength(1);
+			expect(
+				g.client.messages.filter((m) => 'toolCallId' in m && m.toolCallId === 'tc-dup'),
+			).toHaveLength(1);
 		});
 	});
 });

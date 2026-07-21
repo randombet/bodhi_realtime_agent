@@ -115,7 +115,6 @@ function createMockSttProvider(): MockSttProvider {
 	let startCount = 0;
 	let stopCount = 0;
 	let configuredEncoding: 'pcm' | 'pcmu' | undefined;
-	let onTranscript: ((text: string, turnId: number | undefined) => void) | undefined;
 
 	const provider: Partial<MockSttProvider> = {
 		supportedEncodings: ['pcm'],
@@ -140,12 +139,7 @@ function createMockSttProvider(): MockSttProvider {
 		commit: vi.fn(),
 		handleInterrupted: vi.fn(),
 		handleTurnComplete: vi.fn(),
-		set onTranscript(fn: (text: string, turnId: number | undefined) => void) {
-			onTranscript = fn;
-		},
-		get onTranscript() {
-			return onTranscript;
-		},
+		onTranscript: undefined,
 	};
 
 	const result = provider as MockSttProvider;
@@ -154,7 +148,7 @@ function createMockSttProvider(): MockSttProvider {
 	Object.defineProperty(result, '__stopCount', { get: () => stopCount });
 	Object.defineProperty(result, '__fed', { get: () => fed });
 	Object.defineProperty(result, '__configuredEncoding', { get: () => configuredEncoding });
-	result.__triggerTranscript = (text: string) => onTranscript?.(text, undefined);
+	result.__triggerTranscript = (text: string) => result.onTranscript?.(text, undefined);
 	return result;
 }
 

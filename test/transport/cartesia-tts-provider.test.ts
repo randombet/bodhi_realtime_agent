@@ -67,9 +67,11 @@ vi.mock('ws', () => ({
 	WebSocket: MockWebSocket,
 }));
 
+type MockWebSocketInstance = InstanceType<typeof MockWebSocket>;
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function lastInstance(): MockWebSocket {
+function lastInstance(): MockWebSocketInstance {
 	return MockWebSocket.instances[MockWebSocket.instances.length - 1];
 }
 
@@ -91,7 +93,7 @@ function createProvider(
 }
 
 /** Start the provider and connect the WebSocket. */
-async function startProvider(p: CartesiaTTSProvider): Promise<MockWebSocket> {
+async function startProvider(p: CartesiaTTSProvider): Promise<MockWebSocketInstance> {
 	const startPromise = p.start();
 	const ws = lastInstance();
 	ws.triggerOpen();
@@ -99,7 +101,7 @@ async function startProvider(p: CartesiaTTSProvider): Promise<MockWebSocket> {
 	return ws;
 }
 
-function parseSent(ws: MockWebSocket): Record<string, unknown>[] {
+function parseSent(ws: MockWebSocketInstance): Record<string, unknown>[] {
 	return ws.sent.map((s) => JSON.parse(s));
 }
 

@@ -1,17 +1,23 @@
 import { describe, expect, it, vi } from 'vitest';
 import { TranscriptManager } from '../../src/core/transcript-manager.js';
 import type { TranscriptSink } from '../../src/core/transcript-manager.js';
+import type {
+	CoreServerToClientMessage,
+	TranscriptMessage,
+} from '../../src/types/client-protocol.js';
 
 function createSink(): TranscriptSink & {
-	messages: Record<string, unknown>[];
+	messages: TranscriptMessage[];
 	userMessages: string[];
 	assistantMessages: string[];
 } {
 	const sink = {
-		messages: [] as Record<string, unknown>[],
+		messages: [] as TranscriptMessage[],
 		userMessages: [] as string[],
 		assistantMessages: [] as string[],
-		sendToClient: vi.fn((msg: Record<string, unknown>) => sink.messages.push(msg)),
+		sendToClient: vi.fn((msg: CoreServerToClientMessage) =>
+			sink.messages.push(msg as TranscriptMessage),
+		),
 		addUserMessage: vi.fn((text: string) => sink.userMessages.push(text)),
 		addAssistantMessage: vi.fn((text: string) => sink.assistantMessages.push(text)),
 	};

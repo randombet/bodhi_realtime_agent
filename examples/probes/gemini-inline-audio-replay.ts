@@ -21,7 +21,7 @@
  */
 
 import 'dotenv/config';
-import { GoogleGenAI, Modality } from '@google/genai';
+import { GoogleGenAI, type LiveServerMessage, Modality } from '@google/genai';
 import { resamplePcm } from '../../src/audio/resample.js';
 
 const API_KEY = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY ?? '';
@@ -91,15 +91,8 @@ async function main() {
 		},
 		callbacks: {
 			onopen: () => log('connected'),
-			onmessage: (msg: Record<string, unknown>) => {
-				const sc = msg.serverContent as
-					| {
-							modelTurn?: { parts?: Array<{ inlineData?: { data?: string }; text?: string }> };
-							inputTranscription?: { text?: string };
-							interrupted?: boolean;
-							turnComplete?: boolean;
-					  }
-					| undefined;
+			onmessage: (msg: LiveServerMessage) => {
+				const sc = msg.serverContent;
 				if (!sc) return;
 				for (const part of sc.modelTurn?.parts ?? []) {
 					if (part.inlineData?.data) {
@@ -119,8 +112,8 @@ async function main() {
 					log(`turnComplete (audio=${obs.modelAudioBytes}B)`);
 				}
 			},
-			onerror: (e: ErrorEvent) => log(`ERROR ${e.message}`),
-			onclose: (e: CloseEvent) => log(`closed (${e.code} ${e.reason})`),
+			onerror: (e) => log(`ERROR ${e.message}`),
+			onclose: (e) => log(`closed (${e.code} ${e.reason})`),
 		},
 	});
 

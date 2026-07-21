@@ -1,3 +1,4 @@
+import type { AnyServerToClientMessage } from '../types/client-protocol.js';
 import type { SessionClientSender } from '../types/session-client.js';
 import type { IClientChannel } from '../types/session-client.js';
 import { AudioBuffer } from './audio-buffer.js';
@@ -38,7 +39,7 @@ export class ClientSenderAdapter implements IClientChannel {
 		}
 	}
 
-	sendJsonToClient(message: Record<string, unknown>): void {
+	sendJsonToClient(message: AnyServerToClientMessage): void {
 		this.sender.sendJson(message);
 	}
 
@@ -48,7 +49,7 @@ export class ClientSenderAdapter implements IClientChannel {
 	 *  reconnect-buffering window audio is buffered for replay while JSON would
 	 *  send immediately — sending `audio.done` then would let it overtake the
 	 *  buffered audio, so it is dropped and the turn falls to the fallback. */
-	sendJsonAfterAudio(message: Record<string, unknown>): void {
+	sendJsonAfterAudio(message: AnyServerToClientMessage): void {
 		if (this._buffering) return;
 		this.sendJsonToClient(message);
 	}
