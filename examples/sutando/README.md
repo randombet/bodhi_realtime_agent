@@ -83,18 +83,28 @@ openssl rand -hex 32
 
 ### 2. Configure the Mac (Sutando side — config only, no code changes)
 
-In your Sutando checkout, create the gateway channel `.env`
-(e.g. `channels/bodhi/.env`, or wherever your install keeps channel env files):
+Sutando's `startup.sh` reads the gateway channel config from exactly one
+place: `channels/ag2space/.env` under its Claude config home. Resolve the
+path with the repo's own helper and create the file there:
 
 ```bash
+# In the Sutando checkout on the Mac:
+RELAY_ENV="$(bash scripts/sutando-config.sh claude-home-path channels/ag2space/.env)"
+mkdir -p "$(dirname "$RELAY_ENV")"
+cat > "$RELAY_ENV" <<'EOF'
 REMOTE_TASK_URL=http://127.0.0.1:7930      # this demo's relay URL (topology-dependent)
 REMOTE_TASK_TOKEN=<the token from step 1>
 REMOTE_TASK_PROVIDER=bodhi
+EOF
 ```
 
+(Exporting `REMOTE_TASK_TOKEN`/`REMOTE_TASK_URL` in the environment before
+`startup.sh` works too — the channel `.env` is just the durable form.)
+
 Then start (or restart) Sutando — `bash src/startup.sh` launches the bridge
-whenever that `.env` exists. The bridge long-polls the relay and stamps every
-inbound task `access_tier: owner` (its default; the task body cannot override it).
+whenever that `.env` carries a token (silent otherwise). The bridge long-polls
+the relay, logs to `logs/remote-gateway-bridge.log`, and stamps every inbound
+task `access_tier: owner` (its default; the task body cannot override it).
 
 ### 3. Run the demo
 
