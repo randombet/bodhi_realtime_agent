@@ -152,6 +152,7 @@ pnpm tsx examples/openclaw/web-client.ts
 | `PORT` | `9900` | Voice agent WebSocket port |
 | `HOST` | `127.0.0.1` | Voice bind; non-loopback needs `VOICE_FRONT_AUTH_CONFIRMED=true` |
 | `TRANSCRIPT_DIR` | `./transcripts` | Per-session transcript + raw result sidecar |
+| `SUTANDO_GOOGLE_SEARCH` | `1` | Gemini Search grounding. The live model is always `gemini-3.1-flash-live-preview` (override via `SUTANDO_LIVE_MODEL`). Search + 3.1 needs a paid-tier key — free tier is rejected at connect with 1011 "quota exceeded"; set `0` there and quick lookups are delegated to Sutando instead. |
 | `SUTANDO_LEDGER_DIR` | `./sutando-ledger` | M2 durable task ledger (IDs/states/one-line descriptions only — never result content; pruned after consumption + TTL) |
 
 ## Smoke test (no voice, no Gemini key needed)

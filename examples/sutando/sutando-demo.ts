@@ -39,6 +39,7 @@ import { z } from 'zod';
 import { MarkdownConversationHistoryStore } from '../../src/core/markdown-conversation-history-store.js';
 import { VoiceSession } from '../../src/core/voice-session.js';
 import { GeminiBatchSTTProvider } from '../../src/transport/gemini-batch-stt-provider.js';
+import { DEFAULT_GEMINI_LIVE_MODEL } from '../../src/transport/gemini-live-transport.js';
 import type { MainAgent } from '../../src/types/agent.js';
 import type { ToolDefinition } from '../../src/types/tool.js';
 import { SutandoRelayServer } from '../lib/sutando-relay-server.js';
@@ -78,7 +79,15 @@ const RELAY_HOST = process.env.SUTANDO_RELAY_HOST || '127.0.0.1';
 const TRANSCRIPT_DIR = process.env.TRANSCRIPT_DIR || './transcripts';
 const LEDGER_DIR = process.env.SUTANDO_LEDGER_DIR || './sutando-ledger';
 const SESSION_ID = `sutando_${Date.now()}`;
-const LIVE_MODEL = 'gemini-2.5-flash-native-audio-preview-12-2025';
+// Google Search grounding — ON by default (SUTANDO_GOOGLE_SEARCH=0 disables).
+const GOOGLE_SEARCH = process.env.SUTANDO_GOOGLE_SEARCH !== '0';
+// Live model — always the 3.1 Live model (~1.32s replies with a 62ms spread;
+// probed 2026-07-26, dev_docs/framework/investigation-sutando-voice-latency.md).
+// Caveat: on a FREE-TIER key, declaring google_search at connect on this model
+// is rejected with 1011 "quota exceeded" (the grounding entitlement, not a
+// rate limit) — set SUTANDO_GOOGLE_SEARCH=0 there and lookups fall back to
+// ask_sutando. SUTANDO_LIVE_MODEL overrides the model if needed.
+const LIVE_MODEL = process.env.SUTANDO_LIVE_MODEL || DEFAULT_GEMINI_LIVE_MODEL;
 const google = createGoogleGenerativeAI({ apiKey: API_KEY });
 
 // Deviation (a): fail closed on a non-loopback voice bind — the voice WS is
@@ -137,6 +146,10 @@ async function main() {
 		relay,
 		sessionId: SESSION_ID,
 		userId: 'demo_user',
+		// Keeps the persona's tool-routing lines in sync with the declared tools:
+		// when search is off, the fragment must not advertise it (the model would
+		// route "quick lookups" to a tool it cannot call).
+		googleSearch: GOOGLE_SEARCH,
 		hooks: {
 			notifySystem: (text) => session?.publishSystemNotification(text),
 			recordRaw: (taskId, raw) => {
@@ -193,7 +206,10 @@ async function main() {
 			'- end_session: When the user says goodbye.',
 		].join('\n'),
 		tools: [wiring.tool, getCurrentTime, endSession],
-		googleSearch: true,
+		// Declared to Gemini only when enabled — see the free-tier caveat on the
+		// GOOGLE_SEARCH const above. (This agent-level flag works here because the
+		// demo uses VoiceSession's built-in transport construction, which forwards it.)
+		googleSearch: GOOGLE_SEARCH,
 	};
 
 	const transcriptStore = new MarkdownConversationHistoryStore({
@@ -219,6 +235,10 @@ async function main() {
 			[ASK_SUTANDO_TOOL_NAME]: wiring.subagentConfig,
 		},
 		geminiModel: LIVE_MODEL,
+		// Gemini's input-commit latency (client-VAD end → first model activity)
+		// runs 5.5-7.5s on live audio; the framework's 5s default watchdog would
+		// fire mid-turn and the forced reconnect truncates the in-flight reply.
+		responseWatchdogMs: 12_000,
 		sttProvider: new GeminiBatchSTTProvider({ apiKey: API_KEY, model: 'gemini-3-flash-preview' }),
 		speechConfig: { voiceName: 'Puck' as const },
 		hooks: {
@@ -264,12 +284,20 @@ async function main() {
 	console.log(`  Transcript:    ${TRANSCRIPT_DIR}/${SESSION_ID}.md`);
 	console.log(`  Raw sidecar:   ${rawDir}/`);
 	console.log(`  Mac presence:  ${relay.presence().fresh ? 'online' : 'no heartbeat yet'}`);
+	console.log(`  Live model:    ${LIVE_MODEL}`);
+	console.log(
+		`  Search:        ${GOOGLE_SEARCH ? 'Gemini grounding enabled (free-tier keys: set SUTANDO_GOOGLE_SEARCH=0 if connect fails with 1011)' : 'off — quick lookups route to ask_sutando'}`,
+	);
 	console.log();
 	console.log('Start the web client in another terminal:');
 	console.log('  pnpm tsx examples/openclaw/web-client.ts');
 	console.log();
 	console.log('Then open http://localhost:8080 and try saying:');
-	console.log("  - 'What is the weather in San Francisco?'          (Gemini Search)");
+	console.log(
+		GOOGLE_SEARCH
+			? "  - 'What is the weather in San Francisco?'          (Gemini Search)"
+			: "  - 'What is the weather in San Francisco?'          (delegated to Sutando)",
+	);
 	console.log("  - 'Ask Sutando to check my email for invoices'     (Sutando delegation)");
 	console.log("  - 'Have Sutando join my 2pm meeting'               (Sutando meetings)");
 	console.log("  - 'What time is it?'                               (inline tool)");

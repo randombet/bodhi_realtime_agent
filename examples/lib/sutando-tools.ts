@@ -34,6 +34,12 @@ export interface CreateSutandoAgentConfigOptions {
 	watchdogMs?: number;
 	taskTtlMs?: number;
 	priority?: string;
+	/** Whether the session declares the Google Search grounding tool. Drives the
+	 *  persona's routing line only — the caller still enables the tool itself on
+	 *  the agent/transport. Default true (matches the historical fragment). When
+	 *  false, the fragment must not advertise a tool the model cannot call:
+	 *  quick lookups then route to model knowledge or ask_sutando. */
+	googleSearch?: boolean;
 }
 
 export interface SutandoAgentWiring {
@@ -109,7 +115,9 @@ export function createSutandoAgentConfig(
 		'- ask_sutando: Delegate complex or action-oriented tasks to the user’s Sutando agent on their Mac.',
 		'  Use it for email, calendar, meetings, phone calls, files/screen on the Mac, coding, research,',
 		'  and any multi-step task. Write a complete, self-contained brief — Sutando cannot see this conversation.',
-		'- Google Search: quick factual lookups only.',
+		...(options.googleSearch !== false
+			? ['- Google Search: quick factual lookups only (weather, news, facts) — never delegate these.']
+			: []),
 		'',
 		'VOICE RULES:',
 		'- Keep responses short and clear (2-3 sentences).',

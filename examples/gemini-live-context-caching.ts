@@ -42,6 +42,7 @@
  *   4. Try saying:
  *        "What time is it?"
  *        "What is 25 times 17?"
+ *        "What's the weather in San Francisco today?"  (Google Search grounding)
  *        "Goodbye"  (ends the session)
  *   5. Watch the server logs — every model turn prints a [Usage] line
  *      with input/output/cached token counts and the computed cacheHitRatio.
@@ -62,6 +63,11 @@
  *   COMPRESSION_TARGET=4000       slidingWindow.targetTokens (default off).
  *   GEMINI_LIVE_MODEL             Live model (default:
  *                                  gemini-3.1-flash-live-preview).
+ *   GOOGLE_SEARCH=0               Disable Google Search grounding (default:
+ *                                  enabled). Free-tier keys: search on the
+ *                                  3.1 Live model is rejected at connect with
+ *                                  1011 "quota exceeded" — disable it or use
+ *                                  a 2.5 native-audio model.
  */
 
 import 'dotenv/config';
@@ -134,6 +140,14 @@ const SESSION_RESUMPTION_RESUME = process.env.SESSION_RESUMPTION_RESUME === '1';
 const COMPRESSION_TRIGGER = Number(process.env.COMPRESSION_TRIGGER) || 0;
 const COMPRESSION_TARGET = Number(process.env.COMPRESSION_TARGET) || 0;
 const LIVE_MODEL = process.env.GEMINI_LIVE_MODEL || DEFAULT_GEMINI_LIVE_MODEL;
+// Google Search grounding (GOOGLE_SEARCH=0 to disable). Free-tier caveat,
+// verified 2026-07-26: declaring the google_search tool at Live setup on
+// gemini-3.1-flash-live-preview is rejected at CONNECT with 1011 "quota
+// exceeded" on a free-tier key (plain connects succeed seconds apart; the
+// same key grounds fine on the 2.5 native-audio models). If startup dies
+// with a quota error, either set GOOGLE_SEARCH=0 or pick a 2.5 model via
+// GEMINI_LIVE_MODEL. See dev_docs/framework/investigation-sutando-voice-latency.md.
+const GOOGLE_SEARCH = process.env.GOOGLE_SEARCH !== '0';
 
 if (SESSION_RESUMPTION_DISABLE && SESSION_RESUMPTION_RESUME) {
 	console.error(
@@ -206,6 +220,11 @@ const transport = new GeminiLiveTransport(
 				}
 			: {}),
 		inputAudioTranscription: true,
+		// Google Search grounding must be declared HERE, on the transport config:
+		// this demo injects its transport, and on that path the (deprecated)
+		// agent-level `googleSearch` flag never reaches the Live setup payload —
+		// VoiceSession forwards it only when it constructs the transport itself.
+		...(GOOGLE_SEARCH ? { googleSearch: true } : {}),
 	},
 	{
 		onResumptionUpdate: (handle, resumable) => {
@@ -294,7 +313,7 @@ const endSession: ToolDefinition = {
 const mainAgent: MainAgent = {
 	name: 'main',
 	greeting:
-		'[System: A user just connected. Greet them briefly as Bodhi, mention you can do simple math and tell the time, and ask how you can help.]',
+		'[System: A user just connected. Greet them briefly as Bodhi, mention you can do simple math, tell the time, and look up current information, and ask how you can help.]',
 	instructions: `You are Bodhi, a friendly voice assistant.
 
 VOICE & PACING:
@@ -306,9 +325,15 @@ TOOLS:
 - calculate: simple arithmetic
 - get_current_time: current local time
 - end_session: when the user says goodbye
+- Google Search: use it for anything current or factual — weather, news,
+  sports scores, prices. Never answer such questions from memory; search,
+  then summarize the result in one or two spoken sentences.
 
 When the user says goodbye, give a warm one-sentence farewell and call end_session.`,
 	tools: [calculate, getCurrentTime, endSession],
+	// NOTE: no agent-level `googleSearch` flag here — it is deprecated AND a
+	// silent no-op with an injected transport (this demo's path). Grounding is
+	// enabled on the GeminiLiveTransport config above (GOOGLE_SEARCH env).
 	onEnter: async () => console.log(`${ts()} [Agent] main entered`),
 	onExit: async () => console.log(`${ts()} [Agent] main exited`),
 };
@@ -432,10 +457,14 @@ async function main() {
 		}`,
 	);
 	console.log('  Cache support:   NOT AVAILABLE on Gemini Live (May 2026)');
+	console.log(
+		`  Google Search:   ${GOOGLE_SEARCH ? 'enabled (GOOGLE_SEARCH=0 to disable)' : 'DISABLED (GOOGLE_SEARCH=0)'}`,
+	);
 	console.log();
 	console.log('Try saying:');
 	console.log("  - 'What time is it?'");
 	console.log("  - 'What is 25 times 17?'");
+	if (GOOGLE_SEARCH) console.log("  - 'What's the weather in San Francisco today?'");
 	console.log("  - 'Goodbye'");
 	console.log();
 	console.log('Watch [Usage] log lines — they show input/output/cached tokens.');
@@ -455,5 +484,12 @@ async function main() {
 
 main().catch((err) => {
 	console.error('Fatal error:', err);
+	if (GOOGLE_SEARCH && /quota|timed out/i.test(String(err))) {
+		console.error(
+			'\nHint: a connect-time quota failure with Google Search enabled on a',
+			'free-tier key is the google_search entitlement on the 3.1 Live model.',
+			'Retry with GOOGLE_SEARCH=0, or GEMINI_LIVE_MODEL=gemini-2.5-flash-native-audio-latest.',
+		);
+	}
 	process.exit(1);
 });
