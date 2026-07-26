@@ -13,6 +13,11 @@ export interface ConversationItem {
 	timestamp: number;
 	/** Optional application-specific metadata. */
 	metadata?: Record<string, unknown>;
+	/** Stable handle for items whose content is revised after insertion — set
+	 *  only by `ConversationContext.reserveUserMessage`, which holds an ordered
+	 *  slot for a user turn while its authoritative transcript is still in
+	 *  flight. Absent on ordinary append-only items. */
+	id?: string;
 }
 
 /** A tool invocation request from the model. */

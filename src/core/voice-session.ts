@@ -570,6 +570,13 @@ export class VoiceSession {
 	private readonly turnLatencyTracker: TurnLatencyTracker;
 	private directiveManager = new DirectiveManager();
 	private transcriptManager!: TranscriptManager;
+	/** Fallback-seal timers for user messages reserved while awaiting the
+	 *  authoritative STT transcript, keyed by turn id. */
+	private reservationTimers = new Map<number, ReturnType<typeof setTimeout>>();
+	/** How long to wait for the authoritative transcript before sealing a
+	 *  reserved user message with the transport's fallback text. Generous by
+	 *  design: a batch STT round-trip is a whole-utterance model call. */
+	private readonly reservationTimeoutMs = 20_000;
 	/** Whether a client WebSocket connection is currently active. */
 	private clientConnected = false;
 	/**
@@ -623,11 +630,33 @@ export class VoiceSession {
 		this.eventBus = new EventBus();
 		this.hooks = new HooksManager();
 		this.conversationContext = new ConversationContext();
-		this.transcriptManager = new TranscriptManager({
-			sendToClient: (msg) => this.clientTransport.sendJsonToClient(msg),
-			addUserMessage: (text) => this.conversationContext.addUserMessage(text),
-			addAssistantMessage: (text) => this.conversationContext.addAssistantMessage(text),
-		});
+		this.transcriptManager = new TranscriptManager(
+			{
+				sendToClient: (msg) => this.clientTransport.sendJsonToClient(msg),
+				addUserMessage: (text) => this.conversationContext.addUserMessage(text),
+				addAssistantMessage: (text) => this.conversationContext.addAssistantMessage(text),
+				reserveUserMessage: (text) => this.conversationContext.reserveUserMessage(text),
+				sealUserMessage: (id, text) => this.conversationContext.sealUserMessage(id, text),
+			},
+			{
+				// An external STT provider is the authoritative transcript source;
+				// the transport's own transcription is live display + fallback.
+				expectsAuthoritativeInput: config.sttProvider !== undefined,
+				currentTurnId: () => this.turns.numericId,
+			},
+		);
+
+		// A user message was committed before its authoritative transcript arrived.
+		// Arm the fallback seal so a failed/slow STT can never strand it unwritten.
+		this.transcriptManager.onInputReserved = (turnId) => {
+			const timer = setTimeout(() => {
+				this.reservationTimers.delete(turnId);
+				this.transcriptManager.sealPendingInput(turnId);
+				this.log(`[Transcript] Reservation for turn ${turnId} sealed with fallback text`);
+			}, this.reservationTimeoutMs);
+			timer.unref?.();
+			this.reservationTimers.set(turnId, timer);
+		};
 
 		// Relay finalized user speech to an interactive subagent when one is
 		// waiting for input. The callback captures `this` via closure and is only
@@ -1025,6 +1054,15 @@ export class VoiceSession {
 			// `turnId < turns.staleInputCutoff` prevents dropping valid late results while
 			// still rejecting truly stale transcripts from 2+ turns ago.
 			this.sttProvider.onTranscript = (text, turnId) => {
+				// A reserved user message for this turn is waiting on exactly this
+				// transcript — resolve it even though the turn has already finalized
+				// (and regardless of the stale cutoff, since the reservation, not the
+				// turn counter, bounds how long we care). This is the normal path
+				// whenever the batch call outlives its turn.
+				if (turnId !== undefined && this.transcriptManager.sealReservedInput(turnId, text)) {
+					this.clearReservationTimer(turnId);
+					return;
+				}
 				if (turnId !== undefined && turnId < this.turns.staleInputCutoff) return; // Drop stale results (2+ turns old)
 				if (turnId !== undefined && this.turns.isInputFinalized(turnId)) return;
 				// New user input ends the post-interrupt correction-skip window, but
@@ -1054,6 +1092,10 @@ export class VoiceSession {
 			// immediately as a display-only partial; the batch STT then corrects
 			// and finalizes it via handleInput/flush.
 			this.transport.onInputTranscription = (text) => {
+				// Liveness: the provider is transcribing the committed turn, so a
+				// response is in the pipeline — extend the response watchdog (capped)
+				// instead of letting it force a reconnect under an active turn.
+				this.reconnector.notifyProviderActivity();
 				this.logInputTranscriptionLatency(text, 'provider-correction');
 				if (this._turnWasInterrupted) {
 					this.transcriptManager.showInterruptedInputPartial(text);
@@ -1064,6 +1106,7 @@ export class VoiceSession {
 		} else {
 			// No external STT — use transport built-in transcription
 			this.transport.onInputTranscription = (text) => {
+				this.reconnector.notifyProviderActivity(); // liveness (see above)
 				this.logInputTranscriptionLatency(text, 'provider');
 				this.transcriptManager.handleInput(text);
 			};
@@ -1077,7 +1120,6 @@ export class VoiceSession {
 		// any pre-attached handler on injected transports.
 		const prevModelTurnStart = this.transport.onModelTurnStart;
 		this.transport.onModelTurnStart = () => {
-			this.reconnector.disarmResponseWatchdog();
 			try {
 				prevModelTurnStart?.();
 			} catch (e) {
@@ -1095,10 +1137,14 @@ export class VoiceSession {
 			this._turnTiming.firstAudioMs = null;
 			const modelTurn = this.turns.ensureCurrent();
 			// Correlated model activity consumed the pending utterance — clear the
-			// recovery-replay candidate and the replay stage. Trailing model-start
-			// for a just-finalized turn (ensureCurrent → null) must NOT clear it
-			// (correlate-before-mutate, same scoped rule as the disarm guards).
+			// recovery-replay candidate, the replay stage, and the response
+			// watchdog. Trailing model-start for a just-finalized turn
+			// (ensureCurrent → null) must NOT clear them (correlate-before-mutate,
+			// same scoped rule as the other disarm guards — a disarm before this
+			// check would let a dead turn's trailing content silence the watchdog
+			// while the awaited response is still owed).
 			if (modelTurn) {
+				this.reconnector.disarmResponseWatchdog();
 				this.utteranceRetainer?.clearAnswered();
 				this.reconnector.resetReplayState();
 			}
@@ -1826,6 +1872,14 @@ export class VoiceSession {
 	 * adapter's offline-Mac notice — see examples/lib/sutando-tools.ts) can
 	 * bind their notify hooks to the same delivery path the runtime uses.
 	 */
+	/** Disarm the fallback-seal timer for a reservation that resolved normally. */
+	private clearReservationTimer(turnId: number): void {
+		const timer = this.reservationTimers.get(turnId);
+		if (timer === undefined) return;
+		clearTimeout(timer);
+		this.reservationTimers.delete(turnId);
+	}
+
 	publishSystemNotification(text: string): void {
 		// Actor-only callers (the background-tool completion path, guarded by the
 		// actor-construction block). Routed through the sink for uniformity; the
@@ -2001,6 +2055,14 @@ export class VoiceSession {
 
 		// Flush any buffered transcription before closing.
 		this.transcriptManager.flush();
+
+		// Release every outstanding transcript reservation with its fallback text.
+		// A still-pending reservation is a flush barrier — leaving one set here
+		// would strand that user message (and everything after it) unpersisted,
+		// since this runs before session.close reaches ConversationHistoryWriter.
+		for (const timer of this.reservationTimers.values()) clearTimeout(timer);
+		this.reservationTimers.clear();
+		this.transcriptManager.sealPendingInput();
 
 		// §11 close ordering: (1) flush — already-finalized buffered turns still
 		// emit; (2) session.reset quiesces the tracker; (3) the teardown turn.end

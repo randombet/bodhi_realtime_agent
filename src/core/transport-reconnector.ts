@@ -91,11 +91,18 @@ export type ReconnectWindowSpeech = 'none' | 'local-drained-speech' | 'hosted-sp
 export class TransportReconnector {
 	private static readonly MAX_RECONNECT_ATTEMPTS = 3;
 	private static readonly RECONNECT_BACKOFF_MS = [1000, 2000, 4000];
+	/** Absolute ceiling on watchdog deferral via `notifyProviderActivity`,
+	 *  measured from the arm. Sized for Gemini's observed worst input-commit
+	 *  latency (~7.5s from client-VAD end) with headroom. */
+	private static readonly RESPONSE_WATCHDOG_ACTIVITY_CAP_MS = 15_000;
 
 	/** Tracks consecutive reconnect attempts to prevent infinite reconnect storms. */
 	private reconnectAttempts = 0;
 	/** Pending response-watchdog timer (model-silence-after-user-turn). */
 	private _responseWatchdogTimer?: ReturnType<typeof setTimeout>;
+	/** When the current watchdog window was first armed — anchors the
+	 *  `notifyProviderActivity` extension cap. */
+	private _watchdogArmedAtMs?: number;
 	/** Retained-replay stage for the CURRENT stalled utterance (max one in-place
 	 *  + one post-reconnect replay per sealed utterance — duplicate-context cap).
 	 *  See design-retained-user-content-recovery.md. */
@@ -118,6 +125,11 @@ export class TransportReconnector {
 		if (this.responseWatchdogMs <= 0) return;
 		if (!this.deps.isAgentMode()) return; // never watch a non-agent (dictation/transcription) turn
 		this._replayDeferred = false; // a new arm supersedes any deferred fire
+		this._watchdogArmedAtMs = Date.now(); // liveness-extension cap anchor
+		this.startWatchdogTimer(this.responseWatchdogMs);
+	}
+
+	private startWatchdogTimer(delayMs: number): void {
 		this.disarmResponseWatchdog();
 		// Safe to arm even if the session isn't ACTIVE right now: the fire-time
 		// `state !== 'ACTIVE'` guard below makes a stale timer a no-op.
@@ -125,7 +137,24 @@ export class TransportReconnector {
 			this._responseWatchdogTimer = undefined;
 			if (this.deps.sessionManager.state !== 'ACTIVE') return;
 			this.onResponseWatchdogFired();
-		}, this.responseWatchdogMs);
+		}, delayMs);
+	}
+
+	/**
+	 * The provider demonstrated it is actively working on the committed user
+	 * turn (e.g. Gemini's streaming input transcription — deltas arrive seconds
+	 * before the model's first output on slow turns). Extend the armed watchdog
+	 * by a fresh budget so premature recovery does not cut off a response that
+	 * is demonstrably coming, but never past an absolute cap measured from the
+	 * original arm — a stuck transcription stream must not defer stall recovery
+	 * forever. No-op when the watchdog is not armed.
+	 */
+	notifyProviderActivity(): void {
+		if (!this._responseWatchdogTimer || this._watchdogArmedAtMs === undefined) return;
+		const elapsed = Date.now() - this._watchdogArmedAtMs;
+		const remainingCap = TransportReconnector.RESPONSE_WATCHDOG_ACTIVITY_CAP_MS - elapsed;
+		if (remainingCap <= 0) return; // cap exhausted — let the pending timer fire
+		this.startWatchdogTimer(Math.min(this.responseWatchdogMs, remainingCap));
 	}
 
 	/** Stall detected. STAGE 1: replay the retained utterance in-place on the
@@ -314,8 +343,10 @@ export class TransportReconnector {
 			this.armResponseWatchdog();
 			return;
 		}
-		// Tier 3 — content-less nudge: prefer the transport's elicit (Gemini),
-		// else fall back to triggerGeneration (OpenAI).
+		// Tier 3 — content-less nudge, for transports that accept one. No in-tree
+		// transport currently does (see `LLMTransport.elicitResponse`), so this
+		// resolves to triggerGeneration: a `response.create` on OpenAI/Qwen, and a
+		// no-op on Gemini, which auto-generates and rejects content-less requests.
 		this.deps.log(`[Watchdog] Re-eliciting model response after reconnect (reason=${reason})`);
 		try {
 			if (this.deps.transport.elicitResponse) {

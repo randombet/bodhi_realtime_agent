@@ -239,4 +239,79 @@ describe('ConversationContext', () => {
 		// TypeScript prevents mutation, but at runtime it's an array reference
 		expect(Array.isArray(items)).toBe(true);
 	});
+
+	describe('reserved user messages (authoritative-transcript barrier)', () => {
+		it('holds the slot in timeline order and seals with the authoritative text', () => {
+			const ctx = new ConversationContext();
+			const id = ctx.reserveUserMessage('task.');
+			ctx.addAssistantMessage('Checking now.');
+
+			expect(ctx.sealUserMessage(id, 'Is there any pending task?')).toBe(true);
+			expect(ctx.items.map((i) => i.content)).toEqual([
+				'Is there any pending task?',
+				'Checking now.',
+			]);
+		});
+
+		it('replay reads the sealed text', () => {
+			const ctx = new ConversationContext();
+			const id = ctx.reserveUserMessage('cal');
+			ctx.sealUserMessage(id, 'How could it connect to my local Mac?');
+
+			expect(ctx.toReplayContent()[0]).toEqual({
+				type: 'text',
+				role: 'user',
+				text: 'How could it connect to my local Mac?',
+			});
+		});
+
+		it('withholds a pending item — and everything after it — from the store', () => {
+			const ctx = new ConversationContext();
+			ctx.addUserMessage('earlier turn');
+			const id = ctx.reserveUserMessage('provisional');
+			ctx.addAssistantMessage('later item');
+
+			// Only the settled prefix is flushable.
+			expect(ctx.getItemsSinceCheckpoint().map((i) => i.content)).toEqual(['earlier turn']);
+			ctx.markCheckpoint();
+			expect(ctx.getItemsSinceCheckpoint()).toEqual([]);
+
+			ctx.sealUserMessage(id, 'authoritative');
+			expect(ctx.getItemsSinceCheckpoint().map((i) => i.content)).toEqual([
+				'authoritative',
+				'later item',
+			]);
+		});
+
+		it('seals with the provisional text when no authoritative text arrives', () => {
+			const ctx = new ConversationContext();
+			const id = ctx.reserveUserMessage('provisional');
+
+			expect(ctx.sealUserMessage(id)).toBe(true);
+			expect(ctx.hasPendingUserMessages).toBe(false);
+			expect(ctx.getItemsSinceCheckpoint().map((i) => i.content)).toEqual(['provisional']);
+		});
+
+		it('ignores an unknown or already-sealed id', () => {
+			const ctx = new ConversationContext();
+			const id = ctx.reserveUserMessage('x');
+			ctx.sealUserMessage(id, 'y');
+
+			expect(ctx.sealUserMessage(id, 'z')).toBe(false);
+			expect(ctx.sealUserMessage('nope', 'z')).toBe(false);
+			expect(ctx.items[0].content).toBe('y');
+		});
+
+		it('a pending item survives summary eviction', () => {
+			const ctx = new ConversationContext();
+			ctx.addUserMessage('old');
+			ctx.markCheckpoint();
+			const id = ctx.reserveUserMessage('provisional');
+
+			ctx.setSummary('summary of earlier turns');
+
+			expect(ctx.sealUserMessage(id, 'authoritative')).toBe(true);
+			expect(ctx.items.map((i) => i.content)).toEqual(['authoritative']);
+		});
+	});
 });
