@@ -1206,7 +1206,11 @@ export class VoiceSession {
 			// recovery-replay candidate and the replay stage. Trailing model-start
 			// for a just-finalized turn (ensureCurrent → null) must NOT clear it
 			// (correlate-before-mutate, same scoped rule as the disarm guards).
-			if (modelTurn) {
+			if (modelTurn && !this.reconnector.isRecoveryHeld()) {
+				// H4 held-state override: while a recovery is held behind the
+				// greeting gate, ambiguous model activity (the greeting's own
+				// start) must NOT clear the retained candidate or replay stage —
+				// release-time re-evaluation decides (recovery.policy.ts).
 				this.utteranceRetainer?.clearAnswered();
 				this.reconnector.resetReplayState();
 			}
@@ -1269,6 +1273,22 @@ export class VoiceSession {
 		this.wireEventBus();
 
 		this.buildAgentRouter(config, allInitialTools, behaviorTools);
+		// H2: capture-time classification for the local channel's inbound
+		// buffer (gate read + lightweight energy at INGRESS — a drain-time
+		// read would recreate the end-state race), plus the gate-aware
+		// transfer drain. The channel holds only this closure, never a
+		// GreetingController reference.
+		(
+			this.clientTransport as unknown as {
+				installInboundCaptureClassifier?: (
+					c: (data: Buffer) => { voiced: boolean; gateActive: boolean },
+				) => void;
+			}
+		).installInboundCaptureClassifier?.((data) => ({
+			voiced: pcmChunksContainSpeech([data]),
+			gateActive: this.greeting.shouldDropOutbound(),
+		}));
+		this.agentRouter.drainBufferedInbound = () => this.drainCapturedInboundFrames('transfer');
 
 		// Usage + cache-bust observability — chained over any pre-attached handlers,
 		// fired to the framework hook and mirrored to the EventBus.
@@ -1331,6 +1351,8 @@ export class VoiceSession {
 				getMemoryFacts: () => this.memoryCacheManager?.facts ?? [],
 				getSessionSuffix: () => this.directiveManager.getSessionSuffix(),
 				resetNotificationAudio: () => this.notificationSink.resetAudio(),
+				// H4: a held recovery re-evaluates when the gate releases.
+				onGateReleased: () => this.reconnector.onGreetingGateReleased(),
 				log: (msg) => this.log(msg),
 			},
 			{
@@ -1430,6 +1452,15 @@ export class VoiceSession {
 				// Phase-3 coordinator seam: a recovery response must never bind
 				// as the greeting (H1) — invalidate before actuation.
 				onRecoveryDispatch: () => this.triggerCoordinator.dispatch('watchdog-recovery'),
+				// H4 hold predicate: FULL-greeting suppression only (the greeting
+				// controller's uninterruptible state — never grace windows).
+				isGreetingSuppressionArmed: () => this.greeting.isUninterruptibleGreetingActive(),
+				// H2: gate-aware drain + candidate-wide replay freshness.
+				drainBufferedInbound: (reason) => this.drainCapturedInboundFrames(reason),
+				isCandidateReplayEligible: (retained) => {
+					const t = this.userTurnEvidence.lastDrainedSpeechAtMs;
+					return t === null || retained.sealedAtMs > t;
+				},
 				hostedReconnectSpeech: this.utteranceRetainer
 					? () => this.reconnectWindowSpeechVerdict()
 					: undefined,
@@ -2244,6 +2275,7 @@ export class VoiceSession {
 			this.reconnector.disarmResponseWatchdog(),
 		);
 		await this.safeTeardown('greetingGate.dispose', () => this.greeting.dispose());
+		await this.safeTeardown('cancelHeldRecovery', () => this.reconnector.cancelHeldRecovery());
 		// close() bypasses finalizeTurn — tear down the native gate directly so no
 		// native playback timer outlives the session.
 		if (this.nativePlaybackGatingActive) {
@@ -2502,6 +2534,50 @@ export class VoiceSession {
 			this.log('[Watchdog] arm skipped — segment audio gated during greeting');
 		}
 		this.reconnector.notifySegmentAborted();
+	}
+
+	/** H2 gate-aware drain (design §3): pulls capture-tagged inbound frames
+	 *  from the local channel, DISCARDS frames whose gate was active at
+	 *  capture, transform-sends the rest (router helper — no retention, no
+	 *  live gate read), records BufferedInboundEvidence, and returns the
+	 *  ADMITTED buffers for the reconnect speech verdict. Channels without
+	 *  inbound capture (hosted adapter, Direct RTC) fall back to their
+	 *  legacy stopBuffering contract (returns []). */
+	private drainCapturedInboundFrames(reason: 'reconnect' | 'goaway' | 'transfer'): Buffer[] {
+		const channel = this.clientTransport as unknown as {
+			stopInboundCapture?: () => Array<{
+				data: Buffer;
+				voiced: boolean;
+				gateActiveAtCapture: boolean;
+			}>;
+		};
+		const admitted: Buffer[] = [];
+		let voicedCount = 0;
+		let discarded = 0;
+		if (typeof channel.stopInboundCapture === 'function') {
+			for (const f of channel.stopInboundCapture()) {
+				if (f.voiced) voicedCount++;
+				if (f.gateActiveAtCapture) {
+					discarded++;
+					continue;
+				}
+				admitted.push(f.data);
+			}
+		} else {
+			for (const data of this.clientTransport.stopBuffering()) admitted.push(data);
+		}
+		for (const data of admitted) this.audioRouter.sendPreAdmitted(data);
+		if (discarded > 0) {
+			this.log(`[H2] drain discarded ${discarded} gate-captured frame(s) (reason=${reason})`);
+		}
+		this.userTurnEvidence.recordBufferedInbound({
+			reason,
+			voicedFrameCount: voicedCount,
+			admittedCount: admitted.length,
+			destination: 'llm',
+			recordedAtMs: this.nowMs(),
+		});
+		return admitted;
 	}
 
 	/** @internal Observable shadow-parity counters (Phase-1 exit criteria). */

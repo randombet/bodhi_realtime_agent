@@ -55,6 +55,19 @@ export interface FinalizeDescriptor {
 
 export type TerminalObserver = (ev: Readonly<SegmentEvidence>) => void;
 
+/** H2: drained buffered-inbound audio is a DISCRIMINATED variant, never a
+ *  `SegmentEvidence` — buffered frames bypass live VAD (no segment id,
+ *  boundaries, outcome, or cause), so watchdog/retention policies must not
+ *  consume it. Recovery verdict logic consumes `reconnect`/`goaway` records
+ *  ONLY; transfer and external-agent drains are dial-gap paths. */
+export interface BufferedInboundEvidence {
+	reason: 'reconnect' | 'goaway' | 'transfer' | 'external-agent';
+	voicedFrameCount: number;
+	admittedCount: number;
+	destination: 'llm' | 'external';
+	recordedAtMs: number;
+}
+
 const DEFAULT_RING_CAPACITY = 8;
 /** Correlation horizon for heuristic window matching (Open Questions: the
  *  default is validated or restated before Phase 1 exits shadow mode). */
@@ -122,10 +135,30 @@ export class UserTurnEvidenceLedger {
 	private readonly providerToBatch = new Map<string, string>();
 	/** Idempotency keys for applied provider events. */
 	private readonly appliedEvidence = new Set<string>();
+	/** H2 drain-freshness anchor: newest reconnect/goaway drain that carried
+	 *  admitted voiced speech. Candidates sealed BEFORE it are not replayable
+	 *  at ANY recovery stage ("fresh speech wins" — candidate-wide rule). */
+	private _lastDrainedSpeechAtMs: number | null = null;
 
 	constructor(opts: { ringCapacity?: number } = {}) {
 		const cap = opts.ringCapacity ?? DEFAULT_RING_CAPACITY;
 		this.ring = Array.from({ length: cap }, blankRecord);
+	}
+
+	/** H2: record a buffered-inbound drain. Only reconnect/goaway drains with
+	 *  admitted voiced audio move the freshness anchor. */
+	recordBufferedInbound(ev: BufferedInboundEvidence): void {
+		if (
+			(ev.reason === 'reconnect' || ev.reason === 'goaway') &&
+			ev.voicedFrameCount > 0 &&
+			ev.admittedCount > 0
+		) {
+			this._lastDrainedSpeechAtMs = ev.recordedAtMs;
+		}
+	}
+
+	get lastDrainedSpeechAtMs(): number | null {
+		return this._lastDrainedSpeechAtMs;
 	}
 
 	/** Declare which evidence kinds the transport's adapter can ever emit. */

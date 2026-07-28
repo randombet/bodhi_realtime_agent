@@ -40,6 +40,10 @@ export interface GreetingControllerDeps {
 	getSessionSuffix(): string;
 	/** Reset the notification audio gate before sending the greeting. */
 	resetNotificationAudio(): void;
+	/** H4 seam: fired on EVERY suppression active→inactive transition so a
+	 *  held recovery can re-evaluate (turn finalize, invalidation, no-start
+	 *  timeout, client reset). Optional for harnesses. */
+	onGateReleased?(): void;
 	log(message: string): void;
 }
 
@@ -108,6 +112,12 @@ export class GreetingController {
 	/** Config `greetingInterruptible` captured at construction. `false` arms
 	 *  full-greeting suppression on every `sendGreeting()`. */
 	private readonly _greetingInterruptible: boolean;
+
+	/** H4 hold input: is FULL-greeting suppression armed right now? (Never
+	 *  includes the grace or pre-first-audio windows.) */
+	isUninterruptibleGreetingActive(): boolean {
+		return this._uninterruptibleGreetingActive;
+	}
 
 	/** True if outbound mic frames should be dropped right now — the
 	 *  full-greeting suppression window, the pre-first-audio greeting window,
@@ -275,6 +285,7 @@ export class GreetingController {
 		this.gate.clear();
 		this.clearNoStartTimer();
 		this.deps.log(`[Latency] ${reason} — interrupt suppression released`);
+		this.deps.onGateReleased?.();
 	}
 
 	/** Send the active agent's greeting prompt to the LLM to trigger a spoken
@@ -343,9 +354,11 @@ export class GreetingController {
 		this._greetingInFlight = false;
 		// Same for full-greeting suppression: a reconnecting client must not
 		// inherit a prior session's (possibly never-finalized) greeting window.
+		const wasArmed = this._uninterruptibleGreetingActive;
 		this._uninterruptibleGreetingActive = false;
 		this.gate.clear();
 		this.clearNoStartTimer();
+		if (wasArmed) this.deps.onGateReleased?.();
 	}
 }
 

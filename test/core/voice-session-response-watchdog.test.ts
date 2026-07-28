@@ -428,6 +428,45 @@ describe('Phase-2 re-bind: provider-forced retention + H3 stale-candidate guard'
 	});
 });
 
+describe('H4: recovery held during full-greeting suppression (Phase 4)', () => {
+	beforeEach(() => vi.useFakeTimers());
+	afterEach(() => vi.useRealTimers());
+
+	it('a legit armed watchdog firing mid-greeting HOLDS, preserves the candidate through the greeting model start, and actuates after release', async () => {
+		let session: VoiceSession | undefined;
+		try {
+			const s = setupGated({ replayRecovery: true });
+			session = s.session;
+			await activateWithGreeting(session, s.transport);
+			s.transport.onModelTurnStart?.();
+			s.transport.onTurnComplete?.(); // initial greeting done → gate open
+			await vi.advanceTimersByTimeAsync(10);
+
+			completeUserTurn(session); // routed → seals candidate + ARMS (8s timer)
+			vi.advanceTimersByTime(3000);
+			// A transfer-style second greeting re-arms suppression before the fire
+			// (its no-start timeout lands at t+11s — after the fire at t+8s).
+			(session as unknown as { greeting: { sendGreeting(): void } }).greeting.sendGreeting();
+
+			vi.advanceTimersByTime(5100); // watchdog fires while suppressed → HOLD
+			expect(s.transport.replayUserTurn).not.toHaveBeenCalled();
+			expect(s.transport.reconnect).not.toHaveBeenCalled();
+
+			// The greeting's ambiguous model start must NOT clear the candidate.
+			s.transport.onModelTurnStart?.();
+			s.transport.onAudioOutput?.(Buffer.alloc(4800).toString('base64'));
+
+			// Greeting turn finalizes → gate releases → held recovery re-evaluates
+			// with fresh facts and actuates (tier-1 in-place replay).
+			s.transport.onTurnComplete?.();
+			await vi.runAllTimersAsync();
+			expect(s.transport.replayUserTurn).toHaveBeenCalled();
+		} finally {
+			await session?.close();
+		}
+	});
+});
+
 describe('external-audio no-change guard (investigation test 7)', () => {
 	beforeEach(() => vi.useFakeTimers());
 	afterEach(() => vi.useRealTimers());

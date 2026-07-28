@@ -137,6 +137,25 @@ export class AudioRouter {
 		});
 	}
 
+	/** H2 gate-aware drain helper: transform + send a frame whose ADMISSION
+	 *  was already decided at capture time — re-reading the live gate here
+	 *  would recreate the drain-time race, and the retention tee is
+	 *  deliberately skipped (drained audio is excluded from retention; a
+	 *  no-segment feed would pollute the pre-roll ring). Fixes the latent
+	 *  raw-drain format bug: frames now resample/µ-law-encode like every
+	 *  other agent-path frame (an approved Phase-4 behavior change). */
+	sendPreAdmitted(data: Buffer): void {
+		const clientRate = this.d.clientAudioInputRate;
+		const transportRate = this.d.transport.audioFormat.inputSampleRate;
+		const transportPcm =
+			clientRate === transportRate ? data : resamplePcm(data, clientRate, transportRate, 16);
+		const transportAudio =
+			this.d.transport.audioFormat.encoding === 'pcmu'
+				? encodePcmToMulaw(transportPcm).toString('base64')
+				: transportPcm.toString('base64');
+		this.d.transport.sendAudio(transportAudio);
+	}
+
 	/** Flush buffered transition frames to whisper in FIFO order — called by
 	 *  `setTranscriptionMode` once whisper is ready. */
 	drainTransitionBufferToWhisper(): void {
