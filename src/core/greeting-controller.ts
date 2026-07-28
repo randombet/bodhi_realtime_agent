@@ -9,6 +9,14 @@ export interface GreetingControllerConfig {
 	 *  clamped (pass 1). `undefined` means "inherit the transport default at
 	 *  finalize time". */
 	overrideGraceMs: number | undefined;
+	/** When `false`, the greeting is uninterruptible end-to-end: from
+	 *  `sendGreeting()` until the greeting turn finalizes (post-playback),
+	 *  interrupts are suppressed and outbound mic frames are dropped. Unlike
+	 *  the time-boxed grace window this needs no `frameworkOwnsInterrupt` /
+	 *  `cancelResponse` support — withholding mic frames prevents server-side
+	 *  VAD barge-in on every transport. Default `true` (greeting behaves as
+	 *  before: interruptible outside the grace window). */
+	greetingInterruptible: boolean;
 }
 
 /**
@@ -74,23 +82,33 @@ export class GreetingController {
 	 *  doesn't accumulate / auto-commit before the greeting response completes.
 	 *  Only set when the resolved `greetingInterruptGraceMs > 0`. */
 	private _greetingInFlight = false;
+	/** Full-greeting suppression (config `greetingInterruptible: false`). Armed
+	 *  in `sendGreeting()`; released in `onTurnFinalized()` (the greeting turn's
+	 *  post-playback finalization) or `resetForClientConnected()`. While armed,
+	 *  `requestInterrupt` refuses and `shouldDropOutbound` drops mic frames. */
+	private _uninterruptibleGreetingActive = false;
 
 	constructor(
 		private readonly deps: GreetingControllerDeps,
 		config: GreetingControllerConfig,
 	) {
 		this._overrideGraceMs = config.overrideGraceMs;
+		this._greetingInterruptible = config.greetingInterruptible;
 	}
 
 	/** Pass-1 caller override (clamped), captured at construction. `undefined`
 	 *  means "inherit transport default at finalize time". */
 	private readonly _overrideGraceMs: number | undefined;
 
-	/** True if outbound mic frames should be dropped right now — either the
-	 *  pre-first-audio greeting window or the armed grace window. Read by the
-	 *  AudioRouter mic-drop gate. */
+	/** Config `greetingInterruptible` captured at construction. `false` arms
+	 *  full-greeting suppression on every `sendGreeting()`. */
+	private readonly _greetingInterruptible: boolean;
+
+	/** True if outbound mic frames should be dropped right now — the
+	 *  full-greeting suppression window, the pre-first-audio greeting window,
+	 *  or the armed grace window. Read by the AudioRouter mic-drop gate. */
 	shouldDropOutbound(): boolean {
-		return this._greetingInFlight || this._grace.isActive();
+		return this._uninterruptibleGreetingActive || this._greetingInFlight || this._grace.isActive();
 	}
 
 	/** Pass 2 of greeting-grace resolution (§5). Reads the transport's
@@ -166,9 +184,13 @@ export class GreetingController {
 	}
 
 	/** Returns `true` if the caller should proceed with the interrupt; `false`
-	 *  (and logs) if the grace is currently suppressing it. Wraps
-	 *  `_grace.isActive()` with the session's log channel. */
+	 *  (and logs) if full-greeting suppression or the grace window is currently
+	 *  suppressing it. */
 	requestInterrupt(source: string): boolean {
+		if (this._uninterruptibleGreetingActive) {
+			this.deps.log(`[Latency] interrupt suppressed (greeting uninterruptible; src=${source})`);
+			return false;
+		}
 		if (this._grace.isActive()) {
 			this.deps.log(
 				`[Latency] interrupt suppressed (grace, ${this._grace.remainingMs()}ms remaining; src=${source})`,
@@ -176,6 +198,17 @@ export class GreetingController {
 			return false;
 		}
 		return true;
+	}
+
+	/** Turn-finalization hook (called from `VoiceSession.finalizeTurn`).
+	 *  Releases full-greeting suppression: the greeting turn only finalizes
+	 *  after playback completes (playback.ended / the fallback timer), so this
+	 *  is the "greeting fully heard" point. No-op when suppression is unarmed —
+	 *  in particular it never cuts the time-boxed grace window short. */
+	onTurnFinalized(): void {
+		if (!this._uninterruptibleGreetingActive) return;
+		this._uninterruptibleGreetingActive = false;
+		this.deps.log('[Latency] greeting finished — interrupt suppression released');
 	}
 
 	/** Send the active agent's greeting prompt to the LLM to trigger a spoken
@@ -194,6 +227,9 @@ export class GreetingController {
 		// per-client grace state immediately before scheduling this greeting.
 		if (this.greetingInterruptGraceMs > 0 && !this._graceArmingLogged) {
 			this._greetingInFlight = true;
+		}
+		if (!this._greetingInterruptible) {
+			this._uninterruptibleGreetingActive = true;
 		}
 		// Pre-greeting audio-gate reset (clears the actor debounce too, via the sink).
 		this.deps.resetNotificationAudio();
@@ -237,6 +273,9 @@ export class GreetingController {
 		// Don't leak greeting-in-flight state into the new client session.
 		// The next sendGreeting (if any) will re-set it.
 		this._greetingInFlight = false;
+		// Same for full-greeting suppression: a reconnecting client must not
+		// inherit a prior session's (possibly never-finalized) greeting window.
+		this._uninterruptibleGreetingActive = false;
 	}
 }
 

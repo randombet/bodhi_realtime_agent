@@ -418,6 +418,16 @@ export interface VoiceSessionConfig {
 	 *  browser AEC; dropping caller audio would silence real speech).
 	 *  See dev_docs/framework/design-greeting-interrupt-grace.md. */
 	greetingInterruptGraceMs?: number;
+	/** When `false`, the greeting is uninterruptible end-to-end: from the
+	 *  greeting send until the greeting turn finalizes (post-playback where
+	 *  the playback protocol is active, else the fallback/estimate timer),
+	 *  interrupts are suppressed and outbound mic frames are dropped — user
+	 *  speech during the greeting is discarded, not queued. Works on every
+	 *  transport (unlike the grace window it needs no `frameworkOwnsInterrupt`
+	 *  or `cancelResponse`: withholding mic frames prevents server-side VAD
+	 *  barge-in too). Independent of `greetingInterruptGraceMs`, which still
+	 *  covers post-greeting AEC convergence. Default `true`. */
+	greetingInterruptible?: boolean;
 }
 
 /**
@@ -1277,7 +1287,10 @@ export class VoiceSession {
 				resetNotificationAudio: () => this.notificationSink.resetAudio(),
 				log: (msg) => this.log(msg),
 			},
-			{ overrideGraceMs: clampGraceMs(config.greetingInterruptGraceMs) },
+			{
+				overrideGraceMs: clampGraceMs(config.greetingInterruptGraceMs),
+				greetingInterruptible: config.greetingInterruptible !== false,
+			},
 		);
 
 		// Native (non-TTS) sessions get the native playback gate. Its barge-in is
@@ -2646,6 +2659,11 @@ export class VoiceSession {
 		// (Trailing-audio suppression after an interrupt is the transport's job,
 		// via cancelResponse — see handleClientTtsBargeIn.)
 		this._assistantAudioStartedAtMs = null;
+
+		// Full-greeting suppression (greetingInterruptible: false) releases at
+		// the greeting turn's finalization — the post-playback point on gated
+		// paths. No-op when unarmed.
+		this.greeting.onTurnFinalized();
 
 		// Throw-safety: a throw in one effect must not strand the rest, or the
 		// turn would be terminal with a half-published boundary.
