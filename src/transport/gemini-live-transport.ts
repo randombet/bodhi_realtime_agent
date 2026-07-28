@@ -618,16 +618,22 @@ export class GeminiLiveTransport implements LLMTransport {
 		// Gemini auto-generates after sendToolResponse and sendClientContent
 	}
 
-	/** Re-elicit a response from the resumed/existing server context with no new
-	 *  content — a bare `turnComplete`. Used by the framework's response watchdog
-	 *  after a reconnect. No-op if the session is not connected. */
-	elicitResponse(): void {
-		if (!this.session) return;
-		// Omit `turns` entirely — the SDK parses any non-null/non-undefined value
-		// and rejects an empty array ("contents are required"), so `turns: []`
-		// throws instead of sending a bare turnComplete.
-		this.session.sendClientContent({ turnComplete: true });
-	}
+	// `elicitResponse` is deliberately NOT implemented for Gemini.
+	//
+	// A content-less nudge has no valid wire form here. `sendClientContent({
+	// turns: [], turnComplete: true })` is rejected client-side by the SDK
+	// ("contents are required"), and omitting `turns` altogether — the previous
+	// workaround — is rejected *server-side*: the socket closes with 1007
+	// "Request contains an invalid argument". That close arrives asynchronously,
+	// so it cannot be caught at the call site; the response watchdog counts it as
+	// a transport-close, reconnects, nudges again, and burns the reconnect budget
+	// until the session dies with `reconnect_failed`.
+	//
+	// Omitting the method is the contract's documented path for transports that
+	// auto-generate (see `LLMTransport.elicitResponse`): the reconnector falls
+	// back to `triggerGeneration()`, a no-op above, so no invalid request is ever
+	// sent. Real recovery is unaffected — it comes one tier earlier, from
+	// `replayUserTurn` re-sending the retained utterance as inline audio.
 
 	/** Replay a retained user utterance as a complete user turn — inline audio
 	 *  content with an explicit `turnComplete`, deliberately NOT the realtime

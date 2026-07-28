@@ -198,6 +198,9 @@ export class ToolRouterActor implements Actor {
 					args: call.args,
 					configName: toolInfo.configName ?? call.name,
 					lifetime: toolInfo.lifetime ?? 'ephemeral',
+					// The immediate pending result above already filled this tool call's
+					// function-response slot; the supervisor must not send a second one.
+					pendingResultSent: !!toolInfo.pendingMessage,
 				},
 				this.subagentSupervisorId,
 			);

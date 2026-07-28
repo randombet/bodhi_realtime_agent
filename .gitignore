@@ -26,6 +26,8 @@ docs/api/
 # Demo artifacts (e.g. examples/gemini-live-context-caching.ts persists
 # Gemini resumption handles to .cache/gemini-resumption.handle)
 /.cache/
+# Sutando demo runtime task-ledger state (examples/sutando)
+/sutando-ledger/
 
 # SpatialReal Python host bridges: local venvs and bytecode (per-bridge .gitignore too)
 app/lib/spatialreal/bridge/.venv/

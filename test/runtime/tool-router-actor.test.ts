@@ -124,6 +124,7 @@ describe('ToolRouterActor', () => {
 				args: { task: 'write code' },
 				configName: 'coder',
 				lifetime: 'persistent_session',
+				pendingResultSent: false,
 			});
 		});
 

@@ -16,7 +16,9 @@ const mockSession = {
 	sendToolResponse: vi.fn(),
 	// Replicates @google/genai validation: any non-null/non-undefined `turns` is
 	// parsed, and tContents([]) rejects an empty array — so `turns: []` throws
-	// exactly like the real SDK (the elicitResponse regression).
+	// exactly like the real SDK. Note this covers only *client-side* validation;
+	// the server's own rejection of a content-less request (1007) arrives as a
+	// socket close and cannot be modelled here.
 	sendClientContent: vi.fn((params: { turns?: unknown }) => {
 		if (Array.isArray(params.turns) && params.turns.length === 0) {
 			throw new Error(`Failed to parse client content "turns", type: '${typeof params.turns}'`);
@@ -112,14 +114,23 @@ describe('GeminiLiveTransport', () => {
 			).toBe(false);
 		});
 
-		it('elicitResponse sends a content-less turnComplete (no turns field)', async () => {
+		// Gemini has no valid content-less nudge: `turns: []` is rejected by the SDK
+		// and omitting `turns` is rejected by the server (1007, closing the socket
+		// asynchronously — which the response watchdog then retries into oblivion).
+		// Leaving the method undefined routes the reconnector to its
+		// `triggerGeneration()` fallback, a no-op here. This mock cannot reproduce
+		// the server-side rejection, which is exactly why the previous version of
+		// this test passed while the real session died — so assert the absence.
+		it('does not implement elicitResponse (no valid content-less nudge)', async () => {
 			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
 			await transport.connect();
 			mockSession.sendClientContent.mockClear();
-			// Must not throw: the SDK rejects an empty `turns` array, so the nudge
-			// has to omit the field entirely (mock replicates that validation).
-			expect(() => transport.elicitResponse?.()).not.toThrow();
-			expect(mockSession.sendClientContent).toHaveBeenCalledWith({ turnComplete: true });
+
+			expect(transport.elicitResponse).toBeUndefined();
+
+			// The fallback the reconnector uses instead must stay silent on the wire.
+			transport.triggerGeneration();
+			expect(mockSession.sendClientContent).not.toHaveBeenCalled();
 		});
 
 		it('includes system instruction when provided', async () => {

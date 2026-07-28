@@ -23,6 +23,9 @@ export class ConversationContext {
 	private _items: ConversationItem[] = [];
 	private _summary: string | null = null;
 	private checkpointIndex = 0;
+	/** Ids of reserved user messages still awaiting their authoritative transcript. */
+	private pendingIds = new Set<string>();
+	private nextReservationId = 1;
 
 	get items(): readonly ConversationItem[] {
 		return this._items;
@@ -46,6 +49,64 @@ export class ConversationContext {
 
 	addUserMessage(content: string): void {
 		this._items.push({ role: 'user', content, timestamp: Date.now() });
+	}
+
+	/**
+	 * Append a user message whose authoritative transcript has not arrived yet.
+	 *
+	 * The slot is inserted in timeline order immediately (so replay and history
+	 * keep correct interleaving with assistant/tool items) but holds only
+	 * provisional text. Until `sealUserMessage` resolves it, the slot acts as a
+	 * barrier in `getItemsSinceCheckpoint()` — history stores never observe the
+	 * provisional text, so a persisted record is written once, already correct.
+	 * `toReplayContent()` is unaffected and always reads the current best text.
+	 *
+	 * @returns The id to pass to `sealUserMessage`.
+	 */
+	reserveUserMessage(provisionalContent: string): string {
+		const id = `u${this.nextReservationId++}`;
+		this._items.push({ role: 'user', content: provisionalContent, timestamp: Date.now(), id });
+		this.pendingIds.add(id);
+		return id;
+	}
+
+	/**
+	 * Resolve a reserved user message and release the flush barrier.
+	 *
+	 * @param finalContent Authoritative transcript. Omit (or pass empty) to seal
+	 *        with the provisional text already in the slot — the fallback used
+	 *        when the authoritative source fails or times out.
+	 * @returns false if the id is unknown or already sealed.
+	 */
+	sealUserMessage(id: string, finalContent?: string): boolean {
+		if (!this.pendingIds.has(id)) return false;
+		if (finalContent?.trim()) {
+			const item = this._items.find((i) => i.id === id);
+			if (item) item.content = finalContent.trim();
+		}
+		this.pendingIds.delete(id);
+		return true;
+	}
+
+	/** True while any reserved user message is still awaiting its transcript. */
+	get hasPendingUserMessages(): boolean {
+		return this.pendingIds.size > 0;
+	}
+
+	/** Ids of all still-unsealed reservations, oldest first. */
+	pendingUserMessageIds(): string[] {
+		return this._items.filter((i) => i.id && this.pendingIds.has(i.id)).map((i) => i.id as string);
+	}
+
+	/**
+	 * Index of the first still-pending user message, or `_items.length` when
+	 * none is pending. Items at or after this index must not be flushed to a
+	 * history store yet — their text may still change.
+	 */
+	private flushBarrier(): number {
+		if (this.pendingIds.size === 0) return this._items.length;
+		const idx = this._items.findIndex((i) => i.id !== undefined && this.pendingIds.has(i.id));
+		return idx === -1 ? this._items.length : idx;
 	}
 
 	addAssistantMessage(content: string): void {
@@ -76,14 +137,20 @@ export class ConversationContext {
 		});
 	}
 
-	/** Return all items added since the last checkpoint (or all items if no checkpoint set). */
+	/**
+	 * Return items added since the last checkpoint, stopping before the first
+	 * still-pending user message (see `reserveUserMessage`) so provisional text
+	 * is never handed to a history store.
+	 */
 	getItemsSinceCheckpoint(): ConversationItem[] {
-		return this._items.slice(this.checkpointIndex);
+		const barrier = Math.max(this.checkpointIndex, this.flushBarrier());
+		return this._items.slice(this.checkpointIndex, barrier);
 	}
 
-	/** Advance the checkpoint cursor to the current end of the items list. */
+	/** Advance the checkpoint cursor past everything `getItemsSinceCheckpoint`
+	 *  just returned — i.e. up to, but not past, the first pending user message. */
 	markCheckpoint(): void {
-		this.checkpointIndex = this._items.length;
+		this.checkpointIndex = Math.max(this.checkpointIndex, this.flushBarrier());
 	}
 
 	/**

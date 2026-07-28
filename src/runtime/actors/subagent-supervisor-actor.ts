@@ -36,6 +36,11 @@ interface SubagentWorkflow {
 	lifetime: 'ephemeral' | 'persistent_session';
 	state: 'pending' | 'running' | 'waiting_input' | 'completed' | 'failed' | 'cancelled';
 	controller?: AbortController;
+	/** True when tool routing already sent the immediate pending tool result for
+	 * this call (pendingMessage tools). Terminal outcomes must then be delivered
+	 * via system notification only — a second tool result would double-fill the
+	 * function-response slot. */
+	pendingResultSent: boolean;
 }
 
 export class SubagentSupervisorActor implements Actor {
@@ -62,6 +67,7 @@ export class SubagentSupervisorActor implements Actor {
 					args: Record<string, unknown>;
 					configName: string;
 					lifetime: 'ephemeral' | 'persistent_session';
+					pendingResultSent?: boolean;
 				};
 				this.handleSpawnRequest(p);
 				break;
@@ -123,6 +129,7 @@ export class SubagentSupervisorActor implements Actor {
 		args: Record<string, unknown>;
 		configName: string;
 		lifetime: 'ephemeral' | 'persistent_session';
+		pendingResultSent?: boolean;
 	}): void {
 		const workflowId = `wf-${++this.nextWorkflowId}`;
 		const workflow: SubagentWorkflow = {
@@ -132,6 +139,7 @@ export class SubagentSupervisorActor implements Actor {
 			configName: p.configName,
 			lifetime: p.lifetime,
 			state: 'running',
+			pendingResultSent: p.pendingResultSent ?? false,
 		};
 		this.workflows.set(p.toolCallId, workflow);
 
@@ -175,17 +183,21 @@ export class SubagentSupervisorActor implements Actor {
 		if (!workflow || this.isTerminal(workflow.state)) return;
 
 		workflow.state = 'completed';
-		// Send result back to transport
-		this.sendMessage(
-			'transport.send_tool_result',
-			{
-				id: p.toolCallId,
-				name: workflow.configName,
-				result: { result: p.result },
-				scheduling: 'when_idle',
-			},
-			this.transportActorId,
-		);
+		// Send result back to transport — unless the immediate pending result
+		// already filled this call's function-response slot; those calls get
+		// their terminal outcome via system notification only.
+		if (!workflow.pendingResultSent) {
+			this.sendMessage(
+				'transport.send_tool_result',
+				{
+					id: p.toolCallId,
+					name: workflow.configName,
+					result: { result: p.result },
+					scheduling: 'when_idle',
+				},
+				this.transportActorId,
+			);
+		}
 		this.workflows.delete(p.toolCallId);
 	}
 
@@ -194,16 +206,21 @@ export class SubagentSupervisorActor implements Actor {
 		if (!workflow || this.isTerminal(workflow.state)) return;
 
 		workflow.state = 'failed';
-		this.sendMessage(
-			'transport.send_tool_result',
-			{
-				id: p.toolCallId,
-				name: workflow.configName,
-				result: { error: p.error },
-				scheduling: 'when_idle',
-			},
-			this.transportActorId,
-		);
+		// Same gate as handleCompleted: failure is a normal terminal outcome for
+		// pending-message tools (watchdog/abort paths) and must not double-fill
+		// the function-response slot either.
+		if (!workflow.pendingResultSent) {
+			this.sendMessage(
+				'transport.send_tool_result',
+				{
+					id: p.toolCallId,
+					name: workflow.configName,
+					result: { error: p.error },
+					scheduling: 'when_idle',
+				},
+				this.transportActorId,
+			);
+		}
 		this.workflows.delete(p.toolCallId);
 	}
 
