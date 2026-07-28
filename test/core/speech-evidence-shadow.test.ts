@@ -168,3 +168,62 @@ describe('speech-evidence shadow comparator', () => {
 		}
 	});
 });
+
+describe('provider evidence live wiring (P2-5)', () => {
+	beforeEach(() => vi.useFakeTimers());
+	afterEach(() => vi.useRealTimers());
+
+	it('transport-declared kinds reach the ledger and onProviderEvidence feeds it', async () => {
+		const transport = createTransport();
+		transport.capabilities = {
+			...transport.capabilities,
+			providerEvidenceKinds: ['speech-window'],
+		};
+		const session = new VoiceSession({
+			sessionId: 'sess_provider_live',
+			userId: 'user_1',
+			apiKey: 'test-key',
+			agents: [{ name: 'main', instructions: 'x', tools: [] } as MainAgent],
+			initialAgent: 'main',
+			model: mockModel,
+			transport,
+			orchestrationMode: 'actor',
+			clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			clientAudioVad: { bargeInConfirmMs: 0 },
+		});
+		try {
+			await activate(session, transport);
+			const ledger = (
+				session as unknown as {
+					userTurnEvidence: {
+						getActiveSnapshot(): { providerDetected: string } | null;
+						getTerminalSnapshot(id: number): { providerDetected: string } | null;
+					};
+				}
+			).userTurnEvidence;
+
+			const t0 = Date.now();
+			session.feedAudioFromClient(micFrame(2400));
+			vi.advanceTimersByTime(150);
+			session.feedAudioFromClient(micFrame(2400));
+			// Declared capability ⇒ observable-but-uncorrelated, not not-observable.
+			expect(ledger.getActiveSnapshot()?.providerDetected).toBe('unknown');
+			vi.advanceTimersByTime(500);
+			session.feedAudioFromClient(micFrame(0)); // silence terminal
+
+			// The transport's adapter reports a provider VAD window over the
+			// same interval — delivered through the live callback.
+			transport.onProviderEvidence?.({
+				kind: 'speech-window',
+				receiptAtMs: Date.now(),
+				windowStartAtMs: t0,
+				windowEndAtMs: t0 + 200,
+				provenance: 'test-adapter',
+				correlation: 'heuristic',
+			});
+			expect(ledger.getTerminalSnapshot(1)?.providerDetected).toBe('observed');
+		} finally {
+			await session.close();
+		}
+	});
+});

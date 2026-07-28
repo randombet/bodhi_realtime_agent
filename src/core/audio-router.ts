@@ -129,6 +129,9 @@ export class AudioRouter {
 		if (!(flags & VAD_FRAME.TERMINAL) || !this.d.ledger) return;
 		const desc = this.d.vad.takeTerminal();
 		if (!desc) return;
+		if (this.d.getResponseEpoch) {
+			this.d.ledger.noteResponseEpochAtTerminal(this.d.getResponseEpoch());
+		}
 		this.d.ledger.finalizeSegment({
 			segmentId: desc.segmentId,
 			outcome: desc.outcome,

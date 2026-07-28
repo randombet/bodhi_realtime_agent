@@ -194,3 +194,49 @@ describe('H1 turn-bound release hardening (Phase 3)', () => {
 		}
 	});
 });
+
+describe('coordinator enforcement: assistant-initiated triggers (P1-2)', () => {
+	let logSpy: ReturnType<typeof vi.spyOn>;
+
+	beforeEach(() => {
+		vi.useFakeTimers();
+		logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+	});
+	afterEach(() => {
+		logSpy.mockRestore();
+		vi.useRealTimers();
+	});
+
+	const released = () =>
+		logSpy.mock.calls.some(
+			([m]) => typeof m === 'string' && m.includes('interrupt suppression released'),
+		);
+
+	it('guardedTriggerGeneration invalidates a live greeting token — its turn must not bind as the greeting', async () => {
+		const transport = createMockTransport();
+		const session = new VoiceSession({
+			sessionId: 'sess_h1_trigger',
+			userId: 'user_1',
+			apiKey: 'test-key',
+			agents: [createAgent()],
+			initialAgent: 'main',
+			model: mockModel,
+			transport,
+			orchestrationMode: 'actor',
+			clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			greetingInterruptible: false,
+		});
+		try {
+			await session.start();
+			session.notifyClientConnected();
+			transport.onSessionReady?.('mock_session');
+			await vi.advanceTimersByTimeAsync(10); // greeting sent → token live
+
+			session.guardedTriggerGeneration('proactively check in with the user');
+			await vi.advanceTimersByTimeAsync(10);
+			expect(released()).toBe(true);
+		} finally {
+			await session.close();
+		}
+	});
+});

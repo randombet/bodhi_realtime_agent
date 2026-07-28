@@ -14,10 +14,12 @@
  * merely seams into. Same-response operations (`tool-result` continuations)
  * and greeting/transfer-greeting registrations are NOT competing triggers.
  *
- * Known enforcement residual (documented in the design's audit list): the
- * actor-runtime `NotificationActor` can reach `transport.sendContent`
- * without passing through `VoiceSession`; its coordinator hook requires the
- * runtime-side wiring tracked in the Phase-3 acceptance audit.
+ * Actor-runtime notification deliveries reach this coordinator through the
+ * `RuntimeOrchestrator.notification.onTransportDeliver` hook (TransportActor
+ * invokes it before its `adapter.sendContent` wire-out), closing the
+ * enforcement residual the Phase-3 audit tracked. `assistant-initiated`
+ * covers `VoiceSession.guardedTriggerGeneration` — any framework-owned
+ * proactive generation trigger.
  *
  * Internal — not exported from the package index.
  */
@@ -28,12 +30,14 @@ export type TriggerClass =
 	| 'direct-input'
 	| 'notification'
 	| 'watchdog-recovery'
+	| 'assistant-initiated'
 	| 'tool-result';
 
 const COMPETING: ReadonlySet<TriggerClass> = new Set([
 	'direct-input',
 	'notification',
 	'watchdog-recovery',
+	'assistant-initiated',
 ]);
 
 export class ResponseTriggerCoordinator {

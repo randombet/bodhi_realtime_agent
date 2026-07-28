@@ -138,3 +138,89 @@ describe('drainCapturedInboundFrames', () => {
 		}
 	});
 });
+
+describe('drain freshness counts admitted voiced frames only', () => {
+	beforeEach(() => vi.useFakeTimers());
+	afterEach(() => vi.useRealTimers());
+
+	it('gated voiced audio plus admitted silence must NOT move the freshness anchor', async () => {
+		const transport = createTransport();
+		const session = new VoiceSession({
+			sessionId: 'sess_drain3',
+			userId: 'user_1',
+			apiKey: 'test-key',
+			agents: [{ name: 'main', instructions: 'x', tools: [] } as MainAgent],
+			initialAgent: 'main',
+			model: mockModel,
+			transport,
+			orchestrationMode: 'actor',
+			clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+		});
+		try {
+			await session.start();
+			transport.onSessionReady?.('mock');
+			await vi.advanceTimersByTimeAsync(10);
+			const internals = session as unknown as {
+				clientTransport: Record<string, unknown>;
+				drainCapturedInboundFrames(reason: string): Buffer[];
+				userTurnEvidence: { lastDrainedSpeechAtMs: number | null };
+			};
+			// The only VOICED frame was suppressed by the gate; what the model
+			// actually received is silence. The old candidate is still the
+			// newest speech the model has — it must remain replayable.
+			internals.clientTransport.stopInboundCapture = () => [
+				{ data: voicedFrame(), voiced: true, gateActiveAtCapture: true },
+				{ data: Buffer.alloc(480 * 2), voiced: false, gateActiveAtCapture: false },
+			];
+			internals.drainCapturedInboundFrames('reconnect');
+			expect(internals.userTurnEvidence.lastDrainedSpeechAtMs).toBeNull();
+		} finally {
+			await session.close();
+		}
+	});
+});
+
+describe('drain normalization rollback flag (design G5)', () => {
+	beforeEach(() => vi.useFakeTimers());
+	afterEach(() => vi.useRealTimers());
+
+	it('normalizeDrainedInboundAudio: false sends legacy RAW bytes (discard semantics unchanged)', async () => {
+		const transport = createTransport() as LLMTransport & {
+			sendAudio: ReturnType<typeof vi.fn>;
+		};
+		const session = new VoiceSession({
+			sessionId: 'sess_drain4',
+			userId: 'user_1',
+			apiKey: 'test-key',
+			agents: [{ name: 'main', instructions: 'x', tools: [] } as MainAgent],
+			initialAgent: 'main',
+			model: mockModel,
+			transport,
+			orchestrationMode: 'actor',
+			clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			clientAudioInputRate: 24000, // ≠ transport's 16 kHz → transform would resample
+			normalizeDrainedInboundAudio: false,
+		});
+		try {
+			await session.start();
+			transport.onSessionReady?.('mock');
+			await vi.advanceTimersByTimeAsync(10);
+			const gated = voicedFrame();
+			const admitted = voicedFrame();
+			const internals = session as unknown as {
+				clientTransport: Record<string, unknown>;
+				drainCapturedInboundFrames(reason: string): Buffer[];
+			};
+			internals.clientTransport.stopInboundCapture = () => [
+				{ data: gated, voiced: true, gateActiveAtCapture: true },
+				{ data: admitted, voiced: true, gateActiveAtCapture: false },
+			];
+			internals.drainCapturedInboundFrames('reconnect');
+			// Rollback = flag off: byte-for-byte legacy raw send, no resample.
+			expect(transport.sendAudio).toHaveBeenCalledTimes(1);
+			expect(transport.sendAudio).toHaveBeenCalledWith(admitted.toString('base64'));
+		} finally {
+			await session.close();
+		}
+	});
+});

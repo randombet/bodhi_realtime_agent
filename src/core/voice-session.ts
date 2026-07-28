@@ -263,6 +263,13 @@ export interface VoiceSessionConfig {
 	 *  response-watchdog stall replays it — in-place first, then once more after
 	 *  a reconnect. Default false (ships dark until live-validated). */
 	watchdogReplayRecovery?: boolean;
+	/** @internal Rollback flag for H2 drain normalization (design G5).
+	 *  Default `true`: admitted drained inbound frames are transformed
+	 *  through the same resample/µ-law path as live agent audio — an
+	 *  approved byte change on non-PCM/rate-mismatched transports. `false`
+	 *  restores the legacy raw base64 send (rollback); gate-aware discard
+	 *  semantics are unaffected by this flag. */
+	normalizeDrainedInboundAudio?: boolean;
 	/** LLM model name (e.g. "gemini-3.1-flash-live-preview"). */
 	geminiModel?: string;
 	/** Vercel AI SDK model for subagent text generation. */
@@ -617,6 +624,8 @@ export class VoiceSession {
 	private reconnector!: TransportReconnector;
 	/** Resolved watchdog timeout (ms); `<= 0` disables. Set in the constructor. */
 	private readonly responseWatchdogMs: number;
+	/** G5 drain-normalization flag (rollback = false → legacy raw bytes). */
+	private readonly normalizeDrainedInbound: boolean;
 	// --- Server-turn finalization dedup (external-TTS turn completion).
 	//     See dev_docs/framework/design-external-tts-turn-completion.md. ---
 	private config: VoiceSessionConfig;
@@ -832,6 +841,7 @@ export class VoiceSession {
 		this.subagentConfigs = config.subagentConfigs ?? {};
 
 		this.responseWatchdogMs = config.responseWatchdogMs ?? DEFAULT_RESPONSE_WATCHDOG_MS;
+		this.normalizeDrainedInbound = config.normalizeDrainedInboundAudio !== false;
 
 		const initialForLive = config.agents.find((a) => a.name === config.initialAgent);
 		const liveResolved = initialForLive
@@ -1682,10 +1692,16 @@ export class VoiceSession {
 				// time the user has already registered hooks via config.hooks
 				// (HooksManager.register fired up top), so reading
 				// `this.hooks.onBackgroundNotification` here yields the
-				// caller-supplied callback if any.
-				notification: this.hooks.onBackgroundNotification
-					? { onBackgroundNotification: this.hooks.onBackgroundNotification }
-					: undefined,
+				// caller-supplied callback if any. `onTransportDeliver` is
+				// unconditional: every actor-mode notification delivery is a
+				// generation-capable path that must invalidate a live greeting
+				// token before its wire-out (H1 enforcement).
+				notification: {
+					onTransportDeliver: () => this.triggerCoordinator.dispatch('notification'),
+					...(this.hooks.onBackgroundNotification
+						? { onBackgroundNotification: this.hooks.onBackgroundNotification }
+						: {}),
+				},
 			});
 		} else {
 			// Set up legacy tool call router. notificationQueue is guaranteed
@@ -1968,6 +1984,15 @@ export class VoiceSession {
 				reason,
 			});
 		};
+
+		// Provider-evidence wiring (design §1): declare what this transport's
+		// adapter can ever emit (undeclared ⇒ 'not-observable', stated once),
+		// and route delivered events into the ledger.
+		this.userTurnEvidence.declareProviderCapability(
+			this.transport.capabilities.providerEvidenceKinds ?? [],
+		);
+		this.transport.onProviderEvidence = (ev) =>
+			this.userTurnEvidence.applyProviderEvidenceEvent(ev);
 	}
 
 	/**
@@ -2556,17 +2581,26 @@ export class VoiceSession {
 		let discarded = 0;
 		if (typeof channel.stopInboundCapture === 'function') {
 			for (const f of channel.stopInboundCapture()) {
-				if (f.voiced) voicedCount++;
 				if (f.gateActiveAtCapture) {
 					discarded++;
 					continue;
 				}
+				// Count ADMITTED voiced frames only: gate-discarded speech never
+				// reached the model, so it must not advance the replay-freshness
+				// anchor and invalidate an older (still-newest-delivered) candidate.
+				if (f.voiced) voicedCount++;
 				admitted.push(f.data);
 			}
 		} else {
 			for (const data of this.clientTransport.stopBuffering()) admitted.push(data);
 		}
-		for (const data of admitted) this.audioRouter.sendPreAdmitted(data);
+		for (const data of admitted) {
+			if (this.normalizeDrainedInbound) {
+				this.audioRouter.sendPreAdmitted(data);
+			} else {
+				this.transport.sendAudio(data.toString('base64')); // G5 rollback: legacy raw bytes
+			}
+		}
 		if (discarded > 0) {
 			this.log(`[H2] drain discarded ${discarded} gate-captured frame(s) (reason=${reason})`);
 		}
@@ -3119,6 +3153,11 @@ export class VoiceSession {
 	 *  steps complete.
 	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §7.5. */
 	private async preEmptForDirectInput(): Promise<void> {
+		// Direct input supersedes any held voice candidate: idle a recovery
+		// held behind the greeting gate BEFORE the dispatch below releases
+		// that gate, or the release would immediately replay the stale
+		// utterance ahead of the new input (design §3 supersession rule).
+		this.reconnector.cancelHeldRecovery();
 		// H1 voice-only guarantee: typed/injected input invalidates the greeting
 		// token synchronously (and releases the gate) BEFORE dispatch.
 		this.triggerCoordinator.dispatch('direct-input');
@@ -3443,6 +3482,9 @@ export class VoiceSession {
 				`TRANSCRIPTION_MODE_LOCKED: triggerGeneration is blocked while transcription mode is '${this.dictation.mode}'`,
 			);
 		}
+		// Generation-capable path: invalidate a live greeting token so the
+		// triggered turn can never bind as the greeting (H1 enforcement).
+		this.triggerCoordinator.dispatch('assistant-initiated');
 		this._pendingResponseOrigin = 'assistant_initiated';
 		this.transport.triggerGeneration(instructions, overrides);
 	}

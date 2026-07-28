@@ -150,3 +150,34 @@ describe('UserTurnEvidenceLedger — late evidence', () => {
 		expect(ledger.getActiveSnapshot()?.recognized).toBe('not-observable');
 	});
 });
+
+describe('responseEpochAtTerminal', () => {
+	it('a noted terminal epoch survives finalizeSegment (forced-path ordering fact)', () => {
+		const ledger = new UserTurnEvidenceLedger();
+		ledger.beginSegment(1, 1000, { gateActive: false, responseEpoch: 0 });
+		ledger.noteVoicedFrame(1010);
+		// Forced terminal path: the session notes the CURRENT epoch (2 model
+		// turns started since segment start) just before finalizing.
+		ledger.noteResponseEpochAtTerminal(2);
+		ledger.finalizeSegment({
+			segmentId: 1,
+			outcome: 'completed',
+			terminalCause: 'model-activity-forced',
+			resolvedAtMs: 1200,
+		});
+		expect(ledger.getTerminalSnapshot(1)?.responseEpochAtTerminal).toBe(2);
+	});
+
+	it('an un-noted terminal epoch falls back to the start epoch', () => {
+		const ledger = new UserTurnEvidenceLedger();
+		ledger.beginSegment(1, 1000, { gateActive: false, responseEpoch: 3 });
+		ledger.noteVoicedFrame(1010);
+		ledger.finalizeSegment({
+			segmentId: 1,
+			outcome: 'completed',
+			terminalCause: 'silence',
+			resolvedAtMs: 1600,
+		});
+		expect(ledger.getTerminalSnapshot(1)?.responseEpochAtTerminal).toBe(3);
+	});
+});

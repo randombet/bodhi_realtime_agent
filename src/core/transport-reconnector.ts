@@ -251,7 +251,9 @@ export class TransportReconnector {
 		this.onResponseWatchdogFired(); // full decision, fresh facts
 	}
 
-	/** Teardown-only cancellation of a held recovery. */
+	/** Cancel a held recovery without running it: session teardown, or the
+	 *  held candidate was superseded (direct input pre-emption releases the
+	 *  greeting gate — the release must find nothing to fire). */
 	cancelHeldRecovery(): void {
 		this._heldGate = false;
 	}

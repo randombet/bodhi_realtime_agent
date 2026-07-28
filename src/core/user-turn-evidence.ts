@@ -216,7 +216,10 @@ export class UserTurnEvidenceLedger {
 		this.active.outcome = desc.outcome;
 		this.active.terminalCause = desc.terminalCause;
 		this.active.resolvedAtMs = desc.resolvedAtMs;
-		this.active.responseEpochAtTerminal = this.active.responseEpochAtStart;
+		// Preserve an epoch noted via noteResponseEpochAtTerminal (forced
+		// paths note the CURRENT epoch just before finalizing); only default
+		// to the start epoch when no terminal-time note was made.
+		this.active.responseEpochAtTerminal ??= this.active.responseEpochAtStart;
 		const slot = this.ring[this.ringNext];
 		copyInto(slot, this.active);
 		this.ringNext = (this.ringNext + 1) % this.ring.length;

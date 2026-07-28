@@ -661,6 +661,12 @@ export interface LLMTransport {
 	 *  changes `instructions` or `tools` — i.e. before a guaranteed full
 	 *  prompt-cache bust on the next response. Pure telemetry. */
 	onCacheBust?: (reason: 'instructions_changed' | 'tools_changed') => void;
+
+	/** Normalized provider-evidence delivery (speech-evidence design §1).
+	 *  Adapters of transports that declare `capabilities.providerEvidenceKinds`
+	 *  emit each normalized event here; the framework routes it into the
+	 *  session's evidence ledger. Never emit kinds you did not declare. */
+	onProviderEvidence?: (ev: ProviderEvidenceEvent) => void;
 }
 
 /** Provider-evidence kinds (internal transport-adapter correlation contract,

@@ -465,6 +465,39 @@ describe('H4: recovery held during full-greeting suppression (Phase 4)', () => {
 			await session?.close();
 		}
 	});
+
+	it('direct input during a held recovery idles it — the superseded candidate must never replay', async () => {
+		let session: VoiceSession | undefined;
+		try {
+			const s = setupGated({ replayRecovery: true });
+			session = s.session;
+			await activateWithGreeting(session, s.transport);
+			s.transport.onModelTurnStart?.();
+			s.transport.onTurnComplete?.(); // initial greeting done → gate open
+			await vi.advanceTimersByTimeAsync(10);
+
+			completeUserTurn(session); // routed → seals candidate + ARMS (8s timer)
+			vi.advanceTimersByTime(3000);
+			(session as unknown as { greeting: { sendGreeting(): void } }).greeting.sendGreeting();
+			vi.advanceTimersByTime(5100); // watchdog fires while suppressed → HOLD
+			expect(s.transport.replayUserTurn).not.toHaveBeenCalled();
+
+			// Typed input supersedes the held voice candidate. Its pre-emption
+			// releases the greeting gate synchronously — that release must IDLE
+			// the held recovery, not fire it against the stale utterance.
+			await (session as unknown as { handleTextInput(t: string): Promise<void> }).handleTextInput(
+				'actually, forget that — new question',
+			);
+			expect(s.transport.replayUserTurn).not.toHaveBeenCalled();
+			expect(s.transport.reconnect).not.toHaveBeenCalled();
+
+			// And it stays idle: nothing fires later either.
+			await vi.runAllTimersAsync();
+			expect(s.transport.replayUserTurn).not.toHaveBeenCalled();
+		} finally {
+			await session?.close();
+		}
+	});
 });
 
 describe('external-audio no-change guard (investigation test 7)', () => {
