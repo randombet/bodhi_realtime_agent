@@ -1,6 +1,7 @@
 import type { IClientChannel } from '../types/session-client.js';
 import type { LLMTransport, ReplayItem, RetainedUserTurn } from '../types/transport.js';
 import type { EventBus } from './event-bus.js';
+import { decideOnGateReleased, decideOnWatchdogFire } from './policies/recovery.policy.js';
 import type { SessionManager } from './session-manager.js';
 
 /** Session-state surface the reconnector drives during recovery. */
@@ -63,6 +64,23 @@ export interface TransportReconnectorDeps {
 	 *  Never fires for deferred/failed replays or the content-less nudge.
 	 *  Optional. */
 	onReplayDispatched?(): void;
+	/** Phase-3 coordinator seam: invoked BEFORE any recovery actuation
+	 *  (in-place replay, post-reconnect replay, or nudge) so the greeting
+	 *  token is invalidated first — a recovery response must never bind as
+	 *  the greeting. */
+	onRecoveryDispatch?(): void;
+	/** H4 hold predicate — FULL-GREETING suppression ONLY (never the AEC
+	 *  grace or pre-first-audio windows; see recovery.policy.ts). */
+	isGreetingSuppressionArmed?(): boolean;
+	/** H2 gate-aware drain: capture-tagged inbound frames are filtered
+	 *  (gate-active discarded) and transform-sent by the SESSION; the
+	 *  returned buffers are the ADMITTED frames only, so the drained-speech
+	 *  verdict below cannot count gated greeting-period audio as fresh
+	 *  speech. Fallback: the legacy raw stopBuffering drain. */
+	drainBufferedInbound?(reason: 'reconnect' | 'goaway'): Buffer[];
+	/** H2 drain-freshness: a candidate sealed before the latest drained
+	 *  speech is not replayable at ANY stage (escalate instead). */
+	isCandidateReplayEligible?(retained: RetainedUserTurn): boolean;
 }
 
 /** Reconnect-window speech verdict driving the stage-2 replay decision. */
@@ -106,6 +124,8 @@ export class TransportReconnector {
 	 *  is instead aborted (ignored blip / forced reset), `notifySegmentAborted`
 	 *  re-arms so recovery for the original retained utterance is not stranded. */
 	private _replayDeferred = false;
+	/** H4: a watchdog fire held behind full-greeting suppression. */
+	private _heldGate = false;
 
 	constructor(
 		private readonly deps: TransportReconnectorDeps,
@@ -139,16 +159,36 @@ export class TransportReconnector {
 		// No re-arm here — re-arming would loop the timer through one long
 		// utterance. The segment's own completion re-arms (onUserTurnCompleted),
 		// and an aborted segment re-arms via notifySegmentAborted().
-		if (this.deps.isSpeechActive?.() === true) {
+		const fireVerdict = decideOnWatchdogFire({
+			speechActive: this.deps.isSpeechActive?.() === true,
+			greetingSuppressionArmed: this.deps.isGreetingSuppressionArmed?.() === true,
+		});
+		if (fireVerdict === 'defer-speech') {
 			this._replayDeferred = true;
 			this.deps.log(
 				`[Watchdog] Model silent ${this.responseWatchdogMs}ms after user turn — deferred (user speech in progress; no replay, no reconnect)`,
 			);
 			return;
 		}
+		if (fireVerdict === 'hold-gate') {
+			// H4: recovery output must not land inside an open greeting turn.
+			// Held — NOT cancelled: ambiguous model activity (the greeting's own
+			// start) must not erase this; gate release re-evaluates.
+			this._heldGate = true;
+			this.deps.log(
+				`[Watchdog] Model silent ${this.responseWatchdogMs}ms after user turn — HELD (greeting suppression armed; recovery resumes at gate release)`,
+			);
+			return;
+		}
 		const retained = this.deps.peekRetainedUtterance?.() ?? null;
-		if (retained && this.stageFor(retained) === 'idle' && this.deps.transport.isConnected) {
+		if (
+			retained &&
+			this.stageFor(retained) === 'idle' &&
+			this.deps.transport.isConnected &&
+			(this.deps.isCandidateReplayEligible?.(retained) ?? true)
+		) {
 			this._replayStage = 'replayed-in-place';
+			this.deps.onRecoveryDispatch?.();
 			if (this.tryReplay(retained, 'in-place')) {
 				this.deps.log(
 					`[Watchdog] Model silent ${this.responseWatchdogMs}ms after user turn — replayed retained user utterance in-place (no reconnect)`,
@@ -187,6 +227,37 @@ export class TransportReconnector {
 	 *  blip / forced reset) — it will never complete, so its completion can
 	 *  never re-arm. Re-arm now for the ORIGINAL retained utterance; replay
 	 *  stage state is intentionally unchanged. No-op without a deferred fire. */
+	/** H4: is a recovery currently held behind the greeting gate? While held,
+	 *  the session defers ambiguous-activity candidate clearing (held-state
+	 *  override — see recovery.policy.ts). */
+	isRecoveryHeld(): boolean {
+		return this._heldGate;
+	}
+
+	/** H4: the greeting gate released — re-evaluate the held recovery with
+	 *  FRESH facts (never a blind transition; the gate can hold for seconds). */
+	onGreetingGateReleased(): void {
+		if (!this._heldGate) return;
+		this._heldGate = false;
+		const verdict = decideOnGateReleased({
+			speechActive: this.deps.isSpeechActive?.() === true,
+			sessionActive: this.deps.sessionManager.state === 'ACTIVE',
+		});
+		if (verdict === 'idle') return;
+		if (verdict === 'defer-speech') {
+			this._replayDeferred = true;
+			return;
+		}
+		this.onResponseWatchdogFired(); // full decision, fresh facts
+	}
+
+	/** Cancel a held recovery without running it: session teardown, or the
+	 *  held candidate was superseded (direct input pre-emption releases the
+	 *  greeting gate — the release must find nothing to fire). */
+	cancelHeldRecovery(): void {
+		this._heldGate = false;
+	}
+
 	notifySegmentAborted(): void {
 		if (!this._replayDeferred) return;
 		this.deps.log(
@@ -241,9 +312,17 @@ export class TransportReconnector {
 						conversationHistory: this.deps.toReplayContent(),
 					})
 					.then(() => {
-						const buffered = this.deps.clientTransport.stopBuffering();
-						for (const chunk of buffered) {
-							this.deps.transport.sendAudio(chunk.toString('base64'));
+						// H2 gate-aware drain: the session filters capture-tagged frames
+						// (gate-active discarded) and transform-sends admitted ones;
+						// the legacy raw path remains for harnesses without the dep.
+						let buffered: Buffer[];
+						if (this.deps.drainBufferedInbound) {
+							buffered = this.deps.drainBufferedInbound('reconnect');
+						} else {
+							buffered = this.deps.clientTransport.stopBuffering();
+							for (const chunk of buffered) {
+								this.deps.transport.sendAudio(chunk.toString('base64'));
+							}
 						}
 						// Reconnect-window speech verdict ("fresh speech wins" — never
 						// replay an old utterance after newer speech). Local mode: drained
@@ -302,12 +381,13 @@ export class TransportReconnector {
 			return;
 		}
 		const retained = this.deps.peekRetainedUtterance?.() ?? null;
-		if (
+		const replayEligible =
 			reason === 'response-watchdog' &&
-			retained &&
+			retained !== null &&
 			this.stageFor(retained) !== 'replayed-after-reconnect' &&
-			this.tryReplay(retained, 'after reconnect')
-		) {
+			(this.deps.isCandidateReplayEligible?.(retained) ?? true);
+		if (replayEligible) this.deps.onRecoveryDispatch?.();
+		if (replayEligible && retained && this.tryReplay(retained, 'after reconnect')) {
 			this._replayStage = 'replayed-after-reconnect';
 			this.deps.log('[Watchdog] Replayed retained user utterance after reconnect');
 			this.deps.onReplayDispatched?.(); // R7b: surface the replayed turn's transcript
@@ -317,6 +397,7 @@ export class TransportReconnector {
 		// Tier 3 — content-less nudge: prefer the transport's elicit (Gemini),
 		// else fall back to triggerGeneration (OpenAI).
 		this.deps.log(`[Watchdog] Re-eliciting model response after reconnect (reason=${reason})`);
+		this.deps.onRecoveryDispatch?.();
 		try {
 			if (this.deps.transport.elicitResponse) {
 				this.deps.transport.elicitResponse();
@@ -356,9 +437,13 @@ export class TransportReconnector {
 					conversationHistory: this.deps.toReplayContent(),
 				})
 				.then(() => {
-					const buffered = this.deps.clientTransport.stopBuffering();
-					for (const chunk of buffered) {
-						this.deps.transport.sendAudio(chunk.toString('base64'));
+					if (this.deps.drainBufferedInbound) {
+						this.deps.drainBufferedInbound('goaway');
+					} else {
+						const buffered = this.deps.clientTransport.stopBuffering();
+						for (const chunk of buffered) {
+							this.deps.transport.sendAudio(chunk.toString('base64'));
+						}
 					}
 					this.deps.sessionManager.transitionTo('ACTIVE');
 					this.deps.log('Reconnect complete; session ACTIVE');

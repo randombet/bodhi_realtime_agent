@@ -281,7 +281,11 @@ describe('TwilioInboundBridge phone path', () => {
 						}),
 					);
 
-					await new Promise((r) => setImmediate(r));
+					// Wait for the frame to traverse the real socket — a single
+					// setImmediate tick races WS delivery and flakes under load.
+					for (let i = 0; i < 100 && feedAudioFromClient.mock.calls.length === 0; i++) {
+						await new Promise((r) => setTimeout(r, 10));
+					}
 					expect(feedAudioFromClient).toHaveBeenCalled();
 					const buf = feedAudioFromClient.mock.calls[0][0] as Buffer;
 					expect(Buffer.isBuffer(buf)).toBe(true);

@@ -66,6 +66,11 @@ export interface TransportCapabilities {
 	 *  honoured (otherwise the provider auto-cancel defeats the grace).
 	 *  Optional — `undefined` means `false`. */
 	frameworkOwnsInterrupt?: boolean;
+	/** Provider-evidence kinds this transport's adapter can emit (Phase 1,
+	 *  design-speech-evidence-architecture.md §1). Undeclared kinds make the
+	 *  corresponding `SegmentEvidence` bit `'not-observable'` — stated once
+	 *  here, never inferred per event. Omitted = no provider evidence. */
+	providerEvidenceKinds?: ProviderEvidenceKind[];
 	/** True when the transport streams response audio the framework cannot stop
 	 *  on the wire: generation runs faster than realtime and is buffered
 	 *  client-side, and `cancelResponse()` cannot cancel it — instead it
@@ -84,6 +89,7 @@ export interface TransportCapabilities {
  *  can spread this and override only what they actually support, so adding new
  *  flags to the union doesn't break compilation. */
 export const DEFAULT_TRANSPORT_CAPABILITIES: Required<TransportCapabilities> = {
+	providerEvidenceKinds: [],
 	messageTruncation: false,
 	turnDetection: false,
 	userTranscription: false,
@@ -655,4 +661,35 @@ export interface LLMTransport {
 	 *  changes `instructions` or `tools` — i.e. before a guaranteed full
 	 *  prompt-cache bust on the next response. Pure telemetry. */
 	onCacheBust?: (reason: 'instructions_changed' | 'tools_changed') => void;
+
+	/** Normalized provider-evidence delivery (speech-evidence design §1).
+	 *  Adapters of transports that declare `capabilities.providerEvidenceKinds`
+	 *  emit each normalized event here; the framework routes it into the
+	 *  session's evidence ledger. Never emit kinds you did not declare. */
+	onProviderEvidence?: (ev: ProviderEvidenceEvent) => void;
+}
+
+/** Provider-evidence kinds (internal transport-adapter correlation contract,
+ *  design-speech-evidence-architecture.md §1). `speech-window` = provider VAD
+ *  heard speech (detection, never recognition); `input-transcription` /
+ *  `model-output` = the provider demonstrably processed input. */
+export type ProviderEvidenceKind = 'speech-window' | 'input-transcription' | 'model-output';
+
+/** Normalized provider-evidence event. Point events carry `receiptAtMs`
+ *  only; window kinds carry explicit start/end (paired by the adapter). All
+ *  times are stamped onto the session clock at receipt — no cross-clock
+ *  arithmetic with provider timestamps. `correlation` is `'causal'` ONLY
+ *  when a provider ID resolves through the acknowledged
+ *  providerInputId ↔ localInputBatchId ↔ segment chain; time-window matching
+ *  is always `'heuristic'` (dashboards only — behavioral policies may trust
+ *  causal evidence exclusively). */
+export interface ProviderEvidenceEvent {
+	kind: ProviderEvidenceKind;
+	receiptAtMs: number;
+	windowStartAtMs?: number;
+	windowEndAtMs?: number;
+	providerInputId?: string;
+	providerResponseId?: string;
+	provenance: string;
+	correlation: 'causal' | 'heuristic';
 }

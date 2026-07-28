@@ -18,7 +18,10 @@ export interface PlaybackCompletionArbiterDeps {
 	nativePlaybackGatingActive: boolean;
 	getNativeGate: () => NativeAudioPlaybackGate | undefined;
 	getTtsGate: () => ExternalTtsPlaybackGate | undefined;
-	vad: ClientVadDetector;
+	/** Structural surface (not the concrete class) so the session can wrap
+	 *  `resetSegment()` — e.g. to finalize the evidence ledger on the forced
+	 *  VAD-defer cleanup path (dual-track terminals, Phase 1). */
+	vad: Pick<ClientVadDetector, 'isSpeechActive' | 'isBargeInEligible' | 'resetSegment'>;
 	getBargeInConfig: () => { bargeInEnabled: boolean; bargeInConfirmMs: number };
 	finalizeTurn: (turn: Turn | null, opts: { interrupted: boolean }) => void;
 	log: (msg: string) => void;

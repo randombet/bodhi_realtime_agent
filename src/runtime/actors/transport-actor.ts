@@ -42,6 +42,13 @@ export class TransportActor implements Actor {
 		 * RuntimeOrchestrator forwards `OrchestratorConfig.notification?.transportSubscriptionFilter`.
 		 */
 		private transportSubscriptionFilter?: NotificationFilter,
+		/**
+		 * Invoked on each `notification.delivered` envelope BEFORE the
+		 * `adapter.sendContent` wire-out — a generation-capable path, so
+		 * VoiceSession uses this to invalidate a live H1 greeting token
+		 * (the notification's model turn must never bind as the greeting).
+		 */
+		private onNotificationDelivered?: () => void,
 	) {
 		this.id = id;
 	}
@@ -141,6 +148,7 @@ export class TransportActor implements Actor {
 				// in observer/DLQ traces, and keeps this handler single-purpose:
 				// format and write.
 				const p = msg.payload as Omit<NotificationDelivered, 'type'>;
+				this.onNotificationDelivered?.();
 				this.adapter.sendContent(
 					[{ role: 'user', parts: [{ text: `[${p.label}]: ${p.text}` }] }],
 					p.turnComplete,

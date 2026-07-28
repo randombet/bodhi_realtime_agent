@@ -52,6 +52,7 @@ import { AudioRouter } from './audio-router.js';
 import { BackgroundNotificationQueue } from './background-notification-queue.js';
 import { ClientMessageRouter } from './client-message-router.js';
 import { ClientVadDetector, pcmChunksContainSpeech } from './client-vad-detector.js';
+import type { VadTerminalDescriptor } from './client-vad-semantics.js';
 import { DEFAULT_REPLAY_MAX_AGE_MS, DEFAULT_RESPONSE_WATCHDOG_MS } from './constants.js';
 import { ConversationContext } from './conversation-context.js';
 import { ConversationHistoryWriter } from './conversation-history-writer.js';
@@ -71,6 +72,11 @@ import {
 } from './notification-sink.js';
 import { PlaybackCompletionArbiter } from './playback-completion-arbiter.js';
 import { NativeAudioPlaybackGate, type PlaybackGate } from './playback-gate.js';
+import { decideBargeIn } from './policies/barge-in.policy.js';
+import { decideFinalizationPath } from './policies/finalization.policy.js';
+import { decideRetention } from './policies/retention.policy.js';
+import { decideWatchdogArm } from './policies/watchdog-arm.policy.js';
+import { ResponseTriggerCoordinator } from './response-trigger-coordinator.js';
 import { SessionManager } from './session-manager.js';
 import { ToolCallRouter } from './tool-call-router.js';
 import { TranscriptManager } from './transcript-manager.js';
@@ -80,6 +86,8 @@ import { TurnLatencyTracker } from './turn-latency-tracker.js';
 import { TurnManager } from './turn-manager.js';
 import type { Turn } from './turn.js';
 import { computeCacheHitRatio, deriveProviderItemId, deriveUsageSource } from './usage-helpers.js';
+import { UserTurnEvidenceLedger } from './user-turn-evidence.js';
+import type { SegmentEvidence } from './user-turn-evidence.js';
 
 /**
  * Public, stable transcription mode exposed to callers. The internal routing
@@ -255,6 +263,13 @@ export interface VoiceSessionConfig {
 	 *  response-watchdog stall replays it — in-place first, then once more after
 	 *  a reconnect. Default false (ships dark until live-validated). */
 	watchdogReplayRecovery?: boolean;
+	/** @internal Rollback flag for H2 drain normalization (design G5).
+	 *  Default `true`: admitted drained inbound frames are transformed
+	 *  through the same resample/µ-law path as live agent audio — an
+	 *  approved byte change on non-PCM/rate-mismatched transports. `false`
+	 *  restores the legacy raw base64 send (rollback); gate-aware discard
+	 *  semantics are unaffected by this flag. */
+	normalizeDrainedInboundAudio?: boolean;
 	/** LLM model name (e.g. "gemini-3.1-flash-live-preview"). */
 	geminiModel?: string;
 	/** Vercel AI SDK model for subagent text generation. */
@@ -609,6 +624,8 @@ export class VoiceSession {
 	private reconnector!: TransportReconnector;
 	/** Resolved watchdog timeout (ms); `<= 0` disables. Set in the constructor. */
 	private readonly responseWatchdogMs: number;
+	/** G5 drain-normalization flag (rollback = false → legacy raw bytes). */
+	private readonly normalizeDrainedInbound: boolean;
 	// --- Server-turn finalization dedup (external-TTS turn completion).
 	//     See dev_docs/framework/design-external-tts-turn-completion.md. ---
 	private config: VoiceSessionConfig;
@@ -663,6 +680,23 @@ export class VoiceSession {
 	/** Inbound client-audio fast path (mode dispatch + transition buffer + μ-law
 	 *  encode). Constructed after the VAD detector. */
 	private audioRouter!: AudioRouter;
+	/** Phase-1 evidence ledger (shadow mode — internal, no public surface).
+	 *  Fed by the router (routed bits, frame-driven terminals) and by the
+	 *  forced-terminal wrappers below; consumers are shadow-only until the
+	 *  Phase-2 re-bind. */
+	private readonly userTurnEvidence = new UserTurnEvidenceLedger();
+	/** Count of model-turn starts (advisory epoch fact for SegmentEvidence). */
+	private _responseEpoch = 0;
+	/** Phase-3 trigger coordinator: competing framework triggers invalidate
+	 *  the H1 greeting token synchronously before dispatch. */
+	private readonly triggerCoordinator = new ResponseTriggerCoordinator({
+		onCompetingTrigger: (cls) => this.greeting.invalidateForCompetingTrigger(cls),
+	});
+	/** Shadow-parity counters (observable, not log-scraped). With the Phase-2
+	 *  re-bind, actuation IS the policy verdict, so expected/unexpected stay 0
+	 *  by construction; `compared` keeps counting terminals for coverage
+	 *  accounting. Exposed via the @internal accessor below. */
+	private readonly _shadowCounters = { compared: 0, expected: 0, unexpected: 0 };
 	/** Resolved client-VAD barge-in tuning (config + defaults). */
 	private readonly clientVad: ResolvedClientAudioVadConfig;
 	private lastGeminiRecognitionLoggedForSpeechEndMs = 0;
@@ -730,6 +764,7 @@ export class VoiceSession {
 						role: (t.role === 'model' ? 'assistant' : t.role) as 'user' | 'assistant',
 						text: t.parts[0]?.text ?? '',
 					}));
+					this.triggerCoordinator.dispatch('notification');
 					this._pendingResponseOrigin = 'assistant_initiated';
 					this.transport.sendContent(contentTurns, turnComplete);
 				},
@@ -806,6 +841,7 @@ export class VoiceSession {
 		this.subagentConfigs = config.subagentConfigs ?? {};
 
 		this.responseWatchdogMs = config.responseWatchdogMs ?? DEFAULT_RESPONSE_WATCHDOG_MS;
+		this.normalizeDrainedInbound = config.normalizeDrainedInboundAudio !== false;
 
 		const initialForLive = config.agents.find((a) => a.name === config.initialAgent);
 		const liveResolved = initialForLive
@@ -967,9 +1003,18 @@ export class VoiceSession {
 				// User finished a turn → seal the retained utterance (recovery
 				// replay candidate), then arm the response watchdog (the model now
 				// owes a reply; silence past the timeout forces a reconnect).
+				// Phantom-arm guard (Phase 0 tactical fix): a segment whose voiced
+				// audio was ALL dropped by the greeting gate never reached any
+				// route — the model owes nothing. Abort the (unfed) retainer
+				// segment so its pre-roll seed cannot leak into a candidate, and
+				// notify the reconnector so an earlier deferred fire re-evaluates
+				// instead of stranding. See
+				// dev_docs/framework/investigation-greeting-suppression-watchdog-regreet.md.
+				// Phase-2 re-bind: retainer/watchdog ACTUATION moved to the ledger's
+				// terminal observer (actuateTerminalPolicies) — this legacy handler
+				// keeps only playback resolution, latency/hook publication, and
+				// event publishes (dual-track terminal ownership, design §1).
 				onUserTurnCompleted: () => {
-					this.utteranceRetainer?.seal();
-					this.reconnector.armResponseWatchdog();
 					// Latency: end-of-user-speech (S2FA/S2T anchor) on the shared metric clock.
 					const atMs = this.clientVadDetector.lastSpeechCompletedMs || this.nowMs();
 					// Raw latency fact (§11): the DETECTED edge (speechEndMs = lastVoiceMs).
@@ -990,10 +1035,9 @@ export class VoiceSession {
 				// Ignored blip / forced reset: the segment can never seal — drop the
 				// in-progress retained audio (keeps the sealed replay candidate) and
 				// let a deferred watchdog replay re-evaluate instead of stranding.
-				onSegmentAborted: () => {
-					this.utteranceRetainer?.abortSegment();
-					this.reconnector.notifySegmentAborted();
-				},
+				// Phase-2 re-bind: abort/notify actuation runs from the ledger's
+				// terminal observer for ignored/aborted terminals.
+				onSegmentAborted: () => {},
 			},
 			(msg) => this.log(msg),
 			this.nowMs,
@@ -1006,6 +1050,9 @@ export class VoiceSession {
 		this.audioRouter = new AudioRouter({
 			transport: this.transport,
 			vad: this.clientVadDetector,
+			ledger: this.userTurnEvidence,
+			getResponseEpoch: () => this._responseEpoch,
+			nowMs: () => this.nowMs(),
 			clientAudioInputRate: this.clientAudioInputRate,
 			getSttProvider: () => this.sttProvider,
 			getWhisperProvider: () => this.dictation.whisper,
@@ -1148,6 +1195,7 @@ export class VoiceSession {
 		const prevModelTurnStart = this.transport.onModelTurnStart;
 		this.transport.onModelTurnStart = () => {
 			this.reconnector.disarmResponseWatchdog();
+			this._responseEpoch++;
 			try {
 				prevModelTurnStart?.();
 			} catch (e) {
@@ -1168,10 +1216,17 @@ export class VoiceSession {
 			// recovery-replay candidate and the replay stage. Trailing model-start
 			// for a just-finalized turn (ensureCurrent → null) must NOT clear it
 			// (correlate-before-mutate, same scoped rule as the disarm guards).
-			if (modelTurn) {
+			if (modelTurn && !this.reconnector.isRecoveryHeld()) {
+				// H4 held-state override: while a recovery is held behind the
+				// greeting gate, ambiguous model activity (the greeting's own
+				// start) must NOT clear the retained candidate or replay stage —
+				// release-time re-evaluation decides (recovery.policy.ts).
 				this.utteranceRetainer?.clearAnswered();
 				this.reconnector.resetReplayState();
 			}
+			// H1: offer the turn identity to the greeting-gate token (binds only
+			// while live + unambiguous — see greeting-gate.policy.ts).
+			this.greeting.onModelTurnStarted(modelTurn?.id);
 			// Raw latency fact (§11): publish AFTER turn allocation so the payload
 			// carries the turn id; origin is the explicit pending one when set.
 			const origin =
@@ -1215,6 +1270,11 @@ export class VoiceSession {
 			this.ttsPipeline.wire();
 		}
 
+		// Phase-2 re-bind: the ledger's post-routing terminal observer drives
+		// retention + watchdog actuation from the policy verdicts — exactly
+		// once per terminal, with routed evidence final (design §2 truth table).
+		this.userTurnEvidence.observeTerminal((ev) => this.actuateTerminalPolicies(ev));
+
 		this.buildClientChannelAndGating(config);
 
 		// Wire EventBus subscriptions (GUI forwarding, STT lifecycle, subagent UI,
@@ -1223,6 +1283,22 @@ export class VoiceSession {
 		this.wireEventBus();
 
 		this.buildAgentRouter(config, allInitialTools, behaviorTools);
+		// H2: capture-time classification for the local channel's inbound
+		// buffer (gate read + lightweight energy at INGRESS — a drain-time
+		// read would recreate the end-state race), plus the gate-aware
+		// transfer drain. The channel holds only this closure, never a
+		// GreetingController reference.
+		(
+			this.clientTransport as unknown as {
+				installInboundCaptureClassifier?: (
+					c: (data: Buffer) => { voiced: boolean; gateActive: boolean },
+				) => void;
+			}
+		).installInboundCaptureClassifier?.((data) => ({
+			voiced: pcmChunksContainSpeech([data]),
+			gateActive: this.greeting.shouldDropOutbound(),
+		}));
+		this.agentRouter.drainBufferedInbound = () => this.drainCapturedInboundFrames('transfer');
 
 		// Usage + cache-bust observability — chained over any pre-attached handlers,
 		// fired to the framework hook and mirrored to the EventBus.
@@ -1285,6 +1361,8 @@ export class VoiceSession {
 				getMemoryFacts: () => this.memoryCacheManager?.facts ?? [],
 				getSessionSuffix: () => this.directiveManager.getSessionSuffix(),
 				resetNotificationAudio: () => this.notificationSink.resetAudio(),
+				// H4: a held recovery re-evaluates when the gate releases.
+				onGateReleased: () => this.reconnector.onGreetingGateReleased(),
 				log: (msg) => this.log(msg),
 			},
 			{
@@ -1318,7 +1396,15 @@ export class VoiceSession {
 			nativePlaybackGatingActive: this.nativePlaybackGatingActive,
 			getNativeGate: () => this.nativeGate,
 			getTtsGate: () => this.ttsPipeline?.gate,
-			vad: this.clientVadDetector,
+			vad: ((detector: ClientVadDetector) => ({
+				get isSpeechActive() {
+					return detector.isSpeechActive;
+				},
+				get isBargeInEligible() {
+					return detector.isBargeInEligible;
+				},
+				resetSegment: () => this.finalizeForcedVadTerminal(detector.resetSegment()),
+			}))(this.clientVadDetector),
 			getBargeInConfig: () => ({
 				bargeInEnabled: this.clientVad.bargeInEnabled,
 				bargeInConfirmMs: this.clientVad.bargeInConfirmMs,
@@ -1373,6 +1459,18 @@ export class VoiceSession {
 				// a live multi-segment utterance. The R7c hosted-freshness verdict below stays
 				// scoped to the retained-replay rollout flag.
 				isSpeechActive: () => this.clientVadDetector.isSpeechActive,
+				// Phase-3 coordinator seam: a recovery response must never bind
+				// as the greeting (H1) — invalidate before actuation.
+				onRecoveryDispatch: () => this.triggerCoordinator.dispatch('watchdog-recovery'),
+				// H4 hold predicate: FULL-greeting suppression only (the greeting
+				// controller's uninterruptible state — never grace windows).
+				isGreetingSuppressionArmed: () => this.greeting.isUninterruptibleGreetingActive(),
+				// H2: gate-aware drain + candidate-wide replay freshness.
+				drainBufferedInbound: (reason) => this.drainCapturedInboundFrames(reason),
+				isCandidateReplayEligible: (retained) => {
+					const t = this.userTurnEvidence.lastDrainedSpeechAtMs;
+					return t === null || retained.sealedAtMs > t;
+				},
 				hostedReconnectSpeech: this.utteranceRetainer
 					? () => this.reconnectWindowSpeechVerdict()
 					: undefined,
@@ -1594,10 +1692,16 @@ export class VoiceSession {
 				// time the user has already registered hooks via config.hooks
 				// (HooksManager.register fired up top), so reading
 				// `this.hooks.onBackgroundNotification` here yields the
-				// caller-supplied callback if any.
-				notification: this.hooks.onBackgroundNotification
-					? { onBackgroundNotification: this.hooks.onBackgroundNotification }
-					: undefined,
+				// caller-supplied callback if any. `onTransportDeliver` is
+				// unconditional: every actor-mode notification delivery is a
+				// generation-capable path that must invalidate a live greeting
+				// token before its wire-out (H1 enforcement).
+				notification: {
+					onTransportDeliver: () => this.triggerCoordinator.dispatch('notification'),
+					...(this.hooks.onBackgroundNotification
+						? { onBackgroundNotification: this.hooks.onBackgroundNotification }
+						: {}),
+				},
 			});
 		} else {
 			// Set up legacy tool call router. notificationQueue is guaranteed
@@ -1880,6 +1984,15 @@ export class VoiceSession {
 				reason,
 			});
 		};
+
+		// Provider-evidence wiring (design §1): declare what this transport's
+		// adapter can ever emit (undeclared ⇒ 'not-observable', stated once),
+		// and route delivered events into the ledger.
+		this.userTurnEvidence.declareProviderCapability(
+			this.transport.capabilities.providerEvidenceKinds ?? [],
+		);
+		this.transport.onProviderEvidence = (ev) =>
+			this.userTurnEvidence.applyProviderEvidenceEvent(ev);
 	}
 
 	/**
@@ -2186,6 +2299,8 @@ export class VoiceSession {
 		await this.safeTeardown('disarmResponseWatchdog', () =>
 			this.reconnector.disarmResponseWatchdog(),
 		);
+		await this.safeTeardown('greetingGate.dispose', () => this.greeting.dispose());
+		await this.safeTeardown('cancelHeldRecovery', () => this.reconnector.cancelHeldRecovery());
 		// close() bypasses finalizeTurn — tear down the native gate directly so no
 		// native playback timer outlives the session.
 		if (this.nativePlaybackGatingActive) {
@@ -2338,28 +2453,16 @@ export class VoiceSession {
 	 * window allows it. Fires at most once per segment. See `clientVadBargeInAllowed`.
 	 */
 	private runClientVadBargeInPolicy(now: number, maxAbs: number, avgAbs: number): void {
-		// Mark the segment a *potential* barge-in once a frame clears the in-TTS
-		// energy floor — UNCONDITIONALLY, even before a playback gate is armed,
-		// so a segment that begins just before `handleTurnComplete` arms the
-		// native gate is still recognised. `finishOrDeferForVad` keys on this.
-		if (clientVadBargeInEnergyEligible(this.clientVad, maxAbs, avgAbs)) {
-			this.clientVadDetector.markBargeInEligible();
-		}
-		// The interrupt fires only while assistant audio is actively playing —
-		// a pending playback gate (TTS/native) OR, on the no-gate Gemini native
-		// path, an active turn whose buffered audio is still playing.
-		if (!this.isAssistantAudioActive()) return;
-		if (this.clientVadDetector.hasBargeInFired) return;
-		if (
-			!clientVadBargeInAllowed(
-				this.clientVad,
-				now - this.clientVadDetector.speechStartedAtMs,
-				maxAbs,
-				avgAbs,
-			)
-		) {
-			return;
-		}
+		// Pure A1-A6 decision (barge-in.policy.ts); the ordered gate check,
+		// one-shot marking, actuation, and metrics stay here (A4/C2 sequencing).
+		const decision = decideBargeIn(
+			this.clientVad,
+			{ maxAbs, avgAbs, elapsedMs: now - this.clientVadDetector.speechStartedAtMs },
+			{ assistantAudioActive: this.isAssistantAudioActive() },
+			{ fired: this.clientVadDetector.hasBargeInFired },
+		);
+		if (decision.markEligible) this.clientVadDetector.markBargeInEligible();
+		if (!decision.attempt) return;
 		// Grace check goes BEFORE marking fired — otherwise a frame at t=500ms
 		// within a 1s grace would set the "fired" flag, and the `hasBargeInFired`
 		// guard above would skip the next loud frame at t=1100ms (post-grace),
@@ -2432,8 +2535,110 @@ export class VoiceSession {
 		this.finalizeTurn(this.nativeGate?.capturedTurn ?? this.turns.current, { interrupted: true });
 	}
 
+	/** Phase-2 terminal actuation (design §2 truth table): the ledger's
+	 *  post-routing observer calls the pure policies and actuates EXACTLY once
+	 *  per terminal — `seal()`/`abortSegment()` for retention,
+	 *  `armResponseWatchdog()`/`notifySegmentAborted()` for the reconnector.
+	 *  `notifySegmentAborted` on every non-arm terminal keeps deferred fires
+	 *  from stranding (no-op unless one was deferred). */
+	private actuateTerminalPolicies(ev: Readonly<SegmentEvidence>): void {
+		this._shadowCounters.compared++;
+		const retention = decideRetention(ev, {
+			replayRecovery: this.utteranceRetainer !== undefined,
+		});
+		if (retention === 'seal') this.utteranceRetainer?.seal();
+		else this.utteranceRetainer?.abortSegment();
+
+		const verdict = decideWatchdogArm(ev, { agentMode: this.dictation.isAgentMode() });
+		if (verdict === 'arm' && this.responseWatchdogMs > 0) {
+			if (ev.routed.llm) this.greeting.noteRoutedUserTurn();
+			this.reconnector.armResponseWatchdog();
+			return;
+		}
+		if (verdict === 'skip-no-eligible-route' && ev.outcome === 'completed' && ev.voicedFrames > 0) {
+			this.log('[Watchdog] arm skipped — segment audio gated during greeting');
+		}
+		this.reconnector.notifySegmentAborted();
+	}
+
+	/** H2 gate-aware drain (design §3): pulls capture-tagged inbound frames
+	 *  from the local channel, DISCARDS frames whose gate was active at
+	 *  capture, transform-sends the rest (router helper — no retention, no
+	 *  live gate read), records BufferedInboundEvidence, and returns the
+	 *  ADMITTED buffers for the reconnect speech verdict. Channels without
+	 *  inbound capture (hosted adapter, Direct RTC) fall back to their
+	 *  legacy stopBuffering contract (returns []). */
+	private drainCapturedInboundFrames(reason: 'reconnect' | 'goaway' | 'transfer'): Buffer[] {
+		const channel = this.clientTransport as unknown as {
+			stopInboundCapture?: () => Array<{
+				data: Buffer;
+				voiced: boolean;
+				gateActiveAtCapture: boolean;
+			}>;
+		};
+		const admitted: Buffer[] = [];
+		let voicedCount = 0;
+		let discarded = 0;
+		if (typeof channel.stopInboundCapture === 'function') {
+			for (const f of channel.stopInboundCapture()) {
+				if (f.gateActiveAtCapture) {
+					discarded++;
+					continue;
+				}
+				// Count ADMITTED voiced frames only: gate-discarded speech never
+				// reached the model, so it must not advance the replay-freshness
+				// anchor and invalidate an older (still-newest-delivered) candidate.
+				if (f.voiced) voicedCount++;
+				admitted.push(f.data);
+			}
+		} else {
+			for (const data of this.clientTransport.stopBuffering()) admitted.push(data);
+		}
+		for (const data of admitted) {
+			if (this.normalizeDrainedInbound) {
+				this.audioRouter.sendPreAdmitted(data);
+			} else {
+				this.transport.sendAudio(data.toString('base64')); // G5 rollback: legacy raw bytes
+			}
+		}
+		if (discarded > 0) {
+			this.log(`[H2] drain discarded ${discarded} gate-captured frame(s) (reason=${reason})`);
+		}
+		this.userTurnEvidence.recordBufferedInbound({
+			reason,
+			voicedFrameCount: voicedCount,
+			admittedCount: admitted.length,
+			destination: 'llm',
+			recordedAtMs: this.nowMs(),
+		});
+		return admitted;
+	}
+
+	/** @internal Observable shadow-parity counters (Phase-1 exit criteria). */
+	getSpeechEvidenceShadowCounters(): { compared: number; expected: number; unexpected: number } {
+		return { ...this._shadowCounters };
+	}
+
+	/** Dual-track forced terminals (Phase 1): forced `complete()` /
+	 *  `resetSegment()` calls return the descriptor AFTER their legacy
+	 *  callbacks ran; the caller finalizes the ledger with it here. */
+	private finalizeForcedVadTerminal(
+		desc: VadTerminalDescriptor | null,
+	): VadTerminalDescriptor | null {
+		if (desc) {
+			this.userTurnEvidence.noteResponseEpochAtTerminal(this._responseEpoch);
+			this.userTurnEvidence.finalizeSegment({
+				segmentId: desc.segmentId,
+				outcome: desc.outcome,
+				terminalCause: desc.terminalCause,
+				resolvedAtMs: desc.resolvedAtMs,
+			});
+		}
+		return desc;
+	}
+
 	private logProviderUserTurnRecognition(reason: string): void {
-		this.clientVadDetector.complete('provider-recognition');
+		this.finalizeForcedVadTerminal(this.clientVadDetector.complete('provider-recognition'));
 		if (!this.clientVadDetector.lastSpeechCompletedMs) return;
 		if (
 			this.lastGeminiRecognitionLoggedForSpeechEndMs ===
@@ -2603,9 +2808,19 @@ export class VoiceSession {
 		// A completed turn means the connection is healthy — reset reconnect counter
 		this.reconnector.resetAttempts();
 
+		// C1 finalization-path selector (finalization.policy.ts) — the effect
+		// ordering below stays here; only the branch decision is extracted.
+		const path = decideFinalizationPath(
+			{ nativePlaybackGatingActive: this.nativePlaybackGatingActive },
+			{ ttsEnabled: this.ttsPipeline !== undefined },
+			{
+				hasAudio: this.nativeGate?.hasAudio === true,
+				dispatchedToolCall: this._nativeResponseDispatchedToolCall,
+			},
+		);
 		// TTS turn gating: when TTS is active, defer turn completion until TTS finishes
 		const ttsGate = this.ttsPipeline?.gate;
-		if (ttsGate) {
+		if (path === 'tts-gate' && ttsGate) {
 			ttsGate.markLlmTextDone();
 			if (!ttsGate.hasTurnText) {
 				// Tool-call-only turn — no text synthesized, TTS won't fire onDone
@@ -2625,11 +2840,7 @@ export class VoiceSession {
 		// and dispatched no tool call, defer finalization until the client
 		// reports playback end (playback.ended) or the fallback timer fires.
 		// See dev_docs/framework/design-playback-end-gating-openai-native.md.
-		if (
-			this.nativePlaybackGatingActive &&
-			this.nativeGate?.hasAudio &&
-			!this._nativeResponseDispatchedToolCall
-		) {
+		if (path === 'native-gate' && this.nativeGate) {
 			// Arm the gate fully BEFORE sendJsonAfterAudio so a sender that
 			// synchronously echoes audio.done back as playback.ended meets an
 			// armed gate rather than a premature-rejected signal. The gate's
@@ -2662,8 +2873,8 @@ export class VoiceSession {
 
 		// Full-greeting suppression (greetingInterruptible: false) releases at
 		// the greeting turn's finalization — the post-playback point on gated
-		// paths. No-op when unarmed.
-		this.greeting.onTurnFinalized();
+		// paths, turn-bound when the H1 token bound. No-op when unarmed.
+		this.greeting.onTurnFinalized(turn.id);
 
 		// Throw-safety: a throw in one effect must not strand the rest, or the
 		// turn would be terminal with a half-published boundary.
@@ -2942,6 +3153,14 @@ export class VoiceSession {
 	 *  steps complete.
 	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §7.5. */
 	private async preEmptForDirectInput(): Promise<void> {
+		// Direct input supersedes any held voice candidate: idle a recovery
+		// held behind the greeting gate BEFORE the dispatch below releases
+		// that gate, or the release would immediately replay the stale
+		// utterance ahead of the new input (design §3 supersession rule).
+		this.reconnector.cancelHeldRecovery();
+		// H1 voice-only guarantee: typed/injected input invalidates the greeting
+		// token synchronously (and releases the gate) BEFORE dispatch.
+		this.triggerCoordinator.dispatch('direct-input');
 		const turn = this.turns.current;
 		// Always await the cancel: when no response is in flight, cancelResponse
 		// returns Promise.resolve() (true no-op). When in flight, the
@@ -3263,6 +3482,9 @@ export class VoiceSession {
 				`TRANSCRIPTION_MODE_LOCKED: triggerGeneration is blocked while transcription mode is '${this.dictation.mode}'`,
 			);
 		}
+		// Generation-capable path: invalidate a live greeting token so the
+		// triggered turn can never bind as the greeting (H1 enforcement).
+		this.triggerCoordinator.dispatch('assistant-initiated');
 		this._pendingResponseOrigin = 'assistant_initiated';
 		this.transport.triggerGeneration(instructions, overrides);
 	}

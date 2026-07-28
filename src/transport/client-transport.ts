@@ -31,6 +31,14 @@ export class ClientTransport {
 	private client: WebSocket | null = null;
 	private audioBuffer = new AudioBuffer();
 	private _buffering = false;
+	/** H2 inbound-capture classification (design-speech-evidence-architecture
+	 *  §3): the SESSION installs this closure when buffering starts — the
+	 *  transport holds only the closure, never a GreetingController reference.
+	 *  Tags are captured at INGRESS (a drain-time gate read recreates the
+	 *  end-state race the design forbids). */
+	private _captureClassifier: ((data: Buffer) => { voiced: boolean; gateActive: boolean }) | null =
+		null;
+	private _capturedTags: Array<{ voiced: boolean; gateActive: boolean }> = [];
 	/** Audio (binary) and JSON (text) share the one WebSocket and are sent
 	 *  synchronously in call order, so this transport supports the
 	 *  playback-state protocol. */
@@ -62,6 +70,7 @@ export class ClientTransport {
 				ws.on('message', (data: Buffer, isBinary: boolean) => {
 					if (isBinary) {
 						if (this._buffering) {
+							if (this._captureClassifier) this._capturedTags.push(this._captureClassifier(data));
 							this.audioBuffer.push(data);
 						} else {
 							this.callbacks.onAudioFromClient?.(data);
@@ -137,7 +146,33 @@ export class ClientTransport {
 
 	stopBuffering(): Buffer[] {
 		this._buffering = false;
+		this._capturedTags = [];
 		return this.audioBuffer.drain();
+	}
+
+	/** @internal H2: install the session's frame classifier for the NEXT
+	 *  buffering window (gate predicate + lightweight energy check). */
+	installInboundCaptureClassifier(
+		classifier: (data: Buffer) => { voiced: boolean; gateActive: boolean },
+	): void {
+		this._captureClassifier = classifier;
+	}
+
+	/** @internal H2: drain the captured inbound frames WITH their ingress
+	 *  tags. Falls back to untagged frames (treated as ungated by callers)
+	 *  when no classifier was installed. Outbound-only channel
+	 *  implementations have no equivalent — they structurally cannot return
+	 *  captured input. */
+	stopInboundCapture(): Array<{ data: Buffer; voiced: boolean; gateActiveAtCapture: boolean }> {
+		this._buffering = false;
+		const frames = this.audioBuffer.drain();
+		const tags = this._capturedTags;
+		this._capturedTags = [];
+		return frames.map((data, i) => ({
+			data,
+			voiced: tags[i]?.voiced ?? false,
+			gateActiveAtCapture: tags[i]?.gateActive ?? false,
+		}));
 	}
 
 	get isClientConnected(): boolean {
