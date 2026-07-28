@@ -52,6 +52,7 @@ import { AudioRouter } from './audio-router.js';
 import { BackgroundNotificationQueue } from './background-notification-queue.js';
 import { ClientMessageRouter } from './client-message-router.js';
 import { ClientVadDetector, pcmChunksContainSpeech } from './client-vad-detector.js';
+import type { VadTerminalDescriptor } from './client-vad-semantics.js';
 import { DEFAULT_REPLAY_MAX_AGE_MS, DEFAULT_RESPONSE_WATCHDOG_MS } from './constants.js';
 import { ConversationContext } from './conversation-context.js';
 import { ConversationHistoryWriter } from './conversation-history-writer.js';
@@ -71,6 +72,8 @@ import {
 } from './notification-sink.js';
 import { PlaybackCompletionArbiter } from './playback-completion-arbiter.js';
 import { NativeAudioPlaybackGate, type PlaybackGate } from './playback-gate.js';
+import { decideRetention } from './policies/retention.policy.js';
+import { decideWatchdogArm } from './policies/watchdog-arm.policy.js';
 import { SessionManager } from './session-manager.js';
 import { ToolCallRouter } from './tool-call-router.js';
 import { TranscriptManager } from './transcript-manager.js';
@@ -80,6 +83,8 @@ import { TurnLatencyTracker } from './turn-latency-tracker.js';
 import { TurnManager } from './turn-manager.js';
 import type { Turn } from './turn.js';
 import { computeCacheHitRatio, deriveProviderItemId, deriveUsageSource } from './usage-helpers.js';
+import { UserTurnEvidenceLedger } from './user-turn-evidence.js';
+import type { SegmentEvidence } from './user-turn-evidence.js';
 
 /**
  * Public, stable transcription mode exposed to callers. The internal routing
@@ -663,6 +668,22 @@ export class VoiceSession {
 	/** Inbound client-audio fast path (mode dispatch + transition buffer + μ-law
 	 *  encode). Constructed after the VAD detector. */
 	private audioRouter!: AudioRouter;
+	/** Phase-1 evidence ledger (shadow mode — internal, no public surface).
+	 *  Fed by the router (routed bits, frame-driven terminals) and by the
+	 *  forced-terminal wrappers below; consumers are shadow-only until the
+	 *  Phase-2 re-bind. */
+	private readonly userTurnEvidence = new UserTurnEvidenceLedger();
+	/** Count of model-turn starts (advisory epoch fact for SegmentEvidence). */
+	private _responseEpoch = 0;
+	/** Live terminal actions recorded by the legacy VAD handlers, consumed by
+	 *  the shadow comparator on the ledger's terminal observer (Phase 1). */
+	private readonly _liveTerminalActions = { armed: false, sealed: false };
+	/** Shadow-parity counters (observable, not log-scraped). Exposed via the
+	 *  @internal accessor below; hosted surfacing through the metrics
+	 *  collector is rollout wiring on top of these counters. */
+	private readonly _shadowCounters = { compared: 0, expected: 0, unexpected: 0 };
+	/** Bounded sample ring of unexpected-divergence evidence snapshots. */
+	private readonly _shadowSamples: SegmentEvidence[] = [];
 	/** Resolved client-VAD barge-in tuning (config + defaults). */
 	private readonly clientVad: ResolvedClientAudioVadConfig;
 	private lastGeminiRecognitionLoggedForSpeechEndMs = 0;
@@ -979,9 +1000,13 @@ export class VoiceSession {
 						this.log('[Watchdog] arm skipped — segment audio gated during greeting');
 						this.utteranceRetainer?.abortSegment();
 						this.reconnector.notifySegmentAborted();
+						this._liveTerminalActions.armed = false;
+						this._liveTerminalActions.sealed = false;
 					} else {
-						this.utteranceRetainer?.seal();
+						this._liveTerminalActions.sealed = this.utteranceRetainer?.seal() === true;
 						this.reconnector.armResponseWatchdog();
+						this._liveTerminalActions.armed =
+							this.responseWatchdogMs > 0 && this.dictation.isAgentMode();
 					}
 					// Latency: end-of-user-speech (S2FA/S2T anchor) on the shared metric clock.
 					const atMs = this.clientVadDetector.lastSpeechCompletedMs || this.nowMs();
@@ -1006,6 +1031,8 @@ export class VoiceSession {
 				onSegmentAborted: () => {
 					this.utteranceRetainer?.abortSegment();
 					this.reconnector.notifySegmentAborted();
+					this._liveTerminalActions.armed = false;
+					this._liveTerminalActions.sealed = false;
 				},
 			},
 			(msg) => this.log(msg),
@@ -1019,6 +1046,9 @@ export class VoiceSession {
 		this.audioRouter = new AudioRouter({
 			transport: this.transport,
 			vad: this.clientVadDetector,
+			ledger: this.userTurnEvidence,
+			getResponseEpoch: () => this._responseEpoch,
+			nowMs: () => this.nowMs(),
 			clientAudioInputRate: this.clientAudioInputRate,
 			getSttProvider: () => this.sttProvider,
 			getWhisperProvider: () => this.dictation.whisper,
@@ -1161,6 +1191,7 @@ export class VoiceSession {
 		const prevModelTurnStart = this.transport.onModelTurnStart;
 		this.transport.onModelTurnStart = () => {
 			this.reconnector.disarmResponseWatchdog();
+			this._responseEpoch++;
 			try {
 				prevModelTurnStart?.();
 			} catch (e) {
@@ -1227,6 +1258,10 @@ export class VoiceSession {
 			});
 			this.ttsPipeline.wire();
 		}
+
+		// Phase-1 shadow comparator: policy verdicts run beside the live
+		// decisions; NOTHING is actuated from them until the Phase-2 re-bind.
+		this.userTurnEvidence.observeTerminal((ev) => this.compareShadowPolicies(ev));
 
 		this.buildClientChannelAndGating(config);
 
@@ -1331,7 +1366,15 @@ export class VoiceSession {
 			nativePlaybackGatingActive: this.nativePlaybackGatingActive,
 			getNativeGate: () => this.nativeGate,
 			getTtsGate: () => this.ttsPipeline?.gate,
-			vad: this.clientVadDetector,
+			vad: ((detector: ClientVadDetector) => ({
+				get isSpeechActive() {
+					return detector.isSpeechActive;
+				},
+				get isBargeInEligible() {
+					return detector.isBargeInEligible;
+				},
+				resetSegment: () => this.finalizeForcedVadTerminal(detector.resetSegment()),
+			}))(this.clientVadDetector),
 			getBargeInConfig: () => ({
 				bargeInEnabled: this.clientVad.bargeInEnabled,
 				bargeInConfirmMs: this.clientVad.bargeInConfirmMs,
@@ -2445,8 +2488,65 @@ export class VoiceSession {
 		this.finalizeTurn(this.nativeGate?.capturedTurn ?? this.turns.current, { interrupted: true });
 	}
 
+	/** Phase-1 shadow comparison (design §Implementation Plan, step 1.5).
+	 *  Classifies the enumerated expected divergences — currently only the
+	 *  provider-forced retention fix from the Phase-2 truth table — and counts
+	 *  everything unenumerated as unexpected, with a bounded evidence-sample
+	 *  ring for diagnosis. */
+	private compareShadowPolicies(ev: Readonly<SegmentEvidence>): void {
+		const live = this._liveTerminalActions;
+		const agentMode = this.dictation.isAgentMode();
+		const armPolicy = this.responseWatchdogMs > 0 && decideWatchdogArm(ev, { agentMode }) === 'arm';
+		const sealPolicy =
+			decideRetention(ev, { replayRecovery: this.utteranceRetainer !== undefined }) === 'seal';
+		this._shadowCounters.compared++;
+		const armMatch = armPolicy === live.armed;
+		const sealMatch = sealPolicy === live.sealed;
+		if (armMatch && sealMatch) return;
+		const providerForcedRetentionFix =
+			armMatch &&
+			!sealMatch &&
+			ev.outcome === 'completed' &&
+			ev.terminalCause === 'model-activity-forced' &&
+			ev.routed.llm &&
+			live.sealed &&
+			!sealPolicy;
+		if (providerForcedRetentionFix) {
+			this._shadowCounters.expected++;
+			return;
+		}
+		this._shadowCounters.unexpected++;
+		if (this._shadowSamples.length < 4) this._shadowSamples.push(ev as SegmentEvidence);
+		this.log(
+			`[ShadowParity] unexpected divergence (segment=${ev.segmentId}; outcome=${ev.outcome}; cause=${ev.terminalCause}; armPolicy=${armPolicy}; armLive=${live.armed}; sealPolicy=${sealPolicy}; sealLive=${live.sealed})`,
+		);
+	}
+
+	/** @internal Observable shadow-parity counters (Phase-1 exit criteria). */
+	getSpeechEvidenceShadowCounters(): { compared: number; expected: number; unexpected: number } {
+		return { ...this._shadowCounters };
+	}
+
+	/** Dual-track forced terminals (Phase 1): forced `complete()` /
+	 *  `resetSegment()` calls return the descriptor AFTER their legacy
+	 *  callbacks ran; the caller finalizes the ledger with it here. */
+	private finalizeForcedVadTerminal(
+		desc: VadTerminalDescriptor | null,
+	): VadTerminalDescriptor | null {
+		if (desc) {
+			this.userTurnEvidence.noteResponseEpochAtTerminal(this._responseEpoch);
+			this.userTurnEvidence.finalizeSegment({
+				segmentId: desc.segmentId,
+				outcome: desc.outcome,
+				terminalCause: desc.terminalCause,
+				resolvedAtMs: desc.resolvedAtMs,
+			});
+		}
+		return desc;
+	}
+
 	private logProviderUserTurnRecognition(reason: string): void {
-		this.clientVadDetector.complete('provider-recognition');
+		this.finalizeForcedVadTerminal(this.clientVadDetector.complete('provider-recognition'));
 		if (!this.clientVadDetector.lastSpeechCompletedMs) return;
 		if (
 			this.lastGeminiRecognitionLoggedForSpeechEndMs ===

@@ -132,8 +132,8 @@ describe('ClientVadDetector', () => {
 		expect(events.onSegmentResolved).not.toHaveBeenCalled();
 	});
 
-	it('complete() on no active segment returns "none" and emits nothing', () => {
-		expect(detector.complete('manual')).toBe('none');
+	it('complete() on no active segment returns null and emits nothing', () => {
+		expect(detector.complete('manual')).toBeNull();
 		expect(events.onSegmentResolved).not.toHaveBeenCalled();
 	});
 

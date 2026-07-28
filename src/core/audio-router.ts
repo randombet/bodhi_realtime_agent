@@ -3,6 +3,7 @@ import { encodePcmToMulaw } from '../telephony/audio-codec.js';
 import type { LLMTransport, STTProvider } from '../types/transport.js';
 import { VAD_FRAME } from './client-vad-detector.js';
 import type { ClientVadDetector } from './client-vad-detector.js';
+import type { UserTurnEvidenceLedger } from './user-turn-evidence.js';
 
 /**
  * Internal audio-routing mode — the public `TranscriptionMode` ('agent' |
@@ -42,6 +43,17 @@ export interface AudioRouterDeps {
 	 *  Fed the transport-normalized PCM only on the agent path, after the
 	 *  greeting-grace gate — retention must mirror what the model received. */
 	retainer?: { feed(data: Buffer): void };
+	/** Phase-1 evidence ledger (shadow mode). The router is the ROUTED-bit
+	 *  source: it updates the live record atomically with each routing
+	 *  decision and finalizes frame-driven terminals AFTER routing the
+	 *  terminal frame (dual-track — see
+	 *  design-speech-evidence-architecture.md §1). Optional so unit harnesses
+	 *  without evidence keep working. */
+	ledger?: UserTurnEvidenceLedger;
+	/** Model-turn-start count at segment start (advisory epoch fact). */
+	getResponseEpoch?: () => number;
+	/** Clock for ledger timestamps (the session's metric clock). */
+	nowMs?: () => number;
 }
 
 /**
@@ -73,43 +85,82 @@ export class AudioRouter {
 		return this.segmentVoicedPastGate;
 	}
 
-	/** Entry point for an inbound client mic frame (PCM16). */
+	/** Entry point for an inbound client mic frame (PCM16). Per-frame order is
+	 *  fixed (§1): (1) `process()` → segment start/reset, (2) routing with ONE
+	 *  gate read → routed-bit update on the ledger's live record, (3) explicit
+	 *  terminal finalization AFTER routing the terminal frame. */
 	handleFromClient(data: Buffer, source: 'websocket' | 'rtc' = 'websocket'): void {
 		if (source === 'websocket' && this.d.isRtcAudioReady()) return;
 		if (!this.d.isSessionActive()) return;
 
 		const flags = this.d.vad.process(data);
-		if (flags & VAD_FRAME.SEGMENT_STARTED) this.segmentVoicedPastGate = false;
+		if (flags & VAD_FRAME.SEGMENT_STARTED) {
+			this.segmentVoicedPastGate = false;
+			const segId = this.d.vad.activeSegmentId;
+			if (this.d.ledger && segId !== null) {
+				this.d.ledger.beginSegment(segId, this.d.nowMs?.() ?? 0, {
+					gateActive: false, // set by routeToAgent's single gate read below
+					responseEpoch: this.d.getResponseEpoch?.() ?? 0,
+				});
+			}
+		}
 		const voiced = (flags & VAD_FRAME.VOICED) !== 0;
+		if (voiced) this.d.ledger?.noteVoicedFrame(this.d.nowMs?.() ?? 0);
 
 		// External-audio agents (e.g. TwilioBridge) consume mic frames directly
 		// — pre-gate by design (exemption confirmed in the investigation).
 		if (this.d.routeExternalAudio(data)) {
-			if (voiced) this.segmentVoicedPastGate = true;
+			if (voiced) {
+				this.segmentVoicedPastGate = true;
+				this.d.ledger?.noteRouted('external');
+			}
+			this.finalizeLedgerTerminal(flags);
 			return;
 		}
 
 		switch (this.d.getMode()) {
 			case 'agent':
-				this.routeToAgent(data, voiced);
+				this.routeToAgent(data, voiced, (flags & VAD_FRAME.SEGMENT_STARTED) !== 0);
 				break;
 			case 'starting_transcription':
 				// Whisper not ready yet — buffer (bounded, oldest evicted on overflow).
 				// Admission counts even if later evicted (admission ≠ receipt).
-				if (voiced) this.segmentVoicedPastGate = true;
+				if (voiced) {
+					this.segmentVoicedPastGate = true;
+					this.d.ledger?.noteRouted('stt');
+				}
 				this.bufferTransitionFrame(data);
 				break;
 			case 'transcription':
 				// Entering the route counts even with no whisper provider.
-				if (voiced) this.segmentVoicedPastGate = true;
+				if (voiced) {
+					this.segmentVoicedPastGate = true;
+					this.d.ledger?.noteRouted('stt');
+				}
 				this.routeToWhisper(data);
 				break;
 			case 'stopping_transcription':
 				// Transport already authoritative; restore the audio path immediately
 				// so the user is never silent while whisper stop is in flight.
-				this.routeToAgent(data, voiced);
+				this.routeToAgent(data, voiced, (flags & VAD_FRAME.SEGMENT_STARTED) !== 0);
 				break;
 		}
+		this.finalizeLedgerTerminal(flags);
+	}
+
+	/** Dual-track: the frame-driven terminal reaches the ledger only AFTER the
+	 *  terminal frame's routing completed (legacy `VadEvents` already fired
+	 *  synchronously inside `process()`). */
+	private finalizeLedgerTerminal(flags: number): void {
+		if (!(flags & VAD_FRAME.TERMINAL) || !this.d.ledger) return;
+		const desc = this.d.vad.takeTerminal();
+		if (!desc) return;
+		this.d.ledger.finalizeSegment({
+			segmentId: desc.segmentId,
+			outcome: desc.outcome,
+			terminalCause: desc.terminalCause,
+			resolvedAtMs: desc.resolvedAtMs,
+		});
 	}
 
 	/** Flush buffered transition frames to whisper in FIFO order — called by
@@ -135,14 +186,20 @@ export class AudioRouter {
 
 	/** Forward a PCM frame to the agent transport + optional STT provider.
 	 *  `voiced` is the frame's VAD classification; the gate is read exactly
-	 *  ONCE and that single result decides BOTH the drop and the route-flag
-	 *  update (two reads could disagree at a grace-expiry boundary). */
-	private routeToAgent(data: Buffer, voiced = false): void {
+	 *  ONCE and that single result decides the drop, the route-flag update,
+	 *  AND the diagnostics gate-at-start fact (two reads could disagree at a
+	 *  grace-expiry boundary). */
+	private routeToAgent(data: Buffer, voiced = false, segmentStarted = false): void {
 		// Greeting-grace / greeting-in-flight gate: drop outbound transport + STT
 		// audio. The client-VAD in handleFromClient still processed the frame —
 		// only the downstream consumers are gated.
-		if (this.d.shouldDropOutbound()) return;
-		if (voiced) this.segmentVoicedPastGate = true;
+		const drop = this.d.shouldDropOutbound();
+		if (segmentStarted && drop) this.d.ledger?.noteGateActiveAtSegmentStart();
+		if (drop) return;
+		if (voiced) {
+			this.segmentVoicedPastGate = true;
+			this.d.ledger?.noteRouted('llm');
+		}
 		// PCM is the source of truth here. The transport fork: G.711 μ-law
 		// (telephony) resamples to 8 kHz then encodes; PCM transports rate-match
 		// to transport.audioFormat.inputSampleRate.
