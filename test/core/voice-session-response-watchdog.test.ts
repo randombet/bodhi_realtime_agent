@@ -177,6 +177,62 @@ describe('response watchdog', () => {
 		}
 	});
 
+	it('an uncorrelated trailing model-turn-start does NOT disarm the watchdog', async () => {
+		let session: VoiceSession | undefined;
+		try {
+			const s = setup();
+			session = s.session;
+			await activate(session, s.transport);
+
+			// Turn 1: model responds on server turn 1, then is interrupted →
+			// the framework turn finalizes still owning server turn id 1.
+			s.transport.getActiveServerTurnId = () => 1;
+			completeUserTurn(session);
+			s.transport.onModelTurnStart?.();
+			s.transport.onInterrupted?.(1);
+
+			// Turn 2: user speaks again → watchdog armed, model owes a reply.
+			completeUserTurn(session);
+
+			// Trailing model-turn-start still attributed to dead server turn 1
+			// (ensureCurrent → null). It must not silence the watchdog: the
+			// response owed for turn 2 is still missing.
+			s.transport.onModelTurnStart?.();
+
+			vi.advanceTimersByTime(8000); // watchdog fires
+			vi.advanceTimersByTime(1000); // backoff → reconnect
+			expect(s.transport.reconnect).toHaveBeenCalledTimes(1);
+		} finally {
+			await session?.close();
+		}
+	});
+
+	it('input-transcription liveness extends the watchdog past its base deadline', async () => {
+		let session: VoiceSession | undefined;
+		try {
+			const s = setup();
+			session = s.session;
+			await activate(session, s.transport);
+
+			completeUserTurn(session);
+
+			// Gemini's input transcription streams while the model is still
+			// working (the slow-input-commit case): liveness at t=7s extends the
+			// 8s deadline instead of letting it force a reconnect at t=8s.
+			vi.advanceTimersByTime(7000);
+			s.transport.onInputTranscription?.('how are you doing today?');
+			vi.advanceTimersByTime(3000); // t=10s: base deadline passed, no fire
+			expect(s.transport.reconnect).not.toHaveBeenCalled();
+
+			// The model then responds → disarm; no reconnect ever.
+			s.transport.onModelTurnStart?.();
+			vi.advanceTimersByTime(30000);
+			expect(s.transport.reconnect).not.toHaveBeenCalled();
+		} finally {
+			await session?.close();
+		}
+	});
+
 	it('fires only once when the user speaks twice before any model output', async () => {
 		let session: VoiceSession | undefined;
 		try {

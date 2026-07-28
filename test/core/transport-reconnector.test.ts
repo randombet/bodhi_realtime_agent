@@ -357,6 +357,73 @@ describe('TransportReconnector', () => {
 			expect(h.transport.reconnect).not.toHaveBeenCalled();
 		});
 
+		describe('provider-activity liveness extension', () => {
+			it('an input-transcription liveness signal extends the deadline by a fresh budget', async () => {
+				const h = makeHarness({ watchdogMs: 5000 });
+				h.reconnector.armResponseWatchdog();
+
+				// Liveness at t=4s (Gemini's transcription deltas on a slow turn).
+				vi.advanceTimersByTime(4000);
+				h.reconnector.notifyProviderActivity();
+
+				// Old deadline (t=5s) passes without firing…
+				vi.advanceTimersByTime(2000);
+				expect(h.transport.reconnect).not.toHaveBeenCalled();
+
+				// …the extended deadline (t=9s) fires normally.
+				vi.advanceTimersByTime(3000);
+				vi.advanceTimersByTime(1000); // reconnect backoff
+				await vi.runAllTimersAsync();
+				expect(h.transport.reconnect).toHaveBeenCalledTimes(1);
+			});
+
+			it('repeated liveness cannot defer past the absolute cap (15s from arm)', async () => {
+				const h = makeHarness({ watchdogMs: 5000 });
+				h.reconnector.armResponseWatchdog();
+
+				// A stuck stream signalling liveness every second, forever.
+				for (let i = 0; i < 14; i++) {
+					vi.advanceTimersByTime(1000);
+					h.reconnector.notifyProviderActivity();
+				}
+				// t=14s: not yet fired (still inside the cap).
+				expect(h.transport.reconnect).not.toHaveBeenCalled();
+
+				// The cap bounds the last extension to t=15s — signals after the cap
+				// is exhausted are no-ops and the watchdog still fires.
+				vi.advanceTimersByTime(1000);
+				h.reconnector.notifyProviderActivity();
+				vi.advanceTimersByTime(1000); // reconnect backoff
+				await vi.runAllTimersAsync();
+				expect(h.transport.reconnect).toHaveBeenCalledTimes(1);
+			});
+
+			it('liveness while disarmed is a no-op (does not resurrect the watchdog)', () => {
+				const h = makeHarness({ watchdogMs: 5000 });
+				h.reconnector.armResponseWatchdog();
+				h.reconnector.disarmResponseWatchdog();
+				h.reconnector.notifyProviderActivity();
+				vi.advanceTimersByTime(30000);
+				expect(h.transport.reconnect).not.toHaveBeenCalled();
+			});
+
+			it('a fresh arm resets the extension cap anchor', () => {
+				const h = makeHarness({ watchdogMs: 5000 });
+				h.reconnector.armResponseWatchdog();
+				vi.advanceTimersByTime(3000);
+				h.reconnector.disarmResponseWatchdog(); // model responded
+				vi.advanceTimersByTime(11000); // idle chat gap; t=14s from first arm
+
+				// New turn: the new window gets its own full cap, so liveness at +4s
+				// extends normally even though the FIRST arm's cap would be exhausted.
+				h.reconnector.armResponseWatchdog();
+				vi.advanceTimersByTime(4000);
+				h.reconnector.notifyProviderActivity();
+				vi.advanceTimersByTime(2000); // old deadline passes without firing
+				expect(h.transport.reconnect).not.toHaveBeenCalled();
+			});
+		});
+
 		it('falls back to triggerGeneration when the transport cannot elicit', async () => {
 			const transport = fakeTransport({ elicitResponse: undefined });
 			const h = makeHarness({ watchdogMs: 8000, transport });

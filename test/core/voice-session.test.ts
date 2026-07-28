@@ -2691,7 +2691,7 @@ describe('VoiceSession', () => {
 			expect(items.some((i) => i.content === 'current text')).toBe(true);
 		});
 
-		it('Gemini inputTranscription corrects STT transcript when sttProvider is set', async () => {
+		it('external STT outranks Gemini inputTranscription for the committed message', async () => {
 			const stt = createMockSTTProvider();
 			session = new VoiceSession({
 				sessionId: 'sess_stt',
@@ -2716,32 +2716,33 @@ describe('VoiceSession', () => {
 				if (!isBinary) received.push(data.toString());
 			});
 
-			// STT provides initial transcript
-			stt.onTranscript?.('Hola mi nombre es Juan', 0);
-			await new Promise((r) => setTimeout(r, 50));
-
 			const { _getMessageHandler } = await import('@google/genai');
 			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
 
-			// Gemini provides authoritative correction
+			// Gemini's own transcription streams first — live display + fallback.
 			fire({ serverContent: { inputTranscription: { text: 'Hello my name is John' } } });
 			await new Promise((r) => setTimeout(r, 50));
 
-			const transcripts = received
+			const correction = received
 				.map((r) => JSON.parse(r))
-				.filter((m: Record<string, unknown>) => m.type === 'transcript' && m.role === 'user');
-
-			// Should have STT partial + Gemini correction
-			expect(transcripts.length).toBeGreaterThanOrEqual(2);
-			const correction = transcripts.find((t: Record<string, unknown>) => t.corrected === true);
-			expect(correction).toBeDefined();
+				.find((m: Record<string, unknown>) => m.corrected === true);
 			expect(correction?.text).toBe('Hello my name is John');
+
+			// The external STT result lands after it and wins the committed message.
+			stt.onTranscript?.('Hola mi nombre es Juan', 0);
+			fire({ serverContent: { turnComplete: true } });
+			await new Promise((r) => setTimeout(r, 50));
+
+			const userItems = session.conversationContext.items
+				.filter((i) => i.role === 'user')
+				.map((i) => i.content);
+			expect(userItems).toEqual(['Hola mi nombre es Juan']);
 
 			ws.close();
 			await new Promise<void>((r) => ws.on('close', r));
 		});
 
-		it('drops late STT transcript after Gemini correction was finalized before a tool call', async () => {
+		it('a late STT transcript seals the reservation made before a tool call', async () => {
 			const stt = createMockSTTProvider();
 			session = new VoiceSession({
 				sessionId: 'sess_stt_tool_dedup',
@@ -2769,6 +2770,9 @@ describe('VoiceSession', () => {
 			});
 			await new Promise((r) => setTimeout(r, 50));
 
+			// The tool call finalized the turn while only Gemini's fallback text was
+			// available, so the user message was reserved. This late authoritative
+			// transcript resolves that slot instead of being dropped.
 			stt.onTranscript?.('Uh, what time is it?', 0);
 			fire({ serverContent: { outputTranscription: { text: 'It is sunny.' } } });
 			fire({ serverContent: { turnComplete: true } });
@@ -2777,7 +2781,8 @@ describe('VoiceSession', () => {
 			const userItems = session.conversationContext.items
 				.filter((i) => i.role === 'user')
 				.map((i) => i.content);
-			expect(userItems).toEqual(['What time is it?']);
+			expect(userItems).toEqual(['Uh, what time is it?']);
+			expect(session.conversationContext.hasPendingUserMessages).toBe(false);
 		});
 
 		it('skips Gemini transcript correction on interrupted turns', async () => {
@@ -2888,7 +2893,7 @@ describe('VoiceSession', () => {
 			await new Promise<void>((r) => ws.on('close', r));
 		});
 
-		it('resets interrupted flag on next turnComplete so correction resumes', async () => {
+		it('clears the post-interrupt gate so a later turn surfaces corrections again', async () => {
 			const stt = createMockSTTProvider();
 			session = new VoiceSession({
 				sessionId: 'sess_stt',
@@ -2928,16 +2933,22 @@ describe('VoiceSession', () => {
 			fire({ serverContent: { turnComplete: true } });
 			await new Promise((r) => setTimeout(r, 50));
 
-			// New turn: STT + Gemini correction should work
+			// Turn 2: an STT transcript clears the post-interrupt gate, then the turn
+			// completes and flushes (releasing the authoritative-source latch).
 			stt.onTranscript?.('turn two stt', 1);
-			fire({ serverContent: { inputTranscription: { text: 'turn two corrected' } } });
+			fire({ serverContent: { turnComplete: true } });
+			await new Promise((r) => setTimeout(r, 50));
+
+			// Turn 3: gate cleared and no authoritative transcript in hand yet, so
+			// Gemini's own transcription is surfaced as a correction again.
+			fire({ serverContent: { inputTranscription: { text: 'turn three corrected' } } });
 			await new Promise((r) => setTimeout(r, 50));
 
 			const corrections = received
 				.map((r) => JSON.parse(r))
 				.filter((m: Record<string, unknown>) => m.corrected === true);
 			expect(corrections).toHaveLength(1);
-			expect(corrections[0].text).toBe('turn two corrected');
+			expect(corrections[0].text).toBe('turn three corrected');
 
 			ws.close();
 			await new Promise<void>((r) => ws.on('close', r));

@@ -8,6 +8,27 @@ export interface TranscriptSink {
 	addUserMessage(text: string): void;
 	/** Record a finalized assistant message in conversation context. */
 	addAssistantMessage(text: string): void;
+	/** Hold an ordered slot for a user message whose authoritative transcript is
+	 *  still in flight; returns the id to seal it with. Optional — sinks without
+	 *  it always get plain `addUserMessage`. */
+	reserveUserMessage?(text: string): string;
+	/** Resolve a reserved slot, replacing its text when `text` is non-empty. */
+	sealUserMessage?(id: string, text?: string): boolean;
+}
+
+/** Construction options for {@link TranscriptManager}. */
+export interface TranscriptManagerOptions {
+	/**
+	 * True when an external STT provider supplies the authoritative user
+	 * transcript. Its result (via `handleInput`) outranks the transport's own
+	 * built-in transcription (via `correctInput`), which is then only a live
+	 * display source and a fallback. When the authoritative transcript has not
+	 * arrived by the time the turn finalizes, the user message is *reserved*
+	 * rather than committed, so history stores never record the fallback text.
+	 */
+	expectsAuthoritativeInput?: boolean;
+	/** Current turn id — keys a reservation to the late transcript that resolves it. */
+	currentTurnId?: () => number | undefined;
 }
 
 /**
@@ -27,6 +48,19 @@ export class TranscriptManager {
 	private inputFinalizedThisTurn = false;
 	/** Display-only accumulation of realtime input deltas on interrupted turns. */
 	private interruptedInputDisplay = '';
+	/** Accumulation of the provider's own input-transcription deltas for the
+	 *  current utterance (see `correctInput`). Reset at every utterance boundary. */
+	private correctionBuffer = '';
+	/** True while `inputBuffer` holds provider-correction text, so the
+	 *  authoritative batch transcript replaces it instead of appending. */
+	private inputFromCorrection = false;
+	/** True once the authoritative source (`handleInput`) has written the buffer
+	 *  for the current utterance. Makes precedence order-independent: a
+	 *  provider-correction delta arriving afterwards can no longer clobber it. */
+	private inputAuthoritative = false;
+	/** turnId → reserved user-message id, for utterances committed before their
+	 *  authoritative transcript arrived. */
+	private pendingReservations = new Map<number, string>();
 	/** STT turn id of the utterance currently in `inputBuffer` (set by the
 	 *  turn-aware `handleInput`). A change marks a new user utterance so the
 	 *  prior one can be finalized instead of concatenated. `undefined` for
@@ -40,7 +74,75 @@ export class TranscriptManager {
 	 */
 	onInputFinalized?: (text: string) => void;
 
-	constructor(private sink: TranscriptSink) {}
+	/** Fired when a user message was reserved instead of committed, i.e. its
+	 *  authoritative transcript is still outstanding. VoiceSession uses this to
+	 *  arm the fallback seal timer. */
+	onInputReserved?: (turnId: number) => void;
+
+	constructor(
+		private sink: TranscriptSink,
+		private options: TranscriptManagerOptions = {},
+	) {}
+
+	/**
+	 * Commit finalized user text — either sealed outright, or reserved when the
+	 * authoritative transcript is still in flight (see
+	 * `TranscriptManagerOptions.expectsAuthoritativeInput`).
+	 */
+	private commitUserText(text: string): void {
+		const turnId = this.options.currentTurnId?.();
+		if (
+			!this.inputAuthoritative &&
+			this.options.expectsAuthoritativeInput &&
+			turnId !== undefined &&
+			this.sink.reserveUserMessage
+		) {
+			this.pendingReservations.set(turnId, this.sink.reserveUserMessage(text));
+			this.onInputReserved?.(turnId);
+			return;
+		}
+		this.sink.addUserMessage(text);
+	}
+
+	/**
+	 * Resolve the reservation for `turnId` with the authoritative transcript that
+	 * has finally arrived, and correct the client's displayed final.
+	 * @returns false when no reservation is outstanding for that turn.
+	 */
+	sealReservedInput(turnId: number, text: string): boolean {
+		const id = this.pendingReservations.get(turnId);
+		if (id === undefined) return false;
+		this.pendingReservations.delete(turnId);
+		const sealed = this.sink.sealUserMessage?.(id, text) ?? false;
+		if (sealed && text.trim()) {
+			this.sink.sendToClient({
+				type: 'transcript',
+				role: 'user',
+				text: text.trim(),
+				partial: false,
+				corrected: true,
+			});
+		}
+		return sealed;
+	}
+
+	/**
+	 * Seal outstanding reservations with the provisional text already recorded —
+	 * the fallback when the authoritative transcript fails or times out. Pass a
+	 * `turnId` to seal one, or omit to seal all (session close).
+	 */
+	sealPendingInput(turnId?: number): void {
+		const entries =
+			turnId === undefined
+				? [...this.pendingReservations.entries()]
+				: this.pendingReservations.has(turnId)
+					? [[turnId, this.pendingReservations.get(turnId) as string] as const]
+					: [];
+		for (const [id, reservationId] of entries) {
+			this.pendingReservations.delete(id);
+			this.sink.sealUserMessage?.(reservationId);
+		}
+	}
 
 	/** Handle a partial/interim transcript from a streaming STT provider.
 	 *  Sends to client for live display but does NOT accumulate in inputBuffer.
@@ -77,19 +179,32 @@ export class TranscriptManager {
 	}
 
 	/**
-	 * Replace the current input buffer with an authoritative transcript
-	 * (e.g. from Gemini's built-in inputAudioTranscription).
+	 * Replace the current input buffer with the provider's own transcription
+	 * (e.g. Gemini's built-in inputAudioTranscription).
+	 *
+	 * The provider streams this as incremental *deltas*, not as a whole restated
+	 * transcript per call, so the deltas are accumulated across the utterance
+	 * before replacing the buffer — otherwise the buffer (and the finalized user
+	 * message) would collapse to the last delta, often a word fragment. The
+	 * accumulation resets at each utterance boundary along with `inputBuffer`.
 	 * Sends a corrected partial to the client so the UI updates.
-	 * No-op if the correction is empty.
+	 *
+	 * This is the *lower-ranked* source: once the authoritative transcript has
+	 * landed for this utterance (`handleInput`), a late-arriving delta no longer
+	 * touches the buffer, which makes precedence independent of arrival order.
+	 * No-op if the delta is empty.
 	 */
-	correctInput(text: string): void {
-		if (!text.trim()) return;
+	correctInput(textDelta: string): void {
+		if (!textDelta.trim()) return;
 		if (this.inputFinalizedThisTurn) return;
-		this.inputBuffer = text;
+		if (this.inputAuthoritative) return;
+		this.correctionBuffer += textDelta;
+		this.inputBuffer = this.correctionBuffer;
+		this.inputFromCorrection = true;
 		this.sink.sendToClient({
 			type: 'transcript',
 			role: 'user',
-			text: text.trim(),
+			text: this.correctionBuffer.trim(),
 			partial: true,
 			corrected: true,
 		});
@@ -102,10 +217,10 @@ export class TranscriptManager {
 	 * change of `turnId` means a *new* user utterance arrived: if the previous
 	 * one is still buffered (e.g. its barge-in was rejected so no turn finalized
 	 * and flushed it), finalize it as its own message instead of concatenating
-	 * the two into one user turn. A batch transcript that merely re-states what a
-	 * provider correction already wrote (same text) is also deduplicated, so the
-	 * text does not double ("X" + "X" → "XX"). Id-less providers keep the plain
-	 * delta-append behavior.
+	 * the two into one user turn. A batch transcript that arrives over text a
+	 * provider correction already wrote replaces it rather than appending, so the
+	 * utterance does not double ("X" + "X" → "XX"). Id-less providers keep the
+	 * plain delta-append behavior.
 	 */
 	handleInput(text: string, turnId?: number): void {
 		if (this.inputFinalizedThisTurn) return;
@@ -121,11 +236,18 @@ export class TranscriptManager {
 		}
 		if (turnId !== undefined) this.inputTurnId = turnId;
 
-		// Skip a turn-bearing transcript that exactly restates the current buffer
-		// (a provider correction already wrote it); otherwise accumulate.
-		if (!(turnId !== undefined && this.inputBuffer.trim() === text.trim())) {
+		// A batch transcript always carries the whole utterance and is
+		// authoritative, so it replaces provider-correction text rather than
+		// concatenating onto its tail (which would double the utterance, or
+		// graft a half-word delta onto its front).
+		if (this.inputFromCorrection) {
+			this.inputBuffer = text;
+			this.correctionBuffer = '';
+			this.inputFromCorrection = false;
+		} else {
 			this.inputBuffer += text;
 		}
+		this.inputAuthoritative = true;
 		this.sink.sendToClient({
 			type: 'transcript',
 			role: 'user',
@@ -143,10 +265,13 @@ export class TranscriptManager {
 	private commitInputUtterance(): void {
 		const text = this.inputBuffer.trim();
 		if (!text) return;
-		this.sink.addUserMessage(text);
+		this.commitUserText(text);
 		this.sink.sendToClient({ type: 'transcript', role: 'user', text, partial: false });
 		this.inputBuffer = '';
 		this.interruptedInputDisplay = '';
+		this.correctionBuffer = '';
+		this.inputFromCorrection = false;
+		this.inputAuthoritative = false;
 		this.onInputFinalized?.(text);
 	}
 
@@ -164,7 +289,7 @@ export class TranscriptManager {
 		if (this.inputFinalizedThisTurn) return false;
 		const text = this.inputBuffer.trim() || this.interruptedInputDisplay.trim();
 		if (!text) return false;
-		this.sink.addUserMessage(text);
+		this.commitUserText(text);
 		this.sink.sendToClient({
 			type: 'transcript',
 			role: 'user',
@@ -174,6 +299,9 @@ export class TranscriptManager {
 		});
 		this.inputBuffer = '';
 		this.interruptedInputDisplay = '';
+		this.correctionBuffer = '';
+		this.inputFromCorrection = false;
+		this.inputAuthoritative = false;
 		this.inputTurnId = undefined;
 		this.inputFinalizedThisTurn = true;
 		this.onInputFinalized?.(text);
@@ -213,7 +341,7 @@ export class TranscriptManager {
 	flushInput(): void {
 		if (this.inputBuffer.trim()) {
 			const text = this.inputBuffer.trim();
-			this.sink.addUserMessage(text);
+			this.commitUserText(text);
 			this.sink.sendToClient({
 				type: 'transcript',
 				role: 'user',
@@ -225,6 +353,9 @@ export class TranscriptManager {
 			this.onInputFinalized?.(text);
 		}
 		this.interruptedInputDisplay = '';
+		this.correctionBuffer = '';
+		this.inputFromCorrection = false;
+		this.inputAuthoritative = false;
 		this.inputTurnId = undefined;
 	}
 
@@ -232,7 +363,7 @@ export class TranscriptManager {
 	flush(): void {
 		if (!this.inputFinalizedThisTurn && this.inputBuffer.trim()) {
 			const text = this.inputBuffer.trim();
-			this.sink.addUserMessage(text);
+			this.commitUserText(text);
 			this.sink.sendToClient({
 				type: 'transcript',
 				role: 'user',
@@ -256,6 +387,9 @@ export class TranscriptManager {
 		this.outputPrefix = '';
 		this.inputFinalizedThisTurn = false;
 		this.interruptedInputDisplay = '';
+		this.correctionBuffer = '';
+		this.inputFromCorrection = false;
+		this.inputAuthoritative = false;
 		this.inputTurnId = undefined;
 	}
 

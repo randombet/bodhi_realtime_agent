@@ -554,8 +554,14 @@ export interface LLMTransport {
 	 *  without injecting new content. Used after a watchdog-driven reconnect to
 	 *  recover a turn the model silently dropped. Optional — transports that
 	 *  auto-generate (or cannot elicit without content) may omit it; callers fall
-	 *  back to `triggerGeneration()`. Gemini implements it as a content-less
-	 *  `turnComplete`. */
+	 *  back to `triggerGeneration()`.
+	 *
+	 *  Implement this only when the provider accepts a genuinely content-less
+	 *  request. No in-tree transport does: Gemini rejects one server-side (1007,
+	 *  see the note in `GeminiLiveTransport`), and OpenAI/Qwen rely on the
+	 *  `triggerGeneration()` fallback. A rejection here is especially costly
+	 *  because it surfaces as an async socket close, not a throw, so the watchdog
+	 *  reads it as a transport failure and retries into the reconnect budget. */
 	elicitResponse?(): void;
 
 	/** Re-send a retained user utterance as a complete user turn, eliciting a
@@ -588,6 +594,15 @@ export interface LLMTransport {
 	/** @param serverTurnId Monotonic id of the server turn being interrupted
 	 *  (see `onTurnComplete`). `undefined` for transports without server turns. */
 	onInterrupted?: (serverTurnId?: number) => void;
+	/** User-speech transcription from the transport's own recognizer.
+	 *
+	 *  @param text An incremental **delta**, not the whole utterance restated.
+	 *  Gemini Live streams many small deltas per utterance (often mid-word);
+	 *  OpenAI and Qwen fire once per utterance from
+	 *  `conversation.item.input_audio_transcription.completed`, which is the
+	 *  degenerate one-delta case. Consumers must therefore accumulate across
+	 *  calls and reset at each utterance boundary — treating a call as the
+	 *  complete transcript collapses the utterance to its last fragment. */
 	onInputTranscription?: (text: string) => void;
 	onOutputTranscription?: (text: string) => void;
 	onSessionReady?: (sessionId: string) => void;

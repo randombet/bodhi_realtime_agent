@@ -328,13 +328,35 @@ describe('TranscriptManager', () => {
 	});
 
 	describe('correctInput', () => {
-		it('replaces input buffer with authoritative transcript', () => {
+		// Precedence: the external STT provider (handleInput) is the authoritative
+		// transcript; the transport's own transcription (correctInput) is a live
+		// display source and a fallback. This must hold in BOTH arrival orders.
+		it('external STT outranks the provider correction when STT lands first', () => {
 			const sink = createSink();
 			const mgr = new TranscriptManager(sink);
 
-			// STT provides initial (incorrect) transcript
 			mgr.handleInput('Hola mi nombre es Juan');
-			// Gemini corrects it
+			mgr.correctInput('Hello my name is John');
+			mgr.flush();
+
+			expect(sink.userMessages).toEqual(['Hola mi nombre es Juan']);
+		});
+
+		it('external STT outranks the provider correction when STT lands last', () => {
+			const sink = createSink();
+			const mgr = new TranscriptManager(sink);
+
+			mgr.correctInput('Hello my name is John');
+			mgr.handleInput('Hola mi nombre es Juan');
+			mgr.flush();
+
+			expect(sink.userMessages).toEqual(['Hola mi nombre es Juan']);
+		});
+
+		it('falls back to the provider correction when STT never produces text', () => {
+			const sink = createSink();
+			const mgr = new TranscriptManager(sink);
+
 			mgr.correctInput('Hello my name is John');
 			mgr.flush();
 
@@ -369,16 +391,174 @@ describe('TranscriptManager', () => {
 			expect(sink.userMessages).toEqual(['original text']);
 		});
 
-		it('last correction wins when multiple arrive', () => {
+		// Gemini's inputTranscription arrives as incremental deltas, not as a
+		// whole restated transcript per call (same contract as the no-STT path,
+		// which appends, and as showInterruptedInputPartial, which accumulates).
+		it('accumulates successive deltas of one utterance', () => {
 			const sink = createSink();
 			const mgr = new TranscriptManager(sink);
 
-			mgr.handleInput('stt text');
-			mgr.correctInput('first correction');
-			mgr.correctInput('second correction');
+			mgr.correctInput('Hi');
+			mgr.correctInput(', uh');
+			mgr.correctInput(', I would');
+			mgr.correctInput(' like to know');
+
+			const corrections = sink.messages.filter((m) => m.corrected === true);
+			expect(corrections.map((m) => m.text)).toEqual([
+				'Hi',
+				'Hi, uh',
+				'Hi, uh, I would',
+				'Hi, uh, I would like to know',
+			]);
+		});
+
+		it('finalizes the whole corrected utterance, not the last delta', () => {
+			const sink = createSink();
+			const mgr = new TranscriptManager(sink);
+
+			for (const delta of ['Is', ' there', ' any', ' pending', ' task?']) {
+				mgr.correctInput(delta);
+			}
 			mgr.flush();
 
-			expect(sink.userMessages).toEqual(['second correction']);
+			expect(sink.userMessages).toEqual(['Is there any pending task?']);
+		});
+
+		// The batch STT provider emits the full utterance once per turn and is
+		// authoritative for the finalized message, so it must replace the
+		// provider-correction text rather than concatenate onto its tail.
+		it('batch STT replaces accumulated correction text instead of appending', () => {
+			const sink = createSink();
+			const mgr = new TranscriptManager(sink);
+
+			mgr.correctInput('how');
+			mgr.correctInput(' it could');
+			mgr.correctInput(' connect to my lo');
+			mgr.correctInput('cal');
+			// Batch STT lands after the realtime deltas with the full utterance.
+			mgr.handleInput('How could it connect to Sutando on my local Mac.', 1);
+			mgr.flush();
+
+			expect(sink.userMessages).toEqual(['How could it connect to Sutando on my local Mac.']);
+		});
+
+		it('a late correction delta cannot clobber the authoritative transcript', () => {
+			const sink = createSink();
+			const mgr = new TranscriptManager(sink);
+
+			mgr.correctInput('how it could connect to my lo');
+			mgr.handleInput('How could it connect to Sutando on my local Mac.', 1);
+			// Gemini keeps streaming after the batch result landed.
+			mgr.correctInput('cal');
+			mgr.flush();
+
+			expect(sink.userMessages).toEqual(['How could it connect to Sutando on my local Mac.']);
+		});
+
+		it('resets the correction buffer between utterances', () => {
+			const sink = createSink();
+			const mgr = new TranscriptManager(sink);
+
+			mgr.correctInput('first');
+			mgr.correctInput(' utterance');
+			mgr.flush();
+			mgr.correctInput('second');
+			mgr.correctInput(' utterance');
+			mgr.flush();
+
+			expect(sink.userMessages).toEqual(['first utterance', 'second utterance']);
+		});
+	});
+
+	describe('reservation (authoritative transcript still in flight)', () => {
+		function createReservingSink() {
+			const base = createSink();
+			const reserved: { id: string; text: string; sealed: boolean }[] = [];
+			return Object.assign(base, {
+				reserved,
+				reserveUserMessage: vi.fn((text: string) => {
+					const id = `r${reserved.length + 1}`;
+					reserved.push({ id, text, sealed: false });
+					return id;
+				}),
+				sealUserMessage: vi.fn((id: string, text?: string) => {
+					const slot = reserved.find((r) => r.id === id);
+					if (!slot || slot.sealed) return false;
+					if (text?.trim()) slot.text = text.trim();
+					slot.sealed = true;
+					return true;
+				}),
+			});
+		}
+
+		const opts = { expectsAuthoritativeInput: true, currentTurnId: () => 7 };
+
+		it('reserves instead of committing when only fallback text is available', () => {
+			const sink = createReservingSink();
+			const mgr = new TranscriptManager(sink, opts);
+
+			mgr.correctInput('task.');
+			mgr.flush();
+
+			expect(sink.userMessages).toEqual([]); // not committed outright
+			expect(sink.reserved).toEqual([{ id: 'r1', text: 'task.', sealed: false }]);
+		});
+
+		it('seals the reservation when the authoritative transcript finally lands', () => {
+			const sink = createReservingSink();
+			const mgr = new TranscriptManager(sink, opts);
+
+			mgr.correctInput('task.');
+			mgr.flush();
+
+			expect(mgr.sealReservedInput(7, 'Is there any pending task?')).toBe(true);
+			expect(sink.reserved[0]).toEqual({
+				id: 'r1',
+				text: 'Is there any pending task?',
+				sealed: true,
+			});
+		});
+
+		it('commits outright — no reservation — when the authoritative text is already in hand', () => {
+			const sink = createReservingSink();
+			const mgr = new TranscriptManager(sink, opts);
+
+			mgr.correctInput('task.');
+			mgr.handleInput('Is there any pending task?', 7);
+			mgr.flush();
+
+			expect(sink.reserved).toEqual([]);
+			expect(sink.userMessages).toEqual(['Is there any pending task?']);
+		});
+
+		it('sealPendingInput keeps the fallback text when STT never returns', () => {
+			const sink = createReservingSink();
+			const mgr = new TranscriptManager(sink, opts);
+
+			mgr.correctInput('task.');
+			mgr.flush();
+			mgr.sealPendingInput();
+
+			expect(sink.reserved[0]).toEqual({ id: 'r1', text: 'task.', sealed: true });
+			expect(mgr.sealReservedInput(7, 'too late')).toBe(false);
+		});
+
+		it('reports false for a turn with no outstanding reservation', () => {
+			const sink = createReservingSink();
+			const mgr = new TranscriptManager(sink, opts);
+
+			expect(mgr.sealReservedInput(7, 'anything')).toBe(false);
+		});
+
+		it('never reserves when no authoritative source is configured', () => {
+			const sink = createReservingSink();
+			const mgr = new TranscriptManager(sink, { currentTurnId: () => 7 });
+
+			mgr.handleInput('plain transcript');
+			mgr.flush();
+
+			expect(sink.reserved).toEqual([]);
+			expect(sink.userMessages).toEqual(['plain transcript']);
 		});
 	});
 
