@@ -89,6 +89,7 @@ export interface TransportCapabilities {
  *  can spread this and override only what they actually support, so adding new
  *  flags to the union doesn't break compilation. */
 export const DEFAULT_TRANSPORT_CAPABILITIES: Required<TransportCapabilities> = {
+	providerEvidenceKinds: [],
 	messageTruncation: false,
 	turnDetection: false,
 	userTranscription: false,

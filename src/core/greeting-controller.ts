@@ -2,6 +2,7 @@ import type { MainAgent } from '../types/agent.js';
 import type { MemoryFact } from '../types/memory.js';
 import type { LLMTransport } from '../types/transport.js';
 import { InterruptGraceWindow } from './interrupt-grace-window.js';
+import { GreetingGatePolicy } from './policies/greeting-gate.policy.js';
 
 /** Caller-supplied greeting tuning (read at construction). */
 export interface GreetingControllerConfig {
@@ -87,6 +88,10 @@ export class GreetingController {
 	 *  post-playback finalization) or `resetForClientConnected()`. While armed,
 	 *  `requestInterrupt` refuses and `shouldDropOutbound` drops mic frames. */
 	private _uninterruptibleGreetingActive = false;
+	/** H1 turn-bound release token (pure state machine; timers live here in
+	 *  the shell). See policies/greeting-gate.policy.ts. */
+	private readonly gate = new GreetingGatePolicy();
+	private _noStartTimer: ReturnType<typeof setTimeout> | undefined;
 
 	constructor(
 		private readonly deps: GreetingControllerDeps,
@@ -205,10 +210,71 @@ export class GreetingController {
 	 *  after playback completes (playback.ended / the fallback timer), so this
 	 *  is the "greeting fully heard" point. No-op when suppression is unarmed —
 	 *  in particular it never cuts the time-boxed grace window short. */
-	onTurnFinalized(): void {
+	onTurnFinalized(turnId?: string): void {
 		if (!this._uninterruptibleGreetingActive) return;
+		// H1: when the token bound to the greeting's model turn, only THAT
+		// turn's finalization releases — for any completion reason, including
+		// `interrupted` (a truncated greeting is over; holding would deafen).
+		// While UNBOUND, any finalization releases (fallback = today's
+		// semantics; the failure mode is "release slightly early", never
+		// "hold the gate on the wrong turn").
+		if (!this.gate.shouldReleaseOnTurnFinalized(turnId)) return;
+		this.releaseUninterruptibleGate('greeting finished');
+	}
+
+	/** The greeting's model turn started (identity from the turn manager). */
+	onModelTurnStarted(turnId: string | undefined): void {
+		this.gate.onModelTurnStarted(turnId);
+	}
+
+	/** A routed user turn completed — later model starts are ambiguous and
+	 *  must not bind (§2 ambiguity rule b). */
+	noteRoutedUserTurn(): void {
+		this.gate.noteRoutedUserTurn();
+	}
+
+	/** A competing framework trigger (typed input, notification, recovery) is
+	 *  about to dispatch: invalidate the token synchronously AND release the
+	 *  gate — the guarantee is voice-only (H1 position), so deliberate input
+	 *  pre-empts even pre-turn. */
+	invalidateForCompetingTrigger(reason: string): void {
+		this.gate.invalidateToken();
+		if (this._uninterruptibleGreetingActive) {
+			this.releaseUninterruptibleGate(`competing trigger: ${reason}`);
+		}
+	}
+
+	/** Session teardown: clear the no-start timer (release accounting is moot). */
+	dispose(): void {
+		this.clearNoStartTimer();
+		this.gate.clear();
+	}
+
+	private armNoStartTimer(): void {
+		this.clearNoStartTimer();
+		this._noStartTimer = setTimeout(() => {
+			this._noStartTimer = undefined;
+			// A greeting that never produced a model turn: release rather than
+			// leave the session deaf (named transition — design §2).
+			if (this._uninterruptibleGreetingActive && !this.gate.isBound) {
+				this.releaseUninterruptibleGate('no-start timeout');
+			}
+		}, GREETING_NO_START_TIMEOUT_MS);
+	}
+
+	private clearNoStartTimer(): void {
+		if (this._noStartTimer !== undefined) {
+			clearTimeout(this._noStartTimer);
+			this._noStartTimer = undefined;
+		}
+	}
+
+	/** The single active→inactive transition: one generation-tagged release. */
+	private releaseUninterruptibleGate(reason: string): void {
 		this._uninterruptibleGreetingActive = false;
-		this.deps.log('[Latency] greeting finished — interrupt suppression released');
+		this.gate.clear();
+		this.clearNoStartTimer();
+		this.deps.log(`[Latency] ${reason} — interrupt suppression released`);
 	}
 
 	/** Send the active agent's greeting prompt to the LLM to trigger a spoken
@@ -230,6 +296,8 @@ export class GreetingController {
 		}
 		if (!this._greetingInterruptible) {
 			this._uninterruptibleGreetingActive = true;
+			this.gate.registerToken();
+			this.armNoStartTimer();
 		}
 		// Pre-greeting audio-gate reset (clears the actor debounce too, via the sink).
 		this.deps.resetNotificationAudio();
@@ -276,10 +344,17 @@ export class GreetingController {
 		// Same for full-greeting suppression: a reconnecting client must not
 		// inherit a prior session's (possibly never-finalized) greeting window.
 		this._uninterruptibleGreetingActive = false;
+		this.gate.clear();
+		this.clearNoStartTimer();
 	}
 }
 
 const GRACE_MAX_MS = 5000;
+
+/** No-start timeout for the H1 greeting token: a greeting whose response
+ *  never produces a model turn must release the gate rather than leave the
+ *  session deaf (bounded by the response watchdog's timescale — §2). */
+const GREETING_NO_START_TIMEOUT_MS = 8000;
 
 /** Clamp a transport-capability `greetingInterruptGraceMs` default to a sane
  *  numeric range. Returns `undefined` when omitted; `0` for `NaN`, negative,

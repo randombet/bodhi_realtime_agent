@@ -63,6 +63,11 @@ export interface TransportReconnectorDeps {
 	 *  Never fires for deferred/failed replays or the content-less nudge.
 	 *  Optional. */
 	onReplayDispatched?(): void;
+	/** Phase-3 coordinator seam: invoked BEFORE any recovery actuation
+	 *  (in-place replay, post-reconnect replay, or nudge) so the greeting
+	 *  token is invalidated first — a recovery response must never bind as
+	 *  the greeting. */
+	onRecoveryDispatch?(): void;
 }
 
 /** Reconnect-window speech verdict driving the stage-2 replay decision. */
@@ -149,6 +154,7 @@ export class TransportReconnector {
 		const retained = this.deps.peekRetainedUtterance?.() ?? null;
 		if (retained && this.stageFor(retained) === 'idle' && this.deps.transport.isConnected) {
 			this._replayStage = 'replayed-in-place';
+			this.deps.onRecoveryDispatch?.();
 			if (this.tryReplay(retained, 'in-place')) {
 				this.deps.log(
 					`[Watchdog] Model silent ${this.responseWatchdogMs}ms after user turn — replayed retained user utterance in-place (no reconnect)`,
@@ -302,12 +308,12 @@ export class TransportReconnector {
 			return;
 		}
 		const retained = this.deps.peekRetainedUtterance?.() ?? null;
-		if (
+		const replayEligible =
 			reason === 'response-watchdog' &&
-			retained &&
-			this.stageFor(retained) !== 'replayed-after-reconnect' &&
-			this.tryReplay(retained, 'after reconnect')
-		) {
+			retained !== null &&
+			this.stageFor(retained) !== 'replayed-after-reconnect';
+		if (replayEligible) this.deps.onRecoveryDispatch?.();
+		if (replayEligible && retained && this.tryReplay(retained, 'after reconnect')) {
 			this._replayStage = 'replayed-after-reconnect';
 			this.deps.log('[Watchdog] Replayed retained user utterance after reconnect');
 			this.deps.onReplayDispatched?.(); // R7b: surface the replayed turn's transcript
@@ -317,6 +323,7 @@ export class TransportReconnector {
 		// Tier 3 — content-less nudge: prefer the transport's elicit (Gemini),
 		// else fall back to triggerGeneration (OpenAI).
 		this.deps.log(`[Watchdog] Re-eliciting model response after reconnect (reason=${reason})`);
+		this.deps.onRecoveryDispatch?.();
 		try {
 			if (this.deps.transport.elicitResponse) {
 				this.deps.transport.elicitResponse();

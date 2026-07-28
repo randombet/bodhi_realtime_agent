@@ -72,8 +72,11 @@ import {
 } from './notification-sink.js';
 import { PlaybackCompletionArbiter } from './playback-completion-arbiter.js';
 import { NativeAudioPlaybackGate, type PlaybackGate } from './playback-gate.js';
+import { decideBargeIn } from './policies/barge-in.policy.js';
+import { decideFinalizationPath } from './policies/finalization.policy.js';
 import { decideRetention } from './policies/retention.policy.js';
 import { decideWatchdogArm } from './policies/watchdog-arm.policy.js';
+import { ResponseTriggerCoordinator } from './response-trigger-coordinator.js';
 import { SessionManager } from './session-manager.js';
 import { ToolCallRouter } from './tool-call-router.js';
 import { TranscriptManager } from './transcript-manager.js';
@@ -675,6 +678,11 @@ export class VoiceSession {
 	private readonly userTurnEvidence = new UserTurnEvidenceLedger();
 	/** Count of model-turn starts (advisory epoch fact for SegmentEvidence). */
 	private _responseEpoch = 0;
+	/** Phase-3 trigger coordinator: competing framework triggers invalidate
+	 *  the H1 greeting token synchronously before dispatch. */
+	private readonly triggerCoordinator = new ResponseTriggerCoordinator({
+		onCompetingTrigger: (cls) => this.greeting.invalidateForCompetingTrigger(cls),
+	});
 	/** Shadow-parity counters (observable, not log-scraped). With the Phase-2
 	 *  re-bind, actuation IS the policy verdict, so expected/unexpected stay 0
 	 *  by construction; `compared` keeps counting terminals for coverage
@@ -747,6 +755,7 @@ export class VoiceSession {
 						role: (t.role === 'model' ? 'assistant' : t.role) as 'user' | 'assistant',
 						text: t.parts[0]?.text ?? '',
 					}));
+					this.triggerCoordinator.dispatch('notification');
 					this._pendingResponseOrigin = 'assistant_initiated';
 					this.transport.sendContent(contentTurns, turnComplete);
 				},
@@ -1201,6 +1210,9 @@ export class VoiceSession {
 				this.utteranceRetainer?.clearAnswered();
 				this.reconnector.resetReplayState();
 			}
+			// H1: offer the turn identity to the greeting-gate token (binds only
+			// while live + unambiguous — see greeting-gate.policy.ts).
+			this.greeting.onModelTurnStarted(modelTurn?.id);
 			// Raw latency fact (§11): publish AFTER turn allocation so the payload
 			// carries the turn id; origin is the explicit pending one when set.
 			const origin =
@@ -1415,6 +1427,9 @@ export class VoiceSession {
 				// a live multi-segment utterance. The R7c hosted-freshness verdict below stays
 				// scoped to the retained-replay rollout flag.
 				isSpeechActive: () => this.clientVadDetector.isSpeechActive,
+				// Phase-3 coordinator seam: a recovery response must never bind
+				// as the greeting (H1) — invalidate before actuation.
+				onRecoveryDispatch: () => this.triggerCoordinator.dispatch('watchdog-recovery'),
 				hostedReconnectSpeech: this.utteranceRetainer
 					? () => this.reconnectWindowSpeechVerdict()
 					: undefined,
@@ -2228,6 +2243,7 @@ export class VoiceSession {
 		await this.safeTeardown('disarmResponseWatchdog', () =>
 			this.reconnector.disarmResponseWatchdog(),
 		);
+		await this.safeTeardown('greetingGate.dispose', () => this.greeting.dispose());
 		// close() bypasses finalizeTurn — tear down the native gate directly so no
 		// native playback timer outlives the session.
 		if (this.nativePlaybackGatingActive) {
@@ -2380,28 +2396,16 @@ export class VoiceSession {
 	 * window allows it. Fires at most once per segment. See `clientVadBargeInAllowed`.
 	 */
 	private runClientVadBargeInPolicy(now: number, maxAbs: number, avgAbs: number): void {
-		// Mark the segment a *potential* barge-in once a frame clears the in-TTS
-		// energy floor — UNCONDITIONALLY, even before a playback gate is armed,
-		// so a segment that begins just before `handleTurnComplete` arms the
-		// native gate is still recognised. `finishOrDeferForVad` keys on this.
-		if (clientVadBargeInEnergyEligible(this.clientVad, maxAbs, avgAbs)) {
-			this.clientVadDetector.markBargeInEligible();
-		}
-		// The interrupt fires only while assistant audio is actively playing —
-		// a pending playback gate (TTS/native) OR, on the no-gate Gemini native
-		// path, an active turn whose buffered audio is still playing.
-		if (!this.isAssistantAudioActive()) return;
-		if (this.clientVadDetector.hasBargeInFired) return;
-		if (
-			!clientVadBargeInAllowed(
-				this.clientVad,
-				now - this.clientVadDetector.speechStartedAtMs,
-				maxAbs,
-				avgAbs,
-			)
-		) {
-			return;
-		}
+		// Pure A1-A6 decision (barge-in.policy.ts); the ordered gate check,
+		// one-shot marking, actuation, and metrics stay here (A4/C2 sequencing).
+		const decision = decideBargeIn(
+			this.clientVad,
+			{ maxAbs, avgAbs, elapsedMs: now - this.clientVadDetector.speechStartedAtMs },
+			{ assistantAudioActive: this.isAssistantAudioActive() },
+			{ fired: this.clientVadDetector.hasBargeInFired },
+		);
+		if (decision.markEligible) this.clientVadDetector.markBargeInEligible();
+		if (!decision.attempt) return;
 		// Grace check goes BEFORE marking fired — otherwise a frame at t=500ms
 		// within a 1s grace would set the "fired" flag, and the `hasBargeInFired`
 		// guard above would skip the next loud frame at t=1100ms (post-grace),
@@ -2490,6 +2494,7 @@ export class VoiceSession {
 
 		const verdict = decideWatchdogArm(ev, { agentMode: this.dictation.isAgentMode() });
 		if (verdict === 'arm' && this.responseWatchdogMs > 0) {
+			if (ev.routed.llm) this.greeting.noteRoutedUserTurn();
 			this.reconnector.armResponseWatchdog();
 			return;
 		}
@@ -2693,9 +2698,19 @@ export class VoiceSession {
 		// A completed turn means the connection is healthy — reset reconnect counter
 		this.reconnector.resetAttempts();
 
+		// C1 finalization-path selector (finalization.policy.ts) — the effect
+		// ordering below stays here; only the branch decision is extracted.
+		const path = decideFinalizationPath(
+			{ nativePlaybackGatingActive: this.nativePlaybackGatingActive },
+			{ ttsEnabled: this.ttsPipeline !== undefined },
+			{
+				hasAudio: this.nativeGate?.hasAudio === true,
+				dispatchedToolCall: this._nativeResponseDispatchedToolCall,
+			},
+		);
 		// TTS turn gating: when TTS is active, defer turn completion until TTS finishes
 		const ttsGate = this.ttsPipeline?.gate;
-		if (ttsGate) {
+		if (path === 'tts-gate' && ttsGate) {
 			ttsGate.markLlmTextDone();
 			if (!ttsGate.hasTurnText) {
 				// Tool-call-only turn — no text synthesized, TTS won't fire onDone
@@ -2715,11 +2730,7 @@ export class VoiceSession {
 		// and dispatched no tool call, defer finalization until the client
 		// reports playback end (playback.ended) or the fallback timer fires.
 		// See dev_docs/framework/design-playback-end-gating-openai-native.md.
-		if (
-			this.nativePlaybackGatingActive &&
-			this.nativeGate?.hasAudio &&
-			!this._nativeResponseDispatchedToolCall
-		) {
+		if (path === 'native-gate' && this.nativeGate) {
 			// Arm the gate fully BEFORE sendJsonAfterAudio so a sender that
 			// synchronously echoes audio.done back as playback.ended meets an
 			// armed gate rather than a premature-rejected signal. The gate's
@@ -2752,8 +2763,8 @@ export class VoiceSession {
 
 		// Full-greeting suppression (greetingInterruptible: false) releases at
 		// the greeting turn's finalization — the post-playback point on gated
-		// paths. No-op when unarmed.
-		this.greeting.onTurnFinalized();
+		// paths, turn-bound when the H1 token bound. No-op when unarmed.
+		this.greeting.onTurnFinalized(turn.id);
 
 		// Throw-safety: a throw in one effect must not strand the rest, or the
 		// turn would be terminal with a half-published boundary.
@@ -3032,6 +3043,9 @@ export class VoiceSession {
 	 *  steps complete.
 	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §7.5. */
 	private async preEmptForDirectInput(): Promise<void> {
+		// H1 voice-only guarantee: typed/injected input invalidates the greeting
+		// token synchronously (and releases the gate) BEFORE dispatch.
+		this.triggerCoordinator.dispatch('direct-input');
 		const turn = this.turns.current;
 		// Always await the cancel: when no response is in flight, cancelResponse
 		// returns Promise.resolve() (true no-op). When in flight, the

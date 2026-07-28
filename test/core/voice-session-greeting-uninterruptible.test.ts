@@ -118,3 +118,79 @@ describe('VoiceSession greetingInterruptible plumbing', () => {
 		expect(logContains('greeting finished — interrupt suppression released')).toBe(false);
 	});
 });
+
+describe('H1 turn-bound release hardening (Phase 3)', () => {
+	let logSpy: ReturnType<typeof vi.spyOn>;
+
+	beforeEach(() => {
+		vi.useFakeTimers();
+		logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+	});
+	afterEach(() => {
+		logSpy.mockRestore();
+		vi.useRealTimers();
+	});
+
+	const released = () =>
+		logSpy.mock.calls.some(
+			([m]) => typeof m === 'string' && m.includes('interrupt suppression released'),
+		);
+
+	async function gatedSession() {
+		const transport = createMockTransport();
+		const session = new VoiceSession({
+			sessionId: 'sess_h1',
+			userId: 'user_1',
+			apiKey: 'test-key',
+			agents: [createAgent()],
+			initialAgent: 'main',
+			model: mockModel,
+			transport,
+			orchestrationMode: 'actor',
+			clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			greetingInterruptible: false,
+		});
+		await session.start();
+		session.notifyClientConnected();
+		transport.onSessionReady?.('mock_session');
+		await vi.advanceTimersByTimeAsync(10);
+		return { session, transport };
+	}
+
+	it("the greeting turn's own INTERRUPTED finalization releases (provider truncation must not deafen)", async () => {
+		const { session, transport } = await gatedSession();
+		try {
+			transport.onModelTurnStart?.(); // greeting turn starts → binds
+			transport.onAudioOutput?.(Buffer.alloc(4800).toString('base64'));
+			transport.onInterrupted?.(); // provider truncates the greeting
+			await vi.advanceTimersByTimeAsync(10);
+			expect(released()).toBe(true);
+		} finally {
+			await session.close();
+		}
+	});
+
+	it('typed input pre-empts and releases even PRE-TURN (before any model turn exists)', async () => {
+		const { session } = await gatedSession();
+		try {
+			await (session as unknown as { handleTextInput(t: string): Promise<void> }).handleTextInput(
+				'hello',
+			);
+			await vi.advanceTimersByTimeAsync(10);
+			expect(released()).toBe(true);
+		} finally {
+			await session.close();
+		}
+	});
+
+	it('a greeting whose response never starts hits the no-start timeout and releases (no deaf session)', async () => {
+		const { session } = await gatedSession();
+		try {
+			// No model turn, no terminal — advance past the no-start timeout.
+			await vi.advanceTimersByTimeAsync(10_000);
+			expect(released()).toBe(true);
+		} finally {
+			await session.close();
+		}
+	});
+});
