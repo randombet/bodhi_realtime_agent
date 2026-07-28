@@ -42,6 +42,7 @@ function makeHarness(
 		agent?: MainAgent;
 		facts?: MemoryFact[];
 		override?: number | undefined;
+		interruptible?: boolean;
 	} = {},
 ): Harness {
 	const transport = opts.transport ?? fakeTransport();
@@ -59,7 +60,10 @@ function makeHarness(
 		resetNotificationAudio,
 		log,
 	};
-	const config: GreetingControllerConfig = { overrideGraceMs: opts.override };
+	const config: GreetingControllerConfig = {
+		overrideGraceMs: opts.override,
+		greetingInterruptible: opts.interruptible ?? true,
+	};
 	return {
 		controller: new GreetingController(deps, config),
 		transport,
@@ -214,6 +218,92 @@ describe('GreetingController shouldDropOutbound + sendGreeting', () => {
 		h.controller.sendGreeting();
 		expect(h.sendContent).not.toHaveBeenCalled();
 		expect(h.controller.shouldDropOutbound()).toBe(false);
+	});
+});
+
+describe('GreetingController full-greeting suppression (greetingInterruptible: false)', () => {
+	it('arms suppression at sendGreeting: interrupts blocked and mic dropped until onTurnFinalized', () => {
+		// Gemini-like transport: framework does NOT own interrupt, grace is 0.
+		// Full-greeting suppression must still work — it relies on mic-drop, not
+		// cancelResponse.
+		const transport = fakeTransport({
+			capabilities: { frameworkOwnsInterrupt: false },
+			cancelResponse: undefined,
+		} as Partial<LLMTransport>);
+		const h = makeHarness({ transport, override: 0, interruptible: false });
+		h.controller.finalizeGreetingInterruptGrace();
+		expect(h.controller.shouldDropOutbound()).toBe(false);
+
+		h.controller.sendGreeting();
+		expect(h.controller.shouldDropOutbound()).toBe(true);
+		expect(h.controller.requestInterrupt('client-vad')).toBe(false);
+		expect(logHas(h.log, 'interrupt suppressed (greeting')).toBe(true);
+
+		// First audio does NOT release suppression (grace is 0 here).
+		h.controller.maybeArmGraceOnFirstAudio();
+		expect(h.controller.shouldDropOutbound()).toBe(true);
+		expect(h.controller.requestInterrupt('client-vad')).toBe(false);
+
+		// Greeting turn finalized (post-playback) → both gates release.
+		h.controller.onTurnFinalized();
+		expect(h.controller.shouldDropOutbound()).toBe(false);
+		expect(h.controller.requestInterrupt('client-vad')).toBe(true);
+	});
+
+	it('outlives an expired grace window (suppression covers the whole greeting)', () => {
+		vi.useFakeTimers();
+		try {
+			const h = makeHarness({ override: 1000, interruptible: false });
+			h.controller.finalizeGreetingInterruptGrace();
+			h.controller.sendGreeting();
+			h.controller.maybeArmGraceOnFirstAudio();
+			// Past the grace window, greeting still playing → still suppressed.
+			vi.advanceTimersByTime(1001);
+			expect(h.controller.requestInterrupt('vad')).toBe(false);
+			expect(h.controller.shouldDropOutbound()).toBe(true);
+			h.controller.onTurnFinalized();
+			expect(h.controller.requestInterrupt('vad')).toBe(true);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('does not arm when the agent has no greeting', () => {
+		const h = makeHarness({
+			override: 0,
+			interruptible: false,
+			agent: { name: 'NoGreet' } as unknown as MainAgent,
+		});
+		h.controller.finalizeGreetingInterruptGrace();
+		h.controller.sendGreeting();
+		expect(h.controller.shouldDropOutbound()).toBe(false);
+		expect(h.controller.requestInterrupt('x')).toBe(true);
+	});
+
+	it('is cleared by resetForClientConnected and re-arms on the next sendGreeting', () => {
+		const h = makeHarness({ override: 0, interruptible: false });
+		h.controller.finalizeGreetingInterruptGrace();
+		h.controller.sendGreeting();
+		expect(h.controller.shouldDropOutbound()).toBe(true);
+
+		h.controller.resetForClientConnected();
+		expect(h.controller.shouldDropOutbound()).toBe(false);
+		expect(h.controller.requestInterrupt('x')).toBe(true);
+
+		h.controller.sendGreeting();
+		expect(h.controller.shouldDropOutbound()).toBe(true);
+		expect(h.controller.requestInterrupt('x')).toBe(false);
+	});
+
+	it('onTurnFinalized is a no-op when interruptible (default) — grace behavior unchanged', () => {
+		const h = makeHarness({ override: 1000 });
+		h.controller.finalizeGreetingInterruptGrace();
+		h.controller.sendGreeting();
+		h.controller.maybeArmGraceOnFirstAudio();
+		// Grace window active — onTurnFinalized must not cut it short.
+		h.controller.onTurnFinalized();
+		expect(h.controller.requestInterrupt('vad')).toBe(false);
+		expect(h.controller.shouldDropOutbound()).toBe(true);
 	});
 });
 

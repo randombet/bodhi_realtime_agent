@@ -1,0 +1,137 @@
+{
+  "version": 1,
+  "comment": "Calibration baseline for today's ClientVadDetector: steps are [amplitudePcm16, clockAdvanceMsBeforeFrame]; expectations pin segment boundaries and voiced classification. A replacement detector proposes a reviewed delta to this file (G4 calibration), while the structural suite in client-vad-detector-semantics.test.ts must always pass unchanged.",
+  "scenarios": [
+    {
+      "name": "simple completed segment",
+      "steps": [
+        [
+          0,
+          0
+        ],
+        [
+          1500,
+          10
+        ],
+        [
+          1500,
+          60
+        ],
+        [
+          1500,
+          70
+        ],
+        [
+          0,
+          30
+        ],
+        [
+          0,
+          500
+        ]
+      ],
+      "expectVoiced": [
+        false,
+        true,
+        true,
+        true,
+        false,
+        false
+      ],
+      "expectSegmentStartIndex": 1,
+      "expectOutcome": "completed"
+    },
+    {
+      "name": "sub-threshold amplitudes never open a segment",
+      "steps": [
+        [
+          100,
+          10
+        ],
+        [
+          210,
+          30
+        ],
+        [
+          150,
+          30
+        ],
+        [
+          0,
+          500
+        ]
+      ],
+      "expectVoiced": [
+        false,
+        false,
+        false,
+        false
+      ],
+      "expectSegmentStartIndex": -1,
+      "expectOutcome": "none"
+    },
+    {
+      "name": "short blip resolves ignored",
+      "steps": [
+        [
+          0,
+          0
+        ],
+        [
+          1500,
+          10
+        ],
+        [
+          0,
+          30
+        ],
+        [
+          0,
+          600
+        ]
+      ],
+      "expectVoiced": [
+        false,
+        true,
+        false,
+        false
+      ],
+      "expectSegmentStartIndex": 1,
+      "expectOutcome": "ignored"
+    },
+    {
+      "name": "avgAbs threshold alone classifies voiced",
+      "steps": [
+        [
+          0,
+          0
+        ],
+        [
+          300,
+          10
+        ],
+        [
+          300,
+          200
+        ],
+        [
+          0,
+          30
+        ],
+        [
+          0,
+          600
+        ]
+      ],
+      "expectVoiced": [
+        false,
+        true,
+        true,
+        false,
+        false
+      ],
+      "expectSegmentStartIndex": 1,
+      "expectOutcome": "completed"
+    }
+  ]
+}

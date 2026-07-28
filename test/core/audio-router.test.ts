@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { AudioRouter, type AudioRouterDeps } from '../../src/core/audio-router.js';
+import { VAD_FRAME } from '../../src/core/client-vad-detector.js';
 import type { ClientVadDetector } from '../../src/core/client-vad-detector.js';
 import { encodePcmToMulaw } from '../../src/telephony/audio-codec.js';
 import type { LLMTransport, STTProvider } from '../../src/types/transport.js';
@@ -142,5 +143,25 @@ describe('AudioRouter — transcription mode', () => {
 		router.drainTransitionBufferToWhisper();
 		const calls = (whisper.feedAudio as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]);
 		expect(calls).toEqual([a.toString('base64'), b.toString('base64')]); // FIFO order
+	});
+});
+
+describe('AudioRouter — gate atomicity (ported from the Phase-0 tactical contract)', () => {
+	// The Phase-0 per-segment route flag was replaced by the ledger's routed
+	// bits in the Phase-2 re-bind; its reset/leak semantics are pinned in
+	// test/core/audio-router-evidence.test.ts. The single-gate-read atomicity
+	// rule stays here because it is a router-local invariant.
+	const VOICED_START = VAD_FRAME.SEGMENT_STARTED | VAD_FRAME.VOICED;
+
+	it('investigation 8 (atomicity): exactly ONE shouldDropOutbound read per agent-mode frame', () => {
+		const transport = mockTransport(16000, 'pcm');
+		const gate = vi.fn(() => false);
+		const { router, vad } = makeRouter({ transport, shouldDropOutbound: gate });
+		vad.process.mockReturnValueOnce(VOICED_START);
+		router.handleFromClient(FRAME, 'websocket');
+		expect(gate).toHaveBeenCalledTimes(1);
+		vad.process.mockReturnValueOnce(VAD_FRAME.VOICED);
+		router.handleFromClient(FRAME, 'websocket');
+		expect(gate).toHaveBeenCalledTimes(2);
 	});
 });
