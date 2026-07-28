@@ -10,6 +10,18 @@ export const CLIENT_VAD_AVG_ABS_THRESHOLD = 220;
 /** Outcome of a completed speech segment. */
 export type VadSegmentOutcome = 'completed' | 'ignored' | 'none';
 
+/** Allocation-free per-frame classification returned by `process()` —
+ *  numeric bitflags, OR-combined, so the audio fast path allocates nothing
+ *  (see design-speech-evidence-architecture.md §1). `VOICED` = this frame
+ *  cleared the energy thresholds; `SEGMENT_STARTED` = this frame opened a
+ *  new speech segment (the router resets its per-segment route flag on this
+ *  bit BEFORE routing the frame). Empty/invalid frames return `NONE`. */
+export const VAD_FRAME = {
+	NONE: 0,
+	VOICED: 1,
+	SEGMENT_STARTED: 2,
+} as const;
+
 /** One-shot speech check over PCM16 chunks with the same energy thresholds as
  *  the live VAD. Used on the reconnect-buffer drain ("did the user speak during
  *  the reconnect window?") — clients stream continuously, so chunk *presence*
@@ -121,18 +133,22 @@ export class ClientVadDetector {
 
 	/** Process one inbound mic frame (PCM16). Mirrors the former
 	 *  `updateClientAudioVad`: starts/maintains a segment, emits per-frame and
-	 *  segment-boundary events, and auto-completes on sustained silence. */
-	process(data: Buffer): void {
-		if (data.length < 2) return;
+	 *  segment-boundary events, and auto-completes on sustained silence.
+	 *  Returns the frame's `VAD_FRAME` bitflags (allocation-free) so the
+	 *  router can track per-segment route admission. */
+	process(data: Buffer): number {
+		if (data.length < 2) return VAD_FRAME.NONE;
 		analyzeFrameInto(data, this.energy);
-		if (this.energy.samples === 0) return;
+		if (this.energy.samples === 0) return VAD_FRAME.NONE;
 
 		const now = this.clock();
 		const { maxAbs, avgAbs } = this.energy;
 		const hasVoice = maxAbs >= CLIENT_VAD_PEAK_THRESHOLD || avgAbs >= CLIENT_VAD_AVG_ABS_THRESHOLD;
 
 		if (hasVoice) {
+			let flags: number = VAD_FRAME.VOICED;
 			if (!this.speechActive) {
+				flags |= VAD_FRAME.SEGMENT_STARTED;
 				this.speechActive = true;
 				this.speechStartMs = now;
 				this.bargeInFired = false;
@@ -145,7 +161,7 @@ export class ClientVadDetector {
 			}
 			this.lastVoiceMs = now;
 			this.events.onVoicedFrame(now, maxAbs, avgAbs);
-			return;
+			return flags;
 		}
 
 		if (
@@ -155,6 +171,7 @@ export class ClientVadDetector {
 		) {
 			this.complete('silence');
 		}
+		return VAD_FRAME.NONE;
 	}
 
 	/** End the in-progress segment (silence, or a provider-recognition signal).

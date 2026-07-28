@@ -4,6 +4,7 @@ import {
 	CLIENT_VAD_MIN_SPEECH_MS,
 	CLIENT_VAD_SILENCE_MS,
 	ClientVadDetector,
+	VAD_FRAME,
 	type VadEvents,
 } from '../../src/core/client-vad-detector.js';
 
@@ -166,5 +167,44 @@ describe('ClientVadDetector', () => {
 		expect(detector.isSpeechActive).toBe(false);
 		expect(detector.isBargeInEligible).toBe(false);
 		expect(events.onSegmentResolved).not.toHaveBeenCalled();
+	});
+});
+
+describe('ClientVadDetector.process() bitflags (Phase 0 tactical contract)', () => {
+	let now: number;
+	let events: { [K in keyof VadEvents]: ReturnType<typeof vi.fn> };
+	let detector: ClientVadDetector;
+
+	beforeEach(() => {
+		now = 0;
+		events = {
+			onSpeechStart: vi.fn(),
+			onVoicedFrame: vi.fn(),
+			onSegmentResolved: vi.fn(),
+			onUserTurnCompleted: vi.fn(),
+			onSegmentAborted: vi.fn(),
+		};
+		detector = new ClientVadDetector(events, vi.fn(), () => now);
+	});
+
+	it('returns SEGMENT_STARTED|VOICED on the segment-opening frame, VOICED inside, NONE for silence', () => {
+		expect(detector.process(SILENT)).toBe(VAD_FRAME.NONE);
+		expect(detector.process(VOICED)).toBe(VAD_FRAME.SEGMENT_STARTED | VAD_FRAME.VOICED);
+		now = 30;
+		expect(detector.process(VOICED)).toBe(VAD_FRAME.VOICED);
+		now = 60;
+		// Trailing silence inside an open segment is NOT voiced.
+		expect(detector.process(SILENT)).toBe(VAD_FRAME.NONE);
+	});
+
+	it('a new segment after completion returns SEGMENT_STARTED again', () => {
+		detector.process(VOICED);
+		now = CLIENT_VAD_MIN_SPEECH_MS + 50;
+		detector.process(VOICED);
+		now += CLIENT_VAD_SILENCE_MS;
+		detector.process(SILENT); // completes segment 1
+		expect(events.onUserTurnCompleted).toHaveBeenCalledTimes(1);
+		now += 30;
+		expect(detector.process(VOICED) & VAD_FRAME.SEGMENT_STARTED).toBeTruthy();
 	});
 });

@@ -1,6 +1,7 @@
 import { resamplePcm } from '../audio/resample.js';
 import { encodePcmToMulaw } from '../telephony/audio-codec.js';
 import type { LLMTransport, STTProvider } from '../types/transport.js';
+import { VAD_FRAME } from './client-vad-detector.js';
 import type { ClientVadDetector } from './client-vad-detector.js';
 
 /**
@@ -54,34 +55,59 @@ export interface AudioRouterDeps {
 export class AudioRouter {
 	private transitionBuffer: Buffer[] = [];
 	private transitionBufferBytes = 0;
+	/** Per-segment route admission: true once ≥1 VOICED frame of the current
+	 *  client-VAD segment was admitted onto a route (LLM post-gate, external
+	 *  pre-gate, or transcription). Reset on SEGMENT_STARTED — BEFORE routing
+	 *  that frame — so a stale true can never leak into a fully-gated segment.
+	 *  Read by the session's watchdog/retainer actuation at segment terminal.
+	 *  See design-speech-evidence-architecture.md §1 (route-outcome table). */
+	private segmentVoicedPastGate = false;
 
 	constructor(private readonly d: AudioRouterDeps) {}
+
+	/** "Did the current/just-completed segment have voiced audio admitted onto
+	 *  any route?" — the gate is the only place a voiced frame is admitted
+	 *  nowhere, so `false` for a completed voiced segment means the greeting
+	 *  gate dropped everything. */
+	wasSegmentVoicedPastGate(): boolean {
+		return this.segmentVoicedPastGate;
+	}
 
 	/** Entry point for an inbound client mic frame (PCM16). */
 	handleFromClient(data: Buffer, source: 'websocket' | 'rtc' = 'websocket'): void {
 		if (source === 'websocket' && this.d.isRtcAudioReady()) return;
 		if (!this.d.isSessionActive()) return;
 
-		this.d.vad.process(data);
+		const flags = this.d.vad.process(data);
+		if (flags & VAD_FRAME.SEGMENT_STARTED) this.segmentVoicedPastGate = false;
+		const voiced = (flags & VAD_FRAME.VOICED) !== 0;
 
-		// External-audio agents (e.g. TwilioBridge) consume mic frames directly.
-		if (this.d.routeExternalAudio(data)) return;
+		// External-audio agents (e.g. TwilioBridge) consume mic frames directly
+		// — pre-gate by design (exemption confirmed in the investigation).
+		if (this.d.routeExternalAudio(data)) {
+			if (voiced) this.segmentVoicedPastGate = true;
+			return;
+		}
 
 		switch (this.d.getMode()) {
 			case 'agent':
-				this.routeToAgent(data);
+				this.routeToAgent(data, voiced);
 				break;
 			case 'starting_transcription':
 				// Whisper not ready yet — buffer (bounded, oldest evicted on overflow).
+				// Admission counts even if later evicted (admission ≠ receipt).
+				if (voiced) this.segmentVoicedPastGate = true;
 				this.bufferTransitionFrame(data);
 				break;
 			case 'transcription':
+				// Entering the route counts even with no whisper provider.
+				if (voiced) this.segmentVoicedPastGate = true;
 				this.routeToWhisper(data);
 				break;
 			case 'stopping_transcription':
 				// Transport already authoritative; restore the audio path immediately
 				// so the user is never silent while whisper stop is in flight.
-				this.routeToAgent(data);
+				this.routeToAgent(data, voiced);
 				break;
 		}
 	}
@@ -107,12 +133,16 @@ export class AudioRouter {
 		}
 	}
 
-	/** Forward a PCM frame to the agent transport + optional STT provider. */
-	private routeToAgent(data: Buffer): void {
+	/** Forward a PCM frame to the agent transport + optional STT provider.
+	 *  `voiced` is the frame's VAD classification; the gate is read exactly
+	 *  ONCE and that single result decides BOTH the drop and the route-flag
+	 *  update (two reads could disagree at a grace-expiry boundary). */
+	private routeToAgent(data: Buffer, voiced = false): void {
 		// Greeting-grace / greeting-in-flight gate: drop outbound transport + STT
 		// audio. The client-VAD in handleFromClient still processed the frame —
 		// only the downstream consumers are gated.
 		if (this.d.shouldDropOutbound()) return;
+		if (voiced) this.segmentVoicedPastGate = true;
 		// PCM is the source of truth here. The transport fork: G.711 μ-law
 		// (telephony) resamples to 8 kHz then encodes; PCM transports rate-match
 		// to transport.audioFormat.inputSampleRate.

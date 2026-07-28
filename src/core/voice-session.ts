@@ -967,9 +967,22 @@ export class VoiceSession {
 				// User finished a turn → seal the retained utterance (recovery
 				// replay candidate), then arm the response watchdog (the model now
 				// owes a reply; silence past the timeout forces a reconnect).
+				// Phantom-arm guard (Phase 0 tactical fix): a segment whose voiced
+				// audio was ALL dropped by the greeting gate never reached any
+				// route — the model owes nothing. Abort the (unfed) retainer
+				// segment so its pre-roll seed cannot leak into a candidate, and
+				// notify the reconnector so an earlier deferred fire re-evaluates
+				// instead of stranding. See
+				// dev_docs/framework/investigation-greeting-suppression-watchdog-regreet.md.
 				onUserTurnCompleted: () => {
-					this.utteranceRetainer?.seal();
-					this.reconnector.armResponseWatchdog();
+					if (!this.audioRouter.wasSegmentVoicedPastGate()) {
+						this.log('[Watchdog] arm skipped — segment audio gated during greeting');
+						this.utteranceRetainer?.abortSegment();
+						this.reconnector.notifySegmentAborted();
+					} else {
+						this.utteranceRetainer?.seal();
+						this.reconnector.armResponseWatchdog();
+					}
 					// Latency: end-of-user-speech (S2FA/S2T anchor) on the shared metric clock.
 					const atMs = this.clientVadDetector.lastSpeechCompletedMs || this.nowMs();
 					// Raw latency fact (§11): the DETECTED edge (speechEndMs = lastVoiceMs).

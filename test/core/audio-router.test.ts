@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { AudioRouter, type AudioRouterDeps } from '../../src/core/audio-router.js';
+import { VAD_FRAME } from '../../src/core/client-vad-detector.js';
 import type { ClientVadDetector } from '../../src/core/client-vad-detector.js';
 import { encodePcmToMulaw } from '../../src/telephony/audio-codec.js';
 import type { LLMTransport, STTProvider } from '../../src/types/transport.js';
@@ -142,5 +143,85 @@ describe('AudioRouter — transcription mode', () => {
 		router.drainTransitionBufferToWhisper();
 		const calls = (whisper.feedAudio as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]);
 		expect(calls).toEqual([a.toString('base64'), b.toString('base64')]); // FIFO order
+	});
+});
+
+describe('AudioRouter — per-segment route flag (Phase 0 tactical contract)', () => {
+	const VOICED_START = VAD_FRAME.SEGMENT_STARTED | VAD_FRAME.VOICED;
+
+	it('investigation 8b: the flag resets on every segment start and never leaks into a gated segment', () => {
+		const transport = mockTransport(16000, 'pcm');
+		let gated = true;
+		const { router, vad } = makeRouter({ transport, shouldDropOutbound: () => gated });
+
+		// Gated segment: voiced frames dropped → flag stays false.
+		vad.process.mockReturnValueOnce(VOICED_START);
+		router.handleFromClient(FRAME, 'websocket');
+		expect(router.wasSegmentVoicedPastGate()).toBe(false);
+		vad.process.mockReturnValueOnce(VAD_FRAME.VOICED);
+		router.handleFromClient(FRAME, 'websocket');
+		expect(router.wasSegmentVoicedPastGate()).toBe(false);
+
+		// Ungated segment: routed voiced frame → flag true.
+		gated = false;
+		vad.process.mockReturnValueOnce(VOICED_START);
+		router.handleFromClient(FRAME, 'websocket');
+		expect(router.wasSegmentVoicedPastGate()).toBe(true);
+
+		// Next gated segment: SEGMENT_STARTED resets — no stale true.
+		gated = true;
+		vad.process.mockReturnValueOnce(VOICED_START);
+		router.handleFromClient(FRAME, 'websocket');
+		expect(router.wasSegmentVoicedPastGate()).toBe(false);
+	});
+
+	it('trailing-silence frames routed after release do not set the flag (voiced-only)', () => {
+		const transport = mockTransport(16000, 'pcm');
+		let gated = true;
+		const { router, vad } = makeRouter({ transport, shouldDropOutbound: () => gated });
+
+		vad.process.mockReturnValueOnce(VOICED_START);
+		router.handleFromClient(FRAME, 'websocket'); // gated voiced
+		gated = false; // release during trailing silence
+		vad.process.mockReturnValueOnce(VAD_FRAME.NONE);
+		router.handleFromClient(FRAME, 'websocket'); // routed SILENT frame
+		expect(transport.sendAudio).toHaveBeenCalledTimes(1);
+		expect(router.wasSegmentVoicedPastGate()).toBe(false);
+	});
+
+	it('external-audio consumption sets the flag pre-gate (exemption preserved)', () => {
+		const transport = mockTransport(16000, 'pcm');
+		const { router, vad } = makeRouter({
+			transport,
+			shouldDropOutbound: () => true,
+			routeExternalAudio: () => true,
+		});
+		vad.process.mockReturnValueOnce(VOICED_START);
+		router.handleFromClient(FRAME, 'websocket');
+		expect(router.wasSegmentVoicedPastGate()).toBe(true);
+	});
+
+	it('transcription-mode routing sets the flag even with the gate armed', () => {
+		const transport = mockTransport(16000, 'pcm');
+		const { router, vad } = makeRouter({
+			transport,
+			shouldDropOutbound: () => true,
+			getMode: () => 'transcription',
+		});
+		vad.process.mockReturnValueOnce(VOICED_START);
+		router.handleFromClient(FRAME, 'websocket');
+		expect(router.wasSegmentVoicedPastGate()).toBe(true);
+	});
+
+	it('investigation 8 (atomicity): exactly ONE shouldDropOutbound read per agent-mode frame', () => {
+		const transport = mockTransport(16000, 'pcm');
+		const gate = vi.fn(() => false);
+		const { router, vad } = makeRouter({ transport, shouldDropOutbound: gate });
+		vad.process.mockReturnValueOnce(VOICED_START);
+		router.handleFromClient(FRAME, 'websocket');
+		expect(gate).toHaveBeenCalledTimes(1);
+		vad.process.mockReturnValueOnce(VAD_FRAME.VOICED);
+		router.handleFromClient(FRAME, 'websocket');
+		expect(gate).toHaveBeenCalledTimes(2);
 	});
 });
