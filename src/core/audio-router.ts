@@ -67,23 +67,7 @@ export interface AudioRouterDeps {
 export class AudioRouter {
 	private transitionBuffer: Buffer[] = [];
 	private transitionBufferBytes = 0;
-	/** Per-segment route admission: true once ≥1 VOICED frame of the current
-	 *  client-VAD segment was admitted onto a route (LLM post-gate, external
-	 *  pre-gate, or transcription). Reset on SEGMENT_STARTED — BEFORE routing
-	 *  that frame — so a stale true can never leak into a fully-gated segment.
-	 *  Read by the session's watchdog/retainer actuation at segment terminal.
-	 *  See design-speech-evidence-architecture.md §1 (route-outcome table). */
-	private segmentVoicedPastGate = false;
-
 	constructor(private readonly d: AudioRouterDeps) {}
-
-	/** "Did the current/just-completed segment have voiced audio admitted onto
-	 *  any route?" — the gate is the only place a voiced frame is admitted
-	 *  nowhere, so `false` for a completed voiced segment means the greeting
-	 *  gate dropped everything. */
-	wasSegmentVoicedPastGate(): boolean {
-		return this.segmentVoicedPastGate;
-	}
 
 	/** Entry point for an inbound client mic frame (PCM16). Per-frame order is
 	 *  fixed (§1): (1) `process()` → segment start/reset, (2) routing with ONE
@@ -95,7 +79,6 @@ export class AudioRouter {
 
 		const flags = this.d.vad.process(data);
 		if (flags & VAD_FRAME.SEGMENT_STARTED) {
-			this.segmentVoicedPastGate = false;
 			const segId = this.d.vad.activeSegmentId;
 			if (this.d.ledger && segId !== null) {
 				this.d.ledger.beginSegment(segId, this.d.nowMs?.() ?? 0, {
@@ -110,10 +93,7 @@ export class AudioRouter {
 		// External-audio agents (e.g. TwilioBridge) consume mic frames directly
 		// — pre-gate by design (exemption confirmed in the investigation).
 		if (this.d.routeExternalAudio(data)) {
-			if (voiced) {
-				this.segmentVoicedPastGate = true;
-				this.d.ledger?.noteRouted('external');
-			}
+			if (voiced) this.d.ledger?.noteRouted('external');
 			this.finalizeLedgerTerminal(flags);
 			return;
 		}
@@ -125,18 +105,12 @@ export class AudioRouter {
 			case 'starting_transcription':
 				// Whisper not ready yet — buffer (bounded, oldest evicted on overflow).
 				// Admission counts even if later evicted (admission ≠ receipt).
-				if (voiced) {
-					this.segmentVoicedPastGate = true;
-					this.d.ledger?.noteRouted('stt');
-				}
+				if (voiced) this.d.ledger?.noteRouted('stt');
 				this.bufferTransitionFrame(data);
 				break;
 			case 'transcription':
 				// Entering the route counts even with no whisper provider.
-				if (voiced) {
-					this.segmentVoicedPastGate = true;
-					this.d.ledger?.noteRouted('stt');
-				}
+				if (voiced) this.d.ledger?.noteRouted('stt');
 				this.routeToWhisper(data);
 				break;
 			case 'stopping_transcription':
@@ -196,10 +170,7 @@ export class AudioRouter {
 		const drop = this.d.shouldDropOutbound();
 		if (segmentStarted && drop) this.d.ledger?.noteGateActiveAtSegmentStart();
 		if (drop) return;
-		if (voiced) {
-			this.segmentVoicedPastGate = true;
-			this.d.ledger?.noteRouted('llm');
-		}
+		if (voiced) this.d.ledger?.noteRouted('llm');
 		// PCM is the source of truth here. The transport fork: G.711 μ-law
 		// (telephony) resamples to 8 kHz then encodes; PCM transports rate-match
 		// to transport.audioFormat.inputSampleRate.

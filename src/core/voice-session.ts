@@ -675,15 +675,11 @@ export class VoiceSession {
 	private readonly userTurnEvidence = new UserTurnEvidenceLedger();
 	/** Count of model-turn starts (advisory epoch fact for SegmentEvidence). */
 	private _responseEpoch = 0;
-	/** Live terminal actions recorded by the legacy VAD handlers, consumed by
-	 *  the shadow comparator on the ledger's terminal observer (Phase 1). */
-	private readonly _liveTerminalActions = { armed: false, sealed: false };
-	/** Shadow-parity counters (observable, not log-scraped). Exposed via the
-	 *  @internal accessor below; hosted surfacing through the metrics
-	 *  collector is rollout wiring on top of these counters. */
+	/** Shadow-parity counters (observable, not log-scraped). With the Phase-2
+	 *  re-bind, actuation IS the policy verdict, so expected/unexpected stay 0
+	 *  by construction; `compared` keeps counting terminals for coverage
+	 *  accounting. Exposed via the @internal accessor below. */
 	private readonly _shadowCounters = { compared: 0, expected: 0, unexpected: 0 };
-	/** Bounded sample ring of unexpected-divergence evidence snapshots. */
-	private readonly _shadowSamples: SegmentEvidence[] = [];
 	/** Resolved client-VAD barge-in tuning (config + defaults). */
 	private readonly clientVad: ResolvedClientAudioVadConfig;
 	private lastGeminiRecognitionLoggedForSpeechEndMs = 0;
@@ -995,19 +991,11 @@ export class VoiceSession {
 				// notify the reconnector so an earlier deferred fire re-evaluates
 				// instead of stranding. See
 				// dev_docs/framework/investigation-greeting-suppression-watchdog-regreet.md.
+				// Phase-2 re-bind: retainer/watchdog ACTUATION moved to the ledger's
+				// terminal observer (actuateTerminalPolicies) — this legacy handler
+				// keeps only playback resolution, latency/hook publication, and
+				// event publishes (dual-track terminal ownership, design §1).
 				onUserTurnCompleted: () => {
-					if (!this.audioRouter.wasSegmentVoicedPastGate()) {
-						this.log('[Watchdog] arm skipped — segment audio gated during greeting');
-						this.utteranceRetainer?.abortSegment();
-						this.reconnector.notifySegmentAborted();
-						this._liveTerminalActions.armed = false;
-						this._liveTerminalActions.sealed = false;
-					} else {
-						this._liveTerminalActions.sealed = this.utteranceRetainer?.seal() === true;
-						this.reconnector.armResponseWatchdog();
-						this._liveTerminalActions.armed =
-							this.responseWatchdogMs > 0 && this.dictation.isAgentMode();
-					}
 					// Latency: end-of-user-speech (S2FA/S2T anchor) on the shared metric clock.
 					const atMs = this.clientVadDetector.lastSpeechCompletedMs || this.nowMs();
 					// Raw latency fact (§11): the DETECTED edge (speechEndMs = lastVoiceMs).
@@ -1028,12 +1016,9 @@ export class VoiceSession {
 				// Ignored blip / forced reset: the segment can never seal — drop the
 				// in-progress retained audio (keeps the sealed replay candidate) and
 				// let a deferred watchdog replay re-evaluate instead of stranding.
-				onSegmentAborted: () => {
-					this.utteranceRetainer?.abortSegment();
-					this.reconnector.notifySegmentAborted();
-					this._liveTerminalActions.armed = false;
-					this._liveTerminalActions.sealed = false;
-				},
+				// Phase-2 re-bind: abort/notify actuation runs from the ledger's
+				// terminal observer for ignored/aborted terminals.
+				onSegmentAborted: () => {},
 			},
 			(msg) => this.log(msg),
 			this.nowMs,
@@ -1259,9 +1244,10 @@ export class VoiceSession {
 			this.ttsPipeline.wire();
 		}
 
-		// Phase-1 shadow comparator: policy verdicts run beside the live
-		// decisions; NOTHING is actuated from them until the Phase-2 re-bind.
-		this.userTurnEvidence.observeTerminal((ev) => this.compareShadowPolicies(ev));
+		// Phase-2 re-bind: the ledger's post-routing terminal observer drives
+		// retention + watchdog actuation from the policy verdicts — exactly
+		// once per terminal, with routed evidence final (design §2 truth table).
+		this.userTurnEvidence.observeTerminal((ev) => this.actuateTerminalPolicies(ev));
 
 		this.buildClientChannelAndGating(config);
 
@@ -2488,38 +2474,29 @@ export class VoiceSession {
 		this.finalizeTurn(this.nativeGate?.capturedTurn ?? this.turns.current, { interrupted: true });
 	}
 
-	/** Phase-1 shadow comparison (design §Implementation Plan, step 1.5).
-	 *  Classifies the enumerated expected divergences — currently only the
-	 *  provider-forced retention fix from the Phase-2 truth table — and counts
-	 *  everything unenumerated as unexpected, with a bounded evidence-sample
-	 *  ring for diagnosis. */
-	private compareShadowPolicies(ev: Readonly<SegmentEvidence>): void {
-		const live = this._liveTerminalActions;
-		const agentMode = this.dictation.isAgentMode();
-		const armPolicy = this.responseWatchdogMs > 0 && decideWatchdogArm(ev, { agentMode }) === 'arm';
-		const sealPolicy =
-			decideRetention(ev, { replayRecovery: this.utteranceRetainer !== undefined }) === 'seal';
+	/** Phase-2 terminal actuation (design §2 truth table): the ledger's
+	 *  post-routing observer calls the pure policies and actuates EXACTLY once
+	 *  per terminal — `seal()`/`abortSegment()` for retention,
+	 *  `armResponseWatchdog()`/`notifySegmentAborted()` for the reconnector.
+	 *  `notifySegmentAborted` on every non-arm terminal keeps deferred fires
+	 *  from stranding (no-op unless one was deferred). */
+	private actuateTerminalPolicies(ev: Readonly<SegmentEvidence>): void {
 		this._shadowCounters.compared++;
-		const armMatch = armPolicy === live.armed;
-		const sealMatch = sealPolicy === live.sealed;
-		if (armMatch && sealMatch) return;
-		const providerForcedRetentionFix =
-			armMatch &&
-			!sealMatch &&
-			ev.outcome === 'completed' &&
-			ev.terminalCause === 'model-activity-forced' &&
-			ev.routed.llm &&
-			live.sealed &&
-			!sealPolicy;
-		if (providerForcedRetentionFix) {
-			this._shadowCounters.expected++;
+		const retention = decideRetention(ev, {
+			replayRecovery: this.utteranceRetainer !== undefined,
+		});
+		if (retention === 'seal') this.utteranceRetainer?.seal();
+		else this.utteranceRetainer?.abortSegment();
+
+		const verdict = decideWatchdogArm(ev, { agentMode: this.dictation.isAgentMode() });
+		if (verdict === 'arm' && this.responseWatchdogMs > 0) {
+			this.reconnector.armResponseWatchdog();
 			return;
 		}
-		this._shadowCounters.unexpected++;
-		if (this._shadowSamples.length < 4) this._shadowSamples.push(ev as SegmentEvidence);
-		this.log(
-			`[ShadowParity] unexpected divergence (segment=${ev.segmentId}; outcome=${ev.outcome}; cause=${ev.terminalCause}; armPolicy=${armPolicy}; armLive=${live.armed}; sealPolicy=${sealPolicy}; sealLive=${live.sealed})`,
-		);
+		if (verdict === 'skip-no-eligible-route' && ev.outcome === 'completed' && ev.voicedFrames > 0) {
+			this.log('[Watchdog] arm skipped — segment audio gated during greeting');
+		}
+		this.reconnector.notifySegmentAborted();
 	}
 
 	/** @internal Observable shadow-parity counters (Phase-1 exit criteria). */

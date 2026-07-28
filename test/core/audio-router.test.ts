@@ -146,72 +146,12 @@ describe('AudioRouter — transcription mode', () => {
 	});
 });
 
-describe('AudioRouter — per-segment route flag (Phase 0 tactical contract)', () => {
+describe('AudioRouter — gate atomicity (ported from the Phase-0 tactical contract)', () => {
+	// The Phase-0 per-segment route flag was replaced by the ledger's routed
+	// bits in the Phase-2 re-bind; its reset/leak semantics are pinned in
+	// test/core/audio-router-evidence.test.ts. The single-gate-read atomicity
+	// rule stays here because it is a router-local invariant.
 	const VOICED_START = VAD_FRAME.SEGMENT_STARTED | VAD_FRAME.VOICED;
-
-	it('investigation 8b: the flag resets on every segment start and never leaks into a gated segment', () => {
-		const transport = mockTransport(16000, 'pcm');
-		let gated = true;
-		const { router, vad } = makeRouter({ transport, shouldDropOutbound: () => gated });
-
-		// Gated segment: voiced frames dropped → flag stays false.
-		vad.process.mockReturnValueOnce(VOICED_START);
-		router.handleFromClient(FRAME, 'websocket');
-		expect(router.wasSegmentVoicedPastGate()).toBe(false);
-		vad.process.mockReturnValueOnce(VAD_FRAME.VOICED);
-		router.handleFromClient(FRAME, 'websocket');
-		expect(router.wasSegmentVoicedPastGate()).toBe(false);
-
-		// Ungated segment: routed voiced frame → flag true.
-		gated = false;
-		vad.process.mockReturnValueOnce(VOICED_START);
-		router.handleFromClient(FRAME, 'websocket');
-		expect(router.wasSegmentVoicedPastGate()).toBe(true);
-
-		// Next gated segment: SEGMENT_STARTED resets — no stale true.
-		gated = true;
-		vad.process.mockReturnValueOnce(VOICED_START);
-		router.handleFromClient(FRAME, 'websocket');
-		expect(router.wasSegmentVoicedPastGate()).toBe(false);
-	});
-
-	it('trailing-silence frames routed after release do not set the flag (voiced-only)', () => {
-		const transport = mockTransport(16000, 'pcm');
-		let gated = true;
-		const { router, vad } = makeRouter({ transport, shouldDropOutbound: () => gated });
-
-		vad.process.mockReturnValueOnce(VOICED_START);
-		router.handleFromClient(FRAME, 'websocket'); // gated voiced
-		gated = false; // release during trailing silence
-		vad.process.mockReturnValueOnce(VAD_FRAME.NONE);
-		router.handleFromClient(FRAME, 'websocket'); // routed SILENT frame
-		expect(transport.sendAudio).toHaveBeenCalledTimes(1);
-		expect(router.wasSegmentVoicedPastGate()).toBe(false);
-	});
-
-	it('external-audio consumption sets the flag pre-gate (exemption preserved)', () => {
-		const transport = mockTransport(16000, 'pcm');
-		const { router, vad } = makeRouter({
-			transport,
-			shouldDropOutbound: () => true,
-			routeExternalAudio: () => true,
-		});
-		vad.process.mockReturnValueOnce(VOICED_START);
-		router.handleFromClient(FRAME, 'websocket');
-		expect(router.wasSegmentVoicedPastGate()).toBe(true);
-	});
-
-	it('transcription-mode routing sets the flag even with the gate armed', () => {
-		const transport = mockTransport(16000, 'pcm');
-		const { router, vad } = makeRouter({
-			transport,
-			shouldDropOutbound: () => true,
-			getMode: () => 'transcription',
-		});
-		vad.process.mockReturnValueOnce(VOICED_START);
-		router.handleFromClient(FRAME, 'websocket');
-		expect(router.wasSegmentVoicedPastGate()).toBe(true);
-	});
 
 	it('investigation 8 (atomicity): exactly ONE shouldDropOutbound read per agent-mode frame', () => {
 		const transport = mockTransport(16000, 'pcm');

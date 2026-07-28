@@ -146,7 +146,7 @@ describe('speech-evidence shadow comparator', () => {
 		}
 	});
 
-	it('a provider-forced routed segment counts the enumerated EXPECTED retention divergence', async () => {
+	it('a provider-forced routed segment actuates the policy abort (Phase-2 re-bind: no divergence, no re-seal)', async () => {
 		const { session, transport, counters } = makeSession({ replayRecovery: true });
 		try {
 			await activate(session, transport);
@@ -156,8 +156,13 @@ describe('speech-evidence shadow comparator', () => {
 			session.feedAudioFromClient(micFrame(2400));
 			transport.onModelTurnStart?.(); // complete('provider-recognition')
 			expect(counters().compared).toBe(1);
-			expect(counters().expected).toBe(1); // live re-seals; policy aborts
+			// Actuation IS the policy verdict now — the formerly-expected
+			// divergence class is gone by construction.
+			expect(counters().expected).toBe(0);
 			expect(counters().unexpected).toBe(0);
+			const retainer = (session as unknown as { utteranceRetainer?: { peek(m: number): unknown } })
+				.utteranceRetainer;
+			expect(retainer?.peek(60_000) ?? null).toBeNull(); // answered speech: no candidate
 		} finally {
 			await session.close();
 		}

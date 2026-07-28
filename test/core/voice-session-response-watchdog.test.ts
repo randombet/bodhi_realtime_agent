@@ -333,6 +333,101 @@ function anyRecoveryFired(t: GatedTransport): boolean {
 	);
 }
 
+describe('Phase-2 re-bind: provider-forced retention + H3 stale-candidate guard', () => {
+	beforeEach(() => vi.useFakeTimers());
+	afterEach(() => vi.useRealTimers());
+
+	function peek(session: VoiceSession): unknown {
+		return (
+			(
+				session as unknown as { utteranceRetainer?: { peek(m: number): unknown } }
+			).utteranceRetainer?.peek(60_000) ?? null
+		);
+	}
+
+	it('a provider-forced ROUTED segment arms (parity) but never re-seals a candidate for answered speech', async () => {
+		let session: VoiceSession | undefined;
+		try {
+			const transport = createMockTransport();
+			session = new VoiceSession({
+				sessionId: 'sess_pf',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createAgent()],
+				initialAgent: 'main',
+				model: mockModel,
+				transport,
+				orchestrationMode: 'actor',
+				clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+				clientAudioVad: { bargeInConfirmMs: 0 },
+				responseWatchdogMs: 8000,
+				watchdogReplayRecovery: true,
+			});
+			await activate(session, transport);
+
+			// Routed voiced segment, still open (no completing silence).
+			session.feedAudioFromClient(micFrame(2400));
+			vi.advanceTimersByTime(150);
+			session.feedAudioFromClient(micFrame(2400));
+			expect(transport.sendAudio).toHaveBeenCalled();
+
+			// Model answers: onModelTurnStart clears the candidate, then
+			// force-completes the segment (provider-recognition). Today the
+			// completion re-seals — the Phase-2 truth table aborts instead.
+			transport.onModelTurnStart?.();
+			expect(peek(session)).toBeNull(); // answered speech leaves NO candidate
+
+			// Watchdog parity: the forced-completed routed segment still arms.
+			vi.advanceTimersByTime(8000 + 1000);
+			await vi.runAllTimersAsync();
+			expect(transport.reconnect).toHaveBeenCalled();
+		} finally {
+			await session?.close();
+		}
+	});
+
+	it('H3: a sealed candidate survives a later fully-gated segment and stays replayable', async () => {
+		let session: VoiceSession | undefined;
+		try {
+			const s = setupGated({ replayRecovery: true });
+			session = s.session;
+			await activateWithGreeting(session, s.transport);
+			s.transport.onModelTurnStart?.();
+			s.transport.onTurnComplete?.(); // greeting done → gate open
+			await vi.advanceTimersByTimeAsync(10);
+
+			completeUserTurn(session); // routed → seals candidate A + arms
+			expect(peek(session)).not.toBeNull();
+			s.transport.onModelTurnStart?.(); // model answers → clears A + disarms
+			s.transport.onAudioOutput?.(Buffer.alloc(4800).toString('base64'));
+
+			// A second routed segment seals candidate B.
+			completeUserTurn(session);
+			expect(peek(session)).not.toBeNull();
+
+			// A transfer-style second greeting re-arms suppression: simulate the
+			// gate re-arming, then a fully-gated segment completes.
+			const greeting = (
+				session as unknown as {
+					greeting: { sendGreeting(): void };
+				}
+			).greeting;
+			greeting.sendGreeting();
+			completeUserTurn(session); // fully gated → abort path
+			// Candidate B must SURVIVE the gated segment's abort.
+			expect(peek(session)).not.toBeNull();
+
+			// And it remains replayable by a legitimately armed recovery: the
+			// still-armed watchdog from segment B fires → tier-1 in-place replay.
+			vi.advanceTimersByTime(8000 + 1000);
+			await vi.runAllTimersAsync();
+			expect(s.transport.replayUserTurn).toHaveBeenCalled();
+		} finally {
+			await session?.close();
+		}
+	});
+});
+
 describe('external-audio no-change guard (investigation test 7)', () => {
 	beforeEach(() => vi.useFakeTimers());
 	afterEach(() => vi.useRealTimers());
