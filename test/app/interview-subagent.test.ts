@@ -108,11 +108,25 @@ describe('InterviewSubagent', () => {
 	});
 
 	it('prepare() failure falls back to a generic blueprint (never throws); invoke() still works', async () => {
-		gen.mockRejectedValueOnce(new Error('boom'));
+		gen.mockRejectedValue(new Error('boom')); // persistent: fails the retry too
 		const sub = makeSubagent();
 		await expect(sub.prepare()).resolves.toBeUndefined();
 		const r = parse(await sub.invoke('', {}));
 		expect(r.status).toBe('question'); // fallback blueprint has ≥2 sections
+	});
+
+	it('prepare() retries the planner once after a transient failure instead of falling back', async () => {
+		gen.mockRejectedValueOnce(new Error('response did not match schema'));
+		gen.mockImplementation(plannerThenAdvance());
+		const sub = makeSubagent();
+		await sub.prepare();
+		const r = parse(await sub.invoke('', {}));
+		expect(r.status).toBe('question');
+		if (r.status === 'question') expect(r.question.text).toBe('Q1'); // planner blueprint, not fallback
+		const plannerCalls = gen.mock.calls.filter(
+			(c: unknown[]) => (c[0] as { schemaName?: string })?.schemaName === 'interview_blueprint',
+		);
+		expect(plannerCalls).toHaveLength(2);
 	});
 
 	it('prepare() re-throws AbortError', async () => {

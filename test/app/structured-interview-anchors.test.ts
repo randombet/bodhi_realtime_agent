@@ -4,6 +4,7 @@ import {
 	normalizeInterviewAnchors,
 	validateInterviewAnchorsField,
 } from '../../app/agents/interview/structured-interview-default-content.js';
+import { authoringFromAnchors } from '../../app/agents/interview/structured-interview-session.js';
 
 describe('structured interview anchors', () => {
 	it('validateInterviewAnchorsField accepts the default trio shape', () => {
@@ -32,6 +33,21 @@ describe('structured interview anchors', () => {
 			'company_interest',
 			'role_relevant_challenge',
 		]);
+	});
+
+	it('authoringFromAnchors keeps spec/focus as planner guidance only — never as a speakable question', () => {
+		const { sections, sectionsMode } = authoringFromAnchors(DEFAULT_STRUCTURED_INTERVIEW_ANCHORS);
+		expect(sectionsMode).toBe('refine');
+		expect(sections).toHaveLength(3);
+		for (const [i, s] of (sections ?? []).entries()) {
+			const a = DEFAULT_STRUCTURED_INTERVIEW_ANCHORS[i];
+			expect(s.id).toBe(a.id);
+			expect(s.title).toBe(a.focus);
+			expect(s.probeGoal).toBe(a.spec);
+			// The spec is interviewer guidance ("Ask what draws them…"), not candidate-facing text —
+			// it must never seed the `question` field, which downstream is spoken verbatim.
+			expect(s.question).toBeUndefined();
+		}
 	});
 
 	it('normalizeInterviewAnchors uses custom anchors when valid', () => {

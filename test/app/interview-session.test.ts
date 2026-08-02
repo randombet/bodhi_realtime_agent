@@ -272,7 +272,7 @@ describe('previewInterviewBlueprint', () => {
 	});
 
 	it('reports usedFallback + prepareError when the planner fails', async () => {
-		gen.mockRejectedValueOnce(new Error('planner exploded'));
+		gen.mockRejectedValue(new Error('planner exploded')); // persistent: fails the retry too
 		const preview = await previewInterviewBlueprint({
 			documents: docs,
 			durationMinutes: 15,

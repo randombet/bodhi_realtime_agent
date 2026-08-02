@@ -338,6 +338,67 @@ describe('buildFallbackBlueprint', () => {
 		expect(bp.sections.map((s) => s.primaryQuestion.text)).toEqual(['Q-one', 'Q-two']);
 	});
 
+	it('questionless authored sections get candidate-facing generic questions, never the guidance text', () => {
+		// Anchor-derived sections carry planner guidance in probeGoal ("Ask what draws them…") and no
+		// `question`. When the planner is unavailable there is no LLM to write the spoken question, so
+		// the fallback must use the generic candidate-facing builders — never speak the guidance.
+		const bp = buildFallbackBlueprint(
+			docs,
+			opts({
+				sections: [
+					{
+						id: 'walk_resume',
+						title: 'Resume narrative',
+						probeGoal:
+							'Open by asking the candidate to walk through their background or resume highlights relevant to the role.',
+					},
+					{
+						id: 'company_interest',
+						title: 'Why this company',
+						probeGoal:
+							'Ask what draws them to the company named in the company intro and how it fits their goals.',
+					},
+					{
+						id: 'role_relevant_challenge',
+						title: 'Role-relevant challenge',
+						probeGoal:
+							'Ask for a concrete challenge relevant to this role, the constraints, what they tried, and the outcome.',
+					},
+				],
+				sectionsMode: 'refine',
+			}),
+		);
+		expect(bp.sections.map((s) => s.id)).toEqual([
+			'walk_resume',
+			'company_interest',
+			'role_relevant_challenge',
+		]);
+		for (const s of bp.sections) {
+			expect(s.primaryQuestion.text).not.toMatch(/^(ask|open by)/i);
+			expect(s.primaryQuestion.text.toLowerCase()).not.toContain('the candidate');
+			expect(s.primaryQuestion.text.toLowerCase()).not.toContain('company intro');
+		}
+		// role-adaptive generic wording, personalized with the resolved names
+		expect(bp.sections[0].primaryQuestion.text).toContain('walk me through your background');
+		expect(bp.sections[1].primaryQuestion.text).toContain('Vector Foundry');
+	});
+
+	it('keeps interviewer-authored questions verbatim while replacing questionless ones', () => {
+		const bp = buildFallbackBlueprint(
+			docs,
+			opts({
+				sections: [
+					{ id: 'custom', question: 'Tell me about your favorite launch.' },
+					{ id: 'guidance_only', title: 'Compensation', probeGoal: 'Ask about compensation.' },
+				],
+				sectionsMode: 'refine',
+			}),
+		);
+		expect(bp.sections[0].primaryQuestion.text).toBe('Tell me about your favorite launch.');
+		expect(bp.sections[1].primaryQuestion.text).not.toMatch(/^ask/i);
+		expect(bp.sections[1].title).toBe('Compensation');
+	});
+
 	it("flavors the 'hard problem' section technical when styleHint says engineering", () => {
 		const bp = buildFallbackBlueprint(docs, opts({ styleHint: 'software engineering screening' }));
 		expect(bp.sections[2].primaryQuestion.text.toLowerCase()).toContain('technical');
