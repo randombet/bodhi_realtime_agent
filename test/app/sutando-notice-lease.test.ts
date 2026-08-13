@@ -108,6 +108,44 @@ describe('recovery-notice lease/ack protocol', () => {
 		expect(relay.ackRecoveryNotice(noticeId, 'session-b')).toBe(true);
 	});
 
+	it('an expired lease can no longer ack, even before anyone reclaims', async () => {
+		let t = 2_000_000;
+		const { relay, noticeId } = await relayWithNotice(dir(), () => t);
+		relays.push(relay);
+		expect(relay.claimRecoveryNotices('session-a')).toHaveLength(1);
+		t += 61_000; // lease expired; notice is back in the pool, unclaimed
+		expect(relay.ackRecoveryNotice(noticeId, 'session-a')).toBe(false);
+		expect(relay.claimRecoveryNotices('session-b')).toHaveLength(1);
+	});
+
+	it('ack fails (and the notice survives) when the durable consumed-write fails', async () => {
+		const failingLedger = {
+			append: () => {},
+			reap: () => ({
+				notices: [{ id: 'n1', kind: 'dropped_before_delivery', text: 'a request was dropped' }],
+			}),
+			loadTaskViews: () => new Map([['n1', { nonce: 'aaaa' }]]),
+			markNoticeConsumed: () => {
+				throw new Error('disk full');
+			},
+		} as unknown as SutandoTaskLedger;
+		const relay = new SutandoRelayServer({
+			token: TOKEN,
+			port: 0,
+			log: () => {},
+			ledger: failingLedger,
+		});
+		await relay.start();
+		relays.push(relay);
+		relay.reapNow();
+		expect(relay.claimRecoveryNotices('session-a')).toHaveLength(1);
+		// Without a durable notice_consumed record a restart would redeliver, so
+		// the ack must refuse rather than claim success.
+		expect(relay.ackRecoveryNotice('n1', 'session-a')).toBe(false);
+		relay.releaseRecoveryNotices('session-a');
+		expect(relay.claimRecoveryNotices('session-b')).toHaveLength(1);
+	});
+
 	it('ack by a non-claiming session is rejected and keeps the notice', async () => {
 		const { relay, noticeId } = await relayWithNotice(dir(), Date.now);
 		relays.push(relay);
