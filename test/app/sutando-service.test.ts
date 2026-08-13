@@ -210,6 +210,17 @@ describe('startSutandoService', () => {
 		expect(service.state === 'disabled' && service.reason).toBe('dirs_overlap');
 	});
 
+	it('disabled(dirs_overlap) when a symlinked parent aliases the same physical dir', async () => {
+		const r = root();
+		mkdirSync(join(r, 'actual'));
+		symlinkSync(join(r, 'actual'), join(r, 'alias'));
+		const env = validEnv(r);
+		env.SUTANDO_RAW_DIR = join(r, 'actual', 'data');
+		env.SUTANDO_LEDGER_DIR = join(r, 'alias', 'data'); // lexically distinct, physically identical
+		const service = await start(env);
+		expect(service.state === 'disabled' && service.reason).toBe('dirs_overlap');
+	});
+
 	it('tightens a pre-existing permissive raw dir to 0700', async () => {
 		const r = root();
 		const env = validEnv(r);
