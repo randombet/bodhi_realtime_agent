@@ -217,9 +217,8 @@ describe('ledger filesystem hardening', () => {
 			// A planted symlink where a ledger file would go must be refused.
 			writeFileSync(join(outside, 'victim.jsonl'), '');
 			symlinkSync(join(outside, 'victim.jsonl'), join(dir, 'bbbb.jsonl'));
-			expect(() => ledger.append({ id: 't2', nonce: 'bbbb', state: 'submitted' })).toThrow(
-				/not a regular file/,
-			);
+			// O_NOFOLLOW rejects the symlink at open time (ELOOP).
+			expect(() => ledger.append({ id: 't2', nonce: 'bbbb', state: 'submitted' })).toThrow();
 			expect(readFileSync(join(outside, 'victim.jsonl'), 'utf-8')).toBe('');
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
