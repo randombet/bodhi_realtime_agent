@@ -266,6 +266,26 @@ describe('SutandoTicketStore', () => {
 		expect(store.consume(ticket, 'sutando')).toBeNull();
 	});
 
+	it('clamps out-of-range constructor options back into the design bounds', () => {
+		let t = 1_000_000;
+		const store = new SutandoTicketStore({ ttlMs: 3_600_000, now: () => t }); // way past 60s
+		const { ticket, expiresInMs } = store.issue({ ownerUserId: 'owner-1', origin: ORIGIN });
+		expect(expiresInMs).toBe(60_000); // clamped
+		t += 61_000;
+		expect(store.consume(ticket, 'sutando')).toBeNull();
+		store.stop();
+	});
+
+	it('the periodic sweep prunes an idle store', async () => {
+		let t = 1_000_000;
+		const store = new SutandoTicketStore({ ttlMs: 20, now: () => t });
+		store.issue({ ownerUserId: 'owner-1', origin: ORIGIN });
+		t += 30_000;
+		await new Promise((r) => setTimeout(r, 60)); // let the interval fire
+		expect(store.size).toBe(0);
+		store.stop();
+	});
+
 	it('per-owner cap evicts oldest on overflow', () => {
 		let t = 1_000_000;
 		const store = new SutandoTicketStore({ perOwnerCap: 3, now: () => t });

@@ -210,6 +210,18 @@ describe('startSutandoService', () => {
 		expect(service.state === 'disabled' && service.reason).toBe('dirs_overlap');
 	});
 
+	it('origin failures still expose the gate (owner can sign in and see the diagnostic state)', async () => {
+		const env = validEnv(root());
+		env.SUTANDO_ALLOWED_ORIGINS = 'http://insecure.example.com';
+		const service = await start(env);
+		expect(service.state === 'disabled' && service.reason).toBe('origin_invalid');
+		expect(service.gate).toEqual({
+			ownerEmail: 'owner@example.com',
+			supabaseUrl: 'https://project.supabase.co',
+			supabaseAnonKey: 'anon-key',
+		});
+	});
+
 	it('disabled(dirs_overlap) for a nested dir whose name starts with ".."', async () => {
 		const r = root();
 		const env = validEnv(r);
