@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { buildVoiceWebSocketUrl } from '../../app/web-client/src/voice-ws-url.js';
+import {
+	buildVoiceWebSocketUrl,
+	sanitizeVoiceWsUrlForLog,
+} from '../../app/web-client/src/voice-ws-url.js';
 
 describe('buildVoiceWebSocketUrl', () => {
 	it('appends userId and agentProfile', () => {
@@ -188,5 +191,45 @@ describe('buildVoiceWebSocketUrl', () => {
 		expect(u).toContain('spatialReal=1');
 		expect(u).toContain('avatarProvider=spatialreal');
 		expect(u).toContain('spatialAvatarId=avatar-1');
+	});
+});
+
+describe('sutando ticket URL contract (design step 13)', () => {
+	it('sutando URLs carry the ticket and NEVER the Supabase bearer', () => {
+		const u = buildVoiceWebSocketUrl({
+			baseUrl: 'wss://demo.example.com/ws',
+			clientUserId: 'u1',
+			agentProfile: 'sutando',
+			sutandoTicket: 'ticket-abc',
+			supabaseAccessToken: 'SECRET-BEARER', // must be omitted for this profile
+		});
+		expect(u).toContain('sutandoTicket=ticket-abc');
+		expect(u).not.toContain('SECRET-BEARER');
+		expect(u).not.toContain('access_token=');
+	});
+
+	it('other profiles keep the existing access_token behavior and never a ticket', () => {
+		const u = buildVoiceWebSocketUrl({
+			baseUrl: 'wss://demo.example.com/ws',
+			clientUserId: 'u1',
+			agentProfile: 'standard',
+			sutandoTicket: 'ticket-abc', // ignored off-profile
+			supabaseAccessToken: 'bearer-1',
+		});
+		expect(u).toContain('access_token=bearer-1');
+		expect(u).not.toContain('sutandoTicket=');
+	});
+
+	it('sanitizeVoiceWsUrlForLog redacts every credential-bearing param', () => {
+		const url =
+			'wss://h/ws?agentProfile=sutando&sutandoTicket=T1&access_token=A1&profileContextToken=P1&userId=u1';
+		const clean = sanitizeVoiceWsUrlForLog(url);
+		expect(clean).not.toContain('T1');
+		expect(clean).not.toContain('A1');
+		expect(clean).not.toContain('P1');
+		expect(clean).toContain('sutandoTicket=[redacted]');
+		expect(clean).toContain('access_token=[redacted]');
+		expect(clean).toContain('profileContextToken=[redacted]');
+		expect(clean).toContain('userId=u1');
 	});
 });
