@@ -1887,6 +1887,21 @@ export class VoiceSession {
 		this.notificationSink.publish('SYSTEM', text, 'normal');
 	}
 
+	/**
+	 * Observable-acceptance variant of {@link publishSystemNotification}:
+	 * returns false when the session cannot accept the notification — already
+	 * CLOSED, or actor mode without a live runtime — so claim/ack delivery
+	 * protocols (e.g. Sutando recovery notices) can requeue instead of silently
+	 * losing the message. `true` means enqueued; spoken delivery remains
+	 * at-most-once by design (queues are in-memory).
+	 */
+	tryPublishSystemNotification(text: string): boolean {
+		if (this.sessionManager.state === 'CLOSED') return false;
+		if (this._isActorMode && !this.runtimeOrchestrator) return false;
+		this.publishSystemNotification(text);
+		return true;
+	}
+
 	/** Start the client WebSocket server and connect to the LLM transport. */
 	async start(): Promise<void> {
 		// Validate TTS config
