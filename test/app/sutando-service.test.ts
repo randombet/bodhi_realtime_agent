@@ -210,6 +210,14 @@ describe('startSutandoService', () => {
 		expect(service.state === 'disabled' && service.reason).toBe('dirs_overlap');
 	});
 
+	it('disabled(dirs_overlap) for a nested dir whose name starts with ".."', async () => {
+		const r = root();
+		const env = validEnv(r);
+		env.SUTANDO_LEDGER_DIR = join(r, 'raw', '..ledger'); // inside raw despite the '..' prefix
+		const service = await start(env);
+		expect(service.state === 'disabled' && service.reason).toBe('dirs_overlap');
+	});
+
 	it('disabled(dirs_overlap) when the raw dir is the filesystem root', async () => {
 		const env = validEnv(root());
 		env.SUTANDO_RAW_DIR = '/';
