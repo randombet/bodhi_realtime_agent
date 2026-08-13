@@ -210,6 +210,13 @@ describe('startSutandoService', () => {
 		expect(service.state === 'disabled' && service.reason).toBe('dirs_overlap');
 	});
 
+	it('disabled(dirs_overlap) when the raw dir is the filesystem root', async () => {
+		const env = validEnv(root());
+		env.SUTANDO_RAW_DIR = '/';
+		const service = await start(env);
+		expect(service.state === 'disabled' && service.reason).toBe('dirs_overlap');
+	});
+
 	it('disabled(dirs_overlap) when a symlinked parent aliases the same physical dir', async () => {
 		const r = root();
 		mkdirSync(join(r, 'actual'));
