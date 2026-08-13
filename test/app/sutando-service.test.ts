@@ -1,4 +1,5 @@
 import {
+	lstatSync,
 	mkdirSync,
 	mkdtempSync,
 	readdirSync,
@@ -192,6 +193,57 @@ describe('startSutandoService', () => {
 			expect(service.state === 'disabled' && service.reason).toBe(reason);
 		});
 	}
+
+	it('disabled(dirs_overlap) when the ledger dir nests inside the raw dir', async () => {
+		const r = root();
+		const env = validEnv(r);
+		env.SUTANDO_LEDGER_DIR = join(r, 'raw', 'ledger');
+		const service = await start(env);
+		expect(service.state === 'disabled' && service.reason).toBe('dirs_overlap');
+	});
+
+	it('disabled(dirs_overlap) when raw and ledger dirs are equal', async () => {
+		const r = root();
+		const env = validEnv(r);
+		env.SUTANDO_LEDGER_DIR = env.SUTANDO_RAW_DIR as string;
+		const service = await start(env);
+		expect(service.state === 'disabled' && service.reason).toBe('dirs_overlap');
+	});
+
+	it('tightens a pre-existing permissive raw dir to 0700', async () => {
+		const r = root();
+		const env = validEnv(r);
+		mkdirSync(env.SUTANDO_RAW_DIR as string, { recursive: true, mode: 0o755 });
+		const service = await start(env);
+		expect(service.state).toBe('ready');
+		const mode = lstatSync(env.SUTANDO_RAW_DIR as string).mode & 0o777;
+		expect(mode).toBe(0o700);
+	});
+
+	it('disabled(ledger_dir_unusable) on a symlinked ledger dir', async () => {
+		const r = root();
+		const real = join(r, 'real-ledger');
+		mkdirSync(real);
+		const link = join(r, 'ledger-link');
+		symlinkSync(real, link);
+		const env = validEnv(r);
+		env.SUTANDO_LEDGER_DIR = link;
+		const service = await start(env);
+		expect(service.state === 'disabled' && service.reason).toBe('ledger_dir_unusable');
+	});
+
+	it('disabled(sweep_schedule_failed) when the sweep scheduler throws', async () => {
+		const env = validEnv(root());
+		const service = await startSutandoService({
+			env,
+			relayPortOverride: 0,
+			scheduleSweep: () => {
+				throw new Error('scheduler down');
+			},
+		});
+		services.push(service);
+		expect(service.state === 'disabled' && service.reason).toBe('sweep_schedule_failed');
+	});
 
 	it('disabled(relay_port_invalid) on an out-of-range port', async () => {
 		const env = validEnv(root());
