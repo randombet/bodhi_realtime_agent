@@ -4,7 +4,7 @@ import {
 	assertSutandoProfileAllowed,
 	isRegisteredSutandoAuthorization,
 	validateNoSutandoTwilioPins,
-} from '../../app/server/sutando/sutando-profile-gate.js';
+} from '../../app/lib/integrations/sutando/sutando-profile-gate.js';
 
 describe('assertSutandoProfileAllowed', () => {
 	it('authorizes the web WS surface with a ticket grant', () => {

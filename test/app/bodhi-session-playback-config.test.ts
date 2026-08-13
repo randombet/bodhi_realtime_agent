@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createBodhiSessionConfig } from '../../app/agents/bodhi-session.js';
 
+/** The factory now returns { voiceSessionConfig, profileLifecycle }; these
+ *  threading tests only inspect the config. */
+async function createConfig(options: Parameters<typeof createBodhiSessionConfig>[0]) {
+	return (await createBodhiSessionConfig(options)).voiceSessionConfig;
+}
+
 function baseOptions() {
 	return {
 		apiKey: 'test-key',
@@ -20,7 +26,7 @@ function baseOptions() {
 
 describe('createBodhiSessionConfig — playback-state config threading', () => {
 	it('threads playbackStateProtocol and ttsPlaybackFallbackMarginMs into VoiceSessionConfig', async () => {
-		const config = await createBodhiSessionConfig({
+		const config = await createConfig({
 			...baseOptions(),
 			playbackStateProtocol: 'audio_done',
 			ttsPlaybackFallbackMarginMs: 2000,
@@ -30,34 +36,34 @@ describe('createBodhiSessionConfig — playback-state config threading', () => {
 	});
 
 	it('leaves both undefined when the options are not provided', async () => {
-		const config = await createBodhiSessionConfig(baseOptions());
+		const config = await createConfig(baseOptions());
 		expect(config.playbackStateProtocol).toBeUndefined();
 		expect(config.ttsPlaybackFallbackMarginMs).toBeUndefined();
 	});
 
 	it('threads nativePlaybackGating into VoiceSessionConfig', async () => {
-		const onConfig = await createBodhiSessionConfig({
+		const onConfig = await createConfig({
 			...baseOptions(),
 			nativePlaybackGating: true,
 		});
 		expect(onConfig.nativePlaybackGating).toBe(true);
-		const offConfig = await createBodhiSessionConfig(baseOptions());
+		const offConfig = await createConfig(baseOptions());
 		expect(offConfig.nativePlaybackGating).toBeUndefined();
 	});
 
 	it('threads explicit greetingInterruptGraceMs overrides into VoiceSessionConfig', async () => {
-		const disabledConfig = await createBodhiSessionConfig({
+		const disabledConfig = await createConfig({
 			...baseOptions(),
 			greetingInterruptGraceMs: 0,
 		});
 		expect(disabledConfig.greetingInterruptGraceMs).toBe(0);
 
-		const inheritedConfig = await createBodhiSessionConfig(baseOptions());
+		const inheritedConfig = await createConfig(baseOptions());
 		expect(inheritedConfig.greetingInterruptGraceMs).toBeUndefined();
 	});
 
 	it('threads explicit clientAudioInputRate overrides into VoiceSessionConfig', async () => {
-		const config = await createBodhiSessionConfig({
+		const config = await createConfig({
 			...baseOptions(),
 			clientAudioInputRate: 16000,
 		});
@@ -67,18 +73,18 @@ describe('createBodhiSessionConfig — playback-state config threading', () => {
 
 describe('createBodhiSessionConfig — watchdog replay recovery threading (H2)', () => {
 	it('threads watchdogReplayRecovery for gemini sessions; absent by default', async () => {
-		const on = await createBodhiSessionConfig({
+		const on = await createConfig({
 			...baseOptions(),
 			watchdogReplayRecovery: true,
 		});
 		expect(on.watchdogReplayRecovery).toBe(true);
 
-		const off = await createBodhiSessionConfig(baseOptions());
+		const off = await createConfig(baseOptions());
 		expect(off.watchdogReplayRecovery).toBeUndefined();
 	});
 
 	it('does NOT forward watchdogReplayRecovery for the openai provider (replay is Gemini-only)', async () => {
-		const config = await createBodhiSessionConfig({
+		const config = await createConfig({
 			...baseOptions(),
 			liveRealtimeProvider: 'openai' as const,
 			openAiApiKey: 'test-openai-key',
@@ -88,7 +94,7 @@ describe('createBodhiSessionConfig — watchdog replay recovery threading (H2)',
 	});
 
 	it('threads an explicit responseWatchdogMs override verbatim', async () => {
-		const config = await createBodhiSessionConfig({
+		const config = await createConfig({
 			...baseOptions(),
 			responseWatchdogMs: 12_000,
 		});
@@ -98,7 +104,7 @@ describe('createBodhiSessionConfig — watchdog replay recovery threading (H2)',
 	it('no-override fallback is gemini-3.1 (fast model): no derived window', async () => {
 		// The hosted fallback moved to the half-cascade live model — fast
 		// first-token latency, so the framework 5 s default window applies.
-		const config = await createBodhiSessionConfig({
+		const config = await createConfig({
 			...baseOptions(),
 			watchdogReplayRecovery: true,
 		});
@@ -111,7 +117,7 @@ describe('createBodhiSessionConfig — watchdog replay recovery threading (H2)',
 			'gemini-2.5-flash-native-audio-preview-12-2025',
 			'gemini-live-2.5-flash-native-audio',
 		]) {
-			const config = await createBodhiSessionConfig({
+			const config = await createConfig({
 				...baseOptions(),
 				liveRealtimeModel,
 				watchdogReplayRecovery: true,
@@ -121,7 +127,7 @@ describe('createBodhiSessionConfig — watchdog replay recovery threading (H2)',
 	});
 
 	it('keeps the framework default window on gemini-3.1-flash-live-preview', async () => {
-		const config = await createBodhiSessionConfig({
+		const config = await createConfig({
 			...baseOptions(),
 			liveRealtimeModel: 'gemini-3.1-flash-live-preview',
 			watchdogReplayRecovery: true,
@@ -130,12 +136,12 @@ describe('createBodhiSessionConfig — watchdog replay recovery threading (H2)',
 	});
 
 	it('does not derive a window when replay recovery is off (two independent knobs)', async () => {
-		const config = await createBodhiSessionConfig(baseOptions());
+		const config = await createConfig(baseOptions());
 		expect(config.responseWatchdogMs).toBeUndefined();
 	});
 
 	it('an explicit responseWatchdogMs wins over the derived slow-model window', async () => {
-		const config = await createBodhiSessionConfig({
+		const config = await createConfig({
 			...baseOptions(),
 			watchdogReplayRecovery: true,
 			responseWatchdogMs: 9_500,
@@ -146,14 +152,14 @@ describe('createBodhiSessionConfig — watchdog replay recovery threading (H2)',
 
 describe('createBodhiSessionConfig — Gemini server-VAD default', () => {
 	it('defaults hosted Gemini sessions to silenceDurationMs 300 (down from the framework 500)', async () => {
-		const config = await createBodhiSessionConfig(baseOptions());
+		const config = await createConfig(baseOptions());
 		expect(config.realtimeInputConfig).toEqual({
 			automaticActivityDetection: { silenceDurationMs: 300 },
 		});
 	});
 
 	it('does not apply the Gemini VAD default to openai-provider sessions', async () => {
-		const config = await createBodhiSessionConfig({
+		const config = await createConfig({
 			...baseOptions(),
 			liveRealtimeProvider: 'openai' as const,
 			openAiApiKey: 'test-openai-key',

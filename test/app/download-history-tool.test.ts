@@ -11,7 +11,7 @@ import type { ToolContext, ToolDefinition } from '../../src/types/tool.js';
 async function getSessionDataActionTool(
 	conversationHistoryStore?: ConversationHistoryStore,
 ): Promise<ToolDefinition> {
-	const config = await createBodhiSessionConfig({
+	const { voiceSessionConfig: config } = await createBodhiSessionConfig({
 		apiKey: 'test-key',
 		memoryStore: {
 			addFacts: vi.fn(),
@@ -179,7 +179,7 @@ describe('session_data_action tool (download_history)', () => {
 
 describe('artifact registry wiring in bodhi session config', () => {
 	it('creates an artifactRegistry on session config', async () => {
-		const config = await createBodhiSessionConfig({
+		const { voiceSessionConfig: config } = await createBodhiSessionConfig({
 			apiKey: 'test-key',
 			memoryStore: {
 				addFacts: vi.fn(),
@@ -200,7 +200,7 @@ describe('artifact registry wiring in bodhi session config', () => {
 	});
 
 	it('exposes list_artifacts tool that returns session artifacts', async () => {
-		const config = await createBodhiSessionConfig({
+		const { voiceSessionConfig: config } = await createBodhiSessionConfig({
 			apiKey: 'test-key',
 			memoryStore: {
 				addFacts: vi.fn(),
@@ -228,7 +228,7 @@ describe('artifact registry wiring in bodhi session config', () => {
 	});
 
 	it('list_artifacts returns empty array before any artifact is stored', async () => {
-		const config = await createBodhiSessionConfig({
+		const { voiceSessionConfig: config } = await createBodhiSessionConfig({
 			apiKey: 'test-key',
 			memoryStore: {
 				addFacts: vi.fn(),
@@ -267,15 +267,15 @@ describe('artifact registry wiring in bodhi session config', () => {
 			getSessionRef: () => null,
 		};
 
-		const standard = await createBodhiSessionConfig({
+		const { voiceSessionConfig: standard } = await createBodhiSessionConfig({
 			...baseOptions,
 			agentProfile: 'standard',
 		});
-		const claude = await createBodhiSessionConfig({
+		const { voiceSessionConfig: claude } = await createBodhiSessionConfig({
 			...baseOptions,
 			agentProfile: 'claude_code',
 		});
-		const nanoclaw = await createBodhiSessionConfig({
+		const { voiceSessionConfig: nanoclaw } = await createBodhiSessionConfig({
 			...baseOptions,
 			agentProfile: 'nanoclaw',
 		});
@@ -286,7 +286,7 @@ describe('artifact registry wiring in bodhi session config', () => {
 	});
 
 	it('structured_screening profile uses knowledgeBase config and resolves documents at session time', async () => {
-		const config = await createBodhiSessionConfig({
+		const { voiceSessionConfig: config } = await createBodhiSessionConfig({
 			apiKey: 'test-key',
 			memoryStore: {
 				addFacts: vi.fn(),
@@ -337,15 +337,15 @@ describe('artifact registry wiring in bodhi session config', () => {
 			getSessionRef: () => null,
 		};
 
-		const standard = await createBodhiSessionConfig({
+		const { voiceSessionConfig: standard } = await createBodhiSessionConfig({
 			...baseOptions,
 			agentProfile: 'standard',
 		});
-		const claude = await createBodhiSessionConfig({
+		const { voiceSessionConfig: claude } = await createBodhiSessionConfig({
 			...baseOptions,
 			agentProfile: 'claude_code',
 		});
-		const nanoclaw = await createBodhiSessionConfig({
+		const { voiceSessionConfig: nanoclaw } = await createBodhiSessionConfig({
 			...baseOptions,
 			agentProfile: 'nanoclaw',
 		});
@@ -356,7 +356,7 @@ describe('artifact registry wiring in bodhi session config', () => {
 	});
 
 	it('configures read_image as background tool with a pending message', async () => {
-		const config = await createBodhiSessionConfig({
+		const { voiceSessionConfig: config } = await createBodhiSessionConfig({
 			apiKey: 'test-key',
 			memoryStore: {
 				addFacts: vi.fn(),
@@ -377,7 +377,7 @@ describe('artifact registry wiring in bodhi session config', () => {
 	});
 
 	it('registers read_image subagent and returns missing-artifact error', async () => {
-		const config = await createBodhiSessionConfig({
+		const { voiceSessionConfig: config } = await createBodhiSessionConfig({
 			apiKey: 'test-key',
 			memoryStore: {
 				addFacts: vi.fn(),
