@@ -14,7 +14,15 @@ export default defineConfig({
 		// `examples/test/**` are hermetic (no live keys/network) demo-lib tests;
 		// including them here makes the examples regression net part of the single
 		// `pnpm test` invocation (modularization plan migration step M3).
-		include: ['test/**/*.test.ts', 'examples/test/**/*.test.ts'],
+		include: [
+			'test/**/*.test.ts',
+			'examples/test/**/*.test.ts',
+			'composer/test/**/*.test.ts',
+			// Composer touches the shared user-agent store (putIfAbsent); its colocated
+			// contract tests run here too. Scoped to this dir so the broken wider `app/`
+			// tree is not pulled into the suite.
+			'app/server/stores/**/*.test.ts',
+		],
 		coverage: {
 			provider: 'v8',
 			include: ['src/**/*.ts'],

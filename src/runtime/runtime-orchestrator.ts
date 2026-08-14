@@ -80,6 +80,13 @@ export interface OrchestratorConfig {
 		 * observer (orchestrator skips constructing it — zero-overhead).
 		 */
 		onBackgroundNotification?: OnBackgroundNotificationCallback;
+		/**
+		 * Invoked by `TransportActor` on each `notification.delivered`
+		 * envelope before the `adapter.sendContent` wire-out. Wired by
+		 * VoiceSession to its response-trigger coordinator so a delivery's
+		 * model turn can never bind as a live greeting (H1 enforcement).
+		 */
+		onTransportDeliver?: () => void;
 	};
 }
 
@@ -146,6 +153,7 @@ export class RuntimeOrchestrator {
 			'tool-router',
 			'notification',
 			config.notification?.transportSubscriptionFilter,
+			config.notification?.onTransportDeliver,
 		);
 		// SessionActor fan-out target: the BackgroundAgentHostActor below is
 		// addressed via id 'background-agents'. SessionActor sends lifecycle

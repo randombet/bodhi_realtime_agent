@@ -1,4 +1,5 @@
 import type { IceServerEntry } from '../types/client-media.js';
+import type { AnyServerToClientMessage } from '../types/client-protocol.js';
 import type { RtcClientSignalingMessage } from '../types/rtc-signaling.js';
 import type { IClientChannel, SessionClientSender } from '../types/session-client.js';
 import { AudioBuffer } from './audio-buffer.js';
@@ -119,14 +120,14 @@ export class DirectRtcClientChannel implements IClientChannel {
 		this.sender.sendAudio(data);
 	}
 
-	sendJsonToClient(message: Record<string, unknown>): void {
+	sendJsonToClient(message: AnyServerToClientMessage): void {
 		this.sender.sendJson(message);
 	}
 
 	/** Playback-state protocol: deliver JSON in order after the turn's audio.
 	 *  Only meaningful when audio uses the WebSocket PCM path (no Opus engine);
 	 *  dropped during a reconnect-buffering window. */
-	sendJsonAfterAudio(message: Record<string, unknown>): void {
+	sendJsonAfterAudio(message: AnyServerToClientMessage): void {
 		if (this._buffering) return;
 		this.sendJsonToClient(message);
 	}

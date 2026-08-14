@@ -20,6 +20,7 @@ import type {
 } from '../../src/runtime/actors/tool-router-actor.js';
 import { createEnvelope } from '../../src/runtime/envelope.js';
 import { buildSuccessCompletion } from '../../src/runtime/subagent-completion.js';
+import type { AnyServerToClientMessage } from '../../src/types/client-protocol.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -140,8 +141,8 @@ describe('Behavior-freeze regression', () => {
 	describe('subagent completion notification format', () => {
 		it('produces stable completion notification to client', async () => {
 			const { send } = createSender();
-			const clientMessages: Record<string, unknown>[] = [];
-			const clientSend = vi.fn((msg: Record<string, unknown>) => clientMessages.push(msg));
+			const clientMessages: AnyServerToClientMessage[] = [];
+			const clientSend = vi.fn((msg: AnyServerToClientMessage) => clientMessages.push(msg));
 			const gateway = new ClientGatewayActor('client-gateway', send, clientSend, 'session');
 
 			const completion = buildSuccessCompletion({

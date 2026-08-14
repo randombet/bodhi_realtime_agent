@@ -2,6 +2,7 @@ import type { MainAgent } from '../types/agent.js';
 import type { MemoryFact } from '../types/memory.js';
 import type { LLMTransport } from '../types/transport.js';
 import { InterruptGraceWindow } from './interrupt-grace-window.js';
+import { GreetingGatePolicy } from './policies/greeting-gate.policy.js';
 
 /** Caller-supplied greeting tuning (read at construction). */
 export interface GreetingControllerConfig {
@@ -9,6 +10,14 @@ export interface GreetingControllerConfig {
 	 *  clamped (pass 1). `undefined` means "inherit the transport default at
 	 *  finalize time". */
 	overrideGraceMs: number | undefined;
+	/** When `false`, the greeting is uninterruptible end-to-end: from
+	 *  `sendGreeting()` until the greeting turn finalizes (post-playback),
+	 *  interrupts are suppressed and outbound mic frames are dropped. Unlike
+	 *  the time-boxed grace window this needs no `frameworkOwnsInterrupt` /
+	 *  `cancelResponse` support — withholding mic frames prevents server-side
+	 *  VAD barge-in on every transport. Default `true` (greeting behaves as
+	 *  before: interruptible outside the grace window). */
+	greetingInterruptible: boolean;
 }
 
 /**
@@ -31,6 +40,10 @@ export interface GreetingControllerDeps {
 	getSessionSuffix(): string;
 	/** Reset the notification audio gate before sending the greeting. */
 	resetNotificationAudio(): void;
+	/** H4 seam: fired on EVERY suppression active→inactive transition so a
+	 *  held recovery can re-evaluate (turn finalize, invalidation, no-start
+	 *  timeout, client reset). Optional for harnesses. */
+	onGateReleased?(): void;
 	log(message: string): void;
 }
 
@@ -74,23 +87,43 @@ export class GreetingController {
 	 *  doesn't accumulate / auto-commit before the greeting response completes.
 	 *  Only set when the resolved `greetingInterruptGraceMs > 0`. */
 	private _greetingInFlight = false;
+	/** Full-greeting suppression (config `greetingInterruptible: false`). Armed
+	 *  in `sendGreeting()`; released in `onTurnFinalized()` (the greeting turn's
+	 *  post-playback finalization) or `resetForClientConnected()`. While armed,
+	 *  `requestInterrupt` refuses and `shouldDropOutbound` drops mic frames. */
+	private _uninterruptibleGreetingActive = false;
+	/** H1 turn-bound release token (pure state machine; timers live here in
+	 *  the shell). See policies/greeting-gate.policy.ts. */
+	private readonly gate = new GreetingGatePolicy();
+	private _noStartTimer: ReturnType<typeof setTimeout> | undefined;
 
 	constructor(
 		private readonly deps: GreetingControllerDeps,
 		config: GreetingControllerConfig,
 	) {
 		this._overrideGraceMs = config.overrideGraceMs;
+		this._greetingInterruptible = config.greetingInterruptible;
 	}
 
 	/** Pass-1 caller override (clamped), captured at construction. `undefined`
 	 *  means "inherit transport default at finalize time". */
 	private readonly _overrideGraceMs: number | undefined;
 
-	/** True if outbound mic frames should be dropped right now — either the
-	 *  pre-first-audio greeting window or the armed grace window. Read by the
-	 *  AudioRouter mic-drop gate. */
+	/** Config `greetingInterruptible` captured at construction. `false` arms
+	 *  full-greeting suppression on every `sendGreeting()`. */
+	private readonly _greetingInterruptible: boolean;
+
+	/** H4 hold input: is FULL-greeting suppression armed right now? (Never
+	 *  includes the grace or pre-first-audio windows.) */
+	isUninterruptibleGreetingActive(): boolean {
+		return this._uninterruptibleGreetingActive;
+	}
+
+	/** True if outbound mic frames should be dropped right now — the
+	 *  full-greeting suppression window, the pre-first-audio greeting window,
+	 *  or the armed grace window. Read by the AudioRouter mic-drop gate. */
 	shouldDropOutbound(): boolean {
-		return this._greetingInFlight || this._grace.isActive();
+		return this._uninterruptibleGreetingActive || this._greetingInFlight || this._grace.isActive();
 	}
 
 	/** Pass 2 of greeting-grace resolution (§5). Reads the transport's
@@ -166,9 +199,13 @@ export class GreetingController {
 	}
 
 	/** Returns `true` if the caller should proceed with the interrupt; `false`
-	 *  (and logs) if the grace is currently suppressing it. Wraps
-	 *  `_grace.isActive()` with the session's log channel. */
+	 *  (and logs) if full-greeting suppression or the grace window is currently
+	 *  suppressing it. */
 	requestInterrupt(source: string): boolean {
+		if (this._uninterruptibleGreetingActive) {
+			this.deps.log(`[Latency] interrupt suppressed (greeting uninterruptible; src=${source})`);
+			return false;
+		}
 		if (this._grace.isActive()) {
 			this.deps.log(
 				`[Latency] interrupt suppressed (grace, ${this._grace.remainingMs()}ms remaining; src=${source})`,
@@ -176,6 +213,79 @@ export class GreetingController {
 			return false;
 		}
 		return true;
+	}
+
+	/** Turn-finalization hook (called from `VoiceSession.finalizeTurn`).
+	 *  Releases full-greeting suppression: the greeting turn only finalizes
+	 *  after playback completes (playback.ended / the fallback timer), so this
+	 *  is the "greeting fully heard" point. No-op when suppression is unarmed —
+	 *  in particular it never cuts the time-boxed grace window short. */
+	onTurnFinalized(turnId?: string): void {
+		if (!this._uninterruptibleGreetingActive) return;
+		// H1: when the token bound to the greeting's model turn, only THAT
+		// turn's finalization releases — for any completion reason, including
+		// `interrupted` (a truncated greeting is over; holding would deafen).
+		// While UNBOUND, any finalization releases (fallback = today's
+		// semantics; the failure mode is "release slightly early", never
+		// "hold the gate on the wrong turn").
+		if (!this.gate.shouldReleaseOnTurnFinalized(turnId)) return;
+		this.releaseUninterruptibleGate('greeting finished');
+	}
+
+	/** The greeting's model turn started (identity from the turn manager). */
+	onModelTurnStarted(turnId: string | undefined): void {
+		this.gate.onModelTurnStarted(turnId);
+	}
+
+	/** A routed user turn completed — later model starts are ambiguous and
+	 *  must not bind (§2 ambiguity rule b). */
+	noteRoutedUserTurn(): void {
+		this.gate.noteRoutedUserTurn();
+	}
+
+	/** A competing framework trigger (typed input, notification, recovery) is
+	 *  about to dispatch: invalidate the token synchronously AND release the
+	 *  gate — the guarantee is voice-only (H1 position), so deliberate input
+	 *  pre-empts even pre-turn. */
+	invalidateForCompetingTrigger(reason: string): void {
+		this.gate.invalidateToken();
+		if (this._uninterruptibleGreetingActive) {
+			this.releaseUninterruptibleGate(`competing trigger: ${reason}`);
+		}
+	}
+
+	/** Session teardown: clear the no-start timer (release accounting is moot). */
+	dispose(): void {
+		this.clearNoStartTimer();
+		this.gate.clear();
+	}
+
+	private armNoStartTimer(): void {
+		this.clearNoStartTimer();
+		this._noStartTimer = setTimeout(() => {
+			this._noStartTimer = undefined;
+			// A greeting that never produced a model turn: release rather than
+			// leave the session deaf (named transition — design §2).
+			if (this._uninterruptibleGreetingActive && !this.gate.isBound) {
+				this.releaseUninterruptibleGate('no-start timeout');
+			}
+		}, GREETING_NO_START_TIMEOUT_MS);
+	}
+
+	private clearNoStartTimer(): void {
+		if (this._noStartTimer !== undefined) {
+			clearTimeout(this._noStartTimer);
+			this._noStartTimer = undefined;
+		}
+	}
+
+	/** The single active→inactive transition: one generation-tagged release. */
+	private releaseUninterruptibleGate(reason: string): void {
+		this._uninterruptibleGreetingActive = false;
+		this.gate.clear();
+		this.clearNoStartTimer();
+		this.deps.log(`[Latency] ${reason} — interrupt suppression released`);
+		this.deps.onGateReleased?.();
 	}
 
 	/** Send the active agent's greeting prompt to the LLM to trigger a spoken
@@ -194,6 +304,11 @@ export class GreetingController {
 		// per-client grace state immediately before scheduling this greeting.
 		if (this.greetingInterruptGraceMs > 0 && !this._graceArmingLogged) {
 			this._greetingInFlight = true;
+		}
+		if (!this._greetingInterruptible) {
+			this._uninterruptibleGreetingActive = true;
+			this.gate.registerToken();
+			this.armNoStartTimer();
 		}
 		// Pre-greeting audio-gate reset (clears the actor debounce too, via the sink).
 		this.deps.resetNotificationAudio();
@@ -237,10 +352,22 @@ export class GreetingController {
 		// Don't leak greeting-in-flight state into the new client session.
 		// The next sendGreeting (if any) will re-set it.
 		this._greetingInFlight = false;
+		// Same for full-greeting suppression: a reconnecting client must not
+		// inherit a prior session's (possibly never-finalized) greeting window.
+		const wasArmed = this._uninterruptibleGreetingActive;
+		this._uninterruptibleGreetingActive = false;
+		this.gate.clear();
+		this.clearNoStartTimer();
+		if (wasArmed) this.deps.onGateReleased?.();
 	}
 }
 
 const GRACE_MAX_MS = 5000;
+
+/** No-start timeout for the H1 greeting token: a greeting whose response
+ *  never produces a model turn must release the gate rather than leave the
+ *  session deaf (bounded by the response watchdog's timescale — §2). */
+const GREETING_NO_START_TIMEOUT_MS = 8000;
 
 /** Clamp a transport-capability `greetingInterruptGraceMs` default to a sane
  *  numeric range. Returns `undefined` when omitted; `0` for `NaN`, negative,

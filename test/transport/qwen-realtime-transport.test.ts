@@ -275,10 +275,11 @@ describe('QwenRealtimeTransport', () => {
 
 	it('usage: response.done → onRealtimeLLMUsage normalized for qwen_realtime', async () => {
 		const [t, ws] = await connect();
-		let usage: { provider?: string; inputTokens?: number; modalityBreakdown?: unknown } | null =
-			null;
+		const usage: {
+			current: { provider?: string; inputTokens?: number; modalityBreakdown?: unknown } | null;
+		} = { current: null };
 		t.onRealtimeLLMUsage = (u) => {
-			usage = u;
+			usage.current = u;
 		};
 		ws.msg({ type: 'response.created' });
 		ws.msg({
@@ -295,10 +296,10 @@ describe('QwenRealtimeTransport', () => {
 				},
 			},
 		});
-		expect(usage).not.toBeNull();
-		expect(usage?.provider).toBe('qwen_realtime');
-		expect(usage?.inputTokens).toBe(501);
-		expect(usage?.modalityBreakdown).toMatchObject({
+		expect(usage.current).not.toBeNull();
+		expect(usage.current?.provider).toBe('qwen_realtime');
+		expect(usage.current?.inputTokens).toBe(501);
+		expect(usage.current?.modalityBreakdown).toMatchObject({
 			inputTextTokens: 473,
 			inputAudioTokens: 28,
 			outputTextTokens: 8,

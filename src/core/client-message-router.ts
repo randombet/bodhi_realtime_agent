@@ -1,3 +1,4 @@
+import type { CoreClientToServerMessage } from '@bodhi/client-protocol';
 import type { RtcClientSignalingMessage } from '../types/rtc-signaling.js';
 import { tryParseRtcClientSignaling } from '../types/rtc-signaling.js';
 import type { ConversationContext } from './conversation-context.js';
@@ -27,13 +28,26 @@ export interface ArtifactStore {
 
 /** Built-in `type` values dispatched here. A *malformed* payload for one of these
  *  is dropped (not forwarded to `onClientJson`); only an unrecognized `type` is. */
-const RECOGNIZED_TYPES = new Set([
-	'behavior.set',
-	'ui.response',
-	'file_upload',
-	'text_input',
-	'playback.ended',
-]);
+type RoutedCoreClientType = Exclude<
+	CoreClientToServerMessage['type'],
+	RtcClientSignalingMessage['type']
+>;
+
+const RECOGNIZED_TYPE_MAP = {
+	'behavior.set': true,
+	'ui.response': true,
+	file_upload: true,
+	text_input: true,
+	'playback.ended': true,
+} as const satisfies Record<RoutedCoreClientType, true>;
+
+const RECOGNIZED_TYPES: ReadonlySet<RoutedCoreClientType> = new Set(
+	Object.keys(RECOGNIZED_TYPE_MAP) as RoutedCoreClientType[],
+);
+
+function isRecognizedType(type: unknown): type is RoutedCoreClientType {
+	return typeof type === 'string' && RECOGNIZED_TYPES.has(type as RoutedCoreClientType);
+}
 
 /** Playback-defer state the router consults before completing a `playback.ended`. */
 export interface PlaybackDeferArbiter {
@@ -133,7 +147,7 @@ export class ClientMessageRouter {
 				);
 		} else if (message.type === 'playback.ended' && typeof message.playbackId === 'number') {
 			this.handlePlaybackEnded(message.playbackId);
-		} else if (typeof message.type !== 'string' || !RECOGNIZED_TYPES.has(message.type)) {
+		} else if (!isRecognizedType(message.type)) {
 			// A recognized type with a malformed payload was dropped above and is
 			// NOT forwarded; only an unrecognized `type` reaches `onClientJson` (the
 			// former silent-drop fall-through).

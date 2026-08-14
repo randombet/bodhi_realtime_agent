@@ -66,6 +66,11 @@ export interface TransportCapabilities {
 	 *  honoured (otherwise the provider auto-cancel defeats the grace).
 	 *  Optional — `undefined` means `false`. */
 	frameworkOwnsInterrupt?: boolean;
+	/** Provider-evidence kinds this transport's adapter can emit (Phase 1,
+	 *  design-speech-evidence-architecture.md §1). Undeclared kinds make the
+	 *  corresponding `SegmentEvidence` bit `'not-observable'` — stated once
+	 *  here, never inferred per event. Omitted = no provider evidence. */
+	providerEvidenceKinds?: ProviderEvidenceKind[];
 	/** True when the transport streams response audio the framework cannot stop
 	 *  on the wire: generation runs faster than realtime and is buffered
 	 *  client-side, and `cancelResponse()` cannot cancel it — instead it
@@ -84,6 +89,7 @@ export interface TransportCapabilities {
  *  can spread this and override only what they actually support, so adding new
  *  flags to the union doesn't break compilation. */
 export const DEFAULT_TRANSPORT_CAPABILITIES: Required<TransportCapabilities> = {
+	providerEvidenceKinds: [],
 	messageTruncation: false,
 	turnDetection: false,
 	userTranscription: false,
@@ -204,26 +210,11 @@ export type ReplayItem =
 	| { type: 'transfer'; fromAgent: string; toAgent: string };
 
 /** Audio format specification advertised by a transport.
- *  Input and output rates / encodings may differ — e.g. Gemini: 16 kHz in /
- *  24 kHz out (both PCM); OpenAI telephony may mix `audio/pcmu` input with
- *  `audio/pcm` output for some bridges. */
-export interface AudioFormatSpec {
-	inputSampleRate: number;
-	outputSampleRate: number;
-	channels: number;
-	/** Bits per sample, INPUT side. Mirror via `outputBitDepth` for the
-	 *  output side when input and output differ. Single-sided value retained
-	 *  for backwards compat with consumers that don't care about the split. */
-	bitDepth: number;
-	/** Wire encoding, INPUT side. `'pcm'` is signed 16-bit linear; `'pcmu'`
-	 *  is G.711 μ-law for telephony bridges. A-law (`'pcma'`) is future work. */
-	encoding: 'pcm' | 'pcmu';
-	/** OUTPUT side bit depth. Defaults to `bitDepth` if omitted (single-sided).
-	 *  Set explicitly when input and output encodings differ. */
-	outputBitDepth?: number;
-	/** OUTPUT side encoding. Defaults to `encoding` if omitted (single-sided). */
-	outputEncoding?: 'pcm' | 'pcmu';
-}
+ *  Canonically owned by `@bodhi/client-protocol` (it rides in the
+ *  `session.config` wire frame); re-exported here so transport-side
+ *  importers are unchanged. */
+export type { AudioFormatSpec } from '@bodhi/client-protocol';
+import type { AudioFormatSpec } from '@bodhi/client-protocol';
 
 /** Bytes per audio sample for a given encoding. PCM16 is 2; G.711 μ-law is 1. */
 export function bytesPerSample(encoding: AudioFormatSpec['encoding']): number {
@@ -455,6 +446,11 @@ export interface LLMTransport {
 	connect(config?: LLMTransportConfig): Promise<void>;
 	disconnect(): Promise<void>;
 	reconnect(state?: ReconnectState): Promise<void>;
+	/** Prefill prior turns before the first turn (resume). Call ONCE, AFTER connect(), BEFORE the
+	 *  first send; idempotent (no-op if already seeded). Optional — a transport that cannot prefill
+	 *  on the initial connect omits it (VoiceSession calls it as `transport.replayHistory?.(...)`).
+	 *  Distinct from reconnect recovery, which transports drive internally from `ReconnectState`. */
+	replayHistory?(items: readonly ReplayItem[]): void;
 	readonly isConnected: boolean;
 
 	// --- Audio ---
@@ -680,4 +676,35 @@ export interface LLMTransport {
 	 *  changes `instructions` or `tools` — i.e. before a guaranteed full
 	 *  prompt-cache bust on the next response. Pure telemetry. */
 	onCacheBust?: (reason: 'instructions_changed' | 'tools_changed') => void;
+
+	/** Normalized provider-evidence delivery (speech-evidence design §1).
+	 *  Adapters of transports that declare `capabilities.providerEvidenceKinds`
+	 *  emit each normalized event here; the framework routes it into the
+	 *  session's evidence ledger. Never emit kinds you did not declare. */
+	onProviderEvidence?: (ev: ProviderEvidenceEvent) => void;
+}
+
+/** Provider-evidence kinds (internal transport-adapter correlation contract,
+ *  design-speech-evidence-architecture.md §1). `speech-window` = provider VAD
+ *  heard speech (detection, never recognition); `input-transcription` /
+ *  `model-output` = the provider demonstrably processed input. */
+export type ProviderEvidenceKind = 'speech-window' | 'input-transcription' | 'model-output';
+
+/** Normalized provider-evidence event. Point events carry `receiptAtMs`
+ *  only; window kinds carry explicit start/end (paired by the adapter). All
+ *  times are stamped onto the session clock at receipt — no cross-clock
+ *  arithmetic with provider timestamps. `correlation` is `'causal'` ONLY
+ *  when a provider ID resolves through the acknowledged
+ *  providerInputId ↔ localInputBatchId ↔ segment chain; time-window matching
+ *  is always `'heuristic'` (dashboards only — behavioral policies may trust
+ *  causal evidence exclusively). */
+export interface ProviderEvidenceEvent {
+	kind: ProviderEvidenceKind;
+	receiptAtMs: number;
+	windowStartAtMs?: number;
+	windowEndAtMs?: number;
+	providerInputId?: string;
+	providerResponseId?: string;
+	provenance: string;
+	correlation: 'causal' | 'heuristic';
 }

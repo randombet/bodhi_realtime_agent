@@ -1,4 +1,6 @@
-import { appendFile, mkdir } from 'node:fs/promises';
+// SPDX-License-Identifier: MIT
+
+import { appendFile, mkdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import writeFileAtomic from 'write-file-atomic';
 import type { ConversationItem, ToolCall, ToolResult } from '../types/conversation.js';
@@ -152,6 +154,42 @@ export class MarkdownConversationHistoryStore implements ConversationHistoryStor
 				agentsSeen: [record.initialAgentName],
 			});
 		});
+	}
+
+	async ensureSession(record: SessionRecord): Promise<SessionRecord> {
+		// Non-destructive resume init. Unlike createSession (which rewrites the frontmatter and
+		// would clobber an existing transcript), ensureSession leaves an existing file intact and
+		// only (re)initializes the in-memory render state so subsequent addItems append — critical
+		// after a process restart, where `state` is empty and addItems would otherwise drop.
+		await this.enqueueAndSwallow(record.id, 'ensureSession', async () => {
+			await mkdir(this.opts.baseDir, { recursive: true });
+			let exists = false;
+			try {
+				await stat(this.filePath(record.id));
+				exists = true;
+			} catch {
+				exists = false;
+			}
+			if (!exists) {
+				const prelude = renderFrontmatter(record, { modelName: this.opts.modelName });
+				await writeFileAtomic(this.filePath(record.id), prelude);
+			}
+			// (A prior terminal footer on an existing file is not stripped in v1 — a cosmetic
+			// follow-on; appended turns simply follow it.)
+			if (!this.state.has(record.id)) {
+				this.state.set(record.id, {
+					initialAgent: record.initialAgentName,
+					activeAgent: record.finalAgentName ?? record.initialAgentName,
+					pendingToolCalls: new Map(),
+					agentsSeen: [record.initialAgentName],
+				});
+			}
+		});
+		return { ...record };
+	}
+
+	async reactivateSession(_sessionId: string): Promise<void> {
+		// No-op: markdown frontmatter is one-shot and status surfaces in the footer (like updateSession).
 	}
 
 	async updateSession(_sessionId: string, _update: Partial<SessionRecord>): Promise<void> {

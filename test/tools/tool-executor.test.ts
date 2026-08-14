@@ -155,12 +155,12 @@ describe('ToolExecutor', () => {
 
 	it('sets signal.aborted to true on timeout', async () => {
 		const { executor } = setup();
-		let receivedSignal: AbortSignal | null = null;
+		const receivedSignal: { current: AbortSignal | null } = { current: null };
 		executor.register([
 			createTestTool({
 				timeout: 50,
 				execute: vi.fn(async (_args, ctx) => {
-					receivedSignal = ctx.abortSignal;
+					receivedSignal.current = ctx.abortSignal;
 					return new Promise((resolve) => setTimeout(() => resolve('late'), 200));
 				}),
 			}),
@@ -172,8 +172,8 @@ describe('ToolExecutor', () => {
 			args: { query: 'test' },
 		});
 
-		expect(receivedSignal).not.toBeNull();
-		expect(receivedSignal?.aborted).toBe(true);
+		expect(receivedSignal.current).not.toBeNull();
+		expect(receivedSignal.current?.aborted).toBe(true);
 	});
 
 	it('cancel aborts pending execution', async () => {
@@ -216,11 +216,13 @@ describe('ToolExecutor', () => {
 		const mockSend = vi.fn();
 		const executor = new ToolExecutor(hooks, eventBus, 'sess_1', 'main', mockSend);
 
-		let receivedCtx: { sendJsonToClient?: (msg: Record<string, unknown>) => void } | null = null;
+		const receivedCtx: {
+			current: { sendJsonToClient?: (msg: Record<string, unknown>) => void } | null;
+		} = { current: null };
 		executor.register([
 			createTestTool({
 				execute: vi.fn(async (_args, ctx) => {
-					receivedCtx = ctx;
+					receivedCtx.current = ctx;
 					ctx.sendJsonToClient?.({ type: 'test', data: 'hello' });
 					return 'ok';
 				}),
@@ -233,7 +235,7 @@ describe('ToolExecutor', () => {
 			args: { query: 'test' },
 		});
 
-		expect(receivedCtx?.sendJsonToClient).toBe(mockSend);
+		expect(receivedCtx.current?.sendJsonToClient).toBe(mockSend);
 		expect(mockSend).toHaveBeenCalledWith({ type: 'test', data: 'hello' });
 	});
 

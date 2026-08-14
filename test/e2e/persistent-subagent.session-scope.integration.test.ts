@@ -44,12 +44,16 @@ function createStatefulFactory(): PersistentSubagentFactory & {
 	instances: Map<string, PersistentSubagentInstance>;
 } {
 	const instances = new Map<string, PersistentSubagentInstance>();
-	const factory = vi.fn(async (key: string) => {
-		const instance = createStatefulInstance(key);
-		instances.set(key, instance);
-		return instance;
-	}) as PersistentSubagentFactory & { instances: Map<string, PersistentSubagentInstance> };
-	factory.instances = instances;
+	const factory: PersistentSubagentFactory & {
+		instances: Map<string, PersistentSubagentInstance>;
+	} = Object.assign(
+		vi.fn(async (key: string) => {
+			const instance = createStatefulInstance(key);
+			instances.set(key, instance);
+			return instance;
+		}),
+		{ instances },
+	);
 	return factory;
 }
 
@@ -131,6 +135,7 @@ describe('Persistent Subagent — Session Scope Integration', () => {
 		const researcher = factory.instances.get('researcher');
 		expect(coder).toBeDefined();
 		expect(researcher).toBeDefined();
+		if (!coder || !researcher) throw new Error('expected both persistent instances');
 
 		expect(coder.dispose).toHaveBeenCalledOnce();
 		expect(researcher.dispose).toHaveBeenCalledOnce();

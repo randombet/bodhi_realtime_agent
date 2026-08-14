@@ -69,12 +69,10 @@ function micFrame(amplitude: number): Buffer {
 	return f;
 }
 
-type JsonCall = [Record<string, unknown>];
-
 function jsonOfType(sendJson: ReturnType<typeof vi.fn>, type: string): Record<string, unknown>[] {
 	return sendJson.mock.calls
-		.filter((c: JsonCall) => c[0]?.type === type)
-		.map((c: JsonCall) => c[0]);
+		.map((c) => c[0] as Record<string, unknown> | undefined)
+		.filter((message): message is Record<string, unknown> => message?.type === type);
 }
 
 function setupNative(opts?: {
@@ -193,7 +191,7 @@ describe('native playback-end gating — deferred completion', () => {
 
 			s.transport.onModelTurnStart?.();
 			s.transport.onAudioOutput?.(pcmBase64(400)); // a spoken preamble
-			s.transport.onToolCall?.([{ id: 'c1', name: 'get_time', arguments: {} }]);
+			s.transport.onToolCall?.([{ id: 'c1', name: 'get_time', args: {} }]);
 			s.transport.onTurnComplete?.(1);
 
 			// _nativeResponseDispatchedToolCall is set → the gate is skipped.

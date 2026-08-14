@@ -5,6 +5,7 @@ import type { IEventBus } from '../core/event-bus.js';
 import type { HooksManager } from '../core/hooks.js';
 import type { SessionManager } from '../core/session-manager.js';
 import type { MainAgent, SubagentConfig } from '../types/agent.js';
+import type { AnyServerToClientMessage } from '../types/client-protocol.js';
 import type { SubagentResult, ToolCall } from '../types/conversation.js';
 import type { MemoryFact } from '../types/memory.js';
 import type { IClientChannel } from '../types/session-client.js';
@@ -70,6 +71,9 @@ export class AgentRouter {
 	private activeSubagents = new Map<string, ActiveSubagent>();
 	/** Response modality to include in transfer SessionUpdate (set by VoiceSession for TTS). */
 	responseModality?: 'audio' | 'text';
+	/** H2 gate-aware transfer drain (set by VoiceSession): filters
+	 *  capture-tagged inbound frames and transform-sends admitted ones. */
+	drainBufferedInbound?: () => Buffer[];
 
 	constructor(
 		private sessionManager: SessionManager,
@@ -187,10 +191,17 @@ export class AgentRouter {
 					state,
 				);
 
-				// Stop buffering and replay audio
-				const buffered = this.clientTransport.stopBuffering();
-				for (const chunk of buffered) {
-					this.transport.sendAudio(chunk.toString('base64'));
+				// Stop buffering and replay audio. H2 gate-aware drain: when the
+				// session provides the drain (local ClientTransport with capture
+				// tagging), gate-active frames are discarded and admitted frames
+				// transform-sent; legacy raw path otherwise.
+				if (this.drainBufferedInbound) {
+					this.drainBufferedInbound();
+				} else {
+					const buffered = this.clientTransport.stopBuffering();
+					for (const chunk of buffered) {
+						this.transport.sendAudio(chunk.toString('base64'));
+					}
 				}
 
 				this.sessionManager.transitionTo('ACTIVE');
@@ -380,7 +391,7 @@ export class AgentRouter {
 					handler(chunk);
 				}
 			},
-			sendJsonToClient: (message: Record<string, unknown>) => {
+			sendJsonToClient: (message: AnyServerToClientMessage) => {
 				this.clientTransport.sendJsonToClient(message);
 			},
 			sendAudioToClient: (data: Buffer) => {

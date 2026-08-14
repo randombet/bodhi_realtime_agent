@@ -155,14 +155,19 @@ export class ConversationContext {
 
 	/**
 	 * Load existing items (e.g. when resuming from persisted history).
-	 * Appends to the timeline and advances the checkpoint so these items are not
-	 * re-flushed by ConversationHistoryWriter.
+	 * Appends to the timeline. By default (and with `alreadyPersisted: true`) advances the
+	 * checkpoint so these items are **not** re-flushed by ConversationHistoryWriter — appropriate
+	 * when they already live in the store (e.g. `attach`-mode resume). Pass
+	 * `{ alreadyPersisted: false }` to leave the checkpoint in place so the writer re-persists the
+	 * loaded items into a fresh record (`copy`-mode resume).
 	 */
-	loadItems(items: ConversationItem[]): void {
+	loadItems(items: ConversationItem[], opts?: { alreadyPersisted?: boolean }): void {
 		for (const item of items) {
 			this._items.push(item);
 		}
-		this.checkpointIndex = this._items.length;
+		if (opts?.alreadyPersisted !== false) {
+			this.checkpointIndex = this._items.length;
+		}
 	}
 
 	/** Store a compressed summary and evict all items before the current checkpoint. */
@@ -192,8 +197,15 @@ export class ConversationContext {
 		};
 	}
 
-	/** Format the conversation as provider-neutral ReplayItem[] for replay after reconnection. */
-	toReplayContent(): ReplayItem[] {
+	/**
+	 * Format the conversation as provider-neutral ReplayItem[] for replay (reconnect recovery or
+	 * resume). A malformed tool row (unparseable JSON, or missing `toolCallId`/`toolName`) is
+	 * **dropped and logged** (metadata-only — never the row's content) rather than demoted to
+	 * assistant text, so the emitted list enforces the same validity the transport replay expects.
+	 * Errored tool results carry their `error` string through.
+	 */
+	toReplayContent(opts?: { log?: (msg: string) => void }): ReplayItem[] {
+		const log = opts?.log;
 		const items: ReplayItem[] = [];
 
 		if (this._summary) {
@@ -204,26 +216,42 @@ export class ConversationContext {
 			if (item.role === 'tool_call') {
 				try {
 					const parsed = JSON.parse(item.content);
-					items.push({
-						type: 'tool_call',
-						id: parsed.toolCallId,
-						name: parsed.toolName,
-						args: parsed.args ?? {},
-					});
+					// Only a *missing* args defaults to {}; an explicit non-object (incl. null) fails the
+					// check below and is dropped — matching the transport's replay validator exactly.
+					const args = parsed.args === undefined ? {} : parsed.args;
+					if (
+						typeof parsed.toolCallId === 'string' &&
+						typeof parsed.toolName === 'string' &&
+						typeof args === 'object' &&
+						args !== null
+					) {
+						items.push({ type: 'tool_call', id: parsed.toolCallId, name: parsed.toolName, args });
+					} else {
+						log?.(
+							'[ConversationContext] toReplayContent: dropped malformed tool_call row (bad id/name/args)',
+						);
+					}
 				} catch {
-					items.push({ type: 'text', role: 'assistant', text: item.content });
+					log?.('[ConversationContext] toReplayContent: dropped unparseable tool_call row');
 				}
 			} else if (item.role === 'tool_result') {
 				try {
 					const parsed = JSON.parse(item.content);
-					items.push({
-						type: 'tool_result',
-						id: parsed.toolCallId,
-						name: parsed.toolName,
-						result: parsed.result,
-					});
+					if (typeof parsed.toolCallId === 'string' && typeof parsed.toolName === 'string') {
+						items.push({
+							type: 'tool_result',
+							id: parsed.toolCallId,
+							name: parsed.toolName,
+							result: parsed.result,
+							...(typeof parsed.error === 'string' ? { error: parsed.error } : {}),
+						});
+					} else {
+						log?.(
+							'[ConversationContext] toReplayContent: dropped malformed tool_result row (missing id/name)',
+						);
+					}
 				} catch {
-					items.push({ type: 'text', role: 'assistant', text: item.content });
+					log?.('[ConversationContext] toReplayContent: dropped unparseable tool_result row');
 				}
 			} else if (item.role === 'transfer') {
 				const match = item.content.match(/Transfer:\s*(.+?)\s*→\s*(.+)/);

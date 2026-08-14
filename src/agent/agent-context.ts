@@ -2,6 +2,7 @@ import type { ConversationContext } from '../core/conversation-context.js';
 import type { HooksManager } from '../core/hooks.js';
 import { processKnowledgeBase } from '../knowledge/knowledge-base-processor.js';
 import type { AgentContext, MainAgent } from '../types/agent.js';
+import type { AnyServerToClientMessage } from '../types/client-protocol.js';
 import type { ConversationItem } from '../types/conversation.js';
 import type { ProcessedKnowledgeBase } from '../types/knowledge-base.js';
 import type { MemoryFact } from '../types/memory.js';
@@ -103,7 +104,7 @@ export function createAgentContext(options: {
 	memoryFacts?: MemoryFact[];
 	requestTransfer?: (toAgent: string) => void;
 	stopBufferingAndDrain?: (handler: (chunk: Buffer) => void) => void;
-	sendJsonToClient?: (message: Record<string, unknown>) => void;
+	sendJsonToClient?: (message: AnyServerToClientMessage) => void;
 	sendAudioToClient?: (data: Buffer) => void;
 	setExternalAudioHandler?: (handler: ((data: Buffer) => void) | null) => void;
 }): AgentContext {
@@ -126,7 +127,7 @@ export function createAgentContext(options: {
 		stopBufferingAndDrain(handler: (chunk: Buffer) => void): void {
 			options.stopBufferingAndDrain?.(handler);
 		},
-		sendJsonToClient(message: Record<string, unknown>): void {
+		sendJsonToClient(message: AnyServerToClientMessage): void {
 			options.sendJsonToClient?.(message);
 		},
 		sendAudioToClient(data: Buffer): void {

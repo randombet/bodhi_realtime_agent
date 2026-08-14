@@ -77,6 +77,21 @@ describe('zodToJsonSchema', () => {
 			enum: ['low', 'medium', 'high'],
 		});
 	});
+
+	it('preserves unions, nullable values, null, and integer validators for Gemini', () => {
+		const schema = z.object({
+			choice: z.union([z.string(), z.number()]),
+			maybe: z.string().nullable(),
+			nothing: z.null(),
+			count: z.number().int(),
+		});
+		const result = zodToJsonSchema(schema);
+		const props = result.properties as Record<string, unknown>;
+		expect(props.choice).toEqual({ anyOf: [{ type: 'STRING' }, { type: 'NUMBER' }] });
+		expect(props.maybe).toEqual({ type: 'STRING', nullable: true });
+		expect(props.nothing).toEqual({ type: 'NULL' });
+		expect(props.count).toEqual({ type: 'INTEGER' });
+	});
 });
 
 describe('zodToJsonSchema — standard format', () => {
@@ -137,5 +152,21 @@ describe('zodToJsonSchema — standard format', () => {
 		const schema = z.object({ name: z.string() });
 		const result = zodToJsonSchema(schema);
 		expect(result.type).toBe('OBJECT');
+	});
+
+	it('uses standard anyOf/null and preserves strict-object semantics', () => {
+		const schema = z
+			.object({
+				choice: z.union([z.boolean(), z.number().int()]),
+				maybe: z.string().nullable(),
+			})
+			.strict();
+		const result = zodToJsonSchema(schema, 'standard');
+		const props = result.properties as Record<string, unknown>;
+		expect(props.choice).toEqual({ anyOf: [{ type: 'boolean' }, { type: 'integer' }] });
+		expect(props.maybe).toEqual({
+			anyOf: [{ type: 'string' }, { type: 'null' }],
+		});
+		expect(result.additionalProperties).toBe(false);
 	});
 });

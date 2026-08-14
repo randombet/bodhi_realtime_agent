@@ -13,6 +13,11 @@ import type {
 	TransportCapabilities,
 } from '../../src/types/transport.js';
 
+declare module '@google/genai' {
+	function _getMessageHandler(): ((message: unknown) => void) | null;
+	function _getMockSession(): Record<string, ReturnType<typeof vi.fn>> | null;
+}
+
 // Mock the external deps
 vi.mock('@google/genai', () => {
 	let messageHandler: ((msg: unknown) => void) | null = null;
@@ -267,6 +272,58 @@ describe('VoiceSession', () => {
 		await session.close();
 
 		expect(session.sessionManager.state).toBe('CLOSED');
+	});
+
+	describe('no-TTS text mode (responseModality: "text")', () => {
+		it('routes model text output to the transcript and marks the router text-mode', () => {
+			const transport = createMutableServerTurnTransport();
+			session = new VoiceSession({
+				sessionId: 'sess_text',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9899,
+				model: mockModel,
+				transport,
+				responseModality: 'text',
+			});
+
+			const internals = session as unknown as {
+				agentRouter: { responseModality: string };
+				transcriptManager: { handleOutput: (t: string) => void };
+			};
+			// Router is in text mode without any TTS provider.
+			expect(internals.agentRouter.responseModality).toBe('text');
+			// onTextOutput is wired at construction (wireTransportCallbacks).
+			expect(typeof transport.onTextOutput).toBe('function');
+
+			// Model text flows to the transcript manager (which emits the normal
+			// `{ type:'transcript', role:'assistant' }` client events).
+			const spy = vi.spyOn(internals.transcriptManager, 'handleOutput');
+			transport.onTextOutput?.('Hello from the model');
+			expect(spy).toHaveBeenCalledWith('Hello from the model');
+		});
+
+		it('start() rejects when the transport lacks textResponseModality', async () => {
+			const transport = createMutableServerTurnTransport();
+			(transport as { capabilities: TransportCapabilities }).capabilities = {
+				...transport.capabilities,
+				textResponseModality: false,
+			};
+			session = new VoiceSession({
+				sessionId: 'sess_text2',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9898,
+				model: mockModel,
+				transport,
+				responseModality: 'text',
+			});
+			await expect(session.start()).rejects.toThrow(/textResponseModality/);
+		});
 	});
 
 	it('close reaches CLOSED and resolves even when a teardown step throws', async () => {
@@ -1453,6 +1510,8 @@ describe('VoiceSession', () => {
 			// Verify sendToolResponse was called with an error (not left hanging)
 			expect(mockSess.sendToolResponse).toHaveBeenCalled();
 			const lastCall = mockSess.sendToolResponse.mock.calls.at(-1);
+			expect(lastCall).toBeDefined();
+			if (!lastCall) throw new Error('expected tool response');
 			const response = lastCall[0].functionResponses[0];
 			expect(response.id).toBe('tc_err');
 			expect(response.name).toBe('broken_tool');
@@ -1493,7 +1552,10 @@ describe('VoiceSession', () => {
 			// Should get an immediate pending response so the LLM is not blocked.
 			expect(mockSess.sendToolResponse).toHaveBeenCalled();
 			const calls = mockSess.sendToolResponse.mock.calls;
-			const lastResponse = calls.at(-1)[0].functionResponses[0];
+			const lastCall = calls.at(-1);
+			expect(lastCall).toBeDefined();
+			if (!lastCall) throw new Error('expected tool response');
+			const lastResponse = lastCall[0].functionResponses[0];
 			expect(lastResponse.id).toBe('tc_bg');
 			expect(lastResponse.response).toMatchObject({ status: 'still_in_progress' });
 		});

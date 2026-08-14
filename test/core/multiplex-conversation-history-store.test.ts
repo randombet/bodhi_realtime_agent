@@ -223,4 +223,44 @@ describe('MultiplexConversationHistoryStore', () => {
 			await expect(mux.getSession('sess_1')).rejects.toThrow('read error');
 		});
 	});
+
+	describe('ensureSession / reactivateSession fan-out (E3)', () => {
+		it('ensureSession fans out and returns the first store record', async () => {
+			const first = { ...sessionRecord, startedAt: 111 };
+			const a = makeStore({ ensureSession: vi.fn(async () => first) });
+			const b = makeStore({
+				ensureSession: vi.fn(async () => ({ ...sessionRecord, startedAt: 222 })),
+			});
+			const mux = new MultiplexConversationHistoryStore({ stores: [a, b] });
+
+			const returned = await mux.ensureSession(sessionRecord);
+			expect(a.ensureSession).toHaveBeenCalledWith(sessionRecord);
+			expect(b.ensureSession).toHaveBeenCalledWith(sessionRecord);
+			expect(returned.startedAt).toBe(111); // first store's record wins
+		});
+
+		it('ensureSession skips a store lacking the method (no throw), still returns first record', async () => {
+			const first = { ...sessionRecord, startedAt: 111 };
+			const a = makeStore({ ensureSession: vi.fn(async () => first) });
+			const b = makeStore(); // no ensureSession
+			const logs: string[] = [];
+			const mux = new MultiplexConversationHistoryStore({
+				stores: [a, b],
+				log: (m) => logs.push(m),
+			});
+
+			const returned = await mux.ensureSession(sessionRecord);
+			expect(returned.startedAt).toBe(111);
+			expect(logs.some((l) => l.includes('no ensureSession'))).toBe(true);
+		});
+
+		it('reactivateSession fans out to stores that support it', async () => {
+			const a = makeStore({ reactivateSession: vi.fn(async () => {}) });
+			const b = makeStore(); // no reactivateSession — must not throw
+			const mux = new MultiplexConversationHistoryStore({ stores: [a, b] });
+
+			await expect(mux.reactivateSession('sess_1')).resolves.toBeUndefined();
+			expect(a.reactivateSession).toHaveBeenCalledWith('sess_1');
+		});
+	});
 });

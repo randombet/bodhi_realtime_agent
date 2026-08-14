@@ -10,7 +10,10 @@ const baseDef = {
 	id: 'ua_0123456789abcdef',
 	userId: 'u1',
 	name: 'Test',
-	mainAgents: [{ name: 'main', instructions: 'x', toolIds: ['get_current_time'] }],
+	description: 'Test agent',
+	mainAgents: [
+		{ name: 'main', googleSearch: false, instructions: 'x', toolIds: ['get_current_time'] },
+	],
 	workers: {},
 	createdAt: 1,
 	updatedAt: 1,

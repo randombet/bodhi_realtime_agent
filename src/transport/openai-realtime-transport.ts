@@ -604,7 +604,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 
 		// Replay conversation history as conversation items
 		if (state?.conversationHistory?.length) {
-			this.replayHistory(state.conversationHistory);
+			this.#replayHistory(state.conversationHistory);
 		}
 
 		// Re-send completed tool results that were in-flight at disconnect time.
@@ -1891,7 +1891,9 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	 *  per transport instance. */
 	private _truncationReplayWarned = false;
 
-	private replayHistory(items: ReplayItem[]): void {
+	// ES-private (`#`) so the optional public `LLMTransport.replayHistory?` member does not collide;
+	// reconnect recovery calls this directly (unguarded). Public initial-connect wrapper deferred.
+	#replayHistory(items: ReplayItem[]): void {
 		if (!this.rt) return;
 		const rt = this.rt;
 

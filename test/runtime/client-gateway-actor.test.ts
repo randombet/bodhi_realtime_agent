@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ClientGatewayActor } from '../../src/runtime/actors/client-gateway-actor.js';
 import { createEnvelope } from '../../src/runtime/envelope.js';
 import type { SubagentCompletion } from '../../src/runtime/subagent-completion.js';
+import type { AnyServerToClientMessage } from '../../src/types/client-protocol.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -19,8 +20,8 @@ function setup() {
 		messages.push({ type, payload, to });
 	};
 
-	const clientMessages: Record<string, unknown>[] = [];
-	const clientSend = vi.fn((msg: Record<string, unknown>) => {
+	const clientMessages: AnyServerToClientMessage[] = [];
+	const clientSend = vi.fn((msg: AnyServerToClientMessage) => {
 		clientMessages.push(msg);
 	});
 
@@ -37,7 +38,7 @@ describe('ClientGatewayActor', () => {
 	let actor: ClientGatewayActor;
 	let messages: SentMessage[];
 	let clientSend: ReturnType<typeof vi.fn>;
-	let clientMessages: Record<string, unknown>[];
+	let clientMessages: AnyServerToClientMessage[];
 
 	beforeEach(() => {
 		const s = setup();
@@ -123,7 +124,7 @@ describe('ClientGatewayActor', () => {
 			});
 		});
 
-		it('sends failure notification to client', async () => {
+		it('sends failure notification to client (fallback path matches the envelope path)', async () => {
 			await actor.onMessage(
 				createEnvelope(
 					'subagent.failed',
@@ -132,11 +133,43 @@ describe('ClientGatewayActor', () => {
 				),
 			);
 
+			// Both emit paths agree on 'failure' — the fallback used to send
+			// 'failed' while the completion-envelope path sent 'failure'
+			// (issues-client-protocol-audit.md §2).
 			expect(clientMessages[0]).toEqual({
 				type: 'subagent.completion',
 				toolCallId: 'tc-1',
-				status: 'failed',
+				status: 'failure',
 			});
+		});
+
+		it('envelope and fallback paths emit the SAME status for a failed workflow', async () => {
+			const completion: SubagentCompletion = {
+				toolCallId: 'tc-env',
+				workflowId: 'wf-env',
+				status: 'failure',
+				summaryText: 'it broke',
+				metadata: { subagentName: 'x', startedAt: 0, completedAt: 1, durationMs: 1 },
+			} as unknown as SubagentCompletion;
+			await actor.onMessage(
+				createEnvelope(
+					'subagent.failed',
+					{ toolCallId: 'tc-env', workflowId: 'wf-env', completion },
+					'client-gateway',
+				),
+			);
+			await actor.onMessage(
+				createEnvelope(
+					'subagent.failed',
+					{ toolCallId: 'tc-fb', workflowId: 'wf-fb', error: 'timeout' },
+					'client-gateway',
+				),
+			);
+			const statuses = clientMessages
+				.filter((m) => m.type === 'subagent.completion')
+				.map((m) => (m as { status?: string }).status);
+			expect(new Set(statuses).size).toBe(1);
+			expect(statuses[0]).toBe('failure');
 		});
 
 		it('sends cancelled notification to client', async () => {

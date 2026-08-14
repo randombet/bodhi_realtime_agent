@@ -8,7 +8,19 @@ describe('DirectRtcClientChannel', () => {
 		const ch = new DirectRtcClientChannel({
 			sender: { sendAudio, sendJson },
 		});
-		ch.sendJsonToClient({ type: 'session.config', audioFormat: { inputSampleRate: 16000 } });
+		ch.sendJsonToClient({
+			type: 'session.config',
+			audioFormat: {
+				inputSampleRate: 16000,
+				outputSampleRate: 24000,
+				channels: 1,
+				bitDepth: 16,
+				encoding: 'pcm',
+			},
+			clientMedia: { kind: 'websocket' },
+			clientSignalSource: 'websocket_json',
+			clientAudioSource: 'websocket_pcm',
+		});
 		expect(sendJson).toHaveBeenCalledOnce();
 	});
 
