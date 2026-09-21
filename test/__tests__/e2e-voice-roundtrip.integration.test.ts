@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { google } from '@ai-sdk/google';
 import { afterEach, describe, expect, it } from 'vitest';
 import { VoiceSession } from '../../src/core/voice-session.js';

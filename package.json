@@ -1,16 +1,8 @@
 {
-  "name": "bodhi-realtime-agent",
-  "version": "0.2.0",
-  "private": false,
+  "name": "@bodhi_agent/realtime-agent-framework",
+  "version": "0.1.0",
+  "private": true,
   "description": "TypeScript framework for real-time voice agent applications using Google Gemini Live API",
-  "homepage": "https://github.com/randombet/bodhi_realtime_agent#readme",
-  "bugs": {
-    "url": "https://github.com/randombet/bodhi_realtime_agent/issues"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/randombet/bodhi_realtime_agent.git"
-  },
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -25,42 +17,118 @@
         "types": "./dist/index.d.cts",
         "default": "./dist/index.cjs"
       }
+    },
+    "./observability": {
+      "import": {
+        "types": "./dist/observability/index.d.ts",
+        "default": "./dist/observability/index.js"
+      },
+      "require": {
+        "types": "./dist/observability/index.d.cts",
+        "default": "./dist/observability/index.cjs"
+      }
+    },
+    "./observability/opentelemetry": {
+      "import": {
+        "types": "./dist/observability/opentelemetry.d.ts",
+        "default": "./dist/observability/opentelemetry.js"
+      },
+      "require": {
+        "types": "./dist/observability/opentelemetry.d.cts",
+        "default": "./dist/observability/opentelemetry.cjs"
+      }
+    }
+  },
+  "peerDependencies": {
+    "@opentelemetry/api": ">=1.9.0"
+  },
+  "peerDependenciesMeta": {
+    "@opentelemetry/api": {
+      "optional": true
     }
   },
   "files": [
     "dist"
   ],
   "scripts": {
-    "build": "tsup",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "lint": "biome check src/ test/",
+    "start": "pnpm ensure:client-protocol && VOICE_TOOLS_PORT=${VOICE_TOOLS_PORT:-9910} tsx app/server/index.ts",
+    "build": "pnpm ensure:client-protocol && tsup",
+    "build:protocol": "tsc -p clients/client-protocol/tsconfig.json",
+    "ensure:client-protocol": "tsc -p clients/client-protocol/tsconfig.json && tsc -p clients/web-voice/tsconfig.json",
+    "web-client:build": "pnpm ensure:client-protocol && vite build --config app/web-client/vite.config.ts",
+    "web-client:dev": "CLIENT_PORT=${CLIENT_PORT:-8090} vite --config app/web-client/vite.config.ts",
+    "web-client:typecheck": "pnpm ensure:client-protocol && tsc --noEmit -p app/web-client/tsconfig.json",
+    "web-client:lint": "biome check app/web-client/src",
+    "demo:direct-rtc": "tsx examples/direct-rtc-demo/server.ts",
+    "web-client": "pnpm web-client:build && CLIENT_PORT=${CLIENT_PORT:-8090} tsx app/web-client/serve.ts",
+    "test": "pnpm ensure:client-protocol && vitest run",
+    "test:watch": "pnpm ensure:client-protocol && vitest",
+    "test:composer-live": "COMPOSER_LIVE_E2E=1 vitest run composer/test/resume-roundtrip.live.test.ts",
+    "lint": "biome check src/ test/ composer/",
     "lint:fix": "biome check --fix src/",
-    "typecheck": "tsc --noEmit",
+    "lint:composer": "biome check composer/",
+    "typecheck": "pnpm ensure:client-protocol && tsc --noEmit",
+    "typecheck:tests": "pnpm ensure:client-protocol && tsc -p tsconfig.test.json",
+    "typecheck:app": "pnpm ensure:client-protocol && tsc -p tsconfig.app.json",
+    "typecheck:composer": "tsc -p tsconfig.composer.json",
+    "typecheck:examples": "pnpm ensure:client-protocol && tsc -p tsconfig.examples.json",
+    "composer:cli": "tsx composer/src/cli.ts",
     "docs:dev": "vitepress dev docs",
-    "docs:build": "typedoc && vitepress build docs",
-    "docs:preview": "vitepress preview docs"
+    "docs:build": "pnpm ensure:client-protocol && typedoc && vitepress build docs",
+    "docs:preview": "vitepress preview docs",
+    "prepare": "git config core.hooksPath .githooks && tsc -p clients/client-protocol/tsconfig.json && tsc -p clients/web-voice/tsconfig.json"
   },
   "engines": {
     "node": ">=22.0.0"
   },
-  "license": "MIT",
+  "license": "UNLICENSED",
   "dependencies": {
+    "@ai-sdk/anthropic": "^1.2.12",
+    "@bodhi/client-protocol": "link:clients/client-protocol",
+    "@bodhi/web-voice-client": "link:clients/web-voice",
     "@ai-sdk/google": "^1.2.0",
+    "@ai-sdk/openai": "^1.3.24",
+    "@anam-ai/js-sdk": "^4.15.0",
+    "@anthropic-ai/claude-agent-sdk": "^0.2.71",
+    "@emotion/react": "^11.14.0",
+    "@emotion/styled": "^11.14.1",
+    "@evan/opus": "^1.0.3",
     "@google/genai": "^1.41.0",
+    "@heygen/liveavatar-web-sdk": "^0.0.18",
+    "@mui/icons-material": "^7.3.9",
+    "@mui/material": "^7.3.9",
+    "@supabase/supabase-js": "^2.47.0",
     "ai": "^4.3.0",
     "dotenv": "^16.4.5",
+    "jsonwebtoken": "^9.0.3",
     "openai": "^6.25.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
     "twilio": "^5.13.1",
+    "werift": "^0.23.0",
     "write-file-atomic": "^6.0.0",
     "ws": "^8.18.0",
     "zod": "^3.24.0"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.0",
+    "@braintree/sanitize-url": "^7.1.2",
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/exporter-metrics-otlp-http": "^0.218.0",
+    "@opentelemetry/sdk-metrics": "^2.7.1",
+    "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^22.0.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
     "@types/write-file-atomic": "^4.0.3",
     "@types/ws": "^8.5.0",
+    "@vitejs/plugin-react": "^4.7.0",
+    "cytoscape": "^3.33.2",
+    "cytoscape-cose-bilkent": "^4.1.0",
+    "dayjs": "^1.11.20",
+    "debug": "^4.4.3",
     "mermaid": "^11.12.2",
     "tsup": "^8.4.0",
     "tsx": "^4.8.1",
@@ -68,6 +136,7 @@
     "typedoc-plugin-markdown": "^4.10.0",
     "typedoc-vitepress-theme": "^1.1.2",
     "typescript": "^5.7.0",
+    "vite": "^5.4.21",
     "vitepress": "^1.6.4",
     "vitepress-plugin-mermaid": "^2.0.17",
     "vitest": "^3.0.0"

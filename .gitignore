@@ -12,26 +12,27 @@ coverage/
 docs/.vitepress/cache/
 docs/.vitepress/dist/
 docs/.vitepress/.temp/
+docs/api/
 /memory/
+/transcripts/
 /history/
 /workspaces/
 # Optional local pnpm config (e.g. store-dir); do not commit
 .npmrc
 /.worktrees/
 .massgen/
-# Local fixtures/data should never be committed in SDK branch
-/fixtures/
 /user-agents/
-ngrok.yml
-dev_docs/
+/embed-widgets/
+# Demo artifacts (e.g. examples/gemini-live-context-caching.ts persists
+# Gemini resumption handles to .cache/gemini-resumption.handle)
+/.cache/
+# Sutando demo runtime task-ledger state (examples/sutando)
+/sutando-ledger/
 
-# IDE / Editor
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
-# Claude Code
-.claude/
-CLAUDE.md
-AGENTS.md
+# SpatialReal Python host bridges: local venvs and bytecode (per-bridge .gitignore too)
+app/lib/spatialreal/bridge/.venv/
+examples/spatialreal_avatar_websdk/bridge/.venv/
+**/spatialreal/**/__pycache__/
+examples/spatialreal_avatar_websdk/**/__pycache__/
+clients/*/dist/
+/.playwright-mcp/

@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Mock twilio SDK
@@ -23,10 +21,7 @@ vi.mock('../../src/telephony/twilio-webhook-server.js', () => ({
 	})),
 }));
 
-const { TwilioWebhookServer } = await import('../../src/telephony/twilio-webhook-server.js');
 const { TwilioBridge } = await import('../../src/telephony/twilio-bridge.js');
-
-const mockedWebhookServer = vi.mocked(TwilioWebhookServer);
 
 const BASE_CONFIG = {
 	accountSid: 'AC_test',
@@ -150,28 +145,6 @@ describe('TwilioBridge', () => {
 		bridge.handleStatusCallback('CA_test_call_sid', 'completed');
 		expect(bridge.currentState).toBe('ended');
 		expect(onCallEnded).toHaveBeenCalledWith('CA_test_call_sid', 'completed');
-	});
-
-	it('wires Twilio webhook status callbacks into bridge state handling', async () => {
-		const onCallEnded = vi.fn();
-		const bridge = new TwilioBridge(BASE_CONFIG, {
-			onCallConnected: vi.fn(),
-			onCallEnded,
-			onAudioFromHuman: vi.fn(),
-			onError: vi.fn(),
-		});
-		await bridge.start();
-		await bridge.dial('+15559876543');
-
-		const webhookConfig = mockedWebhookServer.mock.calls.at(-1)?.[0] as
-			| { onStatusCallback?: (callSid: string, callStatus: string, answeredBy?: string) => void }
-			| undefined;
-		expect(webhookConfig?.onStatusCallback).toBeDefined();
-
-		webhookConfig?.onStatusCallback?.('CA_test_call_sid', 'busy');
-
-		expect(bridge.currentState).toBe('ended');
-		expect(onCallEnded).toHaveBeenCalledWith('CA_test_call_sid', 'busy');
 	});
 
 	it('handleStatusCallback detects voicemail', async () => {

@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 // Types barrel export
 export type { BehaviorCategory, BehaviorPreset } from './behavior.js';
 
@@ -27,7 +25,15 @@ export type {
 	UIPayload,
 } from './conversation.js';
 
-export type { EventPayload, EventPayloadMap, EventType, Unsubscribe } from './events.js';
+export type {
+	EventPayload,
+	EventPayloadMap,
+	EventType,
+	RealtimeCacheBustPublished,
+	RealtimeUsagePublished,
+	RealtimeUsageSource,
+	Unsubscribe,
+} from './events.js';
 
 export type {
 	ConversationHistoryStore,
@@ -40,9 +46,25 @@ export type {
 
 export type { FrameworkHooks } from './hooks.js';
 
+export type {
+	KnowledgeBaseChunk,
+	KnowledgeBaseConfig,
+	KnowledgeBaseDocument,
+	KnowledgeBaseDocumentMode,
+	KnowledgeBaseDocumentSource,
+	KnowledgeBaseProcessContext,
+	ProcessedKnowledgeBase,
+} from './knowledge-base.js';
+
 export type { MemoryCategory, MemoryFact, MemoryStore } from './memory.js';
 
 export type { QueuedNotification } from './notification.js';
+
+export type { ClientMediaProfile, IceServerEntry } from './client-media.js';
+export { DEFAULT_CLIENT_MEDIA_PROFILE } from './client-media.js';
+
+export type { RtcClientSignalingMessage, RtcServerSignalingMessage } from './rtc-signaling.js';
+export { tryParseRtcClientSignaling } from './rtc-signaling.js';
 
 export type {
 	IClientChannel,
@@ -62,6 +84,7 @@ export type { ToolContext, ToolDefinition, ToolExecution } from './tool.js';
 
 export type {
 	AudioFormatSpec,
+	CacheConfigCommon,
 	ContentTurn,
 	LLMTransport,
 	LLMTransportConfig,

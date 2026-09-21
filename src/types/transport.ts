@@ -1,6 +1,9 @@
-// SPDX-License-Identifier: MIT
-
 import type { ToolDefinition } from './tool.js';
+
+/** Reasoning effort dial for reasoning-capable realtime models
+ *  (e.g. `gpt-realtime-2`). Trades time-to-first-audio for instruction
+ *  following / accuracy. `low` is the documented production default. */
+export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
 
 /** Static capabilities — orchestrator branches on these, never on provider names. */
 export interface TransportCapabilities {
@@ -22,16 +25,101 @@ export interface TransportCapabilities {
 	 *  Optional — defaults to false. Existing custom transport implementations
 	 *  are unaffected until they want to support TTS. */
 	textResponseModality?: boolean;
+	/** Model can emit multiple `function_call` items in a single response.
+	 *  Optional — `undefined` means `false`. Doc-only signal; the transport's
+	 *  batched-tool-call dispatch is on for everyone (no-op if only one call). */
+	parallelToolCalls?: boolean;
+	/** Model exposes a configurable reasoning-effort dial (e.g. `gpt-realtime-2`).
+	 *  Optional — `undefined` means `false`. */
+	reasoningEffort?: boolean;
+	/** Model emits short spoken preambles automatically before tool calls / during
+	 *  reasoning. Doc-only signal for behaviour gating (suppress duplicate
+	 *  app-side announcements). Optional — `undefined` means `false`. */
+	automaticPreambles?: boolean;
+	/** Transport implements `quiesce()` / `unquiesce()` for cross-provider
+	 *  transcription mode (pause without disconnecting). When `undefined` or
+	 *  `false`, VoiceSession falls back to a framework-layer audio-output guard
+	 *  during mode flips. */
+	quiescible?: boolean;
+	/** `onTurnComplete` fires only after model audio playback should be done
+	 *  (Gemini Live: yes — `turnComplete` is delayed until playback; OpenAI
+	 *  Realtime: no — `response.done` is generation-gated). When `false`, the
+	 *  native playback-end gate must supply playback-end gating itself.
+	 *  Optional — `undefined` means `false`. EVERY transport should set this
+	 *  explicitly; the default exists only so adding the flag does not break
+	 *  compilation of existing custom transports.
+	 *  See dev_docs/framework/design-playback-end-gating-openai-native.md. */
+	playbackGatedTurnComplete?: boolean;
+	/** Recommended grace window (ms) at session-first-audio during which
+	 *  user-driven interrupts are suppressed and outbound mic frames are
+	 *  dropped. Allows browser AEC to converge before the framework lets
+	 *  echo-triggered events count as barge-in.
+	 *  Defaults: OpenAI Realtime → 1000 (runtime-computed iff
+	 *  `frameworkOwnsInterrupt` is `true`), Gemini Live → 0,
+	 *  unknown → 0. Optional — `undefined` means `0`.
+	 *  See dev_docs/framework/design-greeting-interrupt-grace.md. */
+	greetingInterruptGraceMs?: number;
+	/** True if this transport's interrupt actuation is framework-owned:
+	 *  `cancelResponse()` is the wire path the framework uses to stop
+	 *  generation, and the provider does **not** auto-cancel from
+	 *  server-VAD events. Required for `greetingInterruptGraceMs > 0` to be
+	 *  honoured (otherwise the provider auto-cancel defeats the grace).
+	 *  Optional — `undefined` means `false`. */
+	frameworkOwnsInterrupt?: boolean;
+	/** Provider-evidence kinds this transport's adapter can emit (Phase 1,
+	 *  design-speech-evidence-architecture.md §1). Undeclared kinds make the
+	 *  corresponding `SegmentEvidence` bit `'not-observable'` — stated once
+	 *  here, never inferred per event. Omitted = no provider evidence. */
+	providerEvidenceKinds?: ProviderEvidenceKind[];
+	/** True when the transport streams response audio the framework cannot stop
+	 *  on the wire: generation runs faster than realtime and is buffered
+	 *  client-side, and `cancelResponse()` cannot cancel it — instead it
+	 *  suppresses the current response's *remaining* outbound audio. When `true`,
+	 *  the framework (a) drives barge-in itself via client VAD (the provider's own
+	 *  VAD is the only other interrupt and is unreliable mid-stream) and (b)
+	 *  relies on `cancelResponse()` to stop the trailing audio. A transport that
+	 *  sets this MUST implement `cancelResponse` to suppress its current-turn
+	 *  audio. Gemini Live → `true`; OpenAI/Qwen → `false` (cancelResponse cancels
+	 *  generation). Optional — `undefined` means `false`.
+	 *  See dev_docs/framework/design-noncancellable-transport-barge-in.md. */
+	bufferedUncancellableAudio?: boolean;
 }
+
+/** Explicit defaults for every flag. Downstream `LLMTransport` implementations
+ *  can spread this and override only what they actually support, so adding new
+ *  flags to the union doesn't break compilation. */
+export const DEFAULT_TRANSPORT_CAPABILITIES: Required<TransportCapabilities> = {
+	providerEvidenceKinds: [],
+	messageTruncation: false,
+	turnDetection: false,
+	userTranscription: false,
+	inPlaceSessionUpdate: false,
+	sessionResumption: false,
+	contextCompression: false,
+	groundingMetadata: false,
+	textResponseModality: false,
+	parallelToolCalls: false,
+	reasoningEffort: false,
+	automaticPreambles: false,
+	quiescible: false,
+	playbackGatedTurnComplete: false,
+	greetingInterruptGraceMs: 0,
+	frameworkOwnsInterrupt: false,
+	bufferedUncancellableAudio: false,
+};
 
 /** Audio format descriptor passed to an STT provider at configuration time. */
 export interface STTAudioConfig {
 	/** Sample rate in Hz (e.g. 16000 for Gemini, 24000 for OpenAI). */
 	sampleRate: number;
-	/** Bits per sample (16). */
+	/** Bits per sample (16 for PCM, 8 for G.711 μ-law). */
 	bitDepth: number;
 	/** Number of channels (1 = mono). */
 	channels: number;
+	/** Encoding the consumer will deliver. Default `'pcm'` — every existing
+	 *  STT provider expects PCM16. A G.711-only provider declares
+	 *  `supportedEncodings: ['pcmu']` and `VoiceSession` encodes before feeding. */
+	encoding?: 'pcm' | 'pcmu';
 }
 
 /**
@@ -43,6 +131,12 @@ export interface STTAudioConfig {
  * onTranscript/onPartialTranscript callbacks.
  */
 export interface STTProvider {
+	/** Optional static declaration of which audio encodings the provider can
+	 *  consume. When omitted, defaults to `['pcm']` (today's behaviour).
+	 *  VoiceSession reads this at configure time and decides whether to feed
+	 *  raw PCM or encode to G.711 before calling `feedAudio()`. */
+	readonly supportedEncodings?: ReadonlyArray<'pcm' | 'pcmu'>;
+
 	/** Configure the audio format that feedAudio() will deliver.
 	 *  Called once before start(). The provider MUST resample or reject
 	 *  if it cannot handle the given format. */
@@ -89,6 +183,19 @@ export interface ContentTurn {
 	text: string;
 }
 
+/** A retained user utterance for watchdog-stall recovery replay
+ *  (`LLMTransport.replayUserTurn`). Produced by `LastUtteranceRetainer` from
+ *  the transport-normalized PCM the router actually sent to the model. */
+export interface RetainedUserTurn {
+	/** PCM16 mono at `transport.audioFormat.inputSampleRate`. */
+	pcm: Buffer;
+	sampleRateHz: number;
+	/** Retainer-owned identity — no framework turn id exists at VAD seal time. */
+	utteranceId: number;
+	/** Freshness key for age-based replay expiry. */
+	sealedAtMs: number;
+}
+
 /**
  * Rich replay item for reconnect/transfer recovery.
  * Preserves the full conversation structure — text, tool calls/results, files,
@@ -103,13 +210,21 @@ export type ReplayItem =
 	| { type: 'transfer'; fromAgent: string; toAgent: string };
 
 /** Audio format specification advertised by a transport.
- *  Input and output rates may differ (e.g. Gemini: 16kHz in / 24kHz out). */
-export interface AudioFormatSpec {
-	inputSampleRate: number;
-	outputSampleRate: number;
-	channels: number;
-	bitDepth: number;
-	encoding: 'pcm';
+ *  Canonically owned by `@bodhi/client-protocol` (it rides in the
+ *  `session.config` wire frame); re-exported here so transport-side
+ *  importers are unchanged. */
+export type { AudioFormatSpec } from '@bodhi/client-protocol';
+import type { AudioFormatSpec } from '@bodhi/client-protocol';
+
+/** Bytes per audio sample for a given encoding. PCM16 is 2; G.711 μ-law is 1. */
+export function bytesPerSample(encoding: AudioFormatSpec['encoding']): number {
+	return encoding === 'pcm' ? 2 : 1;
+}
+
+/** Default sample rate for a given encoding. PCM is 24 kHz (OpenAI Realtime
+ *  default); G.711 μ-law is always 8 kHz (telephony). */
+export function defaultRate(encoding: AudioFormatSpec['encoding']): number {
+	return encoding === 'pcm' ? 24000 : 8000;
 }
 
 /** Configuration for establishing a transport connection. */
@@ -123,7 +238,37 @@ export interface LLMTransportConfig {
 	/** Response modality. Default: 'audio' (LLM-native speech).
 	 *  Set to 'text' when using an external TTSProvider. */
 	responseModality?: 'audio' | 'text';
+	/** Provider-specific realtime input/VAD config. Gemini transport maps this to realtimeInputConfig. */
+	realtimeInputConfig?: Record<string, unknown>;
 	providerOptions?: Record<string, unknown>;
+}
+
+/**
+ * Provider-neutral cache configuration shared across cache-aware transports.
+ * Lives here for cross-transport visibility but is currently consumed only
+ * by `OpenAIRealtimeCacheConfig` — Gemini Live has no in-place session
+ * updates, so prefix-stability enforcement does not apply.
+ */
+export interface CacheConfigCommon {
+	/**
+	 * If true, the OpenAI transport rejects prefix-busting mutations
+	 * (instructions, tools) that occur AFTER `connect()` has completed and
+	 * are NOT part of a `transferSession()` call. Default: false.
+	 *
+	 * Pre-connect config is always allowed (initial setup never throws).
+	 * Same-canonical-prefix updates do not throw — other `SessionUpdate`
+	 * fields in the same call are still sent on the wire.
+	 *
+	 * Wired in P5 of the configurable context caching design.
+	 */
+	enforcePrefixStability?: boolean;
+
+	/**
+	 * Only consulted when `enforcePrefixStability` is true. Default: true
+	 * (multi-agent transfers continue to work). Set false only for hardened
+	 * single-agent demos that should never legitimately swap instructions.
+	 */
+	allowMutationOnTransfer?: boolean;
 }
 
 /** Authentication method for the transport. */
@@ -139,6 +284,11 @@ export interface SessionUpdate {
 	/** Response modality override. Used to preserve text mode across
 	 *  agent transfers and reconnects when TTSProvider is configured. */
 	responseModality?: 'audio' | 'text';
+	/** Toggle server-side audio transcription. `input: false` disables transcription
+	 *  of user audio (used when an external STT provider is the source of truth).
+	 *  Implemented by both transports — OpenAI maps to `audio.input.transcription = null`,
+	 *  Gemini maps to its `inputAudioTranscription` config. */
+	transcription?: { input?: boolean; output?: boolean };
 	providerOptions?: Record<string, unknown>;
 }
 
@@ -164,6 +314,8 @@ export interface TransportToolResult {
 
 /** State provided to the transport for reconnection/recovery. */
 export interface ReconnectState {
+	/** Provider session handle to resume a live session when supported. */
+	resumptionHandle?: string;
 	/** Full conversation replay for recovery — rich typed items, not text-only. */
 	conversationHistory?: ReplayItem[];
 	/** In-flight tool calls to recover after reconnect. */
@@ -201,7 +353,7 @@ export interface LLMTransportError {
 }
 
 /** Which realtime provider produced this usage event. */
-export type RealtimeUsageProvider = 'gemini_live' | 'openai_realtime';
+export type RealtimeUsageProvider = 'gemini_live' | 'openai_realtime' | 'qwen_realtime';
 
 /** What billable slice this event describes. */
 export type RealtimeUsageKind = 'response' | 'input_transcription';
@@ -223,6 +375,11 @@ export interface RealtimeUsageModalityBreakdown {
 	cachedImageTokens?: number;
 	outputTextTokens?: number;
 	outputAudioTokens?: number;
+	/** Reasoning tokens generated internally by reasoning-capable models
+	 *  (e.g. `gpt-realtime-2`). Hidden from the API — only the count is
+	 *  exposed via `response.usage.output_tokens_details.reasoning_tokens`.
+	 *  Billed as output tokens at the chosen modality rate. */
+	reasoningTokens?: number;
 }
 
 /**
@@ -242,8 +399,22 @@ export interface RealtimeLLMUsageEvent {
 	modalityBreakdown?: RealtimeUsageModalityBreakdown;
 	/** OpenAI response id when `kind === 'response'`. */
 	providerResponseId?: string;
+	/** Provider-supplied opaque id for non-response items. Currently used
+	 *  for OpenAI input-audio transcription `item_id` so transcription usage
+	 *  events can be aggregated independently (they have no `turnId`). */
+	providerItemId?: string;
 	/** Opaque provider payload for exact downstream reconciliation. */
 	providerRaw?: unknown;
+	/** Monotonic id of the server turn this usage belongs to. Set by transports
+	 *  that model the server turn explicitly (Gemini Live external-TTS path) so
+	 *  consumers can attribute usage that arrives after the framework turn ended. */
+	serverTurnId?: number;
+	/** True when the transport emitted this usage event while the server turn was
+	 *  winding down — the framework turn had ended early (or been interrupted) but
+	 *  the provider's server turn was not yet closed. A transport-phase marker:
+	 *  consumers should attribute by `serverTurnId`, not assume the framework
+	 *  turn already finalized. */
+	serverTurnWindingDown?: boolean;
 }
 
 /**
@@ -252,6 +423,21 @@ export interface RealtimeLLMUsageEvent {
  * Each provider (Gemini Live, OpenAI Realtime) implements this interface,
  * exposing static capabilities and handling provider-specific wire protocols internally.
  */
+/** Options for `LLMTransport.cancelResponse`. See the method's JSDoc on
+ *  `LLMTransport` for full semantics.
+ *  See dev_docs/framework/design-greeting-interrupt-grace.md §2. */
+export interface CancelResponseOptions {
+	/** Truncate the stored assistant audio item alongside cancelling the
+	 *  response. `{ audioEndMs }` provides an explicit value (floored).
+	 *  `'generated'` asks the transport to use its own per-response
+	 *  generated-audio counter. Omit to skip truncation entirely. */
+	truncate?: { audioEndMs: number } | 'generated';
+	/** When true, the returned promise resolves only after the trailing
+	 *  `response.done(status:'cancelled')` (or a 2000 ms timeout). Use
+	 *  before sending a new `response.create` to avoid races. */
+	waitForDone?: boolean;
+}
+
 export interface LLMTransport {
 	/** Static capabilities — read before connecting, used for orchestrator branching. */
 	readonly capabilities: TransportCapabilities;
@@ -260,6 +446,11 @@ export interface LLMTransport {
 	connect(config?: LLMTransportConfig): Promise<void>;
 	disconnect(): Promise<void>;
 	reconnect(state?: ReconnectState): Promise<void>;
+	/** Prefill prior turns before the first turn (resume). Call ONCE, AFTER connect(), BEFORE the
+	 *  first send; idempotent (no-op if already seeded). Optional — a transport that cannot prefill
+	 *  on the initial connect omits it (VoiceSession calls it as `transport.replayHistory?.(...)`).
+	 *  Distinct from reconnect recovery, which transports drive internally from `ReconnectState`. */
+	replayHistory?(items: readonly ReplayItem[]): void;
 	readonly isConnected: boolean;
 
 	// --- Audio ---
@@ -270,8 +461,68 @@ export interface LLMTransport {
 	commitAudio(): void;
 	clearAudio(): void;
 
+	// --- Framework-owned interrupt actuation (optional; required when
+	//     `capabilities.frameworkOwnsInterrupt` is true) ---
+	/** Cancel the in-flight response — wire-only actuation. May be called
+	 *  from any framework barge-in path that has decided to interrupt.
+	 *  Idempotent.
+	 *
+	 *  MUST NOT invoke `onInterrupted` or any other framework callback — the
+	 *  caller is responsible for `finalizeTurn(interrupted)`. The
+	 *  implementation only sends wire messages and updates the transport's
+	 *  own state.
+	 *
+	 *  MUST NOT reject. Transient send failures are caught and logged
+	 *  internally; the returned promise still resolves so fire-and-forget
+	 *  callers cannot trigger unhandled-rejection warnings.
+	 *
+	 *  When `truncate.audioEndMs` is supplied and the transport tracks an
+	 *  active assistant audio item, it also sends a per-provider truncate
+	 *  (OpenAI: `conversation.item.truncate`). `truncate: 'generated'` asks
+	 *  the transport to compute `audioEndMs` from its own per-response
+	 *  generated-audio counter (e.g. OpenAI's `audioOutputMs`); transports
+	 *  without such a counter ignore the sentinel. Omitting `truncate` only
+	 *  skips truncation — `cancelResponse` still stops generation if a
+	 *  response is in flight.
+	 *
+	 *  When `waitForDone` is true, the returned promise resolves only after
+	 *  the trailing `response.done(status:'cancelled')` arrives from the
+	 *  provider (or a 2000 ms timeout, whichever comes first). Use this
+	 *  before sending a new `response.create` so cancel and create cannot
+	 *  race. Default `false`. */
+	cancelResponse?(opts?: CancelResponseOptions): Promise<void>;
+
+	/** Clear the provider's pending input-audio buffer (OpenAI Realtime:
+	 *  `input_audio_buffer.clear`). Optional — Gemini and other transports
+	 *  without a server-side append-then-commit input buffer omit this.
+	 *  Called by `VoiceSession` at grace-window arming to discard any
+	 *  pre-arming echo residue; safe to call when the buffer is empty.
+	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §8. */
+	clearInputAudio?(): void;
+
+	// --- Quiesce / unquiesce (optional; advertised via capabilities.quiescible) ---
+	/** Pause the transport without disconnecting:
+	 *   1. Cancel any in-flight model response (provider chooses how).
+	 *   2. Suppress onAudioOutput deltas until unquiesce() is called.
+	 *   3. Leave the WebSocket open and conversation state intact.
+	 *
+	 *  Idempotent. Used by VoiceSession to transition into transcription mode
+	 *  without tearing the transport down. When omitted, VoiceSession falls
+	 *  back to its framework-layer audio-output guard. */
+	quiesce?(): Promise<void>;
+
+	/** Resume normal operation after quiesce(). After this resolves,
+	 *  onAudioOutput fires again on the next response. Idempotent. */
+	unquiesce?(): Promise<void>;
+
 	// --- Session configuration ---
-	updateSession(config: SessionUpdate): void;
+	/** Apply a session update.
+	 *  Pre-connect: state-only mutation; coalesces with prior pre-connect calls
+	 *  and resolves immediately. The merged config is sent in the single
+	 *  `session.update` issued at connect time.
+	 *  Post-connect: serialized via the transport's internal FIFO queue; each
+	 *  call produces one wire `session.update` and awaits its ack. */
+	updateSession(config: SessionUpdate): Promise<void>;
 
 	// --- Agent transfer (transport decides: in-place vs reconnect) ---
 	transferSession(config: SessionUpdate, state?: ReconnectState): Promise<void>;
@@ -286,14 +537,72 @@ export interface LLMTransport {
 	sendToolResult(result: TransportToolResult): void;
 
 	// --- Generation control (non-tool-result generation) ---
-	triggerGeneration(instructions?: string): void;
+	/** Trigger a model response.
+	 *  @param instructions Optional one-off instruction (passed as
+	 *    `response.create.response.instructions` on OpenAI — does not mutate
+	 *    the session prefix, so it is cache-safe for subsequent turns).
+	 *  @param overrides Optional per-response overrides. `reasoning.effort`
+	 *    bumps the dial for this Response only (resets to session default
+	 *    on the next turn). Only honored by transports advertising
+	 *    `capabilities.reasoningEffort`. */
+	triggerGeneration(
+		instructions?: string,
+		overrides?: { reasoning?: { effort: ReasoningEffort } },
+	): void;
+
+	/** Best-effort re-elicit of a model response from existing/restored context,
+	 *  without injecting new content. Used after a watchdog-driven reconnect to
+	 *  recover a turn the model silently dropped. Optional — transports that
+	 *  auto-generate (or cannot elicit without content) may omit it; callers fall
+	 *  back to `triggerGeneration()`.
+	 *
+	 *  Implement this only when the provider accepts a genuinely content-less
+	 *  request. No in-tree transport does: Gemini rejects one server-side (1007,
+	 *  see the note in `GeminiLiveTransport`), and OpenAI/Qwen rely on the
+	 *  `triggerGeneration()` fallback. A rejection here is especially costly
+	 *  because it surfaces as an async socket close, not a throw, so the watchdog
+	 *  reads it as a transport failure and retries into the reconnect budget. */
+	elicitResponse?(): void;
+
+	/** Re-send a retained user utterance as a complete user turn, eliciting a
+	 *  response. Used by the response watchdog when a stalled turn left pending
+	 *  user input the provider never answered — first in-place on the existing
+	 *  connection, then once more after a reconnect if the model stays silent.
+	 *  Returns true if the transport dispatched it; false/absent → caller falls
+	 *  back. Optional. Gemini sends `clientContent` inline audio with an explicit
+	 *  `turnComplete` (no server-VAD dependence; Phase 0 validated — see
+	 *  dev_docs/framework/design-retained-user-content-recovery.md). */
+	replayUserTurn?(turn: RetainedUserTurn): boolean;
+
+	// --- Turn correlation (optional) ---
+	/** The transport's currently-active server-turn id, or `undefined` when no
+	 *  server turn is active (idle/closed) or the transport does not model
+	 *  server turns. Read synchronously from a model-output callback to bind the
+	 *  framework `Turn` to the server turn at birth. Active-only by contract:
+	 *  it must NOT return a stale id between turns. */
+	getActiveServerTurnId?(): number | undefined;
 
 	// --- Core callbacks (all providers must support) ---
 	onAudioOutput?: (base64Data: string) => void;
 	onToolCall?: (calls: TransportToolCall[]) => void;
 	onToolCallCancel?: (ids: string[]) => void;
-	onTurnComplete?: () => void;
-	onInterrupted?: () => void;
+	/** @param serverTurnId Monotonic id of the server turn that completed, when
+	 *  the transport models server turns explicitly (Gemini external-TTS path).
+	 *  Consumers dedupe finalization by this id. `undefined` for transports that
+	 *  do not track server turns. */
+	onTurnComplete?: (serverTurnId?: number) => void;
+	/** @param serverTurnId Monotonic id of the server turn being interrupted
+	 *  (see `onTurnComplete`). `undefined` for transports without server turns. */
+	onInterrupted?: (serverTurnId?: number) => void;
+	/** User-speech transcription from the transport's own recognizer.
+	 *
+	 *  @param text An incremental **delta**, not the whole utterance restated.
+	 *  Gemini Live streams many small deltas per utterance (often mid-word);
+	 *  OpenAI and Qwen fire once per utterance from
+	 *  `conversation.item.input_audio_transcription.completed`, which is the
+	 *  degenerate one-delta case. Consumers must therefore accumulate across
+	 *  calls and reset at each utterance boundary — treating a call as the
+	 *  complete transcript collapses the utterance to its last fragment. */
 	onInputTranscription?: (text: string) => void;
 	onOutputTranscription?: (text: string) => void;
 	onSessionReady?: (sessionId: string) => void;
@@ -304,6 +613,13 @@ export interface LLMTransport {
 	/** Fires when the model begins any response (audio, tool call, etc.).
 	 *  Used by VoiceSession to trigger STT provider commit. */
 	onModelTurnStart?: () => void;
+
+	/** Fires once per model response, on the FIRST audio chunk emitted to the
+	 *  client. Distinct from `onModelTurnStart` (which fires on any response part,
+	 *  including tool-only turns) — this marks the moment audio actually begins, the
+	 *  anchor for TTS-first-audio / stop-to-first-audio latency. Transports reset
+	 *  their per-response "audio started" flag when a new response begins. */
+	onFirstAudioChunk?: () => void;
 
 	// --- Text-mode callbacks (active when responseModality is 'text') ---
 	/** Fires when the model produces text output (text-mode responses).
@@ -322,6 +638,15 @@ export interface LLMTransport {
 	 *  Gemini: may require custom VAD signal — needs empirical testing. */
 	onSpeechStarted?: () => void;
 
+	/** Fires when the provider's server VAD detects end of user speech.
+	 *  OpenAI/Qwen: wired to input_audio_buffer.speech_stopped. Gemini Live has
+	 *  no equivalent wire event (callback never fires there — the framework
+	 *  falls back to client-VAD timing). The latency anchor derived from this is
+	 *  callback receipt time: biased late by the provider's silence window +
+	 *  network hop (a bounded lower-bound bias — see the observability design,
+	 *  investment-hai-metrics-observability.md §11). */
+	onUserSpeechStopped?: () => void;
+
 	// --- Optional capability callbacks (only fired by supporting transports) ---
 	onGoAway?: (timeLeft: string) => void;
 	onResumptionUpdate?: (handle: string, resumable: boolean) => void;
@@ -329,4 +654,57 @@ export interface LLMTransport {
 
 	/** Optional: fires when the provider reports token or duration usage for billing/observability. */
 	onRealtimeLLMUsage?: (usage: RealtimeLLMUsageEvent) => void;
+
+	// --- Reasoning lifecycle (reasoning-capable models only) ---
+	/** Fires when the model begins emitting its hidden reasoning trace
+	 *  for the current response. Useful for latency observability. */
+	onReasoningStart?: () => void;
+
+	/** Fires when the model's reasoning step completes for the current
+	 *  response, before any audio/text answer is emitted. `durationMs`
+	 *  is the wall-clock time the reasoning step took; `reasoningTokens`
+	 *  is the count if the provider exposes it (otherwise undefined). */
+	onReasoningDone?: (info: { durationMs: number; reasoningTokens?: number }) => void;
+
+	/** Fires with a streamed chunk of the optional reasoning summary text
+	 *  (when the model was configured to emit one). Surface this to ops
+	 *  telemetry only — never to end users. */
+	onReasoningSummary?: (text: string) => void;
+
+	// --- Prompt-cache observability ---
+	/** Fires immediately before the framework emits a `session.update` that
+	 *  changes `instructions` or `tools` — i.e. before a guaranteed full
+	 *  prompt-cache bust on the next response. Pure telemetry. */
+	onCacheBust?: (reason: 'instructions_changed' | 'tools_changed') => void;
+
+	/** Normalized provider-evidence delivery (speech-evidence design §1).
+	 *  Adapters of transports that declare `capabilities.providerEvidenceKinds`
+	 *  emit each normalized event here; the framework routes it into the
+	 *  session's evidence ledger. Never emit kinds you did not declare. */
+	onProviderEvidence?: (ev: ProviderEvidenceEvent) => void;
+}
+
+/** Provider-evidence kinds (internal transport-adapter correlation contract,
+ *  design-speech-evidence-architecture.md §1). `speech-window` = provider VAD
+ *  heard speech (detection, never recognition); `input-transcription` /
+ *  `model-output` = the provider demonstrably processed input. */
+export type ProviderEvidenceKind = 'speech-window' | 'input-transcription' | 'model-output';
+
+/** Normalized provider-evidence event. Point events carry `receiptAtMs`
+ *  only; window kinds carry explicit start/end (paired by the adapter). All
+ *  times are stamped onto the session clock at receipt — no cross-clock
+ *  arithmetic with provider timestamps. `correlation` is `'causal'` ONLY
+ *  when a provider ID resolves through the acknowledged
+ *  providerInputId ↔ localInputBatchId ↔ segment chain; time-window matching
+ *  is always `'heuristic'` (dashboards only — behavioral policies may trust
+ *  causal evidence exclusively). */
+export interface ProviderEvidenceEvent {
+	kind: ProviderEvidenceKind;
+	receiptAtMs: number;
+	windowStartAtMs?: number;
+	windowEndAtMs?: number;
+	providerInputId?: string;
+	providerResponseId?: string;
+	provenance: string;
+	correlation: 'causal' | 'heuristic';
 }

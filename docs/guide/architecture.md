@@ -9,10 +9,28 @@ At a high level:
 5. Subagents handle long-running tasks.
 6. Events/hooks expose observability and integration points.
 
-## Runtime model
+## Realtime links: client media vs LLM transport
 
-The framework uses the router-based orchestration path for tool routing,
-subagent handoff, and agent transfers.
+**Two legs on the wire** (Leg 1 = what integrators often build; Leg 2 = always inside your Bodhi server to the vendor):
+
+```text
+[Browser or device] ─── Leg 1 ───> [App server / VoiceSession] ─── Leg 2 ───> [Gemini or OpenAI]
+```
+
+There are **three** links in a typical deployment — not one monolithic “voice socket”:
+
+1. **Client or device ↔ your Bodhi app server** — capture, playback, and JSON control (and optional WebRTC signaling) on paths you own.
+2. **App server ↔ `VoiceSession`** — your server forwards WebSocket binary/JSON (or decoded PCM from an RTC bridge) into the framework.
+3. **`VoiceSession` / `LLMTransport` ↔ Gemini or OpenAI realtime** — the **vendor** WebSocket(s); unchanged when you change how the browser talks to your server.
+
+Framework option **`clientMedia: { kind: 'direct_rtc' }`** only affects **link (1)** (optional Opus RTP for audio when `rtcAudio: 'werift_opus'`). It does **not** replace link (3). See [Transport](/guide/transport) and [VoiceSession](/guide/voice-session).
+
+## Key runtime modes
+
+- `legacy`: classic router-based orchestration
+- `actor`: actor-runtime orchestration
+
+See [Actor Runtime Pattern](/guide/actor-pattern) for details.
 
 ## Main components
 

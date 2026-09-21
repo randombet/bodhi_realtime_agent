@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Server Configuration
  *
@@ -65,11 +63,49 @@ export interface ServerConfig {
 		defaultAgentProfile: string;
 		/** Optional E.164 number -> agent profile map (digits only key). */
 		numberAgentProfiles: Record<string, string>;
+		/**
+		 * REST-initiated dial-out to PSTN using the same bidirectional Media Stream as inbound.
+		 * Requires `TWILIO_INBOUND_ENABLED` (shared `/twilio/media` path).
+		 */
+		outboundDial?: TwilioOutboundDialConfig;
 	};
+}
+
+/** Twilio REST PSTN dial-out — not the human-escalation `TwilioBridge` in `src/telephony/`. */
+export interface TwilioOutboundDialConfig {
+	accountSid: string;
+	authToken: string;
+	/** Caller ID (E.164) — must be a Twilio-owned number on this account. */
+	defaultFromNumber: string;
+	/** When set, `POST /api/telephony/twilio/outbound` must send `X-Bodhi-Telephony-Outbound-Key`. */
+	apiKey?: string;
 }
 
 function normalizePhoneMapKey(phone: string): string {
 	return phone.replace(/[^0-9]/g, '');
+}
+
+function buildTwilioOutboundDialConfig(): TwilioOutboundDialConfig | undefined {
+	if (process.env.TWILIO_OUTBOUND_ENABLED?.trim() !== 'true') return undefined;
+	const accountSid = process.env.TWILIO_ACCOUNT_SID?.trim() ?? '';
+	const authToken = process.env.TWILIO_AUTH_TOKEN?.trim() ?? '';
+	const defaultFromNumber = (
+		process.env.TWILIO_OUTBOUND_FROM?.trim() ||
+		process.env.TWILIO_FROM_NUMBER?.trim() ||
+		''
+	).slice(0, 24);
+	const apiKey = process.env.TWILIO_OUTBOUND_API_KEY?.trim() || undefined;
+	if (!accountSid || !authToken) {
+		throw new Error(
+			'TWILIO_OUTBOUND_ENABLED requires TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN for Calls.create',
+		);
+	}
+	if (!defaultFromNumber) {
+		throw new Error(
+			'TWILIO_OUTBOUND_ENABLED requires TWILIO_OUTBOUND_FROM or TWILIO_FROM_NUMBER (E.164 caller ID)',
+		);
+	}
+	return { accountSid, authToken, defaultFromNumber, apiKey };
 }
 
 function parseTwilioNumberAgentProfiles(raw: string): Record<string, string> {
@@ -178,6 +214,7 @@ export function loadConfig(): ServerConfig {
 						numberAgentProfiles: parseTwilioNumberAgentProfiles(
 							process.env.TWILIO_NUMBER_AGENT_PROFILES || '',
 						),
+						outboundDial: buildTwilioOutboundDialConfig(),
 					}
 				: undefined,
 	};
@@ -223,5 +260,11 @@ export function validateConfig(config: ServerConfig): void {
 
 	if (config.cleanupIntervalMs < 1000) {
 		throw new Error('CLEANUP_INTERVAL_MS must be at least 1000ms');
+	}
+
+	if (config.twilio?.outboundDial && !config.twilio.inboundEnabled) {
+		throw new Error(
+			'TWILIO_OUTBOUND_ENABLED requires TWILIO_INBOUND_ENABLED (shared Media Stream server)',
+		);
 	}
 }

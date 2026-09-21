@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type {
 	RealtimeLLMUsageEvent,
 	RealtimeUsageModalityBreakdown,
@@ -134,8 +132,10 @@ function openAIModalityFromOutputDetails(
 	const breakdown: RealtimeUsageModalityBreakdown = {};
 	const text = readNumber(d, ['text_tokens']);
 	const audio = readNumber(d, ['audio_tokens']);
+	const reasoning = readNumber(d, ['reasoning_tokens']);
 	if (text !== undefined) breakdown.outputTextTokens = text;
 	if (audio !== undefined) breakdown.outputAudioTokens = audio;
+	if (reasoning !== undefined) breakdown.reasoningTokens = reasoning;
 	return breakdown;
 }
 
@@ -196,8 +196,67 @@ export function normalizeOpenAIResponseUsage(
 /**
  * Normalize OpenAI Realtime input transcription `usage` from
  * `conversation.item.input_audio_transcription.completed`.
+ *
+ * @param providerItemId The transcription `item_id` (P4) — required so
+ *   downstream consumers can aggregate transcription billing without
+ *   collapsing every event in a session into one bucket. Optional for
+ *   backward compatibility with callers that don't have it.
  */
-export function normalizeOpenAITranscriptionUsage(raw: unknown): RealtimeLLMUsageEvent | null {
+/**
+ * Normalize Qwen Omni Realtime `response.usage` (from `response.done.response.usage`).
+ *
+ * Qwen shape (note plural `*_tokens_details`, unlike OpenAI's singular):
+ *   { total_tokens, input_tokens, output_tokens,
+ *     input_tokens_details: { text_tokens, audio_tokens },
+ *     output_tokens_details: { text_tokens, audio_tokens } }
+ */
+export function normalizeQwenResponseUsage(
+	raw: unknown,
+	providerResponseId?: string,
+): RealtimeLLMUsageEvent | null {
+	if (!isRecord(raw)) return null;
+
+	const input = readNumber(raw, ['input_tokens']);
+	const output = readNumber(raw, ['output_tokens']);
+	const total = readNumber(raw, ['total_tokens']);
+	if (input === undefined && output === undefined && total === undefined) return null;
+
+	const breakdown: RealtimeUsageModalityBreakdown = {};
+	const inDet = raw.input_tokens_details;
+	if (isRecord(inDet)) {
+		const t = readNumber(inDet, ['text_tokens']);
+		const a = readNumber(inDet, ['audio_tokens']);
+		const img = readNumber(inDet, ['image_tokens']);
+		if (t !== undefined) breakdown.inputTextTokens = t;
+		if (a !== undefined) breakdown.inputAudioTokens = a;
+		if (img !== undefined) breakdown.inputImageTokens = img;
+	}
+	const outDet = raw.output_tokens_details;
+	if (isRecord(outDet)) {
+		const t = readNumber(outDet, ['text_tokens']);
+		const a = readNumber(outDet, ['audio_tokens']);
+		if (t !== undefined) breakdown.outputTextTokens = t;
+		if (a !== undefined) breakdown.outputAudioTokens = a;
+	}
+
+	return {
+		provider: 'qwen_realtime',
+		kind: 'response',
+		phase: 'final',
+		unit: 'tokens',
+		inputTokens: input,
+		outputTokens: output,
+		totalTokens: total,
+		modalityBreakdown: Object.keys(breakdown).length > 0 ? breakdown : undefined,
+		...(providerResponseId !== undefined ? { providerResponseId } : {}),
+		providerRaw: raw,
+	};
+}
+
+export function normalizeOpenAITranscriptionUsage(
+	raw: unknown,
+	providerItemId?: string,
+): RealtimeLLMUsageEvent | null {
 	if (!isRecord(raw)) return null;
 
 	const typ = raw.type;
@@ -210,6 +269,7 @@ export function normalizeOpenAITranscriptionUsage(raw: unknown): RealtimeLLMUsag
 			phase: 'final',
 			unit: 'duration_seconds',
 			durationSeconds: seconds,
+			...(providerItemId !== undefined ? { providerItemId } : {}),
 			providerRaw: raw,
 		};
 	}
@@ -235,6 +295,7 @@ export function normalizeOpenAITranscriptionUsage(raw: unknown): RealtimeLLMUsag
 		totalTokens: total,
 		modalityBreakdown:
 			modality && Object.values(modality).some((v) => v !== undefined) ? modality : undefined,
+		...(providerItemId !== undefined ? { providerItemId } : {}),
 		providerRaw: raw,
 	};
 }

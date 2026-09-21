@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CartesiaTTSProvider } from '../../src/transport/cartesia-tts-provider.js';
 
@@ -69,9 +67,11 @@ vi.mock('ws', () => ({
 	WebSocket: MockWebSocket,
 }));
 
+type MockWebSocketInstance = InstanceType<typeof MockWebSocket>;
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function lastInstance(): MockWebSocket {
+function lastInstance(): MockWebSocketInstance {
 	return MockWebSocket.instances[MockWebSocket.instances.length - 1];
 }
 
@@ -93,7 +93,7 @@ function createProvider(
 }
 
 /** Start the provider and connect the WebSocket. */
-async function startProvider(p: CartesiaTTSProvider): Promise<MockWebSocket> {
+async function startProvider(p: CartesiaTTSProvider): Promise<MockWebSocketInstance> {
 	const startPromise = p.start();
 	const ws = lastInstance();
 	ws.triggerOpen();
@@ -101,7 +101,7 @@ async function startProvider(p: CartesiaTTSProvider): Promise<MockWebSocket> {
 	return ws;
 }
 
-function parseSent(ws: MockWebSocket): Record<string, unknown>[] {
+function parseSent(ws: MockWebSocketInstance): Record<string, unknown>[] {
 	return ws.sent.map((s) => JSON.parse(s));
 }
 
@@ -238,7 +238,7 @@ describe('CartesiaTTSProvider', () => {
 			expect(url.origin).toBe('wss://api.cartesia.ai');
 			expect(url.pathname).toBe('/tts/websocket');
 			expect(url.searchParams.get('api_key')).toBe('test-api-key');
-			expect(url.searchParams.get('cartesia_version')).toBe('2024-06-10');
+			expect(url.searchParams.get('cartesia_version')).toBe('2026-03-01');
 
 			ws.triggerOpen();
 			await startPromise;
@@ -313,7 +313,7 @@ describe('CartesiaTTSProvider', () => {
 			expect(msg.transcript).toBe('Hello world. ');
 			expect(msg.continue).toBe(true);
 			expect(msg.context_id).toMatch(/^ctx-/);
-			expect(msg.model_id).toBe('sonic-2');
+			expect(msg.model_id).toBe('sonic-3.5');
 			expect(msg.voice).toEqual({ mode: 'id', id: 'test-voice-id' });
 			expect(msg.output_format).toEqual({
 				container: 'raw',
@@ -700,6 +700,21 @@ describe('CartesiaTTSProvider', () => {
 			expect(onDone).toHaveBeenCalledTimes(1);
 		});
 
+		it('fires onDone when Cartesia sends done boolean without type', async () => {
+			const p = createProvider();
+			const ws = await startProvider(p);
+			const onDone = vi.fn();
+			p.onDone = onDone;
+
+			p.synthesize('Hello. ', 1, { flush: true });
+			const contextId = (JSON.parse(ws.sent[0]) as Record<string, unknown>).context_id;
+
+			ws.triggerMessage({ done: true, context_id: contextId });
+
+			expect(onDone).toHaveBeenCalledWith(1);
+			expect(onDone).toHaveBeenCalledTimes(1);
+		});
+
 		it('fires onDone once per requestId', async () => {
 			const p = createProvider();
 			const ws = await startProvider(p);
@@ -758,6 +773,18 @@ describe('CartesiaTTSProvider', () => {
 			// The mock triggers message handler directly
 			const ws = lastInstance();
 			ws.triggerMessage({ type: 'done', context_id: 'unknown-ctx' });
+
+			expect(onDone).not.toHaveBeenCalled();
+		});
+
+		it('ignores done boolean for unknown context', async () => {
+			const p = createProvider();
+			await startProvider(p);
+			const onDone = vi.fn();
+			p.onDone = onDone;
+
+			const ws = lastInstance();
+			ws.triggerMessage({ done: true, context_id: 'unknown-ctx' });
 
 			expect(onDone).not.toHaveBeenCalled();
 		});
@@ -928,6 +955,22 @@ describe('CartesiaTTSProvider', () => {
 
 			// Server sends done for cancelled context — should clean up without firing onDone
 			ws.triggerMessage({ type: 'done', context_id: contextId });
+
+			expect(onDone).not.toHaveBeenCalled();
+		});
+
+		it('done boolean for cancelled context does not fire onDone', async () => {
+			const p = createProvider();
+			const ws = await startProvider(p);
+			const onDone = vi.fn();
+			p.onDone = onDone;
+
+			p.synthesize('Hello. ', 1);
+			const contextId = (JSON.parse(ws.sent[0]) as Record<string, unknown>).context_id;
+
+			p.cancel();
+
+			ws.triggerMessage({ done: true, context_id: contextId });
 
 			expect(onDone).not.toHaveBeenCalled();
 		});

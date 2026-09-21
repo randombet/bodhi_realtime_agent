@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { LanguageModelV1 } from 'ai';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConversationContext } from '../../src/core/conversation-context.js';
@@ -161,6 +159,21 @@ describe('MemoryDistiller', () => {
 		const { generateObject } = await import('ai');
 		const call = (generateObject as ReturnType<typeof vi.fn>).mock.calls[0][0];
 		expect(call.prompt).toContain('Existing fact');
+	});
+
+	it('injects knowledge base summary into extraction prompt when getter is set', async () => {
+		const kbDistiller = new MemoryDistiller(convCtx, store, hooks, mockModel, {
+			userId: 'user1',
+			sessionId: 'sess1',
+			getKnowledgeBaseSummary: () => 'Company: WidgetCo — Role: Senior Engineer',
+		});
+		convCtx.addUserMessage('I agree with the role description');
+		await kbDistiller.forceExtract();
+
+		const { generateObject } = await import('ai');
+		const call = (generateObject as ReturnType<typeof vi.fn>).mock.calls[0][0];
+		expect(call.prompt).toContain('KNOWLEDGE BASE CONTEXT');
+		expect(call.prompt).toContain('Company: WidgetCo');
 	});
 
 	it('reports errors via hooks.onError', async () => {

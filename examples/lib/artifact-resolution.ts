@@ -1,14 +1,13 @@
-// SPDX-License-Identifier: MIT
-
 /**
- * Shared artifact resolution logic for OpenClaw tool execution paths.
+ * Shared artifact resolution logic for OpenClaw tool and persistent subagent paths.
  *
  * Resolves artifact IDs to ChatAttachments, enforcing size/count limits.
- * The relay (openclaw_chat tool) uses this same logic.
- * Errors are returned in structured `{ status: 'error' }` shape for tool responses.
+ * Both the relay (openclaw_chat tool) and persistent (PersistentOpenClawSubagent)
+ * paths use this same logic — the difference is only in error transport:
+ * relay returns structured { status: 'error' }, persistent throws.
  */
 
-import type { ArtifactRegistry } from './artifact-registry.js';
+import type { ArtifactRegistry } from '../../app/lib/media/artifact-registry.js';
 import type { ChatAttachment } from './openclaw-client.js';
 
 // ---------------------------------------------------------------------------
@@ -29,8 +28,7 @@ export interface ResolvedAttachments {
 // Intent-aware fallback
 // ---------------------------------------------------------------------------
 
-const IMAGE_REFERENCE_RE =
-	/\b(image|picture|photo|screenshot|graphic|chart|diagram|snapshot)\b/i;
+const IMAGE_REFERENCE_RE = /\b(image|picture|photo|screenshot|graphic|chart|diagram|snapshot)\b/i;
 const SEND_INTENT_RE = /\b(email|send|forward|attach|share)\b/i;
 
 /**
@@ -53,9 +51,7 @@ export function resolveRequestedArtifactIds(
 	const isImageSendIntent = IMAGE_REFERENCE_RE.test(message) && SEND_INTENT_RE.test(message);
 	if (!isImageSendIntent) return [];
 
-	const artifacts = registry
-		.list()
-		.filter((artifact) => artifact.mimeType.startsWith('image/'));
+	const artifacts = registry.list().filter((artifact) => artifact.mimeType.startsWith('image/'));
 	if (artifacts.length === 0) return [];
 
 	const latest = artifacts[artifacts.length - 1];
@@ -93,9 +89,7 @@ export function resolveArtifacts(
 	}
 
 	if (!registry) {
-		throw new ArtifactResolutionError(
-			'File attachments not configured for this session.',
-		);
+		throw new ArtifactResolutionError('File attachments not configured for this session.');
 	}
 
 	const maxAttachments = Math.min(
@@ -127,9 +121,7 @@ export function resolveArtifacts(
 		}
 
 		if (artifact.sizeBytes > MAX_ARTIFACT_BYTES) {
-			console.warn(
-				`[ArtifactResolution] Artifact ${id} exceeds 5 MB gateway limit, skipping`,
-			);
+			console.warn(`[ArtifactResolution] Artifact ${id} exceeds 5 MB gateway limit, skipping`);
 			oversizedIds.push(id);
 			continue;
 		}

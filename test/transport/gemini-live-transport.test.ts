@@ -1,16 +1,29 @@
-// SPDX-License-Identifier: MIT
-
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
-import { GeminiLiveTransport } from '../../src/transport/gemini-live-transport.js';
+import {
+	DEFAULT_GEMINI_LIVE_MODEL,
+	DEFAULT_GEMINI_REALTIME_INPUT_CONFIG,
+	GeminiLiveTransport,
+	resolveGeminiRealtimeInputConfig,
+} from '../../src/transport/gemini-live-transport.js';
 import type { ToolDefinition } from '../../src/types/tool.js';
+import type { RealtimeLLMUsageEvent } from '../../src/types/transport.js';
 
 // Mock @google/genai
 let capturedConnectConfig: Record<string, unknown> = {};
 const mockSession = {
 	sendRealtimeInput: vi.fn(),
 	sendToolResponse: vi.fn(),
-	sendClientContent: vi.fn(),
+	// Replicates @google/genai validation: any non-null/non-undefined `turns` is
+	// parsed, and tContents([]) rejects an empty array — so `turns: []` throws
+	// exactly like the real SDK. Note this covers only *client-side* validation;
+	// the server's own rejection of a content-less request (1007) arrives as a
+	// socket close and cannot be modelled here.
+	sendClientContent: vi.fn((params: { turns?: unknown }) => {
+		if (Array.isArray(params.turns) && params.turns.length === 0) {
+			throw new Error(`Failed to parse client content "turns", type: '${typeof params.turns}'`);
+		}
+	}),
 	close: vi.fn(),
 };
 
@@ -52,11 +65,72 @@ describe('GeminiLiveTransport', () => {
 			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
 			await transport.connect();
 
-			expect(capturedConnectConfig.model).toBe('gemini-live-2.5-flash-preview');
+			expect(capturedConnectConfig.model).toBe(DEFAULT_GEMINI_LIVE_MODEL);
 			const config = capturedConnectConfig.config as Record<string, unknown>;
 			expect(config.responseModalities).toEqual(['AUDIO']);
 			expect(config.sessionResumption).toEqual({});
 			expect(config.inputAudioTranscription).toEqual({});
+		});
+
+		it('replayUserTurn sends inline audio clientContent with an explicit turnComplete', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			mockSession.sendClientContent.mockClear();
+			const pcm = Buffer.alloc(640, 5);
+			const dispatched = transport.replayUserTurn?.({
+				pcm,
+				sampleRateHz: 16000,
+				utteranceId: 1,
+				sealedAtMs: 0,
+			});
+			expect(dispatched).toBe(true);
+			expect(mockSession.sendClientContent).toHaveBeenCalledWith({
+				turns: [
+					{
+						role: 'user',
+						parts: [
+							{
+								inlineData: {
+									data: pcm.toString('base64'),
+									mimeType: 'audio/pcm;rate=16000',
+								},
+							},
+						],
+					},
+				],
+				turnComplete: true,
+			});
+		});
+
+		it('replayUserTurn returns false when not connected', () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			expect(
+				transport.replayUserTurn?.({
+					pcm: Buffer.alloc(2),
+					sampleRateHz: 16000,
+					utteranceId: 1,
+					sealedAtMs: 0,
+				}),
+			).toBe(false);
+		});
+
+		// Gemini has no valid content-less nudge: `turns: []` is rejected by the SDK
+		// and omitting `turns` is rejected by the server (1007, closing the socket
+		// asynchronously — which the response watchdog then retries into oblivion).
+		// Leaving the method undefined routes the reconnector to its
+		// `triggerGeneration()` fallback, a no-op here. This mock cannot reproduce
+		// the server-side rejection, which is exactly why the previous version of
+		// this test passed while the real session died — so assert the absence.
+		it('does not implement elicitResponse (no valid content-less nudge)', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			mockSession.sendClientContent.mockClear();
+
+			expect(transport.elicitResponse).toBeUndefined();
+
+			// The fallback the reconnector uses instead must stay silent on the wire.
+			transport.triggerGeneration();
+			expect(mockSession.sendClientContent).not.toHaveBeenCalled();
 		});
 
 		it('includes system instruction when provided', async () => {
@@ -130,6 +204,20 @@ describe('GeminiLiveTransport', () => {
 			expect(config.inputAudioTranscription).toEqual({});
 		});
 
+		it('includes realtimeInputConfig when provided', async () => {
+			const realtimeInputConfig = {
+				automaticActivityDetection: {
+					endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
+					silenceDurationMs: 500,
+				},
+			};
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key', realtimeInputConfig }, {});
+			await transport.connect();
+
+			const config = capturedConnectConfig.config as Record<string, unknown>;
+			expect(config.realtimeInputConfig).toEqual(realtimeInputConfig);
+		});
+
 		it('omits inputAudioTranscription when explicitly disabled', async () => {
 			const transport = new GeminiLiveTransport(
 				{ apiKey: 'test-key', inputAudioTranscription: false },
@@ -181,9 +269,26 @@ describe('GeminiLiveTransport', () => {
 			transport.sendAudio('base64audiodata');
 
 			expect(mockSession.sendRealtimeInput).toHaveBeenCalledWith({
-				media: { data: 'base64audiodata', mimeType: 'audio/pcm;rate=16000' },
+				audio: { data: 'base64audiodata', mimeType: 'audio/pcm;rate=16000' },
 			});
 		});
+
+		it.each([DEFAULT_GEMINI_LIVE_MODEL, 'gemini-2.5-flash-native-audio-preview-12-2025'])(
+			'sends non-deprecated audio realtime input for %s',
+			async (model) => {
+				const transport = new GeminiLiveTransport({ apiKey: 'test-key', model }, {});
+				await transport.connect();
+
+				transport.sendAudio('base64audiodata');
+
+				expect(mockSession.sendRealtimeInput).toHaveBeenCalledWith({
+					audio: { data: 'base64audiodata', mimeType: 'audio/pcm;rate=16000' },
+				});
+				expect(mockSession.sendRealtimeInput).not.toHaveBeenCalledWith(
+					expect.objectContaining({ media: expect.anything() }),
+				);
+			},
+		);
 
 		it('does nothing if not connected', () => {
 			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
@@ -271,6 +376,31 @@ describe('GeminiLiveTransport', () => {
 
 			expect(onAudioOutput).not.toHaveBeenCalled();
 			expect(propertyAudioOutput).not.toHaveBeenCalled();
+		});
+
+		it('cancelResponse suppresses the current turn audio and resumes on the next', async () => {
+			const onAudioOutput = vi.fn();
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, { onAudioOutput });
+			await transport.connect();
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			const audio = {
+				serverContent: { modelTurn: { parts: [{ inlineData: { data: 'a' } }] } },
+			};
+
+			cbs.onmessage(audio); // server turn 1 — forwarded
+			expect(onAudioOutput).toHaveBeenCalledTimes(1);
+
+			// Gemini can't cancel generation; cancelResponse suppresses the rest of
+			// the current server turn's outbound audio.
+			await transport.cancelResponse();
+			cbs.onmessage(audio); // trailing turn-1 audio — dropped
+			cbs.onmessage(audio);
+			expect(onAudioOutput).toHaveBeenCalledTimes(1);
+
+			// A new server turn (the response to the barge-in) resumes forwarding.
+			cbs.onmessage({ serverContent: { turnComplete: true } });
+			cbs.onmessage(audio); // server turn 2 — forwarded
+			expect(onAudioOutput).toHaveBeenCalledTimes(2);
 		});
 
 		it('dispatches toolCall', async () => {
@@ -437,6 +567,9 @@ describe('GeminiLiveTransport', () => {
 				contextCompression: true,
 				groundingMetadata: true,
 				textResponseModality: true,
+				quiescible: true,
+				playbackGatedTurnComplete: true,
+				bufferedUncancellableAudio: true,
 			});
 		});
 
@@ -471,6 +604,22 @@ describe('GeminiLiveTransport', () => {
 			await transport.connect({
 				auth: { type: 'api_key', apiKey: 'test-key' },
 				model: 'gemini-2.5-flash-native-audio-preview-12-2025',
+				responseModality: 'text',
+			});
+
+			expect(capturedConnectConfig.config).toEqual(
+				expect.objectContaining({
+					responseModalities: ['AUDIO'],
+					outputAudioTranscription: {},
+				}),
+			);
+		});
+
+		it('uses AUDIO + outputAudioTranscription in text mode for Gemini 3.x live models', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect({
+				auth: { type: 'api_key', apiKey: 'test-key' },
+				model: 'gemini-3.1-flash-live-preview',
 				responseModality: 'text',
 			});
 
@@ -614,6 +763,243 @@ describe('GeminiLiveTransport', () => {
 				expect.objectContaining({ responseModalities: ['AUDIO', 'TEXT'] }),
 			);
 		});
+
+		describe('server-turn state machine (external-TTS turn completion)', () => {
+			async function connectTextMode(model = 'gemini-3.1-flash-live-preview') {
+				const transport = new GeminiLiveTransport({ apiKey: 'test-key', model }, {});
+				await transport.connect({
+					auth: { type: 'api_key', apiKey: 'test-key' },
+					model,
+					responseModality: 'text',
+				});
+				const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+				return { transport, cbs };
+			}
+
+			it('fires turn-end on generationComplete in native-audio text mode', async () => {
+				const { transport, cbs } = await connectTextMode();
+				const order: string[] = [];
+				transport.onTextOutput = () => order.push('text');
+				transport.onTextDone = () => order.push('textDone');
+				let completedId: number | undefined;
+				transport.onTurnComplete = (id) => {
+					order.push('turnComplete');
+					completedId = id;
+				};
+				cbs.onmessage({ serverContent: { outputTranscription: { text: 'Hello there.' } } });
+				cbs.onmessage({ serverContent: { generationComplete: true } });
+				expect(order).toEqual(['text', 'textDone', 'turnComplete']);
+				expect(typeof completedId).toBe('number');
+			});
+
+			it('does not re-fire turn-end on the trailing turnComplete after early completion', async () => {
+				const { transport, cbs } = await connectTextMode();
+				transport.onTextOutput = () => {};
+				const textDone = vi.fn();
+				const turnComplete = vi.fn();
+				transport.onTextDone = textDone;
+				transport.onTurnComplete = turnComplete;
+				cbs.onmessage({ serverContent: { outputTranscription: { text: 'Hi.' } } });
+				cbs.onmessage({ serverContent: { generationComplete: true } });
+				expect(textDone).toHaveBeenCalledTimes(1);
+				expect(turnComplete).toHaveBeenCalledTimes(1);
+				cbs.onmessage({ serverContent: { turnComplete: true } });
+				expect(textDone).toHaveBeenCalledTimes(1);
+				expect(turnComplete).toHaveBeenCalledTimes(1);
+			});
+
+			it('same-message text + generationComplete fires text before turn-end', async () => {
+				const { transport, cbs } = await connectTextMode('gemini-2.5-flash');
+				const order: string[] = [];
+				transport.onTextOutput = () => order.push('text');
+				transport.onTextDone = () => order.push('textDone');
+				transport.onTurnComplete = () => order.push('turnComplete');
+				cbs.onmessage({
+					serverContent: {
+						modelTurn: { parts: [{ text: 'Final words.' }] },
+						generationComplete: true,
+					},
+				});
+				expect(order).toEqual(['text', 'textDone', 'turnComplete']);
+			});
+
+			it('a late modelTurn after early completion does not re-fire onModelTurnStart', async () => {
+				const { transport, cbs } = await connectTextMode();
+				const modelTurnStart = vi.fn();
+				transport.onModelTurnStart = modelTurnStart;
+				transport.onTextOutput = () => {};
+				transport.onTextDone = () => {};
+				transport.onTurnComplete = () => {};
+				cbs.onmessage({
+					serverContent: { modelTurn: { parts: [{ inlineData: { data: 'aa' } }] } },
+				});
+				cbs.onmessage({ serverContent: { outputTranscription: { text: 'Hello.' } } });
+				cbs.onmessage({ serverContent: { generationComplete: true } });
+				expect(modelTurnStart).toHaveBeenCalledTimes(1);
+				cbs.onmessage({
+					serverContent: { modelTurn: { parts: [{ inlineData: { data: 'bb' } }] } },
+				});
+				expect(modelTurnStart).toHaveBeenCalledTimes(1);
+			});
+
+			it('does not early-complete a tool-call turn', async () => {
+				const { transport, cbs } = await connectTextMode();
+				transport.onTextOutput = () => {};
+				transport.onToolCall = () => {};
+				const turnComplete = vi.fn();
+				transport.onTurnComplete = turnComplete;
+				cbs.onmessage({ toolCall: { functionCalls: [{ id: 'fc1', name: 'x', args: {} }] } });
+				cbs.onmessage({ serverContent: { outputTranscription: { text: 'Checking.' } } });
+				cbs.onmessage({ serverContent: { generationComplete: true } });
+				expect(turnComplete).not.toHaveBeenCalled();
+				cbs.onmessage({ serverContent: { turnComplete: true } });
+				expect(turnComplete).toHaveBeenCalledTimes(1);
+			});
+
+			it('does not fire turn-end on generationComplete in audio mode', async () => {
+				const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+				await transport.connect();
+				const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+				const turnComplete = vi.fn();
+				transport.onTurnComplete = turnComplete;
+				cbs.onmessage({ serverContent: { generationComplete: true } });
+				expect(turnComplete).not.toHaveBeenCalled();
+				cbs.onmessage({ serverContent: { turnComplete: true } });
+				expect(turnComplete).toHaveBeenCalledTimes(1);
+			});
+
+			it('interrupted carries a server-turn id reused by the trailing turnComplete', async () => {
+				const { transport, cbs } = await connectTextMode();
+				let interruptedId: number | undefined;
+				let completedId: number | undefined;
+				transport.onInterrupted = (id) => {
+					interruptedId = id;
+				};
+				transport.onTurnComplete = (id) => {
+					completedId = id;
+				};
+				transport.onTextDone = () => {};
+				cbs.onmessage({ serverContent: { interrupted: true } });
+				cbs.onmessage({ serverContent: { turnComplete: true } });
+				expect(typeof interruptedId).toBe('number');
+				expect(completedId).toBe(interruptedId);
+			});
+
+			it('tags final usage from an early-completed turn as serverTurnWindingDown', async () => {
+				const { transport, cbs } = await connectTextMode();
+				transport.onTextOutput = () => {};
+				transport.onTextDone = () => {};
+				transport.onTurnComplete = () => {};
+				const usage: RealtimeLLMUsageEvent[] = [];
+				transport.onRealtimeLLMUsage = (u) => usage.push(u);
+				cbs.onmessage({ serverContent: { outputTranscription: { text: 'Hi.' } } });
+				cbs.onmessage({ serverContent: { generationComplete: true } });
+				cbs.onmessage({
+					usageMetadata: { promptTokenCount: 6, responseTokenCount: 4, totalTokenCount: 10 },
+					serverContent: { turnComplete: true },
+				});
+				const windingDown = usage.filter((u) => u.serverTurnWindingDown);
+				expect(windingDown.length).toBeGreaterThan(0);
+				expect(typeof windingDown[0].serverTurnId).toBe('number');
+			});
+
+			it('buffers generation-triggering sends during the divergence window', async () => {
+				const { transport, cbs } = await connectTextMode();
+				transport.onTextOutput = () => {};
+				transport.onTextDone = () => {};
+				transport.onTurnComplete = () => {};
+				cbs.onmessage({ serverContent: { outputTranscription: { text: 'Hi.' } } });
+				cbs.onmessage({ serverContent: { generationComplete: true } });
+				mockSession.sendClientContent.mockClear();
+				mockSession.sendRealtimeInput.mockClear();
+				// During ENDED_EARLY a generation-triggering send is buffered.
+				transport.sendClientContent([{ role: 'user', parts: [{ text: 'directive' }] }], true);
+				expect(mockSession.sendClientContent).not.toHaveBeenCalled();
+				// Realtime audio is never buffered.
+				transport.sendAudio('YXVkaW8=');
+				expect(mockSession.sendRealtimeInput).toHaveBeenCalled();
+				// On turnComplete (CLOSED) the buffer flushes.
+				cbs.onmessage({ serverContent: { turnComplete: true } });
+				expect(mockSession.sendClientContent).toHaveBeenCalledTimes(1);
+			});
+
+			it('disconnect() resets server-turn state', async () => {
+				const { transport, cbs } = await connectTextMode();
+				transport.onTextOutput = () => {};
+				transport.onTextDone = () => {};
+				transport.onTurnComplete = () => {};
+				cbs.onmessage({ serverContent: { outputTranscription: { text: 'Hi.' } } });
+				cbs.onmessage({ serverContent: { generationComplete: true } });
+				await transport.disconnect();
+				await transport.reconnect();
+				mockSession.sendClientContent.mockClear();
+				// After the reset the session is no longer winding down — send goes through.
+				transport.sendClientContent([{ role: 'user', parts: [{ text: 'x' }] }], true);
+				expect(mockSession.sendClientContent).toHaveBeenCalledTimes(1);
+			});
+
+			it('getActiveServerTurnId() is active-only — id while generating, undefined otherwise', async () => {
+				const { transport, cbs } = await connectTextMode();
+				transport.onTextOutput = () => {};
+				transport.onTextDone = () => {};
+				transport.onTurnComplete = () => {};
+				// idle — no server turn yet
+				expect(transport.getActiveServerTurnId()).toBeUndefined();
+				// generating — a live id
+				cbs.onmessage({ serverContent: { outputTranscription: { text: 'Hi.' } } });
+				const generatingId = transport.getActiveServerTurnId();
+				expect(typeof generatingId).toBe('number');
+				// ended_early (winding down) — still the same live id
+				cbs.onmessage({ serverContent: { generationComplete: true } });
+				expect(transport.getActiveServerTurnId()).toBe(generatingId);
+				// closed (trailing turnComplete) — undefined, not the stale id
+				cbs.onmessage({ serverContent: { turnComplete: true } });
+				expect(transport.getActiveServerTurnId()).toBeUndefined();
+			});
+
+			it('getActiveServerTurnId() is undefined after disconnect/reset', async () => {
+				const { transport, cbs } = await connectTextMode();
+				transport.onTextOutput = () => {};
+				cbs.onmessage({ serverContent: { outputTranscription: { text: 'Hi.' } } });
+				expect(typeof transport.getActiveServerTurnId()).toBe('number');
+				await transport.disconnect();
+				expect(transport.getActiveServerTurnId()).toBeUndefined();
+			});
+		});
+
+		it('resumes with the latest server handle and does not replay history', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({
+				sessionResumptionUpdate: { newHandle: 'handle_resume', resumable: true },
+			});
+
+			mockSession.sendClientContent.mockClear();
+			await transport.reconnect({
+				conversationHistory: [{ type: 'text', role: 'user', text: 'hello before reconnect' }],
+			});
+
+			const config = capturedConnectConfig.config as Record<string, unknown>;
+			expect(config.sessionResumption).toEqual({ handle: 'handle_resume' });
+			expect(mockSession.sendClientContent).not.toHaveBeenCalled();
+		});
+
+		it('uses an explicit reconnect resumption handle and does not replay history', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			mockSession.sendClientContent.mockClear();
+			await transport.reconnect({
+				resumptionHandle: 'handle_explicit',
+				conversationHistory: [{ type: 'text', role: 'user', text: 'hello before reconnect' }],
+			});
+
+			const config = capturedConnectConfig.config as Record<string, unknown>;
+			expect(config.sessionResumption).toEqual({ handle: 'handle_explicit' });
+			expect(mockSession.sendClientContent).not.toHaveBeenCalled();
+		});
 	});
 
 	describe('sendContent', () => {
@@ -643,6 +1029,53 @@ describe('GeminiLiveTransport', () => {
 
 			expect(mockSession.sendClientContent).toHaveBeenCalledWith({
 				turns: [{ role: 'user', parts: [{ text: 'hello' }] }],
+				turnComplete: false,
+			});
+		});
+
+		it('uses realtime text for generation-triggering content on Gemini 3 live models', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', model: 'gemini-3.1-flash-live-preview' },
+				{},
+			);
+			await transport.connect();
+
+			transport.sendContent([
+				{ role: 'user', text: ' Say hello. ' },
+				{ role: 'user', text: 'Ask one question.' },
+			]);
+
+			expect(mockSession.sendRealtimeInput).toHaveBeenCalledWith({
+				text: 'Say hello.\n\nAsk one question.',
+			});
+			expect(mockSession.sendClientContent).not.toHaveBeenCalled();
+		});
+
+		it('uses realtime text for generation-triggering content on Gemini 2.5 native-audio live models', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', model: 'gemini-2.5-flash-native-audio-preview-12-2025' },
+				{},
+			);
+			await transport.connect();
+
+			transport.sendContent([{ role: 'user', text: 'Say hello.' }]);
+
+			expect(mockSession.sendRealtimeInput).toHaveBeenCalledWith({ text: 'Say hello.' });
+			expect(mockSession.sendClientContent).not.toHaveBeenCalled();
+		});
+
+		it('keeps non-generating content on clientContent for Gemini 3 live models', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', model: 'gemini-3.1-flash-live-preview' },
+				{},
+			);
+			await transport.connect();
+
+			transport.sendContent([{ role: 'user', text: 'prefill context' }], false);
+
+			expect(mockSession.sendRealtimeInput).not.toHaveBeenCalled();
+			expect(mockSession.sendClientContent).toHaveBeenCalledWith({
+				turns: [{ role: 'user', parts: [{ text: 'prefill context' }] }],
 				turnComplete: false,
 			});
 		});
@@ -730,7 +1163,7 @@ describe('GeminiLiveTransport', () => {
 			});
 		});
 
-		it('replay wraps primitive tool results into functionResponse objects', async () => {
+		it('replay serializes tool history as Gemini Live-safe text context', async () => {
 			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
 			await transport.connect();
 			mockSession.sendClientContent.mockClear();
@@ -748,16 +1181,45 @@ describe('GeminiLiveTransport', () => {
 			expect(mockSession.sendClientContent).toHaveBeenCalledWith({
 				turns: [
 					{
-						role: 'model',
-						parts: [{ functionCall: { name: 'ask_openclaw', args: { task: 'x' } } }],
+						role: 'user',
+						parts: [{ text: '[Previous tool call: ask_openclaw({"task":"x"})]' }],
 					},
 					{
 						role: 'user',
-						parts: [{ functionResponse: { name: 'ask_openclaw', response: { result: 'sent' } } }],
+						parts: [{ text: '[Previous tool result for ask_openclaw: "sent"]' }],
 					},
 				],
 				turnComplete: false,
 			});
+
+			const replayPayload = mockSession.sendClientContent.mock.calls[0][0];
+			expect(JSON.stringify(replayPayload)).not.toContain('functionCall');
+			expect(JSON.stringify(replayPayload)).not.toContain('functionResponse');
+		});
+
+		it('skips transfer history replay when resuming an existing Gemini session', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({
+				sessionResumptionUpdate: { newHandle: 'handle_transfer_resume', resumable: true },
+			});
+
+			mockSession.sendClientContent.mockClear();
+			await transport.transferSession(
+				{ instructions: 'New agent', tools: [] },
+				{
+					conversationHistory: [
+						{ type: 'text', role: 'user', text: 'hello' },
+						{ type: 'tool_call', id: 'tc_1', name: 'search', args: { query: 'x' } },
+					],
+				},
+			);
+
+			const config = capturedConnectConfig.config as Record<string, unknown>;
+			expect(config.sessionResumption).toEqual({ handle: 'handle_transfer_resume' });
+			expect(mockSession.sendClientContent).not.toHaveBeenCalled();
 		});
 
 		it('applies responseModality from transferSession before reconnect', async () => {
@@ -937,5 +1399,173 @@ describe('GeminiLiveTransport', () => {
 
 			expect(onModelTurnStart).toHaveBeenCalledTimes(2);
 		});
+	});
+
+	// P2: sessionResumption refactor — see dev_docs/framework/design-context-caching.md
+	describe('sessionResumption (P2)', () => {
+		it('sessionResumption: false omits the field from connectConfig', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', sessionResumption: false },
+				{},
+			);
+			await transport.connect();
+			const config = capturedConnectConfig.config as Record<string, unknown>;
+			expect(config.sessionResumption).toBeUndefined();
+		});
+
+		it('sessionResumption.handle flows through', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', sessionResumption: { handle: 'h_initial' } },
+				{},
+			);
+			await transport.connect();
+			const config = capturedConnectConfig.config as Record<string, unknown>;
+			expect(config.sessionResumption).toEqual({ handle: 'h_initial' });
+		});
+
+		it('legacy resumptionHandle still works (deprecation alias)', async () => {
+			const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			const transport = new GeminiLiveTransport(
+				// biome-ignore lint/suspicious/noExplicitAny: testing deprecated path
+				{ apiKey: 'test-key', resumptionHandle: 'h_legacy' } as any,
+				{},
+			);
+			await transport.connect();
+			const config = capturedConnectConfig.config as Record<string, unknown>;
+			expect(config.sessionResumption).toEqual({ handle: 'h_legacy' });
+			// deprecation warn fires (latched module-level — exact call count
+			// across tests is implementation-dependent, just ensure ≥0 and don't
+			// crash when the latch already fired in another test)
+			expect(warnSpy).toBeDefined();
+			warnSpy.mockRestore();
+		});
+
+		it('sessionResumption.handle wins over legacy resumptionHandle when both set', async () => {
+			const transport = new GeminiLiveTransport(
+				{
+					apiKey: 'test-key',
+					sessionResumption: { handle: 'h_new' },
+					resumptionHandle: 'h_legacy',
+					// biome-ignore lint/suspicious/noExplicitAny: testing deprecated path
+				} as any,
+				{},
+			);
+			await transport.connect();
+			const config = capturedConnectConfig.config as Record<string, unknown>;
+			expect(config.sessionResumption).toEqual({ handle: 'h_new' });
+		});
+
+		it('default (omitted) → sessionResumption: {} (fresh resumable session)', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			const config = capturedConnectConfig.config as Record<string, unknown>;
+			expect(config.sessionResumption).toEqual({});
+		});
+
+		it('resumable: true update updates effectiveResumptionHandle for next reconnect', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({
+				sessionResumptionUpdate: { newHandle: 'h_server', resumable: true },
+			});
+
+			await transport.reconnect();
+			const config = capturedConnectConfig.config as Record<string, unknown>;
+			expect(config.sessionResumption).toEqual({ handle: 'h_server' });
+		});
+
+		it('resumable: false update clears the handle → next reconnect uses {} (fresh)', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', sessionResumption: { handle: 'h_initial' } },
+				{},
+			);
+			await transport.connect();
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({
+				sessionResumptionUpdate: { newHandle: 'h_terminal', resumable: false },
+			});
+
+			expect(transport.getLastNonResumableAt()).not.toBeNull();
+
+			await transport.reconnect();
+			const config = capturedConnectConfig.config as Record<string, unknown>;
+			expect(config.sessionResumption).toEqual({});
+		});
+
+		it('sessionResumption: false overrides incoming reconnect state handle', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', sessionResumption: false },
+				{},
+			);
+			await transport.connect();
+
+			await transport.reconnect({ resumptionHandle: 'h_from_state' });
+			const config = capturedConnectConfig.config as Record<string, unknown>;
+			expect(config.sessionResumption).toBeUndefined();
+		});
+	});
+});
+
+describe('resolveGeminiRealtimeInputConfig', () => {
+	it('returns the default when user is undefined', () => {
+		const result = resolveGeminiRealtimeInputConfig(undefined);
+		expect(result).toEqual(DEFAULT_GEMINI_REALTIME_INPUT_CONFIG);
+		expect(
+			(result as { automaticActivityDetection: { endOfSpeechSensitivity: string } })
+				.automaticActivityDetection.endOfSpeechSensitivity,
+		).toBe('END_SENSITIVITY_HIGH');
+	});
+
+	it('deep-merges partial automaticActivityDetection — user fields win, defaults fill in', () => {
+		const result = resolveGeminiRealtimeInputConfig({
+			automaticActivityDetection: { silenceDurationMs: 800 },
+		});
+		expect((result as Record<string, Record<string, unknown>>).automaticActivityDetection).toEqual({
+			endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
+			silenceDurationMs: 800,
+		});
+	});
+
+	it('preserves default silenceDurationMs when user only overrides sensitivity', () => {
+		const result = resolveGeminiRealtimeInputConfig({
+			automaticActivityDetection: { endOfSpeechSensitivity: 'END_SENSITIVITY_LOW' },
+		});
+		expect((result as Record<string, Record<string, unknown>>).automaticActivityDetection).toEqual({
+			endOfSpeechSensitivity: 'END_SENSITIVITY_LOW',
+			silenceDurationMs: 500,
+		});
+	});
+
+	it('retains a user-supplied disabled flag without dropping default keys', () => {
+		const result = resolveGeminiRealtimeInputConfig({
+			automaticActivityDetection: { disabled: true },
+		});
+		const aad = (result as Record<string, Record<string, unknown>>).automaticActivityDetection;
+		expect(aad.disabled).toBe(true);
+		expect(aad.endOfSpeechSensitivity).toBe('END_SENSITIVITY_HIGH');
+		expect(aad.silenceDurationMs).toBe(500);
+	});
+
+	it('preserves user-provided top-level keys outside automaticActivityDetection', () => {
+		const result = resolveGeminiRealtimeInputConfig({
+			automaticActivityDetection: { silenceDurationMs: 800 },
+			activityHandling: 'NO_INTERRUPTION',
+		} as Record<string, unknown>);
+		expect((result as Record<string, unknown>).activityHandling).toBe('NO_INTERRUPTION');
+		expect(
+			(result as Record<string, Record<string, unknown>>).automaticActivityDetection
+				.endOfSpeechSensitivity,
+		).toBe('END_SENSITIVITY_HIGH');
+	});
+
+	it('does not mutate the default constant', () => {
+		const before = JSON.stringify(DEFAULT_GEMINI_REALTIME_INPUT_CONFIG);
+		resolveGeminiRealtimeInputConfig({
+			automaticActivityDetection: { silenceDurationMs: 999 },
+		});
+		expect(JSON.stringify(DEFAULT_GEMINI_REALTIME_INPUT_CONFIG)).toBe(before);
 	});
 });

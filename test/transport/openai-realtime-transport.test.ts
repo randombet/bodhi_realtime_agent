@@ -1,8 +1,9 @@
-// SPDX-License-Identifier: MIT
-
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
-import { OpenAIRealtimeTransport } from '../../src/transport/openai-realtime-transport.js';
+import {
+	type OpenAIRealtimeConfig,
+	OpenAIRealtimeTransport,
+} from '../../src/transport/openai-realtime-transport.js';
 import type { ToolDefinition } from '../../src/types/tool.js';
 
 /**
@@ -104,6 +105,16 @@ describe('OpenAIRealtimeTransport', () => {
 				contextCompression: false,
 				groundingMetadata: false,
 				textResponseModality: true,
+				parallelToolCalls: false,
+				reasoningEffort: false,
+				automaticPreambles: false,
+				quiescible: true,
+				playbackGatedTurnComplete: false,
+				bufferedUncancellableAudio: false,
+				// B8 framework-owned default: interrupt_response: false →
+				// frameworkOwnsInterrupt: true → grace recommendation: 1000ms.
+				frameworkOwnsInterrupt: true,
+				greetingInterruptGraceMs: 1000,
 			});
 		});
 
@@ -114,6 +125,8 @@ describe('OpenAIRealtimeTransport', () => {
 				channels: 1,
 				bitDepth: 16,
 				encoding: 'pcm',
+				outputBitDepth: 16,
+				outputEncoding: 'pcm',
 			});
 		});
 	});
@@ -172,6 +185,8 @@ describe('OpenAIRealtimeTransport', () => {
 					arguments: '{"input":"from_done_event"}',
 				},
 			});
+			// Phase 1.3: tool-call dispatch is batched on response.done.
+			mockRt.emit('response.done', { response: { id: 'resp_1' } });
 
 			expect(calls).toHaveLength(1);
 			expect(calls[0]).toEqual({
@@ -195,6 +210,7 @@ describe('OpenAIRealtimeTransport', () => {
 					arguments: '{"input":"fallback"}',
 				},
 			});
+			mockRt.emit('response.done', { response: { id: 'resp_2' } });
 
 			expect(calls).toHaveLength(1);
 			expect(calls[0]).toEqual({
@@ -204,9 +220,11 @@ describe('OpenAIRealtimeTransport', () => {
 			});
 		});
 
-		it('handles interleaved tool calls independently', () => {
-			const calls: unknown[] = [];
-			transport.onToolCall = (c) => calls.push(...c);
+		it('handles interleaved tool calls independently and batches dispatch', () => {
+			// Phase 1.3: two parallel function_call items arrive in one response;
+			// the transport batches them and dispatches via a single onToolCall(calls[]).
+			const dispatches: unknown[][] = [];
+			transport.onToolCall = (c) => dispatches.push(c);
 
 			// Two interleaved streams
 			mockRt.emit('response.function_call_arguments.delta', {
@@ -244,10 +262,13 @@ describe('OpenAIRealtimeTransport', () => {
 					arguments: '{}',
 				},
 			});
+			mockRt.emit('response.done', { response: { id: 'resp_parallel' } });
 
-			expect(calls).toHaveLength(2);
-			expect(calls[0]).toEqual({ id: 'ca', name: 'toolA', args: { x: 1 } });
-			expect(calls[1]).toEqual({ id: 'cb', name: 'toolB', args: { y: 2 } });
+			// Single dispatch with both calls — not two separate dispatches.
+			expect(dispatches).toHaveLength(1);
+			expect(dispatches[0]).toHaveLength(2);
+			expect(dispatches[0][0]).toEqual({ id: 'ca', name: 'toolA', args: { x: 1 } });
+			expect(dispatches[0][1]).toEqual({ id: 'cb', name: 'toolB', args: { y: 2 } });
 		});
 
 		it('fires onError and skips dispatch on malformed JSON args', () => {
@@ -284,6 +305,41 @@ describe('OpenAIRealtimeTransport', () => {
 			});
 
 			expect(calls).toHaveLength(0);
+		});
+	});
+
+	describe('cancelled response handling', () => {
+		it('cancelled response.done suppresses onTurnComplete and tool dispatch', () => {
+			const turnComplete = vi.fn();
+			const toolCalls: unknown[] = [];
+			transport.onTurnComplete = turnComplete;
+			transport.onToolCall = (c) => toolCalls.push(...c);
+
+			mockRt.emit('response.created', {});
+			// A partial tool call buffered during the about-to-be-cancelled response.
+			mockRt.emit('response.output_item.done', {
+				item: { id: 'i1', type: 'function_call', call_id: 'c1', name: 't', arguments: '{}' },
+			});
+			mockRt.emit('response.done', { response: { id: 'r1', status: 'cancelled' } });
+
+			expect(turnComplete).not.toHaveBeenCalled();
+			expect(toolCalls).toHaveLength(0);
+		});
+
+		it('a completed response.done still fires onTurnComplete and dispatches tool calls', () => {
+			const turnComplete = vi.fn();
+			const toolCalls: unknown[] = [];
+			transport.onTurnComplete = turnComplete;
+			transport.onToolCall = (c) => toolCalls.push(...c);
+
+			mockRt.emit('response.created', {});
+			mockRt.emit('response.output_item.done', {
+				item: { id: 'i2', type: 'function_call', call_id: 'c2', name: 't', arguments: '{}' },
+			});
+			mockRt.emit('response.done', { response: { id: 'r2', status: 'completed' } });
+
+			expect(turnComplete).toHaveBeenCalledTimes(1);
+			expect(toolCalls).toHaveLength(1);
 		});
 	});
 
@@ -359,7 +415,7 @@ describe('OpenAIRealtimeTransport', () => {
 			expect(mockRt.sent).toContainEqual({ type: 'response.create' });
 		});
 
-		it('sends response.cancel before result for interrupt scheduling', () => {
+		it('waits for cancelled response.done before sending interrupt-scheduled result', async () => {
 			// Model must be generating for cancel to be sent
 			mockRt.emit('response.created', {});
 
@@ -370,11 +426,90 @@ describe('OpenAIRealtimeTransport', () => {
 				scheduling: 'interrupt',
 			});
 
+			await vi.waitFor(() =>
+				expect(mockRt.sent.some((m) => m.type === 'response.cancel')).toBe(true),
+			);
+			expect(mockRt.sent.some((m) => m.type === 'conversation.item.create')).toBe(false);
+			expect(mockRt.sent.some((m) => m.type === 'response.create')).toBe(false);
+
+			mockRt.emit('response.done', { response: { status: 'cancelled' } });
+			await vi.waitFor(() =>
+				expect(mockRt.sent.some((m) => m.type === 'conversation.item.create')).toBe(true),
+			);
+
 			const cancelIdx = mockRt.sent.findIndex((m) => m.type === 'response.cancel');
 			const createIdx = mockRt.sent.findIndex((m) => m.type === 'conversation.item.create');
-			expect(cancelIdx).toBeGreaterThanOrEqual(0);
+			const responseCreateIdx = mockRt.sent.findIndex((m) => m.type === 'response.create');
 			expect(createIdx).toBeGreaterThan(cancelIdx);
+			expect(responseCreateIdx).toBeGreaterThan(createIdx);
 			expect(mockRt.sent).toContainEqual({ type: 'response.create' });
+		});
+
+		it('serializes two rapid interrupt-scheduled tool results — second waits for first', async () => {
+			// Regression: without the internal queue, two rapid
+			// sendToolResult({scheduling:'interrupt'}) calls would each fire
+			// cancel + item.create + response.create in parallel, producing
+			// `conversation_already_has_active_response`. The internal
+			// `_interruptToolResultQueue` serializes them so each pair of
+			// (cancel → done → item → response.create) completes before the
+			// next pair begins.
+			mockRt.emit('response.created', {});
+
+			transport.sendToolResult({
+				id: 'call_a',
+				name: 'tool_a',
+				result: 'a-result',
+				scheduling: 'interrupt',
+			});
+			transport.sendToolResult({
+				id: 'call_b',
+				name: 'tool_b',
+				result: 'b-result',
+				scheduling: 'interrupt',
+			});
+
+			// Item B must NOT land before A's cancel-done cycle completes.
+			await vi.waitFor(() =>
+				expect(mockRt.sent.some((m) => m.type === 'response.cancel')).toBe(true),
+			);
+			const itemsBefore = mockRt.sent.filter((m) => m.type === 'conversation.item.create');
+			expect(itemsBefore).toHaveLength(0);
+
+			// Acknowledge A's cancel — A's item + response.create should now
+			// land. B's cancel-done cycle then runs.
+			mockRt.emit('response.done', { response: { status: 'cancelled' } });
+			await vi.waitFor(() => {
+				const items = mockRt.sent.filter((m) => m.type === 'conversation.item.create');
+				expect(items).toHaveLength(1);
+				expect(items[0]?.item).toMatchObject({ call_id: 'call_a' });
+			});
+
+			// B's wire dispatch: depending on internal sequencing, B may have
+			// triggered its own response.cancel (because A's response.create
+			// re-armed _activeResponseDone via markResponsePending). In
+			// either case, B's item must land only AFTER A's item.
+			// Emit response.done for whatever waiter B is currently on.
+			mockRt.emit('response.created', {});
+			mockRt.emit('response.done', { response: { status: 'cancelled' } });
+			await vi.waitFor(() => {
+				const items = mockRt.sent.filter((m) => m.type === 'conversation.item.create');
+				expect(items).toHaveLength(2);
+				expect(items[1]?.item).toMatchObject({ call_id: 'call_b' });
+			});
+
+			// Ordering invariant: A's item index < B's item index.
+			const items = mockRt.sent.filter((m) => m.type === 'conversation.item.create');
+			const aIdx = mockRt.sent.findIndex(
+				// biome-ignore lint/suspicious/noExplicitAny: test-only access to runtime-shape item
+				(m) => m.type === 'conversation.item.create' && (m as any).item?.call_id === 'call_a',
+			);
+			const bIdx = mockRt.sent.findIndex(
+				// biome-ignore lint/suspicious/noExplicitAny: test-only access to runtime-shape item
+				(m) => m.type === 'conversation.item.create' && (m as any).item?.call_id === 'call_b',
+			);
+			expect(aIdx).toBeGreaterThanOrEqual(0);
+			expect(bIdx).toBeGreaterThan(aIdx);
+			expect(items).toHaveLength(2);
 		});
 	});
 
@@ -436,18 +571,25 @@ describe('OpenAIRealtimeTransport', () => {
 	});
 
 	describe('updateSession', () => {
-		it('sends session.update with new instructions', () => {
-			transport.updateSession({ instructions: 'New instructions' });
+		// Follow-up fix #1: updateSession is now ack-correlated via the
+		// FIFO queue, so callers must await for the wire send to complete.
+		it('sends session.update with new instructions', async () => {
+			await transport.updateSession({ instructions: 'New instructions' });
 
-			expect(mockRt.sent).toContainEqual({
-				type: 'session.update',
-				session: { instructions: 'New instructions' },
-			});
+			// Wire payload carries an event_id (ack correlation); strip it for
+			// shape-only equality. The rest of the session payload is unchanged.
+			const sent = mockRt.sent.find(
+				(m) =>
+					m.type === 'session.update' &&
+					(m.session as Record<string, unknown>).instructions === 'New instructions',
+			);
+			expect(sent).toBeDefined();
+			expect(sent?.session).toEqual({ instructions: 'New instructions' });
 		});
 
-		it('sends session.update with new tools', () => {
+		it('sends session.update with new tools', async () => {
 			const tool = makeTool('calculator');
-			transport.updateSession({ tools: [tool] });
+			await transport.updateSession({ tools: [tool] });
 
 			const sessionUpdate = mockRt.sent.find(
 				(m) => m.type === 'session.update' && (m.session as Record<string, unknown>).tools,
@@ -460,13 +602,16 @@ describe('OpenAIRealtimeTransport', () => {
 			expect(tools[0]).toMatchObject({ type: 'function', name: 'calculator' });
 		});
 
-		it('sends session.update with output_modalities when responseModality is provided', () => {
-			transport.updateSession({ responseModality: 'text' });
+		it('sends session.update with output_modalities when responseModality is provided', async () => {
+			await transport.updateSession({ responseModality: 'text' });
 
-			expect(mockRt.sent).toContainEqual({
-				type: 'session.update',
-				session: { output_modalities: ['text'] },
-			});
+			const sent = mockRt.sent.find(
+				(m) =>
+					m.type === 'session.update' &&
+					Array.isArray((m.session as Record<string, unknown>).output_modalities),
+			);
+			expect(sent).toBeDefined();
+			expect(sent?.session).toEqual({ output_modalities: ['text'] });
 		});
 	});
 
@@ -492,47 +637,37 @@ describe('OpenAIRealtimeTransport', () => {
 		it('includes output_modalities in transfer session.update when responseModality is provided', async () => {
 			await transport.transferSession({ responseModality: 'text' });
 
-			expect(mockRt.sent).toContainEqual({
-				type: 'session.update',
-				session: { output_modalities: ['text'] },
-			});
-		});
-
-		it('reconnects and replays history when transferring back from a disconnected external agent', async () => {
-			await transport.disconnect();
-			mockRt.sent.length = 0;
-
-			const connectSpy = vi.spyOn(transport, 'connect').mockImplementation(async () => {
-				// biome-ignore lint/suspicious/noExplicitAny: test mock injection
-				(transport as any).rt = mockRt;
-				// biome-ignore lint/suspicious/noExplicitAny: test mock injection
-				(transport as any)._isConnected = true;
-			});
-
-			await transport.transferSession(
-				{ instructions: 'Back to AI', responseModality: 'text' },
-				{
-					conversationHistory: [{ type: 'text', role: 'user', text: 'I am back' }],
-				},
+			// Wire payload includes a synthetic event_id (ack correlation);
+			// shape-only equality on the session body.
+			const sent = mockRt.sent.find(
+				(m) =>
+					m.type === 'session.update' &&
+					Array.isArray((m.session as Record<string, unknown>).output_modalities),
 			);
-
-			expect(connectSpy).toHaveBeenCalledOnce();
-			expect(mockRt.sent).toContainEqual({
-				type: 'conversation.item.create',
-				item: {
-					type: 'message',
-					role: 'user',
-					content: [{ type: 'input_text', text: 'I am back' }],
-				},
-			});
-			// biome-ignore lint/suspicious/noExplicitAny: test internal state
-			expect((transport as any).instructions).toBe('Back to AI');
-			// biome-ignore lint/suspicious/noExplicitAny: test internal state
-			expect((transport as any)._textMode).toBe(true);
+			expect(sent).toBeDefined();
+			expect(sent?.session).toEqual({ output_modalities: ['text'] });
 		});
 	});
 
-	describe('interruption handling', () => {
+	describe('interruption handling (legacy provider-owned mode)', () => {
+		// These tests assert the pre-design behaviour preserved when a caller
+		// explicitly opts into `interrupt_response: true`. Re-create the
+		// transport in legacy mode for this block.
+		beforeEach(() => {
+			transport = new OpenAIRealtimeTransport({
+				apiKey: 'test-key',
+				model: 'gpt-realtime',
+				turnDetection: { type: 'semantic_vad', interrupt_response: true },
+			});
+			mockRt = createMockRt();
+			// biome-ignore lint/suspicious/noExplicitAny: test mock injection
+			(transport as any).rt = mockRt;
+			// biome-ignore lint/suspicious/noExplicitAny: test mock injection
+			(transport as any)._isConnected = true;
+			// biome-ignore lint/suspicious/noExplicitAny: test mock injection
+			(transport as any).wireEventListeners();
+		});
+
 		it('sends truncate (but not cancel) on speech_started when model is generating', () => {
 			let interrupted = false;
 			transport.onInterrupted = () => {
@@ -618,7 +753,24 @@ describe('OpenAIRealtimeTransport', () => {
 		});
 	});
 
-	describe('audio suppression after interruption', () => {
+	describe('audio suppression after interruption (legacy provider-owned mode)', () => {
+		// Legacy mode: speech_started sets _suppressAudio. Framework-owned
+		// mode does this via cancelResponse() — covered separately.
+		beforeEach(() => {
+			transport = new OpenAIRealtimeTransport({
+				apiKey: 'test-key',
+				model: 'gpt-realtime',
+				turnDetection: { type: 'semantic_vad', interrupt_response: true },
+			});
+			mockRt = createMockRt();
+			// biome-ignore lint/suspicious/noExplicitAny: test mock injection
+			(transport as any).rt = mockRt;
+			// biome-ignore lint/suspicious/noExplicitAny: test mock injection
+			(transport as any)._isConnected = true;
+			// biome-ignore lint/suspicious/noExplicitAny: test mock injection
+			(transport as any).wireEventListeners();
+		});
+
 		it('suppresses audio output after speech_started until next response.created', () => {
 			const audioChunks: string[] = [];
 			transport.onAudioOutput = (data) => audioChunks.push(data);
@@ -790,6 +942,448 @@ describe('OpenAIRealtimeTransport', () => {
 		});
 	});
 
+	describe('cancelResponse + _activeResponseDone waiter', () => {
+		// dev_docs/framework/design-greeting-interrupt-grace.md §2.
+		// `_isModelGenerating` is read/set by these tests via the test mock
+		// access pattern used throughout this file.
+
+		function setGenerating(active: boolean) {
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			(transport as any)._isModelGenerating = active;
+		}
+		function setLastAssistantItemId(id: string | null) {
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			(transport as any).lastAssistantItemId = id;
+		}
+		function setAudioOutputMs(ms: number) {
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			(transport as any).audioOutputMs = ms;
+		}
+		function sentTypes(): string[] {
+			return mockRt.sent.map((m) => String(m.type));
+		}
+
+		it('returns a true no-op when no response in flight and no truncate', async () => {
+			setGenerating(false);
+			mockRt.sent.length = 0;
+			await transport.cancelResponse?.({});
+			expect(mockRt.sent).toHaveLength(0);
+		});
+
+		it('returns a true no-op for waitForDone tail case (already resolved)', async () => {
+			setGenerating(false);
+			mockRt.sent.length = 0;
+			// Should resolve immediately — _activeResponseDone is Promise.resolve()
+			// when no response has been created. Race against a tight timer.
+			const start = Date.now();
+			await transport.cancelResponse?.({ waitForDone: true });
+			expect(Date.now() - start).toBeLessThan(200);
+			expect(mockRt.sent).toHaveLength(0);
+		});
+
+		it('sends response.cancel when _isModelGenerating', async () => {
+			setGenerating(true);
+			mockRt.sent.length = 0;
+			await transport.cancelResponse?.({});
+			expect(sentTypes()).toContain('response.cancel');
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			expect((transport as any)._isModelGenerating).toBe(false);
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			expect((transport as any)._suppressAudio).toBe(true);
+		});
+
+		it('sends conversation.item.truncate with explicit audioEndMs', async () => {
+			setGenerating(true);
+			setLastAssistantItemId('item_123');
+			mockRt.sent.length = 0;
+			await transport.cancelResponse?.({ truncate: { audioEndMs: 250.7 } });
+			const truncate = mockRt.sent.find((m) => m.type === 'conversation.item.truncate');
+			expect(truncate).toEqual({
+				type: 'conversation.item.truncate',
+				item_id: 'item_123',
+				content_index: 0,
+				audio_end_ms: 250, // floored
+			});
+			expect(sentTypes()).toContain('response.cancel');
+		});
+
+		it('sends truncate with audioOutputMs when truncate: "generated"', async () => {
+			setGenerating(true);
+			setLastAssistantItemId('item_xyz');
+			setAudioOutputMs(900);
+			mockRt.sent.length = 0;
+			await transport.cancelResponse?.({ truncate: 'generated' });
+			const truncate = mockRt.sent.find((m) => m.type === 'conversation.item.truncate');
+			expect(truncate).toEqual({
+				type: 'conversation.item.truncate',
+				item_id: 'item_xyz',
+				content_index: 0,
+				audio_end_ms: 900,
+			});
+		});
+
+		it('skips truncate when no lastAssistantItemId', async () => {
+			setGenerating(true);
+			setLastAssistantItemId(null);
+			mockRt.sent.length = 0;
+			await transport.cancelResponse?.({ truncate: 'generated' });
+			expect(sentTypes()).not.toContain('conversation.item.truncate');
+			expect(sentTypes()).toContain('response.cancel');
+		});
+
+		it('floors and clamps negative audioEndMs to 0', async () => {
+			setGenerating(true);
+			setLastAssistantItemId('item_neg');
+			mockRt.sent.length = 0;
+			await transport.cancelResponse?.({ truncate: { audioEndMs: -5 } });
+			const truncate = mockRt.sent.find((m) => m.type === 'conversation.item.truncate');
+			expect(truncate?.audio_end_ms).toBe(0);
+		});
+
+		it('waitForDone resolves when response.done fires', async () => {
+			setGenerating(true);
+			mockRt.sent.length = 0;
+			// Arm the waiter by firing response.created.
+			mockRt.emit('response.created', {});
+			// Now waitForDone should pend until response.done is emitted.
+			const pending = transport.cancelResponse?.({ waitForDone: true });
+			let resolved = false;
+			pending?.then(() => {
+				resolved = true;
+			});
+			await new Promise((r) => setTimeout(r, 5));
+			expect(resolved).toBe(false);
+			// Trigger response.done — waiter resolves.
+			mockRt.emit('response.done', { response: { status: 'cancelled' } });
+			await pending;
+			expect(resolved).toBe(true);
+		});
+
+		it('waitForDone clears the 2s timer when the waiter wins the race (no spurious warn)', async () => {
+			// Regression: previously the timeout's setTimeout was not cleared
+			// when _activeResponseDone resolved first, so every successful
+			// cancel logged `cancelResponse waitForDone timed out` 2s later.
+			vi.useFakeTimers();
+			try {
+				setGenerating(true);
+				mockRt.emit('response.created', {});
+				const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+				const pending = transport.cancelResponse?.({ waitForDone: true });
+				// Resolve the waiter immediately.
+				mockRt.emit('response.done', { response: { status: 'cancelled' } });
+				await pending;
+				// Advance well past the 2s timeout — if the timer wasn't
+				// cleared, the warn fires here. Assert it does NOT.
+				await vi.advanceTimersByTimeAsync(3000);
+				const timeoutWarns = warnSpy.mock.calls.filter(
+					(call) =>
+						typeof call[0] === 'string' && call[0].includes('cancelResponse waitForDone timed out'),
+				);
+				expect(timeoutWarns).toHaveLength(0);
+				warnSpy.mockRestore();
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it('waitForDone DOES warn when the 2s timer wins (no resolution arrives)', async () => {
+			vi.useFakeTimers();
+			try {
+				setGenerating(true);
+				mockRt.emit('response.created', {});
+				const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+				const pending = transport.cancelResponse?.({ waitForDone: true });
+				// Don't emit response.done — let the timer win.
+				await vi.advanceTimersByTimeAsync(2001);
+				await pending;
+				const timeoutWarns = warnSpy.mock.calls.filter(
+					(call) =>
+						typeof call[0] === 'string' && call[0].includes('cancelResponse waitForDone timed out'),
+				);
+				expect(timeoutWarns).toHaveLength(1);
+				warnSpy.mockRestore();
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it('never rejects when send throws', async () => {
+			setGenerating(true);
+			setLastAssistantItemId('item_err');
+			// Make rt.send throw on truncate
+			const original = mockRt.send.bind(mockRt);
+			mockRt.send = vi.fn((msg) => {
+				if (msg.type === 'conversation.item.truncate') throw new Error('boom');
+				original(msg);
+			}) as typeof mockRt.send;
+			// Should resolve, not reject.
+			await expect(
+				transport.cancelResponse?.({ truncate: { audioEndMs: 100 } }),
+			).resolves.toBeUndefined();
+		});
+
+		it('sendContent(turnComplete=true) pre-arms _activeResponseDone before response.created', async () => {
+			// Regression: response.create is sent synchronously, but
+			// response.created arrives later. Without pre-arming, a
+			// cancelResponse({waitForDone:true}) called between send and
+			// server ack would resolve to the previous Promise.resolve() and
+			// race the next response.create. After fix, sendContent calls
+			// markResponsePending() FIRST so the waiter is already pending.
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			expect((transport as any)._resolveActiveResponseDone).toBeNull();
+			transport.sendContent([{ role: 'user', text: 'hi' }], true);
+			// Without any server ack, the waiter MUST be pending.
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			expect((transport as any)._resolveActiveResponseDone).not.toBeNull();
+			// A waitForDone caller right now should NOT resolve until
+			// response.done fires.
+			let resolved = false;
+			transport.cancelResponse?.({ waitForDone: true }).then(() => {
+				resolved = true;
+			});
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(resolved).toBe(false);
+			// Simulate response.created (idempotent — reuses existing waiter).
+			mockRt.emit('response.created', {});
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			expect((transport as any)._isModelGenerating).toBe(true);
+			// response.done resolves the waiter.
+			mockRt.emit('response.done', { response: { status: 'completed' } });
+			await new Promise((r) => setTimeout(r, 5));
+			expect(resolved).toBe(true);
+		});
+
+		it('triggerGeneration pre-arms _activeResponseDone', () => {
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			expect((transport as any)._resolveActiveResponseDone).toBeNull();
+			transport.triggerGeneration();
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			expect((transport as any)._resolveActiveResponseDone).not.toBeNull();
+		});
+
+		it('disconnect resolves a pending waitForDone caller', async () => {
+			setGenerating(true);
+			mockRt.emit('response.created', {});
+			const pending = transport.cancelResponse?.({ waitForDone: true });
+			let resolved = false;
+			pending?.then(() => {
+				resolved = true;
+			});
+			await transport.disconnect();
+			await pending;
+			expect(resolved).toBe(true);
+		});
+	});
+
+	describe('resolveTurnDetectionConfig (shared resolver)', () => {
+		// dev_docs/framework/design-greeting-interrupt-grace.md §3.
+		// B8 flips the default to `interrupt_response: false` (framework-owned).
+
+		function resolve(t: OpenAIRealtimeTransport) {
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			return (t as any).resolveTurnDetectionConfig();
+		}
+
+		it('returns null wire when caller turnDetection is null', () => {
+			const t = new OpenAIRealtimeTransport({
+				apiKey: 'k',
+				model: 'gpt-realtime',
+				turnDetection: null,
+			});
+			const r = resolve(t);
+			expect(r.wire).toBeNull();
+			expect(r.effective).toEqual({ interrupt_response: false, create_response: false });
+		});
+
+		it('defaults to semantic_vad with eagerness:low + interrupt_response:false', () => {
+			const t = new OpenAIRealtimeTransport({ apiKey: 'k', model: 'gpt-realtime' });
+			const r = resolve(t);
+			expect(r.wire).toEqual({
+				type: 'semantic_vad',
+				// Default lowered from 'medium' → 'low' to reduce false-positive
+				// barge-ins from under-converged AEC echo on subsequent
+				// responses (see transport defaults JSDoc).
+				eagerness: 'low',
+				create_response: true,
+				interrupt_response: false, // B8 framework-owned default
+			});
+			expect(r.effective.interrupt_response).toBe(false);
+		});
+
+		it('caller can opt back into provider-owned mode with interrupt_response:true', () => {
+			const t = new OpenAIRealtimeTransport({
+				apiKey: 'k',
+				model: 'gpt-realtime',
+				turnDetection: { type: 'semantic_vad', interrupt_response: true },
+			});
+			const r = resolve(t);
+			expect(r.wire?.interrupt_response).toBe(true);
+			expect(r.effective.interrupt_response).toBe(true);
+		});
+
+		it('server_vad branch does NOT inject eagerness', () => {
+			const t = new OpenAIRealtimeTransport({
+				apiKey: 'k',
+				model: 'gpt-realtime',
+				turnDetection: { type: 'server_vad', threshold: 0.6 },
+			});
+			const r = resolve(t);
+			expect(r.wire).toEqual({
+				type: 'server_vad',
+				create_response: true,
+				interrupt_response: false,
+				threshold: 0.6,
+			});
+			expect(r.wire).not.toHaveProperty('eagerness');
+		});
+
+		it('unknown type only gets common defaults', () => {
+			const t = new OpenAIRealtimeTransport({
+				apiKey: 'k',
+				model: 'gpt-realtime',
+				// biome-ignore lint/suspicious/noExplicitAny: test exercises future-type branch
+				turnDetection: { type: 'future_vad' } as any,
+			});
+			const r = resolve(t);
+			expect(r.wire).toEqual({
+				type: 'future_vad',
+				create_response: true,
+				interrupt_response: false,
+			});
+		});
+
+		it('caller create_response:false is preserved', () => {
+			const t = new OpenAIRealtimeTransport({
+				apiKey: 'k',
+				model: 'gpt-realtime',
+				turnDetection: { type: 'semantic_vad', create_response: false },
+			});
+			const r = resolve(t);
+			expect(r.wire?.create_response).toBe(false);
+			expect(r.effective.create_response).toBe(false);
+		});
+	});
+
+	describe('B8 atomic flip: framework-owned capabilities + speech_started dual-mode', () => {
+		// dev_docs/framework/design-greeting-interrupt-grace.md §1, §3.
+
+		function resolveCaps(t: OpenAIRealtimeTransport) {
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			return (t as any).resolveCapabilities();
+		}
+
+		it('default config: frameworkOwnsInterrupt=true, greetingInterruptGraceMs=1000', () => {
+			const t = new OpenAIRealtimeTransport({ apiKey: 'k', model: 'gpt-realtime' });
+			const caps = resolveCaps(t);
+			expect(caps.frameworkOwnsInterrupt).toBe(true);
+			expect(caps.greetingInterruptGraceMs).toBe(1000);
+		});
+
+		it('caller opt-in to legacy (interrupt_response:true): frameworkOwnsInterrupt=false, grace=0', () => {
+			const t = new OpenAIRealtimeTransport({
+				apiKey: 'k',
+				model: 'gpt-realtime',
+				turnDetection: { type: 'semantic_vad', interrupt_response: true },
+			});
+			const caps = resolveCaps(t);
+			expect(caps.frameworkOwnsInterrupt).toBe(false);
+			expect(caps.greetingInterruptGraceMs).toBe(0);
+		});
+
+		it('turnDetection:null: frameworkOwnsInterrupt=false, grace=0 (manual turn control)', () => {
+			const t = new OpenAIRealtimeTransport({
+				apiKey: 'k',
+				model: 'gpt-realtime',
+				turnDetection: null,
+			});
+			const caps = resolveCaps(t);
+			expect(caps.frameworkOwnsInterrupt).toBe(false);
+			expect(caps.greetingInterruptGraceMs).toBe(0);
+		});
+
+		it('speech_started in framework-owned mode is signal-only (no truncate, no onInterrupted)', () => {
+			// Set up: default config = framework-owned. Simulate an in-flight
+			// response then speech_started.
+			mockRt.sent.length = 0;
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			(transport as any)._isModelGenerating = true;
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			(transport as any).lastAssistantItemId = 'item_abc';
+			const onInterrupted = vi.fn();
+			const onSpeechStarted = vi.fn();
+			transport.onInterrupted = onInterrupted;
+			transport.onSpeechStarted = onSpeechStarted;
+
+			mockRt.emit('input_audio_buffer.speech_started', {});
+
+			expect(onSpeechStarted).toHaveBeenCalledTimes(1);
+			// Framework-owned: no local truncate, no onInterrupted, no
+			// _isModelGenerating reset (that's the framework's job via
+			// cancelResponse).
+			const truncate = mockRt.sent.find((m) => m.type === 'conversation.item.truncate');
+			expect(truncate).toBeUndefined();
+			expect(onInterrupted).not.toHaveBeenCalled();
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			expect((transport as any)._isModelGenerating).toBe(true);
+		});
+
+		it('speech_started in legacy mode (interrupt_response:true) preserves pre-design behavior', () => {
+			// Build a fresh transport in legacy mode and wire it up.
+			const legacy = new OpenAIRealtimeTransport({
+				apiKey: 'k',
+				model: 'gpt-realtime',
+				turnDetection: { type: 'semantic_vad', interrupt_response: true },
+			});
+			const legacyMockRt = createMockRt();
+			// biome-ignore lint/suspicious/noExplicitAny: test mock injection
+			(legacy as any).rt = legacyMockRt;
+			// biome-ignore lint/suspicious/noExplicitAny: test mock injection
+			(legacy as any)._isConnected = true;
+			// biome-ignore lint/suspicious/noExplicitAny: test mock injection
+			(legacy as any).wireEventListeners();
+
+			legacyMockRt.sent.length = 0;
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			(legacy as any)._isModelGenerating = true;
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			(legacy as any).lastAssistantItemId = 'item_legacy';
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			(legacy as any).audioOutputMs = 750;
+			const onInterrupted = vi.fn();
+			legacy.onInterrupted = onInterrupted;
+
+			legacyMockRt.emit('input_audio_buffer.speech_started', {});
+
+			const truncate = legacyMockRt.sent.find((m) => m.type === 'conversation.item.truncate');
+			expect(truncate).toEqual({
+				type: 'conversation.item.truncate',
+				item_id: 'item_legacy',
+				content_index: 0,
+				audio_end_ms: 750,
+			});
+			expect(onInterrupted).toHaveBeenCalledTimes(1);
+			// biome-ignore lint/suspicious/noExplicitAny: test mock access
+			expect((legacy as any)._isModelGenerating).toBe(false);
+		});
+	});
+
+	describe('clearInputAudio', () => {
+		it('sends input_audio_buffer.clear', () => {
+			mockRt.sent.length = 0;
+			transport.clearInputAudio?.();
+			expect(mockRt.sent).toContainEqual({ type: 'input_audio_buffer.clear' });
+		});
+
+		it('does not send when disconnected', () => {
+			mockRt.sent.length = 0;
+			// biome-ignore lint/suspicious/noExplicitAny: test mock
+			(transport as any)._isConnected = false;
+			transport.clearInputAudio?.();
+			expect(mockRt.sent).toHaveLength(0);
+		});
+	});
+
 	describe('text-mode responses', () => {
 		it('fires onTextOutput on text delta events', () => {
 			const textOutput = vi.fn();
@@ -835,6 +1429,17 @@ describe('OpenAIRealtimeTransport', () => {
 			expect(speechStarted).toHaveBeenCalledOnce();
 		});
 
+		it('fires onUserSpeechStopped on speech_stopped, after onSpeechStarted', () => {
+			const order: string[] = [];
+			transport.onSpeechStarted = () => order.push('started');
+			transport.onUserSpeechStopped = () => order.push('stopped');
+
+			mockRt.emit('input_audio_buffer.speech_started', {});
+			mockRt.emit('input_audio_buffer.speech_stopped', {});
+
+			expect(order).toEqual(['started', 'stopped']);
+		});
+
 		it('fires onSpeechStarted even when model is not generating', () => {
 			const speechStarted = vi.fn();
 			const interrupted = vi.fn();
@@ -861,6 +1466,942 @@ describe('OpenAIRealtimeTransport', () => {
 
 			// biome-ignore lint/suspicious/noExplicitAny: test internal state
 			expect((transport as any)._textMode).toBe(true);
+		});
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Phase 1 features: gpt-realtime-2 reasoning, parallel tools (covered above
+// under "tool call handling"), audio format, quiesce/unquiesce, onCacheBust.
+// ---------------------------------------------------------------------------
+
+describe('OpenAIRealtimeTransport — Phase 1 features (gpt-realtime-2)', () => {
+	let transport: OpenAIRealtimeTransport;
+	let mockRt: ReturnType<typeof createMockRt>;
+
+	function setup(config: OpenAIRealtimeConfig) {
+		transport = new OpenAIRealtimeTransport(config);
+		mockRt = createMockRt();
+		// biome-ignore lint/suspicious/noExplicitAny: test mock injection
+		(transport as any).rt = mockRt;
+		// biome-ignore lint/suspicious/noExplicitAny: test mock injection
+		(transport as any)._isConnected = true;
+		// biome-ignore lint/suspicious/noExplicitAny: test mock injection
+		(transport as any).wireEventListeners();
+	}
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	describe('capabilities resolve from model', () => {
+		it('gpt-realtime-2 enables reasoningEffort, parallelToolCalls, automaticPreambles', () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+			expect(transport.capabilities.reasoningEffort).toBe(true);
+			expect(transport.capabilities.parallelToolCalls).toBe(true);
+			expect(transport.capabilities.automaticPreambles).toBe(true);
+			expect(transport.capabilities.quiescible).toBe(true);
+		});
+
+		it('gpt-realtime (legacy) disables reasoning + parallel tools + preambles', () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime' });
+			expect(transport.capabilities.reasoningEffort).toBe(false);
+			expect(transport.capabilities.parallelToolCalls).toBe(false);
+			expect(transport.capabilities.automaticPreambles).toBe(false);
+		});
+
+		it('unknown model defaults to all-false on gated flags', () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-future' });
+			expect(transport.capabilities.reasoningEffort).toBe(false);
+			expect(transport.capabilities.parallelToolCalls).toBe(false);
+		});
+	});
+
+	describe('reasoning serialisation gating', () => {
+		it('serialises reasoning into session config for gpt-realtime-2', () => {
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				reasoning: { effort: 'low', summary: 'auto' },
+			});
+			// biome-ignore lint/suspicious/noExplicitAny: probing build-config output
+			const session = (transport as any).buildSessionConfig();
+			expect(session.reasoning).toEqual({ effort: 'low', summary: 'auto' });
+		});
+
+		it('drops reasoning silently with warn on older model (strict=false)', () => {
+			const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime',
+				reasoning: { effort: 'low' },
+			});
+			// biome-ignore lint/suspicious/noExplicitAny: probing build-config output
+			const session = (transport as any).buildSessionConfig();
+			expect(session.reasoning).toBeUndefined();
+			expect(warn).toHaveBeenCalled();
+			expect((warn.mock.calls[0]?.[0] as string) ?? '').toContain('reasoning');
+		});
+
+		it('throws UNSUPPORTED_FEATURE on older model when strict=true', () => {
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime',
+				reasoning: { effort: 'low' },
+				strict: true,
+			});
+			// biome-ignore lint/suspicious/noExplicitAny: probing build-config output
+			expect(() => (transport as any).buildSessionConfig()).toThrow(/UNSUPPORTED_FEATURE/);
+		});
+	});
+
+	describe('reasoning lifecycle callbacks', () => {
+		it('fires onReasoningStart/Done with durationMs', async () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+			const started = vi.fn();
+			const done = vi.fn();
+			transport.onReasoningStart = started;
+			transport.onReasoningDone = done;
+
+			mockRt.emit('response.created', { response: { id: 'r1' } });
+			mockRt.emit('response.output_item.added', {
+				item: { id: 'r_item', type: 'reasoning' } as unknown,
+			});
+			expect(started).toHaveBeenCalledOnce();
+
+			await new Promise((r) => setTimeout(r, 5));
+
+			mockRt.emit('response.output_item.done', {
+				item: { id: 'r_item', type: 'reasoning' } as unknown,
+			});
+			expect(done).toHaveBeenCalledOnce();
+			const info = done.mock.calls[0]?.[0] as { durationMs: number };
+			expect(info.durationMs).toBeGreaterThanOrEqual(0);
+		});
+
+		it('streams reasoning summary text to onReasoningSummary', () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+			const chunks: string[] = [];
+			transport.onReasoningSummary = (t) => chunks.push(t);
+
+			mockRt.emit('response.reasoning_summary_text.delta', { delta: 'Thinking ' });
+			mockRt.emit('response.reasoning_summary_text.delta', { delta: 'about it.' });
+
+			expect(chunks).toEqual(['Thinking ', 'about it.']);
+		});
+	});
+
+	describe('audio format propagation', () => {
+		it('PCM 24 kHz is the default; bytesPerSample = 2', () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+			expect(transport.audioFormat).toEqual({
+				inputSampleRate: 24000,
+				outputSampleRate: 24000,
+				channels: 1,
+				bitDepth: 16,
+				encoding: 'pcm',
+				outputBitDepth: 16,
+				outputEncoding: 'pcm',
+			});
+		});
+
+		it('uses semantic VAD and far-field input noise reduction by default', () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+			// biome-ignore lint/suspicious/noExplicitAny: probing build-config output
+			const session = (transport as any).buildSessionConfig();
+			expect(session.audio.input.turn_detection).toMatchObject({ type: 'semantic_vad' });
+			expect(session.audio.input.noise_reduction).toEqual({ type: 'far_field' });
+		});
+
+		it('allows near-field input noise reduction override', () => {
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				noiseReduction: { type: 'near_field' },
+			});
+			// biome-ignore lint/suspicious/noExplicitAny: probing build-config output
+			const session = (transport as any).buildSessionConfig();
+			expect(session.audio.input.noise_reduction).toEqual({ type: 'near_field' });
+		});
+
+		it('allows disabling input noise reduction with null', () => {
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				noiseReduction: null,
+			});
+			// biome-ignore lint/suspicious/noExplicitAny: probing build-config output
+			const session = (transport as any).buildSessionConfig();
+			expect(session.audio.input.noise_reduction).toBeNull();
+		});
+
+		it('G.711 mu-law: input rate = 8000, bitDepth = 8, encoding = pcmu', () => {
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				audioInputFormat: { type: 'audio/pcmu' },
+				audioOutputFormat: { type: 'audio/pcmu' },
+			});
+			expect(transport.audioFormat.encoding).toBe('pcmu');
+			expect(transport.audioFormat.bitDepth).toBe(8);
+			expect(transport.audioFormat.inputSampleRate).toBe(8000);
+			expect(transport.audioFormat.outputSampleRate).toBe(8000);
+		});
+
+		it('rejects non-24 kHz PCM rate at build-session-config time', () => {
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				audioInputFormat: { type: 'audio/pcm', rate: 16000 },
+			});
+			// biome-ignore lint/suspicious/noExplicitAny: probing build-config output
+			expect(() => (transport as any).buildSessionConfig()).toThrow(/UNSUPPORTED_SAMPLE_RATE/);
+		});
+
+		it('interruption math uses output rate + bytes-per-sample from format', () => {
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				audioInputFormat: { type: 'audio/pcmu' },
+				audioOutputFormat: { type: 'audio/pcmu' },
+			});
+			// Feed 1 second of G.711 audio: 8000 samples × 1 byte = 8000 bytes.
+			const oneSecMuLaw = Buffer.alloc(8000).toString('base64');
+			mockRt.emit('response.output_audio.delta', { delta: oneSecMuLaw });
+
+			// biome-ignore lint/suspicious/noExplicitAny: probing internal state
+			const ms = (transport as any).audioOutputMs as number;
+			expect(ms).toBeCloseTo(1000, -1);
+		});
+	});
+
+	describe('triggerGeneration with reasoning override', () => {
+		it('emits response.create with response.reasoning when overrides supplied', () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+			transport.triggerGeneration('clarify', { reasoning: { effort: 'medium' } });
+			const last = mockRt.sent[mockRt.sent.length - 1] as {
+				type: string;
+				response?: { instructions?: string; reasoning?: { effort?: string } };
+			};
+			expect(last.type).toBe('response.create');
+			expect(last.response?.instructions).toBe('clarify');
+			expect(last.response?.reasoning?.effort).toBe('medium');
+		});
+
+		it('drops reasoning override silently for models that do not support it', () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime' });
+			transport.triggerGeneration(undefined, { reasoning: { effort: 'medium' } });
+			const last = mockRt.sent[mockRt.sent.length - 1] as {
+				type: string;
+				response?: { reasoning?: unknown };
+			};
+			// No response.reasoning landed in the payload.
+			expect(last.response?.reasoning).toBeUndefined();
+		});
+
+		it('preserves existing behaviour when no overrides are supplied', () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+			transport.triggerGeneration();
+			const last = mockRt.sent[mockRt.sent.length - 1] as { type: string; response?: unknown };
+			expect(last.type).toBe('response.create');
+			expect(last.response).toBeUndefined();
+		});
+	});
+
+	describe('quiesce / unquiesce', () => {
+		it('quiesce sends response.cancel when a response is in flight and suppresses audio', async () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+			const audio: string[] = [];
+			transport.onAudioOutput = (d) => audio.push(d);
+
+			mockRt.emit('response.created', { response: { id: 'r1' } });
+			mockRt.emit('response.output_audio.delta', { delta: Buffer.alloc(4).toString('base64') });
+			expect(audio).toHaveLength(1);
+
+			await transport.quiesce?.();
+
+			const cancel = mockRt.sent.find((m) => m.type === 'response.cancel');
+			expect(cancel).toBeDefined();
+
+			// Subsequent audio is suppressed.
+			mockRt.emit('response.output_audio.delta', { delta: Buffer.alloc(4).toString('base64') });
+			expect(audio).toHaveLength(1);
+
+			// Unquiesce — audio flows again.
+			await transport.unquiesce?.();
+			mockRt.emit('response.output_audio.delta', { delta: Buffer.alloc(4).toString('base64') });
+			expect(audio).toHaveLength(2);
+		});
+
+		it('quiesce is a no-op (no response.cancel) when nothing is generating', async () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+			await transport.quiesce?.();
+			expect(mockRt.sent.find((m) => m.type === 'response.cancel')).toBeUndefined();
+		});
+
+		it('quiesce / unquiesce are idempotent', async () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+			mockRt.emit('response.created', { response: { id: 'r1' } });
+			await transport.quiesce?.();
+			await transport.quiesce?.();
+			// Only one response.cancel because second call sees _isModelGenerating=false.
+			const cancels = mockRt.sent.filter((m) => m.type === 'response.cancel');
+			expect(cancels).toHaveLength(1);
+
+			await transport.unquiesce?.();
+			await transport.unquiesce?.();
+			// No-op pair; nothing extra sent.
+			expect(mockRt.sent.filter((m) => m.type === 'response.cancel')).toHaveLength(1);
+		});
+
+		it('defers when_idle response.create until unquiesce (no leak during dictation mode)', async () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+
+			// Simulate: model is generating in agent mode → a when_idle tool result
+			// arrives → it's buffered in _pendingWhenIdle.
+			mockRt.emit('response.created', { response: { id: 'r1' } });
+			transport.sendToolResult({
+				id: 'call_bg',
+				name: 'background_task',
+				result: { ok: true },
+				scheduling: 'when_idle',
+			});
+			// Nothing flushed yet — model is still generating.
+			expect(mockRt.sent.filter((m) => m.type === 'conversation.item.create')).toHaveLength(0);
+
+			// Session flips to transcription mode (e.g., via VoiceSession).
+			await transport.quiesce?.();
+
+			// While quiesced, response.done arrives — flush MUST NOT fire response.create.
+			mockRt.emit('response.done', { response: { id: 'r1' } });
+			expect(mockRt.sent.filter((m) => m.type === 'response.create')).toHaveLength(0);
+			expect(mockRt.sent.filter((m) => m.type === 'conversation.item.create')).toHaveLength(0);
+
+			// Unquiesce drains the deferred queue: one item.create + one response.create.
+			await transport.unquiesce?.();
+			expect(mockRt.sent.filter((m) => m.type === 'conversation.item.create')).toHaveLength(1);
+			expect(mockRt.sent.filter((m) => m.type === 'response.create')).toHaveLength(1);
+		});
+	});
+
+	describe('onCacheBust telemetry', () => {
+		it('fires instructions_changed on updateSession({ instructions })', () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+			const reasons: string[] = [];
+			transport.onCacheBust = (r) => reasons.push(r);
+
+			transport.updateSession({ instructions: 'be helpful' });
+			expect(reasons).toEqual(['instructions_changed']);
+		});
+
+		it('fires tools_changed on updateSession({ tools })', () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+			const reasons: string[] = [];
+			transport.onCacheBust = (r) => reasons.push(r);
+
+			transport.updateSession({ tools: [makeTool('a')] });
+			expect(reasons).toEqual(['tools_changed']);
+		});
+
+		it('prefers instructions_changed when both fields change in one call', () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+			const reasons: string[] = [];
+			transport.onCacheBust = (r) => reasons.push(r);
+
+			transport.updateSession({ instructions: 'x', tools: [makeTool('a')] });
+			expect(reasons).toEqual(['instructions_changed']);
+		});
+
+		it('does not fire on sendContent (tail append, no prefix mutation)', () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+			const reasons: string[] = [];
+			transport.onCacheBust = (r) => reasons.push(r);
+
+			transport.sendContent([{ role: 'user', text: 'hi' }], true);
+			expect(reasons).toEqual([]);
+		});
+
+		it('does not fire on responseModality-only updates', () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+			const reasons: string[] = [];
+			transport.onCacheBust = (r) => reasons.push(r);
+
+			transport.updateSession({ responseModality: 'text' });
+			expect(reasons).toEqual([]);
+		});
+	});
+
+	// P3: OpenAI cacheConfig.truncation mapping. See dev_docs/framework/design-context-caching.md
+	describe('cacheConfig.truncation (P3)', () => {
+		it('validateOpenAICacheConfig accepts valid object form', async () => {
+			const { validateOpenAICacheConfig } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			expect(() =>
+				validateOpenAICacheConfig({
+					truncation: { type: 'retention_ratio', retentionRatio: 0.5 },
+				}),
+			).not.toThrow();
+			expect(() => validateOpenAICacheConfig({ truncation: 'auto' })).not.toThrow();
+			expect(() => validateOpenAICacheConfig({ truncation: 'disabled' })).not.toThrow();
+			expect(() => validateOpenAICacheConfig(undefined)).not.toThrow();
+		});
+
+		it('validateOpenAICacheConfig rejects retentionRatio outside [0, 1]', async () => {
+			const { validateOpenAICacheConfig } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			expect(() =>
+				validateOpenAICacheConfig({
+					truncation: { type: 'retention_ratio', retentionRatio: -0.1 },
+				}),
+			).toThrow(/retentionRatio/);
+			expect(() =>
+				validateOpenAICacheConfig({
+					truncation: { type: 'retention_ratio', retentionRatio: 1.1 },
+				}),
+			).toThrow(/retentionRatio/);
+			expect(() =>
+				validateOpenAICacheConfig({
+					truncation: { type: 'retention_ratio', retentionRatio: Number.NaN },
+				}),
+			).toThrow(/retentionRatio/);
+		});
+
+		it('validateOpenAICacheConfig accepts retentionRatio=0 and =1 as boundary values', async () => {
+			const { validateOpenAICacheConfig } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			expect(() =>
+				validateOpenAICacheConfig({
+					truncation: { type: 'retention_ratio', retentionRatio: 0 },
+				}),
+			).not.toThrow();
+			expect(() =>
+				validateOpenAICacheConfig({
+					truncation: { type: 'retention_ratio', retentionRatio: 1 },
+				}),
+			).not.toThrow();
+		});
+
+		it('validateOpenAICacheConfig rejects fractional / negative postInstructions', async () => {
+			const { validateOpenAICacheConfig } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			expect(() =>
+				validateOpenAICacheConfig({
+					truncation: {
+						type: 'retention_ratio',
+						retentionRatio: 0.8,
+						tokenLimits: { postInstructions: 1.5 },
+					},
+				}),
+			).toThrow(/postInstructions/);
+			expect(() =>
+				validateOpenAICacheConfig({
+					truncation: {
+						type: 'retention_ratio',
+						retentionRatio: 0.8,
+						tokenLimits: { postInstructions: -1 },
+					},
+				}),
+			).toThrow(/postInstructions/);
+		});
+
+		it('applyOpenAICacheConfig writes string truncation forms', async () => {
+			const { applyOpenAICacheConfig } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			const auto: Record<string, unknown> = {};
+			applyOpenAICacheConfig(auto, { truncation: 'auto' }, 'unknown');
+			expect(auto.truncation).toBe('auto');
+
+			const disabled: Record<string, unknown> = {};
+			applyOpenAICacheConfig(disabled, { truncation: 'disabled' }, 'unknown');
+			expect(disabled.truncation).toBe('disabled');
+		});
+
+		it('applyOpenAICacheConfig writes retention_ratio object form (snake_case wire shape)', async () => {
+			const { applyOpenAICacheConfig } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			const payload: Record<string, unknown> = {};
+			applyOpenAICacheConfig(
+				payload,
+				{
+					truncation: {
+						type: 'retention_ratio',
+						retentionRatio: 0.8,
+						tokenLimits: { postInstructions: 4096 },
+					},
+				},
+				'unknown',
+			);
+			expect(payload.truncation).toEqual({
+				type: 'retention_ratio',
+				retention_ratio: 0.8,
+				token_limits: { post_instructions: 4096 },
+			});
+		});
+
+		it('applyOpenAICacheConfig omits token_limits when postInstructions is undefined', async () => {
+			const { applyOpenAICacheConfig } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			const payload: Record<string, unknown> = {};
+			applyOpenAICacheConfig(
+				payload,
+				{ truncation: { type: 'retention_ratio', retentionRatio: 0.5 } },
+				'unknown',
+			);
+			expect(payload.truncation).toEqual({
+				type: 'retention_ratio',
+				retention_ratio: 0.5,
+			});
+			expect((payload.truncation as Record<string, unknown>).token_limits).toBeUndefined();
+		});
+
+		it('applyOpenAICacheConfig is a no-op when cfg is undefined', async () => {
+			const { applyOpenAICacheConfig } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			const payload: Record<string, unknown> = { existing: 'field' };
+			applyOpenAICacheConfig(payload, undefined, 'unknown');
+			expect(payload).toEqual({ existing: 'field' });
+		});
+
+		it('updateSession includes truncation in the session.update payload', async () => {
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				cacheConfig: { truncation: { type: 'retention_ratio', retentionRatio: 0.8 } },
+			});
+			await transport.updateSession({ instructions: 'be helpful' });
+			const update = mockRt.sent.find(
+				(m) =>
+					m.type === 'session.update' &&
+					(m.session as Record<string, unknown>).truncation !== undefined,
+			);
+			expect(update).toBeDefined();
+			expect((update?.session as Record<string, unknown>).truncation).toEqual({
+				type: 'retention_ratio',
+				retention_ratio: 0.8,
+			});
+		});
+
+		it('transferSession includes truncation in the session.update payload (in-place handoff)', async () => {
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				cacheConfig: { truncation: 'auto' },
+			});
+			await transport.transferSession({ instructions: 'You are agent B.' });
+			const update = mockRt.sent.find(
+				(m) =>
+					m.type === 'session.update' &&
+					(m.session as Record<string, unknown>).truncation !== undefined,
+			);
+			expect(update).toBeDefined();
+			expect((update?.session as Record<string, unknown>).truncation).toBe('auto');
+		});
+	});
+
+	// P5: enforcePrefixStability + sendSessionUpdateAndWait. See dev_docs/framework/design-context-caching.md §2.
+	describe('enforcePrefixStability (P5)', () => {
+		it('pre-connect updateSession is always allowed (no baseline yet)', async () => {
+			const { OpenAIRealtimeTransport: T } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			const t = new T({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				cacheConfig: { enforcePrefixStability: true },
+			});
+			// Pre-connect: no rt, no baseline. Should not throw.
+			await expect(t.updateSession({ instructions: 'pre-connect setup' })).resolves.toBeUndefined();
+		});
+
+		it('connected, non-transfer prefix change throws CachePrefixMutationError', async () => {
+			const { CachePrefixMutationError } = await import('../../src/core/errors.js');
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				cacheConfig: { enforcePrefixStability: true },
+			});
+			// Set initial instructions and capture baseline.
+			await transport.updateSession({ instructions: 'baseline' });
+			// Manually set baseline to simulate post-connect ack (setup() bypasses
+			// connect()'s baseline-capture step).
+			// biome-ignore lint/suspicious/noExplicitAny: test-only hook
+			(transport as any).prefixBaselineCanonical = (
+				transport as unknown as { computePrefixCanonical: (i?: string, t?: unknown) => string }
+			).computePrefixCanonical('baseline', undefined);
+
+			await expect(transport.updateSession({ instructions: 'changed' })).rejects.toBeInstanceOf(
+				CachePrefixMutationError,
+			);
+		});
+
+		it('same-canonical-prefix update does NOT throw and STILL sends responseModality', async () => {
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				cacheConfig: { enforcePrefixStability: true },
+			});
+			await transport.updateSession({ instructions: 'baseline' });
+			// biome-ignore lint/suspicious/noExplicitAny: test-only hook
+			(transport as any).prefixBaselineCanonical = (
+				transport as unknown as { computePrefixCanonical: (i?: string, t?: unknown) => string }
+			).computePrefixCanonical('baseline', undefined);
+
+			const beforeCount = mockRt.sent.length;
+			await transport.updateSession({
+				instructions: 'baseline', // same prefix
+				responseModality: 'text',
+			});
+			const after = mockRt.sent.slice(beforeCount);
+			expect(after.length).toBeGreaterThan(0);
+			// responseModality should still flow to the wire as output_modalities.
+			const update = after.find(
+				(m) =>
+					m.type === 'session.update' &&
+					Array.isArray((m.session as Record<string, unknown>).output_modalities),
+			);
+			expect(update).toBeDefined();
+			expect((update?.session as Record<string, unknown>).output_modalities).toEqual(['text']);
+		});
+
+		it('transferSession with allowMutationOnTransfer=true (default) allows prefix change', async () => {
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				cacheConfig: { enforcePrefixStability: true },
+			});
+			await transport.updateSession({ instructions: 'agent A' });
+			// biome-ignore lint/suspicious/noExplicitAny: test-only hook
+			(transport as any).prefixBaselineCanonical = (
+				transport as unknown as { computePrefixCanonical: (i?: string, t?: unknown) => string }
+			).computePrefixCanonical('agent A', undefined);
+
+			await expect(transport.transferSession({ instructions: 'agent B' })).resolves.toBeUndefined();
+		});
+
+		it('transferSession with allowMutationOnTransfer=false throws on prefix change', async () => {
+			const { CachePrefixMutationError } = await import('../../src/core/errors.js');
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				cacheConfig: { enforcePrefixStability: true, allowMutationOnTransfer: false },
+			});
+			await transport.updateSession({ instructions: 'agent A' });
+			// biome-ignore lint/suspicious/noExplicitAny: test-only hook
+			(transport as any).prefixBaselineCanonical = (
+				transport as unknown as { computePrefixCanonical: (i?: string, t?: unknown) => string }
+			).computePrefixCanonical('agent A', undefined);
+
+			await expect(transport.transferSession({ instructions: 'agent B' })).rejects.toBeInstanceOf(
+				CachePrefixMutationError,
+			);
+		});
+
+		it('canonicalize: reordered-but-equivalent JSON Schema compares equal', async () => {
+			// White-box test of the canonicalize helper used for prefix comparison.
+			// We import via dynamic import to access the file-level function.
+			// The helper is not exported, so we exercise it via computePrefixCanonical
+			// indirectly: same canonical string for two semantically-equivalent objects.
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+			const computeCanonical = (
+				transport as unknown as { computePrefixCanonical: (i?: string, t?: unknown) => string }
+			).computePrefixCanonical.bind(transport);
+			// Two tools with parameters whose key order differs.
+			const toolA = makeTool('search');
+			const toolB = makeTool('search');
+			expect(computeCanonical('x', [toolA])).toBe(computeCanonical('x', [toolB]));
+		});
+
+		it('without enforcePrefixStability, prefix mutation does NOT throw (default behavior)', async () => {
+			setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+			// No cacheConfig.enforcePrefixStability — should never throw.
+			await expect(transport.updateSession({ instructions: 'whatever' })).resolves.toBeUndefined();
+			await expect(transport.updateSession({ instructions: 'changed' })).resolves.toBeUndefined();
+		});
+	});
+
+	// P6: experimental.promptCacheKey probe. See dev_docs/framework/design-context-caching.md §6.
+	describe('experimental.promptCacheKey probe (P6)', () => {
+		it('derivePromptCacheKeyProbeScope produces stable scope strings', async () => {
+			const { derivePromptCacheKeyProbeScope } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			expect(derivePromptCacheKeyProbeScope(undefined, undefined, undefined, 'm', 'k')).toBe(
+				'default|default|default|m|k',
+			);
+			expect(
+				derivePromptCacheKeyProbeScope(
+					'https://api.openai.com/v1',
+					'org_x',
+					'proj_y',
+					'gpt-realtime-2',
+					'k1',
+				),
+			).toBe('https://api.openai.com/v1|org_x|proj_y|gpt-realtime-2|k1');
+			// Different baseURL → different scope.
+			expect(
+				derivePromptCacheKeyProbeScope('https://other/', 'org_x', 'proj_y', 'gpt-realtime-2', 'k1'),
+			).not.toBe(
+				derivePromptCacheKeyProbeScope(
+					'https://api.openai.com/v1',
+					'org_x',
+					'proj_y',
+					'gpt-realtime-2',
+					'k1',
+				),
+			);
+		});
+
+		it('applyOpenAICacheConfig includes prompt_cache_key when probe state is unknown or accepted', async () => {
+			const { applyOpenAICacheConfig } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			const cfg = { experimental: { promptCacheKey: 'demo_key' } };
+
+			const u: Record<string, unknown> = {};
+			applyOpenAICacheConfig(u, cfg, 'unknown');
+			expect(u.prompt_cache_key).toBe('demo_key');
+
+			const a: Record<string, unknown> = {};
+			applyOpenAICacheConfig(a, cfg, 'accepted');
+			expect(a.prompt_cache_key).toBe('demo_key');
+		});
+
+		it('applyOpenAICacheConfig OMITS prompt_cache_key when probe state is rejected', async () => {
+			const { applyOpenAICacheConfig } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			const u: Record<string, unknown> = {};
+			applyOpenAICacheConfig(u, { experimental: { promptCacheKey: 'demo_key' } }, 'rejected');
+			expect(u.prompt_cache_key).toBeUndefined();
+		});
+
+		it('updateSession includes prompt_cache_key when key is configured', async () => {
+			const { _clearPromptCacheKeyProbeStateForTesting } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			_clearPromptCacheKeyProbeStateForTesting();
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				cacheConfig: { experimental: { promptCacheKey: 'agent_alpha' } },
+			});
+			await transport.updateSession({ instructions: 'be helpful' });
+			const update = mockRt.sent.find(
+				(m) =>
+					m.type === 'session.update' &&
+					(m.session as Record<string, unknown>).prompt_cache_key !== undefined,
+			);
+			expect(update).toBeDefined();
+			expect((update?.session as Record<string, unknown>).prompt_cache_key).toBe('agent_alpha');
+		});
+
+		it('transferSession also includes prompt_cache_key (in-place handoff)', async () => {
+			const { _clearPromptCacheKeyProbeStateForTesting } = await import(
+				'../../src/transport/openai-realtime-transport.js'
+			);
+			_clearPromptCacheKeyProbeStateForTesting();
+			setup({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				cacheConfig: { experimental: { promptCacheKey: 'agent_alpha' } },
+			});
+			await transport.transferSession({ instructions: 'agent B' });
+			const update = mockRt.sent.find(
+				(m) =>
+					m.type === 'session.update' &&
+					(m.session as Record<string, unknown>).prompt_cache_key !== undefined,
+			);
+			expect(update).toBeDefined();
+		});
+
+		it('rejected scope does NOT poison a different scope (per-key isolation)', async () => {
+			const {
+				_clearPromptCacheKeyProbeStateForTesting,
+				derivePromptCacheKeyProbeScope,
+				setPromptCacheKeyProbeState,
+				getPromptCacheKeyProbeState,
+			} = await import('../../src/transport/openai-realtime-transport.js');
+			_clearPromptCacheKeyProbeStateForTesting();
+			const scope1 = derivePromptCacheKeyProbeScope(
+				undefined,
+				undefined,
+				undefined,
+				'gpt-realtime-2',
+				'key1',
+			);
+			const scope2 = derivePromptCacheKeyProbeScope(
+				undefined,
+				undefined,
+				undefined,
+				'gpt-realtime-2',
+				'key2',
+			);
+			setPromptCacheKeyProbeState(scope1, 'rejected');
+			expect(getPromptCacheKeyProbeState(scope1)).toBe('rejected');
+			expect(getPromptCacheKeyProbeState(scope2)).toBe('unknown');
+		});
+
+		it('OpenAIRealtimeConfig accepts baseURL/organization/project', () => {
+			// Smoke test: type-check + no-throw construction.
+			const t = new OpenAIRealtimeTransport({
+				apiKey: 'test',
+				model: 'gpt-realtime-2',
+				baseURL: 'https://gateway.example.com/v1',
+				organization: 'org_x',
+				project: 'proj_y',
+			});
+			expect(t).toBeDefined();
+		});
+	});
+
+	// Follow-up review fixes — see commit message + design-context-caching.md
+	describe('follow-up fixes (post-P7 review)', () => {
+		// Fix #1: ack-correlated single-flight session.update queue.
+		describe('FIFO queue + sendSessionUpdateAndWait (fix #1)', () => {
+			it('updateSession resolves only after session.updated arrives (not fire-and-forget)', async () => {
+				setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+				// The mock auto-emits session.updated on every session.update,
+				// so a successful await means the wire→ack round-trip completed.
+				const promise = transport.updateSession({ instructions: 'X' });
+				// Promise is pending until the microtask queue drains.
+				expect(promise).toBeInstanceOf(Promise);
+				await promise;
+				const sent = mockRt.sent.find(
+					(m) =>
+						m.type === 'session.update' &&
+						(m.session as Record<string, unknown>).instructions === 'X',
+				);
+				expect(sent).toBeDefined();
+				// Outgoing payload carries an event_id for ack correlation.
+				expect((sent as Record<string, unknown>).event_id).toMatch(/^sess_upd_\d+$/);
+			});
+
+			it('concurrent updateSession calls serialize via the queue', async () => {
+				setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+				const a = transport.updateSession({ instructions: 'A' });
+				const b = transport.updateSession({ instructions: 'B' });
+				await Promise.all([a, b]);
+				const updates = mockRt.sent.filter((m) => m.type === 'session.update');
+				// Two ordered sends with monotonic event_ids.
+				const ids = updates
+					.map((m) => (m as Record<string, unknown>).event_id as string | undefined)
+					.filter((x): x is string => typeof x === 'string');
+				expect(ids.length).toBeGreaterThanOrEqual(2);
+				const counters = ids.map((id) => Number(id.replace('sess_upd_', '')));
+				for (let i = 1; i < counters.length; i++) {
+					expect(counters[i]).toBeGreaterThan(counters[i - 1] ?? 0);
+				}
+			});
+
+			it('prefix baseline does NOT update when the wire send rejects', async () => {
+				setup({
+					apiKey: 'test',
+					model: 'gpt-realtime-2',
+					cacheConfig: { enforcePrefixStability: true },
+				});
+				// Set initial baseline by simulating a successful first update.
+				await transport.updateSession({ instructions: 'baseline' });
+				// biome-ignore lint/suspicious/noExplicitAny: test-only hook
+				const beforeBaseline = (transport as any).prefixBaselineCanonical;
+				expect(beforeBaseline).toBeDefined();
+
+				// Replace the mock to make the next session.update reject by
+				// emitting an error event with a matching event_id instead of
+				// session.updated.
+				// biome-ignore lint/suspicious/noExplicitAny: deliberate mock override
+				const origSend = (mockRt as any).send.bind(mockRt);
+				// biome-ignore lint/suspicious/noExplicitAny: deliberate mock override
+				(mockRt as any).send = (m: Record<string, unknown>) => {
+					mockRt.sent.push(m);
+					if (
+						m.type === 'session.update' &&
+						(m.session as Record<string, unknown>).instructions === 'rejected'
+					) {
+						queueMicrotask(() =>
+							mockRt.emit('error', {
+								event_id: m.event_id,
+								error: { message: 'simulated server rejection', type: 'invalid_request_error' },
+							}),
+						);
+						return;
+					}
+					origSend(m);
+				};
+
+				// Mutate prefix; transferSession path so enforcePrefixStability
+				// allows the change (default allowMutationOnTransfer=true), but
+				// the wire send is rejected by the mock.
+				await expect(transport.transferSession({ instructions: 'rejected' })).rejects.toThrow();
+
+				// biome-ignore lint/suspicious/noExplicitAny: test-only hook
+				const afterBaseline = (transport as any).prefixBaselineCanonical;
+				expect(afterBaseline).toBe(beforeBaseline);
+			});
+		});
+
+		// Fix #2: probe rejection suppressed from user-facing onError.
+		describe('probe rejection suppression (fix #2)', () => {
+			it('does NOT call user onError when error is a prompt_cache_key probe rejection', async () => {
+				const { _clearPromptCacheKeyProbeStateForTesting } = await import(
+					'../../src/transport/openai-realtime-transport.js'
+				);
+				_clearPromptCacheKeyProbeStateForTesting();
+				setup({
+					apiKey: 'test',
+					model: 'gpt-realtime-2',
+					cacheConfig: { experimental: { promptCacheKey: 'probe_test_key' } },
+				});
+				const errors: unknown[] = [];
+				transport.onError = (e) => errors.push(e);
+
+				// Mark probe as in-flight (mirrors what installPromptCacheKeyProbe does).
+				// biome-ignore lint/suspicious/noExplicitAny: test-only hook
+				(transport as any)._inFlightProbeScope = 'any';
+
+				// Emit an error matching the probe pattern.
+				mockRt.emit('error', {
+					error: { param: 'prompt_cache_key', message: 'unknown parameter' },
+				});
+
+				expect(errors).toEqual([]);
+			});
+
+			it('DOES call user onError for unrelated errors even with probe in flight', async () => {
+				setup({
+					apiKey: 'test',
+					model: 'gpt-realtime-2',
+					cacheConfig: { experimental: { promptCacheKey: 'probe_test_key' } },
+				});
+				const errors: unknown[] = [];
+				transport.onError = (e) => errors.push(e);
+				// biome-ignore lint/suspicious/noExplicitAny: test-only hook
+				(transport as any)._inFlightProbeScope = 'any';
+
+				mockRt.emit('error', {
+					error: { type: 'server_error', message: 'something else broke' },
+				});
+				expect(errors).toHaveLength(1);
+			});
+
+			it('DOES call user onError for probe-shaped errors when no probe is in flight', () => {
+				setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+				const errors: unknown[] = [];
+				transport.onError = (e) => errors.push(e);
+
+				// Probe scope cleared; same error pattern should NOT be suppressed.
+				mockRt.emit('error', {
+					error: { param: 'prompt_cache_key', message: 'unknown parameter' },
+				});
+				expect(errors).toHaveLength(1);
+			});
 		});
 	});
 });

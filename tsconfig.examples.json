@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "outDir": null,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
+  },
+  "include": ["examples"],
+  "exclude": ["node_modules", "dist", "examples/livekit", "examples/**/*.test.ts"]
+}

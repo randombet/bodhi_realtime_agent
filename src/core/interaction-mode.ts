@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Tracks whether user transcript should flow to the main LLM agent or
  * to an interactive subagent that is waiting for user input.

@@ -24,3 +24,7 @@ Common pattern:
 Subagents are background workers for long-running tasks.
 
 See [Subagent Patterns](/advanced/subagents).
+
+## Knowledge base
+
+To attach documents and optional retrieval to **main** agents (and to understand what subagents see), see [Knowledge base](/guide/knowledge-base).

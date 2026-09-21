@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { BehaviorCategory } from '../types/behavior.js';
 
 /** Speech speed behavior (slow / normal / fast). */

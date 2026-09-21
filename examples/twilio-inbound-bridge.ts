@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Twilio Inbound Call Bridge
  *

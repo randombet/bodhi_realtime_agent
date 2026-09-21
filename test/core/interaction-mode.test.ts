@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it } from 'vitest';
 import { InteractionModeManager } from '../../src/core/interaction-mode.js';
 

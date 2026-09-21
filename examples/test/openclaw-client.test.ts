@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it } from 'vitest';
 import {
 	type ChatAttachment,
@@ -8,7 +6,7 @@ import {
 	extractContentBlocks,
 	mergeText,
 	normalizeEvent,
-} from '../lib/openclaw-client.js';
+} from '../../app/lib/integrations/openclaw/openclaw-client.js';
 
 describe('normalizeEvent', () => {
 	const baseRaw: GatewayChatEventRaw = {

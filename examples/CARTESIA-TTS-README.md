@@ -95,7 +95,7 @@ The demo agent ("Bodhi") comes with three inline tools:
 
 ```
 ┌─────────────┐     WebSocket      ┌──────────────────────────────────────────┐
-│  Browser /   │◄──────────────────►│  VoiceSession                             │
+│  Browser /   │◄──────────────────►│  VoiceSession (actor mode)               │
 │  web-client  │   audio + JSON     │                                          │
 └─────────────┘                     │  ┌──────────────┐  ┌──────────────────┐  │
                                     │  │ Gemini Live   │  │ CartesiaTTS      │  │
@@ -111,7 +111,7 @@ The demo agent ("Bodhi") comes with three inline tools:
 ```
 
 Key components:
-- **VoiceSession** with a `ttsProvider` — enables the pluggable TTS pipeline
+- **VoiceSession** in `actor` orchestration mode — enables the pluggable TTS pipeline
 - **CartesiaTTSProvider** — streams text to Cartesia via WebSocket, receives PCM audio chunks
 - **SentenceBuffer** — buffers LLM tokens and emits at sentence boundaries for natural prosody
 - **GeminiBatchSTTProvider** — transcribes user speech for display (separate from TTS)
@@ -119,7 +119,7 @@ Key components:
 ## Troubleshooting
 
 **Connection refused on port 9900**
-The backend isn't running. Start it with `pnpm tsx examples/cartesia-tts-demo.ts`.
+The backend isn't running. Start it with `pnpm tsx app/cartesia-tts-demo.ts`.
 
 **No audio playback in browser**
 Chrome requires user interaction before playing audio. Click the Connect button — don't automate the connection.

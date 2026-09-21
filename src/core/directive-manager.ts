@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Manages session-scoped and agent-scoped directives.
  *

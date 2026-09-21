@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 type Turn = { role: string; parts: Array<{ text: string }> };
 
 /** Priority for notification delivery. */

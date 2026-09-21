@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { LanguageModelV1 } from 'ai';
 import { generateText, tool } from 'ai';
 import { z } from 'zod';
@@ -64,6 +62,10 @@ function buildSystemPrompt(context: SubagentContextSnapshot): string {
 	if (context.relevantMemoryFacts.length > 0) {
 		const facts = context.relevantMemoryFacts.map((f) => `- ${f.content}`).join('\n');
 		parts.push(`\n# Relevant Memory\n${facts}`);
+	}
+
+	if (context.knowledgeBaseContext?.trim()) {
+		parts.push(`\n# Knowledge Base\n${context.knowledgeBaseContext.trim()}`);
 	}
 
 	return parts.join('\n');

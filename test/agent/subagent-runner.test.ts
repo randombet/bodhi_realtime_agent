@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { LanguageModelV1 } from 'ai';
 import { describe, expect, it, vi } from 'vitest';
 import { _buildSystemPromptForTest, runSubagent } from '../../src/agent/subagent-runner.js';
@@ -98,6 +96,14 @@ describe('buildSystemPrompt', () => {
 			}),
 		);
 		expect(prompt).toContain('Prefers window seat');
+	});
+
+	it('includes knowledge base section when knowledgeBaseContext is set', () => {
+		const prompt = _buildSystemPromptForTest(
+			createTestContext({ knowledgeBaseContext: 'Role: Engineer at Acme' }),
+		);
+		expect(prompt).toContain('# Knowledge Base');
+		expect(prompt).toContain('Role: Engineer at Acme');
 	});
 });
 
@@ -260,7 +266,7 @@ describe('runSubagent', () => {
 			// Abort the caller while generateText is still in-flight
 			controller.abort();
 			expect(capturedSignal?.aborted).toBe(true);
-			return { text: 'done' } as ReturnType<typeof generateText>;
+			return { text: 'done' } as Awaited<ReturnType<typeof generateText>>;
 		});
 
 		await runSubagent({

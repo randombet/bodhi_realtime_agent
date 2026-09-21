@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Resample PCM audio buffer from one sample rate to another using linear interpolation.
  *

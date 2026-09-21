@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Multi-User Session Manager
  *

@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it, vi } from 'vitest';
 import { HooksManager } from '../../src/core/hooks.js';
 
@@ -16,7 +14,47 @@ describe('HooksManager', () => {
 		expect(mgr.onRealtimeLLMUsage).toBeUndefined();
 		expect(mgr.onMemoryExtraction).toBeUndefined();
 		expect(mgr.onTTSSynthesis).toBeUndefined();
+		expect(mgr.onUserSpeechEnd).toBeUndefined();
+		expect(mgr.onTranscriptReady).toBeUndefined();
+		expect(mgr.onBargeInDetected).toBeUndefined();
 		expect(mgr.onError).toBeUndefined();
+	});
+
+	it('onBargeInDetected hook fires with detection→actuation timing', () => {
+		const mgr = new HooksManager();
+		const handler = vi.fn();
+		mgr.register({ onBargeInDetected: handler });
+
+		const event = {
+			sessionId: 's',
+			speechStartedAtMs: 1000,
+			detectedAtMs: 1020,
+			cancelRequestedAtMs: 1050,
+			audioStoppedAtMs: 1060,
+			latencyMs: 30,
+			successful: true,
+		};
+		mgr.onBargeInDetected?.(event);
+
+		expect(handler).toHaveBeenCalledWith(event);
+	});
+
+	it('onUserSpeechEnd / onTranscriptReady fire with metric-clock timestamps', () => {
+		const mgr = new HooksManager();
+		const speechEnd = vi.fn();
+		const transcript = vi.fn();
+		mgr.register({ onUserSpeechEnd: speechEnd, onTranscriptReady: transcript });
+
+		mgr.onUserSpeechEnd?.({ sessionId: 's', turnId: '3', atMs: 2000 });
+		mgr.onTranscriptReady?.({ sessionId: 's', turnId: '3', atMs: 2150, textLength: 12 });
+
+		expect(speechEnd).toHaveBeenCalledWith({ sessionId: 's', turnId: '3', atMs: 2000 });
+		expect(transcript).toHaveBeenCalledWith({
+			sessionId: 's',
+			turnId: '3',
+			atMs: 2150,
+			textLength: 12,
+		});
 	});
 
 	it('onTTSSynthesis hook fires with timing metrics', () => {

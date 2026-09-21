@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { AgentRouter } from '../agent/agent-router.js';
 import type { ToolExecutor } from '../tools/tool-executor.js';
 import type { SubagentConfig } from '../types/agent.js';
@@ -33,6 +31,10 @@ export interface ToolCallRouterDeps {
  *
  * Extracted from VoiceSession to reduce its line count and isolate
  * tool call routing as a self-contained concern.
+ *
+ * @deprecated Use `ToolRouterActor` from `src/runtime/` instead.
+ * This class is retained for backward compatibility during the transition
+ * to the actor-based orchestration layer (`RuntimeOrchestrator`).
  */
 export class ToolCallRouter {
 	private deps: ToolCallRouterDeps;
@@ -89,7 +91,7 @@ export class ToolCallRouter {
 			if (toolDef?.execution === 'background') {
 				this.handleBackgroundToolCall(toolCall, toolDef);
 			} else {
-				this.handleInlineToolCall(toolCall);
+				this.handleInlineToolCall(toolCall, toolDef);
 			}
 		}
 	}
@@ -102,11 +104,18 @@ export class ToolCallRouter {
 		}
 	}
 
-	private handleInlineToolCall(call: {
-		toolCallId: string;
-		toolName: string;
-		args: Record<string, unknown>;
-	}): void {
+	private handleInlineToolCall(
+		call: {
+			toolCallId: string;
+			toolName: string;
+			args: Record<string, unknown>;
+		},
+		toolDef: ToolDefinition | undefined,
+	): void {
+		// Respect the tool definition's scheduling hint (e.g. 'silent' for
+		// purely informational tools like `set_transcription_mode`). Default
+		// 'immediate' preserves existing behaviour.
+		const scheduling = toolDef?.scheduling ?? 'immediate';
 		this.deps.toolExecutor
 			.handleToolCall(call)
 			.then((result) => {
@@ -117,12 +126,14 @@ export class ToolCallRouter {
 					id: result.toolCallId,
 					name: result.toolName,
 					result: result.error ? { error: result.error } : result.result,
-					scheduling: 'immediate',
+					scheduling,
 				});
 			})
 			.catch((err) => {
 				this.deps.reportError('tool-executor', err);
-				// Always send a response so the LLM doesn't hang
+				// Always send a response so the LLM doesn't hang. Errors use
+				// 'immediate' regardless of the tool's default scheduling —
+				// the model should react to failures.
 				this.deps.sendToolResult({
 					id: call.toolCallId,
 					name: call.toolName,
@@ -157,8 +168,7 @@ export class ToolCallRouter {
 		// Find subagent config
 		const registeredConfig = this.deps.subagentConfigs[call.toolName];
 		if (!registeredConfig) {
-			// Fallback: run as inline tool
-			this.handleInlineToolCall(call);
+			this.handleLocalBackgroundToolCall(call, hasPendingMessage);
 			return;
 		}
 
@@ -237,6 +247,71 @@ export class ToolCallRouter {
 						scheduling: 'when_idle',
 					});
 				}
+			});
+	}
+
+	private handleLocalBackgroundToolCall(
+		call: { toolCallId: string; toolName: string; args: Record<string, unknown> },
+		hasPendingMessage: boolean,
+	): void {
+		this.deps.conversationContext.addToolCall(call);
+
+		if (!hasPendingMessage) {
+			this.deps.sendToolResult({
+				id: call.toolCallId,
+				name: call.toolName,
+				result: {
+					status: 'accepted',
+					message: 'Background tool accepted. Continue with the next required step.',
+					important:
+						'Do not wait for another tool result. Continue with the next tool call or user-facing response required by your instructions.',
+				},
+				scheduling: 'immediate',
+			});
+		}
+
+		this.deps.toolExecutor
+			.handleToolCall(call)
+			.then((result) => {
+				this.deps.conversationContext.addToolResult(result);
+
+				if (hasPendingMessage) {
+					this.deps.notificationQueue.sendOrQueue(
+						[
+							{
+								role: 'user',
+								parts: [
+									{
+										text: `[SYSTEM: Background task "${call.toolName}" completed successfully. Result: ${JSON.stringify(result.result)}. Please inform the user if relevant.]`,
+									},
+								],
+							},
+						],
+						true,
+					);
+				}
+			})
+			.catch((err) => {
+				this.deps.reportError('tool-executor', err);
+				this.deps.conversationContext.addToolResult({
+					toolCallId: call.toolCallId,
+					toolName: call.toolName,
+					result: null,
+					error: err instanceof Error ? err.message : String(err),
+				});
+				this.deps.notificationQueue.sendOrQueue(
+					[
+						{
+							role: 'user',
+							parts: [
+								{
+									text: `[SYSTEM: Background task "${call.toolName}" failed. Exact error details: ${err instanceof Error ? err.message : String(err)}. Tell the user the exact error details first, then ask how to proceed.]`,
+								},
+							],
+						},
+					],
+					true,
+				);
 			});
 	}
 }

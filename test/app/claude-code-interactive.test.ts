@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mockQuery = vi.fn();
@@ -8,7 +6,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
 }));
 
 const { createClaudeCodeSubagentConfig, _ClaudeCodeSessionClass } = await import(
-	'../../examples/claude_code/claude-code-tools.js'
+	'../../app/lib/integrations/claude-code/claude-code-tools.js'
 );
 
 function createMockInitMessage(sessionId: string) {

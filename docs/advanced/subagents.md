@@ -2,8 +2,12 @@
 
 Subagents run in the background using the Vercel AI SDK while the voice model continues speaking to the user. They handle long-running operations that would otherwise block the voice stream.
 
+::: tip Persistent Runtime Flow
+For the actor-runtime persistent path (instance reuse, lifecycle states, and OpenClaw example), see [Persistent Subagent Lifecycle](/advanced/persistent-subagent-lifecycle).
+:::
+
 ::: info OpenClaw Demo Routing Note
-In `examples/openclaw/openclaw-demo.ts`, OpenClaw is not configured to generate images or videos. Media generation requests should route to `generate_image` / `generate_video`, even if the user explicitly mentions OpenClaw.
+In `app/openclaw-demo.ts`, OpenClaw is not configured to generate images or videos. Media generation requests should route to `generate_image` / `generate_video`, even if the user explicitly mentions OpenClaw.
 :::
 
 ## Why Subagents?
@@ -202,7 +206,7 @@ Fire-and-forget background work. The simplest pattern.
 ```typescript
 import { z } from 'zod';
 import { tool } from 'ai';
-import type { ToolDefinition, SubagentConfig } from 'bodhi-realtime-agent';
+import type { ToolDefinition, SubagentConfig } from '@bodhi_agent/realtime-agent-framework';
 
 // Background tool the model calls
 const generateReport: ToolDefinition = {
@@ -384,7 +388,7 @@ See [Claude Code Demo](#claude-code-demo) for a complete relay subagent implemen
 Service subagents monitor external systems and proactively notify the user. They run for the entire session, reacting to webhooks, database changes, or polling results.
 
 ```typescript
-import type { ServiceSubagentConfig, EventSourceConfig } from 'bodhi-realtime-agent';
+import type { ServiceSubagentConfig, EventSourceConfig } from '@bodhi_agent/realtime-agent-framework';
 
 const orderEvents: EventSourceConfig = {
   name: 'order-webhook',

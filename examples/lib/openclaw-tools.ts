@@ -1,10 +1,9 @@
-// SPDX-License-Identifier: MIT
-
 import { tool } from 'ai';
 import { z } from 'zod';
+import type { OpenClawTransport } from '../../app/lib/integrations/openclaw/openclaw-transport.js';
+import type { ArtifactRegistry } from '../../app/lib/media/artifact-registry.js';
 import type { SubagentConfig } from '../../src/types/agent.js';
 import type { ToolDefinition } from '../../src/types/tool.js';
-import type { ArtifactRegistry } from './artifact-registry.js';
 import {
 	type AdapterLimits,
 	ArtifactResolutionError,
@@ -12,14 +11,7 @@ import {
 	resolveRequestedArtifactIds,
 } from './artifact-resolution.js';
 import { type ContentBlock, mergeText } from './openclaw-client.js';
-import {
-	type OpenClawQueueEvent,
-	OpenClawTaskManager,
-	OpenClawTaskQueueTimeoutError,
-	type OpenClawTaskStatus,
-	type OpenClawThreadEvent,
-} from './openclaw-task-manager.js';
-import type { OpenClawTransport } from './openclaw-transport.js';
+import { PersistentOpenClawSubagent } from './persistent-openclaw-subagent.js';
 
 // ---------------------------------------------------------------------------
 // OpenClaw subagent options — injected dependencies for file transfer
@@ -32,38 +24,7 @@ export interface OpenClawSubagentOptions {
 	eventBus?: { publish(event: string, payload: unknown): void };
 	/** Session ID for EventBus payloads. Required when eventBus is provided. */
 	sessionId?: string;
-	taskManager?: OpenClawTaskManager;
-	onQueueEvent?: (event: OpenClawQueueEvent) => void;
-	onThreadResolved?: (event: OpenClawThreadEvent) => void;
 }
-
-interface OpenClawRunState {
-	threadHint?: string;
-}
-
-const openClawRelayInstructions = [
-	'You are a relay agent between the user and the OpenClaw AI agent.',
-	'OpenClaw is a general-purpose agent — it can handle coding, research,',
-	'web browsing, writing, emails, and much more.',
-	'',
-	'WORKFLOW:',
-	'1. Call openclaw_chat with the task from the user.',
-	'2. If the result has status "needs_input", OpenClaw is asking a clarifying question.',
-	'   - Also treat question-like responses as clarification requests, even when status is "completed".',
-	'   - The "text" field contains OpenClaw\'s response including the question.',
-	'   - Use ask_user to relay the question to the user via voice.',
-	"   - When phrasing the question for ask_user, be concise — extract the key question from OpenClaw's response.",
-	"   - Call openclaw_chat with the user's answer to continue.",
-	'3. If the result has status "completed", OpenClaw has finished the task.',
-	'   - Return a brief voice-friendly summary of what was done.',
-	'   - Do NOT read out code verbatim — summarize the outcome.',
-	'4. If the result has an error, tell the user what went wrong briefly.',
-	'',
-	'IMPORTANT:',
-	"- Always relay OpenClaw's questions to the user — never answer on their behalf.",
-	'- Keep your voice summaries short (2-3 sentences max).',
-	'- The user is listening via audio — no markdown, no code blocks in your final answer.',
-].join('\n');
 
 /**
  * Framework ToolDefinition for the main voice agent (declared to Gemini/OpenAI).
@@ -75,7 +36,6 @@ export const askOpenClawTool: ToolDefinition = {
 	description:
 		'Delegate a task to the OpenClaw AI agent. ' +
 		'ALWAYS use this for any email request (send/draft/reply/forward/rewrite). ' +
-		'ALWAYS use this for any calendar request (lookup/reschedule/schedule). ' +
 		'The agent is general-purpose and can handle coding, research, web browsing, ' +
 		'writing, sending emails, and much more. Route any user request here.',
 	parameters: z.object({
@@ -95,7 +55,7 @@ export const askOpenClawTool: ToolDefinition = {
 
 /**
  * Work-focused OpenClaw tool — handles email, calendar, Xiaohongshu/XHS,
- * and other productivity/work tasks.
+ * and other productivity/work tasks in its own persistent session.
  */
 export const askWorkAgentTool: ToolDefinition = {
 	name: 'ask_work_agent',
@@ -121,7 +81,7 @@ export const askWorkAgentTool: ToolDefinition = {
 
 /**
  * General-purpose OpenClaw tool — handles coding, research, web browsing,
- * and other complex tasks.
+ * and other complex tasks in its own persistent session.
  */
 export const askGeneralAgentTool: ToolDefinition = {
 	name: 'ask_general_agent',
@@ -145,6 +105,37 @@ export const askGeneralAgentTool: ToolDefinition = {
 };
 
 /**
+ * Create a persistent-session OpenClaw subagent config for actor-runtime execution.
+ *
+ * This path bypasses legacy relay-subagent prompting and invokes OpenClaw directly
+ * through PersistentSubagentManager + PersistentOpenClawSubagent.
+ */
+export function createPersistentOpenClawSubagentConfig(
+	client: OpenClawTransport,
+	sessionId: string,
+	options?: OpenClawSubagentOptions,
+): SubagentConfig {
+	const sessionKey = client.sessionKey(sessionId);
+
+	return {
+		name: 'openclaw-persistent',
+		instructions: 'Runtime-managed persistent OpenClaw execution.',
+		tools: {},
+		lifetime: 'persistent_session',
+		persistentFactory: async (key) =>
+			new PersistentOpenClawSubagent(
+				key,
+				client,
+				sessionKey,
+				options?.artifactRegistry,
+				options?.adapterLimits,
+				options?.eventBus,
+				options?.sessionId,
+			),
+	};
+}
+
+/**
  * Create the OpenClaw SubagentConfig for interactive subagent delegation.
  *
  * The subagent is given an `openclaw_chat` AI SDK tool that sends messages to
@@ -156,35 +147,42 @@ export const askGeneralAgentTool: ToolDefinition = {
 export function createOpenClawSubagentConfig(
 	client: OpenClawTransport,
 	sessionId: string,
-	options: OpenClawSubagentOptions = {},
+	options?: OpenClawSubagentOptions,
 ): SubagentConfig {
-	const baseSessionKey = client.sessionKey(sessionId);
-	const taskManager =
-		options.taskManager ??
-		new OpenClawTaskManager({
-			sessionKeyForThread: (threadId) => `${baseSessionKey}:thread:${threadId}`,
-			log: (message) => console.log(`[OpenClawTask] ${message}`),
-		});
+	const sessionKey = client.sessionKey(sessionId);
 
-	const createInstance = (): SubagentConfig => {
-		const runState: OpenClawRunState = {};
-		return {
-			name: 'openclaw',
-			interactive: true,
-			instructions: openClawRelayInstructions,
-			tools: {
-				openclaw_chat: createOpenClawChatTool(client, taskManager, runState, options),
-			},
-			maxSteps: 12, // Allow for multi-turn: chat → ask_user → chat → ask_user → ...
-			timeout: 300_000, // 5 min for complex coding tasks
-		};
+	return {
+		name: 'openclaw',
+		interactive: true,
+		instructions: [
+			'You are a relay agent between the user and the OpenClaw AI agent.',
+			'OpenClaw is a general-purpose agent — it can handle coding, research,',
+			'web browsing, writing, emails, and much more.',
+			'',
+			'WORKFLOW:',
+			'1. Call openclaw_chat with the task from the user.',
+			'2. If the result has status "needs_input", OpenClaw is asking a clarifying question.',
+			'   - Also treat question-like responses as clarification requests, even when status is "completed".',
+			'   - The "text" field contains OpenClaw\'s response including the question.',
+			'   - Use ask_user to relay the question to the user via voice.',
+			"   - When phrasing the question for ask_user, be concise — extract the key question from OpenClaw's response.",
+			"   - Call openclaw_chat with the user's answer to continue.",
+			'3. If the result has status "completed", OpenClaw has finished the task.',
+			'   - Return a brief voice-friendly summary of what was done.',
+			'   - Do NOT read out code verbatim — summarize the outcome.',
+			'4. If the result has an error, tell the user what went wrong briefly.',
+			'',
+			'IMPORTANT:',
+			"- Always relay OpenClaw's questions to the user — never answer on their behalf.",
+			'- Keep your voice summaries short (2-3 sentences max).',
+			'- The user is listening via audio — no markdown, no code blocks in your final answer.',
+		].join('\n'),
+		tools: {
+			openclaw_chat: createOpenClawChatTool(client, sessionKey, options),
+		},
+		maxSteps: 12, // Allow for multi-turn: chat → ask_user → chat → ask_user → ...
+		timeout: 300_000, // 5 min for complex coding tasks
 	};
-
-	const baseConfig = createInstance();
-	// The router calls createInstance on the registered config. Returned
-	// per-handoff configs do not need to recursively expose createInstance.
-	baseConfig.createInstance = createInstance;
-	return baseConfig;
 }
 
 /**
@@ -193,9 +191,8 @@ export function createOpenClawSubagentConfig(
  */
 function createOpenClawChatTool(
 	client: OpenClawTransport,
-	taskManager: OpenClawTaskManager,
-	runState: OpenClawRunState,
-	options: OpenClawSubagentOptions,
+	sessionKey: string,
+	options?: OpenClawSubagentOptions,
 ) {
 	const maxAttempts = 2;
 
@@ -279,115 +276,67 @@ function createOpenClawChatTool(
 				}
 
 				for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-					let lease: Awaited<ReturnType<OpenClawTaskManager['acquire']>> | null = null;
-					let releaseStatus: OpenClawTaskStatus = 'failed';
-					let shouldRetry = false;
-					let terminalResult: Record<string, unknown> | null = null;
-
 					const attachmentCount = sendOptions?.attachments?.length ?? 0;
+					console.log(
+						`[OpenClaw] Sending message (sessionKey=${sessionKey}, attempt=${attempt}/${maxAttempts}, attachments=${attachmentCount}): ${message.slice(0, 200)}`,
+					);
+					const { runId } = await client.chatSend(sessionKey, message, sendOptions);
+					console.log(`[OpenClaw] Run started: ${runId}`);
+					let text = '';
+					const receivedBlocks: ContentBlock[] = [];
+					const seenBlockHashes = new Set<string>();
 
-					try {
-						lease = await taskManager.acquire({
-							message,
-							threadHint: runState.threadHint,
-							onQueued: (event) => {
-								console.log(
-									`[OpenClaw] Task queued (taskId=${event.taskId}, stage=${event.stage}, waitMs=${event.waitMs}, queueLength=${event.queueLength})`,
-								);
-								options.onQueueEvent?.(event);
-							},
-							onThreadResolved: options.onThreadResolved,
-						});
-						runState.threadHint = lease.threadId;
+					while (true) {
+						const event = await client.nextChatEvent(runId);
 
-						console.log(
-							`[OpenClaw] Sending message (taskId=${lease.taskId}, threadId=${lease.threadId}, sessionKey=${lease.sessionKey}, domain=${lease.domain}, operation=${lease.operation}, attempt=${attempt}/${maxAttempts}, attachments=${attachmentCount}): ${message.slice(0, 200)}`,
-						);
-						const { runId } = await client.chatSend(lease.sessionKey, message, sendOptions);
-						console.log(`[OpenClaw] Run started: ${runId}`);
-						let text = '';
-						const receivedBlocks: ContentBlock[] = [];
-						const seenBlockHashes = new Set<string>();
+						if (event.state === 'delta') {
+							text = mergeText(text, event.text);
+							collectContentBlocks(event.contentBlocks, receivedBlocks, seenBlockHashes);
+						} else if (event.state === 'final') {
+							text = mergeText(text, event.text);
+							collectContentBlocks(event.contentBlocks, receivedBlocks, seenBlockHashes);
+							const status = event.finalDisposition ?? 'completed';
+							console.log(`[OpenClaw] Run ${runId} completed (${status}): ${text.slice(0, 200)}`);
 
-						while (true) {
-							const event = await client.nextChatEvent(runId);
-
-							if (event.state === 'delta') {
-								text = mergeText(text, event.text);
-								collectContentBlocks(event.contentBlocks, receivedBlocks, seenBlockHashes);
-							} else if (event.state === 'final') {
-								text = mergeText(text, event.text);
-								collectContentBlocks(event.contentBlocks, receivedBlocks, seenBlockHashes);
-								const status = event.finalDisposition ?? 'completed';
-								console.log(`[OpenClaw] Run ${runId} completed (${status}): ${text.slice(0, 200)}`);
-
-								if (status === 'completed' && text.trim().length === 0) {
-									if (attempt < maxAttempts) {
-										console.warn(
-											`[OpenClaw] Run ${runId} completed with empty text (attempt ${attempt}/${maxAttempts}), retrying once`,
-										);
-										shouldRetry = true;
-										break;
-									}
-									terminalResult = {
-										status: 'error',
-										error: 'OpenClaw completed with empty response text',
-									};
+							if (status === 'completed' && text.trim().length === 0) {
+								if (attempt < maxAttempts) {
+									console.warn(
+										`[OpenClaw] Run ${runId} completed with empty text (attempt ${attempt}/${maxAttempts}), retrying once`,
+									);
 									break;
 								}
+								return {
+									status: 'error',
+									error: 'OpenClaw completed with empty response text',
+								};
+							}
 
-								releaseStatus = 'completed';
+							// Surface received content blocks to user
+							const receivedArtifactIds = surfaceContentBlocks(receivedBlocks, options);
 
-								// Surface received content blocks to user
-								const receivedArtifactIds = surfaceContentBlocks(receivedBlocks, options);
-
-								if (status === 'completed' && looksLikeClarifyingQuestion(text)) {
-									const result: Record<string, unknown> = { status: 'needs_input', text };
-									if (attachmentWarning) result.attachmentWarning = attachmentWarning;
-									if (receivedArtifactIds.length > 0) result.artifactIds = receivedArtifactIds;
-									terminalResult = result;
-									break;
-								}
-
-								const result: Record<string, unknown> = { status, text };
+							if (status === 'completed' && looksLikeClarifyingQuestion(text)) {
+								const result: Record<string, unknown> = { status: 'needs_input', text };
 								if (attachmentWarning) result.attachmentWarning = attachmentWarning;
 								if (receivedArtifactIds.length > 0) result.artifactIds = receivedArtifactIds;
-								terminalResult = result;
-								break;
-							} else if (event.state === 'error' || event.state === 'aborted') {
-								console.log(`[OpenClaw] Run ${runId} ${event.state}: ${event.error}`);
-								releaseStatus = event.state === 'aborted' ? 'aborted' : 'failed';
-								const errorText = event.error ?? `OpenClaw run ${event.state}`;
-								// Surface attachment-specific gateway errors with context
-								if (sendOptions?.attachments && /attachment|mime|unsupported/i.test(errorText)) {
-									terminalResult = {
-										status: 'error',
-										error: `Attachment rejected by agent gateway: ${errorText}`,
-									};
-									break;
-								}
-								terminalResult = { status: 'error', error: errorText };
-								break;
+								return result;
 							}
-						}
-					} catch (err) {
-						if (err instanceof OpenClawTaskQueueTimeoutError) {
-							console.warn(
-								`[OpenClaw] Queue timeout (stage=${err.stage}, waitedMs=${err.waitedMs}, queueLength=${err.queueLength})`,
-							);
-							terminalResult = { status: 'error', error: err.userMessage() };
-						} else {
-							throw err;
-						}
-					} finally {
-						lease?.release(releaseStatus);
-					}
 
-					if (shouldRetry) {
-						continue;
-					}
-					if (terminalResult) {
-						return terminalResult;
+							const result: Record<string, unknown> = { status, text };
+							if (attachmentWarning) result.attachmentWarning = attachmentWarning;
+							if (receivedArtifactIds.length > 0) result.artifactIds = receivedArtifactIds;
+							return result;
+						} else if (event.state === 'error' || event.state === 'aborted') {
+							console.log(`[OpenClaw] Run ${runId} ${event.state}: ${event.error}`);
+							const errorText = event.error ?? `OpenClaw run ${event.state}`;
+							// Surface attachment-specific gateway errors with context
+							if (sendOptions?.attachments && /attachment|mime|unsupported/i.test(errorText)) {
+								return {
+									status: 'error',
+									error: `Attachment rejected by agent gateway: ${errorText}`,
+								};
+							}
+							return { status: 'error', error: errorText };
+						}
 					}
 				}
 

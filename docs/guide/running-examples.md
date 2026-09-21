@@ -15,7 +15,7 @@ The framework includes full-featured demos for both Gemini and OpenAI, with mult
 export GEMINI_API_KEY="your-key-here"
 
 # Start the voice agent
-pnpm tsx examples/gemini-realtime-tools.ts
+pnpm tsx examples/hello_world/agent.ts
 ```
 
 You should see:
@@ -49,10 +49,9 @@ Alternatively, run the same tools and agents with OpenAI's Realtime API:
 ```bash
 # Set your API key
 export OPENAI_API_KEY="your-key-here"
-export GEMINI_API_KEY="your-gemini-key" # background subagents and image tools
 
 # Start the voice agent
-pnpm tsx examples/openai-realtime-tools.ts
+pnpm tsx examples/hello_world/openai-realtime-tools.ts
 ```
 
 The OpenAI example has the same tools (calculator, current time, image generation, slow search) and agents (main, math expert) as the Gemini example. The web client works with either server without changes — audio format is negotiated automatically via `session.config`.
@@ -66,42 +65,6 @@ pnpm tsx examples/web-client.ts
 ```
 
 Open [http://localhost:8080](http://localhost:8080) in Chrome and click **Connect**.
-
-## Cartesia TTS Demo
-
-Use this demo when you want Gemini to generate text while Cartesia synthesizes the spoken audio:
-
-```bash
-export GEMINI_API_KEY="your-gemini-key"
-export CARTESIA_API_KEY="your-cartesia-key"
-pnpm tsx examples/cartesia-tts-demo.ts
-```
-
-Start `examples/web-client.ts` in another terminal and connect as usual. The session config still advertises framework PCM audio to the browser; `VoiceSession` handles provider output format negotiation and resampling.
-
-## Twilio Demos
-
-Outbound human transfer:
-
-```bash
-export GEMINI_API_KEY="your-gemini-key"
-export TWILIO_ACCOUNT_SID="ACxxxxxxxx"
-export TWILIO_AUTH_TOKEN="xxxxxxxx"
-export TWILIO_FROM_NUMBER="+1xxxxxxxxxx"
-export HUMAN_AGENT_PHONE="+1xxxxxxxxxx"
-export TWILIO_WEBHOOK_URL="https://xxxx.ngrok-free.app"
-pnpm tsx examples/twilio-demo.ts
-```
-
-Inbound phone caller to an already running agent:
-
-```bash
-export TWILIO_WEBHOOK_URL="https://xxxx.ngrok-free.app"
-export AGENT_WS_URL="ws://localhost:9900"
-pnpm tsx examples/twilio-inbound-bridge.ts
-```
-
-See [Telephony](/advanced/telephony) for Twilio webhook and media-stream details.
 
 ## Things to Try
 
@@ -249,9 +212,11 @@ Open [http://localhost:8080](http://localhost:8080) in Chrome and click **Connec
 
 **Email not sending:** Requires macOS with Mail.app configured. First use triggers a system permission dialog. Check for `[MCP:send_email] Tool invoked!` in logs.
 
-## OpenClaw Demo — Dual Specialist Agents
+## OpenClaw Demo — Persistent Agent Sessions
 
-A voice assistant backed by [OpenClaw](https://openclaw.ai), a gateway for delegating tasks to Claude. This demo uses the [relay subagent pattern](/advanced/subagents#pattern-3-relay-subagent) with separate work and general-agent routes.
+A voice assistant backed by [OpenClaw](https://openclaw.ai), a gateway for delegating tasks to Claude with persistent session state. This demo uses the [relay subagent pattern](/advanced/subagents#pattern-3-relay-subagent) with LLM-driven session routing and concurrent task isolation.
+
+Unlike the Claude Code demo (which creates fresh sessions per task), the OpenClaw demo maintains persistent sessions — follow-up requests are automatically routed to the correct existing session by a classifier.
 
 ### Prerequisites
 
@@ -266,13 +231,13 @@ export GEMINI_API_KEY="your-gemini-key"
 export OPENCLAW_TOKEN="your-openclaw-token"
 export OPENCLAW_URL="ws://127.0.0.1:18789"  # optional, this is the default
 
-pnpm tsx examples/openclaw/openclaw-demo.ts
+pnpm tsx app/openclaw-demo.ts
 ```
 
 ### Start the Web Client
 
 ```bash
-pnpm tsx examples/openclaw/web-client.ts
+pnpm tsx app/openclaw/web-client.ts
 ```
 
 Open [http://localhost:8080](http://localhost:8080) in Chrome and click **Connect**.

@@ -1,7 +1,36 @@
-// SPDX-License-Identifier: MIT
-
 import type { ToolExecution } from './tool.js';
 import type { RealtimeLLMUsageEvent } from './transport.js';
+
+/**
+ * Per-turn latency segment breakdown emitted via `onTurnLatency` and the
+ * `'turn.latency'` EventBus topic. Field names are historically Gemini-flavored
+ * but transport-agnostic in meaning: `geminiProcessingMs` ≈ user stop →
+ * provider response start (TTFT-like); `backendToClientMs` = provider response
+ * start → first audio out; `totalE2EMs` = stop-to-first-audio (the headline).
+ */
+export interface TurnLatencySegments {
+	clientToBackendMs?: number;
+	backendToGeminiMs?: number;
+	geminiProcessingMs?: number;
+	geminiToBackendMs?: number;
+	backendToClientMs?: number;
+	totalE2EMs: number;
+}
+
+/**
+ * Why a turn produced no latency sample (design §11): `no_anchor` — a
+ * user-audio turn had no speech-end stamp (quiet-mic coverage gap);
+ * `stale_anchor` — an anchor existed but died with the previous epoch;
+ * `implausible` — E2E outside [0, 10s]; `reset` — reconnect/transfer/close
+ * discarded in-flight stamps; `overflow` — the tracker ring hit capacity and
+ * failed closed.
+ */
+export type TurnLatencyDropReason =
+	| 'no_anchor'
+	| 'stale_anchor'
+	| 'implausible'
+	| 'reset'
+	| 'overflow';
 
 /**
  * Optional lifecycle hooks for observability, logging, and metrics.
@@ -23,19 +52,92 @@ export interface FrameworkHooks {
 		reason: string;
 	}): void;
 
-	/** Fires at the end of each turn with segment-level latency breakdown. */
+	/** Fires at the end of each turn with segment-level latency breakdown.
+	 *  Emitted by the TurnLatencyTracker on its drain tick — asynchronously,
+	 *  ≈ one macrotask after the turn finalizes. */
 	onTurnLatency?(event: {
 		sessionId: string;
 		turnId: string;
-		segments: {
-			clientToBackendMs?: number;
-			backendToGeminiMs?: number;
-			geminiProcessingMs?: number;
-			geminiToBackendMs?: number;
-			backendToClientMs?: number;
-			totalE2EMs: number;
-		};
+		segments: TurnLatencySegments;
 	}): void;
+
+	/** Fires when a turn produced no latency sample, with the reason — makes
+	 *  measurement gaps observable instead of silent (design §11). */
+	onTurnLatencyDropped?(event: {
+		sessionId: string;
+		turnId?: string;
+		reason: TurnLatencyDropReason;
+	}): void;
+
+	/**
+	 * Fires when end-of-user-speech is detected — the anchor for
+	 * stop-to-first-audio (S2FA) and stop-to-transcript (S2T). Fires once per
+	 * detecting source: `client-vad` carries the detected end edge; `provider`
+	 * (OpenAI/Qwen `speech_stopped`) carries receipt time and fills the
+	 * quiet-mic coverage gap. `turnId` is usually undefined — the turn is not
+	 * born until the model responds; correlate sequentially, not by id. `atMs`
+	 * is on the session metric clock (see `VoiceSessionConfig.nowMs`).
+	 */
+	onUserSpeechEnd?(event: {
+		sessionId: string;
+		turnId?: string;
+		atMs: number;
+		source?: 'provider' | 'client-vad';
+	}): void;
+
+	/**
+	 * Fires when the user transcript for a turn is finalized (STT commit). Paired
+	 * with `onUserSpeechEnd`, the delta gives stop-to-transcript (S2T). Carries
+	 * `textLength` only — never the transcript text (privacy, see design §6).
+	 */
+	onTranscriptReady?(event: {
+		sessionId: string;
+		turnId?: string;
+		atMs: number;
+		textLength: number;
+	}): void;
+
+	/**
+	 * Fires when a client-VAD barge-in is detected over assistant audio. Cancel
+	 * latency is `cancelRequestedAtMs - detectedAtMs` (detection → actuation), NOT
+	 * anything involving speech end. `successful` is false when the barge-in was
+	 * detected but declined (below threshold / no active audio). All timestamps
+	 * come from the session metric clock.
+	 */
+	onBargeInDetected?(event: {
+		sessionId: string;
+		speechStartedAtMs: number;
+		detectedAtMs: number;
+		cancelRequestedAtMs: number;
+		audioStoppedAtMs?: number;
+		latencyMs: number;
+		successful: boolean;
+	}): void;
+
+	/**
+	 * Fires once when any turn is finalized — clean or interrupted. Gives the
+	 * agent-interruption rate (interrupted / total) and the denominator for
+	 * barge-in recovery rate.
+	 */
+	onTurnFinalized?(event: {
+		sessionId: string;
+		turnId: string;
+		interrupted: boolean;
+	}): void;
+
+	/**
+	 * Fires when the agent's audio starts while the user is still actively speaking
+	 * — a "jump-in" / false turn-end (the agent took the floor prematurely).
+	 * Jump-in rate = jump-ins / turns.
+	 */
+	onJumpIn?(event: { sessionId: string; turnId?: string }): void;
+
+	/**
+	 * Fires when the agent re-enters with audio after yielding to a barge-in.
+	 * `reentryMs` is the pause between the interrupt and the next agent audio
+	 * (human baseline ≈ 200ms).
+	 */
+	onAgentReentry?(event: { sessionId: string; reentryMs: number }): void;
 
 	/** Fires when Gemini requests a tool invocation (before execution). */
 	onToolCall?(event: {
@@ -93,6 +195,27 @@ export interface FrameworkHooks {
 		audioMs: number;
 		ttfbMs: number;
 		requestId: number;
+	}): void;
+
+	/**
+	 * Fires once per background notification, after `NotificationActor` flushes
+	 * it to its subscribers. Driven by the built-in `NotificationHooksObserverActor`
+	 * (a default subscriber). Useful for end-to-end tracing of background
+	 * tool completions, interactive subagent questions, and wall-clock /
+	 * external producer events. `deferredMs` reports the time the notification
+	 * spent in the queue (0 for immediate-deliver paths).
+	 *
+	 * Actor mode only — only fires when `orchestrationMode: 'actor'`.
+	 */
+	onBackgroundNotification?(event: {
+		sessionId: string;
+		id: string;
+		label: string;
+		priority: 'normal' | 'high';
+		publishedAtMs: number;
+		deliveredAtMs: number;
+		deferredMs: number;
+		correlationId?: string;
 	}): void;
 
 	/** Fires on any framework error. Use for centralized error logging/alerting. */

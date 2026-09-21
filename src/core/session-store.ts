@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { SessionCheckpoint } from '../types/session.js';
 
 /**

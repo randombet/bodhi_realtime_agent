@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Web Audio Client for Bodhi Voice Agent
  *
@@ -430,11 +428,11 @@ function playChunk(arrayBuf) {
 async function startMic() {
   // Check if getUserMedia is available (requires HTTPS or localhost)
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    const isLocalhost = window.location.hostname === 'localhost' ||
-	                       window.location.hostname === '127.0.0.1' ||
-	                       window.location.hostname === '[::1]';
-	    const isHttps = window.location.protocol === 'https:';
-
+    const isLocalhost = window.location.hostname === 'localhost' || 
+                       window.location.hostname === '127.0.0.1' ||
+                       window.location.hostname === '[::1]';
+    const isHttps = window.location.protocol === 'https:';
+    
     if (!isLocalhost && !isHttps) {
       throw new Error('Microphone access requires HTTPS. Please access this page via HTTPS (https://your-domain.com) or use localhost. Modern browsers block getUserMedia on HTTP for security.');
     } else {
@@ -824,7 +822,8 @@ const server = createServer((_req, res) => {
 });
 
 server.listen(HTTP_PORT, HTTP_HOST, () => {
-		const serverUrl = HTTP_HOST === '0.0.0.0'
+	const serverUrl =
+		HTTP_HOST === '0.0.0.0'
 			? `http://localhost:${HTTP_PORT} (or use your server's IP/DNS)`
 			: `http://${HTTP_HOST}:${HTTP_PORT}`;
 	console.log(`\n  Bodhi Voice Agent — Web Client`);

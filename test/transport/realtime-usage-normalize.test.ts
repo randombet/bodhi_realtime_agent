@@ -1,11 +1,41 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it } from 'vitest';
 import {
 	normalizeGeminiUsageMetadata,
 	normalizeOpenAIResponseUsage,
 	normalizeOpenAITranscriptionUsage,
+	normalizeQwenResponseUsage,
 } from '../../src/transport/realtime-usage-normalize.js';
+
+describe('normalizeQwenResponseUsage', () => {
+	it('maps qwen response.done usage (plural *_tokens_details) with modality breakdown', () => {
+		const raw = {
+			total_tokens: 535,
+			input_tokens: 501,
+			output_tokens: 34,
+			input_tokens_details: { text_tokens: 473, audio_tokens: 28 },
+			output_tokens_details: { text_tokens: 8, audio_tokens: 26 },
+		};
+		const ev = normalizeQwenResponseUsage(raw, 'resp_q');
+		expect(ev).not.toBeNull();
+		expect(ev?.provider).toBe('qwen_realtime');
+		expect(ev?.kind).toBe('response');
+		expect(ev?.inputTokens).toBe(501);
+		expect(ev?.outputTokens).toBe(34);
+		expect(ev?.totalTokens).toBe(535);
+		expect(ev?.providerResponseId).toBe('resp_q');
+		expect(ev?.modalityBreakdown).toMatchObject({
+			inputTextTokens: 473,
+			inputAudioTokens: 28,
+			outputTextTokens: 8,
+			outputAudioTokens: 26,
+		});
+	});
+
+	it('returns null when no token fields present', () => {
+		expect(normalizeQwenResponseUsage({}, undefined)).toBeNull();
+		expect(normalizeQwenResponseUsage(null, undefined)).toBeNull();
+	});
+});
 
 describe('normalizeGeminiUsageMetadata', () => {
 	it('maps camelCase usageMetadata to a response update event', () => {
