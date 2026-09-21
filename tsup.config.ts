@@ -17,4 +17,7 @@ export default defineConfig({
 	/** Heavy / platform-specific — consumers install when using `rtcAudio: 'werift_opus'`.
 	 *  `@opentelemetry/*` is an optional peer dep of the OTel subpath. */
 	external: ['werift', '@evan/opus', /^@opentelemetry\//],
+	/** Workspace-only wire contract (clients/client-protocol) — not published, so bundle it.
+	 *  tsconfig.build.json maps it to source so the types are inlined as well. */
+	noExternal: ['@bodhi/client-protocol'],
 });

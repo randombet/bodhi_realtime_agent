@@ -23,12 +23,6 @@ importers:
       '@anthropic-ai/claude-agent-sdk':
         specifier: ^0.2.71
         version: 0.2.126(zod@3.25.76)
-      '@bodhi/client-protocol':
-        specifier: link:clients/client-protocol
-        version: link:clients/client-protocol
-      '@bodhi/web-voice-client':
-        specifier: link:clients/web-voice
-        version: link:clients/web-voice
       '@emotion/react':
         specifier: ^11.14.0
         version: 11.14.0(@types/react@19.2.14)(react@19.2.5)
@@ -96,6 +90,9 @@ importers:
       '@biomejs/biome':
         specifier: ^1.9.0
         version: 1.9.4
+      '@bodhi/client-protocol':
+        specifier: link:clients/client-protocol
+        version: link:clients/client-protocol
       '@braintree/sanitize-url':
         specifier: ^7.1.2
         version: 7.1.2
