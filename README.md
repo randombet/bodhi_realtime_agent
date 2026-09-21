@@ -21,7 +21,7 @@ TypeScript framework for building real-time voice agent applications using the G
 ## Installation
 
 ```bash
-pnpm add @bodhi_agent/realtime-agent-framework
+pnpm add bodhi-realtime-agent
 ```
 
 To integrate the framework into your own backend: use `MultiClientTransport` to accept WebSockets, build a `SessionClientSender` per connection, and create a `VoiceSession` with that sender plus your agents and tools. A reference app (server + web client) lives in **app/** — see **app/README.md** for how to run it.
@@ -181,7 +181,7 @@ const session = new VoiceSession({
 The memory system automatically extracts durable facts about the user from conversation using a merge-on-write strategy — each extraction produces the complete updated fact list (deduped, contradictions resolved):
 
 ```typescript
-import { JsonMemoryStore } from '@bodhi_agent/realtime-agent-framework';
+import { JsonMemoryStore } from 'bodhi-realtime-agent';
 
 const session = new VoiceSession({
   // ...required config

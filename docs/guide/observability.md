@@ -90,11 +90,11 @@ Three integration tiers, smallest first:
 ## Quick start (Prometheus)
 
 ```ts
-import { VoiceSession } from '@bodhi_agent/realtime-agent-framework';
+import { VoiceSession } from 'bodhi-realtime-agent';
 import {
   MetricsCollector,
   createMetricsHandler,
-} from '@bodhi_agent/realtime-agent-framework/observability';
+} from 'bodhi-realtime-agent/observability';
 
 const collector = new MetricsCollector();
 
@@ -457,7 +457,7 @@ import {
   createOtelMetricsHooks,
   createOtelTracingHooks,
   mergeHooks,
-} from '@bodhi_agent/realtime-agent-framework/observability/opentelemetry';
+} from 'bodhi-realtime-agent/observability/opentelemetry';
 
 const meter = new MeterProvider({ readers: [otlpReader] }).getMeter('voice-agent');
 
@@ -597,7 +597,7 @@ flowchart LR
 import {
   computeWER,
   renderOfflineEvalMetrics,
-} from '@bodhi_agent/realtime-agent-framework/observability';
+} from 'bodhi-realtime-agent/observability';
 
 const wer = computeWER('how are you doing', recognizedTranscript);
 

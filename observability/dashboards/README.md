@@ -11,7 +11,7 @@ a minimal voice agent that serves `/metrics` on port 9464 — skip to step 3.
 For your own app, the framework owns no HTTP server — mount the handler on yours:
 
 ```ts
-import { MetricsCollector, createMetricsHandler } from '@bodhi_agent/realtime-agent-framework/observability';
+import { MetricsCollector, createMetricsHandler } from 'bodhi-realtime-agent/observability';
 
 const collector = new MetricsCollector();
 const session = new VoiceSession({ /* ...config */, hooks: collector.hooks });

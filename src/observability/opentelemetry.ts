@@ -3,7 +3,7 @@ import type { FrameworkHooks } from '../types/hooks.js';
 
 /**
  * OpenTelemetry metrics integration for the observability module
- * (`@bodhi_agent/realtime-agent-framework/observability/opentelemetry`).
+ * (`bodhi-realtime-agent/observability/opentelemetry`).
  *
  * Requires `@opentelemetry/api` as an **optional peerDependency** (plus an SDK
  * + exporter, e.g. `@opentelemetry/sdk-metrics` and

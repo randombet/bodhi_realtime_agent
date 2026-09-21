@@ -206,7 +206,7 @@ Fire-and-forget background work. The simplest pattern.
 ```typescript
 import { z } from 'zod';
 import { tool } from 'ai';
-import type { ToolDefinition, SubagentConfig } from '@bodhi_agent/realtime-agent-framework';
+import type { ToolDefinition, SubagentConfig } from 'bodhi-realtime-agent';
 
 // Background tool the model calls
 const generateReport: ToolDefinition = {
@@ -388,7 +388,7 @@ See [Claude Code Demo](#claude-code-demo) for a complete relay subagent implemen
 Service subagents monitor external systems and proactively notify the user. They run for the entire session, reacting to webhooks, database changes, or polling results.
 
 ```typescript
-import type { ServiceSubagentConfig, EventSourceConfig } from '@bodhi_agent/realtime-agent-framework';
+import type { ServiceSubagentConfig, EventSourceConfig } from 'bodhi-realtime-agent';
 
 const orderEvents: EventSourceConfig = {
   name: 'order-webhook',

@@ -1,5 +1,5 @@
 /**
- * Optional observability module (`@bodhi_agent/realtime-agent-framework/observability`).
+ * Optional observability module (`bodhi-realtime-agent/observability`).
  *
  * Aggregates {@link FrameworkHooks} events into Prometheus-style metrics and
  * renders a `/metrics` exposition. Dependency-free; opt-in via subpath import so
