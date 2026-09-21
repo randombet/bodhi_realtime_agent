@@ -1,6 +1,6 @@
 # Persistent Subagent Lifecycle
 
-This page documents the current actor-runtime lifecycle for `persistent_session` subagents (for example, `ask_openclaw` in `app/openclaw-demo.ts`).
+This page documents the current actor-runtime lifecycle for `persistent_session` subagents (for example, `ask_openclaw` in `examples/openclaw/openclaw-demo.ts`).
 
 ## Where It Is Configured
 
@@ -82,7 +82,7 @@ stateDiagram-v2
 
 ## Routing Precedence (OpenClaw Demo)
 
-In `app/openclaw-demo.ts`, explicit mentions of OpenClaw route to `ask_openclaw`, but media generation has higher precedence:
+In `examples/openclaw/openclaw-demo.ts`, explicit mentions of OpenClaw route to `ask_openclaw`, but media generation has higher precedence:
 
 - Image/visual generation requests must route to `generate_image`.
 - Video/motion generation requests must route to `generate_video`.
@@ -92,9 +92,9 @@ This prevents explicit phrases like "use OpenClaw" from accidentally bypassing m
 
 ## Code Map
 
-- `app/openclaw-demo.ts`
-- `app/lib/openclaw-tools.ts`
-- `app/lib/persistent-openclaw-subagent.ts`
+- `examples/openclaw/openclaw-demo.ts`
+- `examples/lib/openclaw-tools.ts`
+- `examples/lib/persistent-openclaw-subagent.ts`
 - `src/core/voice-session.ts`
 - `src/agent/persistent-subagent-manager.ts`
 - `src/runtime/actors/tool-router-actor.ts`

@@ -48,7 +48,7 @@ pnpm tsx examples/qwen-realtime/tools.ts
 ```
 
 Then connect a WebSocket audio client to `ws://localhost:9900` — e.g. start the
-bundled web client with `pnpm web-client:dev` — and start talking.
+bundled web client with `pnpm web-client` — and start talking.
 
 ### Things to try with `tools.ts`
 

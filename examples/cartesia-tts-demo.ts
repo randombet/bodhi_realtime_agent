@@ -21,7 +21,7 @@
  *   1. Set GEMINI_API_KEY and CARTESIA_API_KEY in .env or environment
  *   2. Optionally set CARTESIA_VOICE_ID (defaults to "a0e99841-438c-4a64-b679-ae501e7d6091")
  *   3. Run: pnpm tsx examples/cartesia-tts-demo.ts
- *   4. In another terminal: pnpm web-client:dev
+ *   4. In another terminal: pnpm web-client
  *   5. Open http://localhost:8080 in Chrome, click Connect
  *
  * Environment Variables:
@@ -274,7 +274,7 @@ async function main() {
 	console.log(`  Emotion:   ${EMOTION.length > 0 ? EMOTION.join(', ') : '(none)'}`);
 	console.log(`  Model:     ${geminiLiveModel} (text stream → Cartesia sonic-3.5)`);
 	console.log();
-	console.log('Connect via: pnpm web-client:dev');
+	console.log('Connect via: pnpm web-client');
 	console.log('Press Ctrl+C to stop.');
 	console.log('============================================================');
 }

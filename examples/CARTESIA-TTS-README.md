@@ -34,14 +34,10 @@ export CARTESIA_API_KEY=your_cartesia_key
 pnpm tsx examples/cartesia-tts-demo.ts
 
 # 3. In another terminal, start the web client
-pnpm web-client:dev
+pnpm web-client
 
 # 4. Open http://localhost:8080 in Chrome and click Connect
 ```
-
-### Production Bodhi app (`pnpm start`)
-
-The same Cartesia pipeline is wired into `createBodhiSessionConfig()` when `CARTESIA_TTS_ENABLED=true` and `CARTESIA_API_KEY` are set in `.env`. Without `CARTESIA_TTS_ENABLED=true`, the production server uses native Gemini audio even if the key is present. Use `pnpm start` and `pnpm web-client:dev`; optional voice/speed/emotion overrides are available in the Talk page under **Output voice (Cartesia)** (query params: `cartesiaVoiceId`, `cartesiaSpeed`, `cartesiaEmotion`). Not used when `LLM_PROVIDER=openai` (OpenAI Realtime supplies its own audio).
 
 ## Environment Variables
 
@@ -119,7 +115,7 @@ Key components:
 ## Troubleshooting
 
 **Connection refused on port 9900**
-The backend isn't running. Start it with `pnpm tsx app/cartesia-tts-demo.ts`.
+The backend isn't running. Start it with `pnpm tsx examples/cartesia-tts-demo.ts`.
 
 **No audio playback in browser**
 Chrome requires user interaction before playing audio. Click the Connect button — don't automate the connection.

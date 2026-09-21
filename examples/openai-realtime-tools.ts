@@ -28,7 +28,7 @@
  *      client WS at any time to flip back to agent mode from a UI button.
  *   6. While in transcription mode, Whisper transcripts are streamed to the connected
  *      client as `{"type":"dictation_transcript", text, partial?, exit?}` JSON messages
- *      AND logged to the server console — so a web client (`pnpm web-client:dev`) can
+ *      AND logged to the server console — so a web client (`pnpm web-client`) can
  *      render live dictation, and you can see it from the server logs too.
  *
  * Optional context-caching env vars (see dev_docs/framework/design-context-caching.md

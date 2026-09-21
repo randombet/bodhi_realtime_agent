@@ -22,7 +22,7 @@
  *      GEMINI_API_KEY for the image/video subagents + subagent text generation.
  *   2. Run: pnpm tsx examples/qwen-realtime/tools.ts
  *   3. Connect a WebSocket audio client to ws://localhost:9900
- *      (e.g. pnpm web-client:dev) and try saying:
+ *      (e.g. pnpm web-client) and try saying:
  *        "What time is it in Tokyo?"
  *        "What is the square root of 144?"
  *        "I need help with harder math"      (transfers to the math helper)

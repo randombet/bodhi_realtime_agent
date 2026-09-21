@@ -5,8 +5,8 @@ app's `/metrics` endpoint, Grafana renders the dashboard.**
 
 ## 1. Expose `/metrics` from your app
 
-**Using this repo's app server (`pnpm start`)?** It already mounts `/metrics`
-on its default port 9900 — skip to step 3.
+**Just trying it out?** Run `pnpm tsx examples/metrics-demo.ts` (needs `GEMINI_API_KEY`):
+a minimal voice agent that serves `/metrics` on port 9464 — skip to step 3.
 
 For your own app, the framework owns no HTTP server — mount the handler on yours:
 
@@ -16,7 +16,7 @@ import { MetricsCollector, createMetricsHandler } from '@bodhi_agent/realtime-ag
 const collector = new MetricsCollector();
 const session = new VoiceSession({ /* ...config */, hooks: collector.hooks });
 
-// On your existing Node http server (default scrape target below is 9900):
+// On your existing Node http server:
 const metrics = createMetricsHandler(collector);
 httpServer.on('request', (req, res) => {
   if (req.url === '/metrics') return metrics(req, res);
@@ -27,7 +27,7 @@ httpServer.on('request', (req, res) => {
 ## 2. Point Prometheus at it
 
 Edit `prometheus.yml` → `scrape_configs[0].targets` to your app's `host:port`
-(default `host.docker.internal:9900` — the repo app server's port).
+(default `host.docker.internal:9464` — the metrics demo's port).
 
 ## 3. Run the stack
 

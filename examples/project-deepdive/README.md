@@ -2,8 +2,6 @@
 
 **Purpose:** A toy demo that mirrors [`examples/interviewer/`](../interviewer/) but specializes the persistent subagent's brain to deep-dive a candidate's past project using the STAR frame. Useful both as a more realistic interview demo and as a template for users building their own probe-frame variants.
 
-It is **not** the production Bodhi `./app` stack. Production-shaped voice screening lives in [`app/agents/builtin/structured-screening/`](../../app/agents/builtin/structured-screening/README.md).
-
 ## What It Does
 
 - Loads a mock job description, candidate resume, and company intro from `docs/`.
@@ -27,7 +25,7 @@ pnpm tsx examples/project-deepdive/project-deepdive-demo.ts
 In another terminal:
 
 ```bash
-pnpm web-client:dev
+pnpm web-client
 ```
 
 Open the local web client and connect to `ws://localhost:9900`.

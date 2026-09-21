@@ -61,7 +61,7 @@ The OpenAI example has the same tools (calculator, current time, image generatio
 In a second terminal:
 
 ```bash
-pnpm tsx examples/web-client.ts
+pnpm web-client
 ```
 
 Open [http://localhost:8080](http://localhost:8080) in Chrome and click **Connect**.
@@ -231,7 +231,7 @@ export GEMINI_API_KEY="your-gemini-key"
 export OPENCLAW_TOKEN="your-openclaw-token"
 export OPENCLAW_URL="ws://127.0.0.1:18789"  # optional, this is the default
 
-pnpm tsx app/openclaw-demo.ts
+pnpm tsx examples/openclaw/openclaw-demo.ts
 ```
 
 ### Start the Web Client

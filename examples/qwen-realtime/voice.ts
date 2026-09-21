@@ -12,7 +12,7 @@
  *      used for subagent text generation — this demo has none).
  *   2. Run: pnpm tsx examples/qwen-realtime/voice.ts
  *   3. Connect a WebSocket audio client to ws://localhost:9900
- *      (e.g. pnpm web-client:dev) and start talking.
+ *      (e.g. pnpm web-client) and start talking.
  */
 
 import 'dotenv/config';

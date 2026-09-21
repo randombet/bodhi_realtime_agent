@@ -82,7 +82,7 @@ export OPENCLAW_TOKEN="your-gateway-auth-token"
 
 ```bash
 # Terminal 1: Start the voice agent server
-pnpm tsx app/openclaw/openclaw-demo.ts
+pnpm tsx examples/openclaw/openclaw-demo.ts
 
 # Terminal 2: Start the web client
 pnpm web-client

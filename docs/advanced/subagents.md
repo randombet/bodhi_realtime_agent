@@ -7,7 +7,7 @@ For the actor-runtime persistent path (instance reuse, lifecycle states, and Ope
 :::
 
 ::: info OpenClaw Demo Routing Note
-In `app/openclaw-demo.ts`, OpenClaw is not configured to generate images or videos. Media generation requests should route to `generate_image` / `generate_video`, even if the user explicitly mentions OpenClaw.
+In `examples/openclaw/openclaw-demo.ts`, OpenClaw is not configured to generate images or videos. Media generation requests should route to `generate_image` / `generate_video`, even if the user explicitly mentions OpenClaw.
 :::
 
 ## Why Subagents?
@@ -541,7 +541,7 @@ export PROJECT_DIR="/path/to/your/project"
 pnpm tsx examples/claude_code/claude-demo.ts
 
 # In another terminal, start the web client
-pnpm tsx examples/web-client.ts
+pnpm web-client
 
 # Open http://localhost:8080 in Chrome
 ```

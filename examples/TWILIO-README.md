@@ -117,12 +117,12 @@ TWILIO_WEBHOOK_URL=https://a1b2-203-0-113-42.ngrok-free.app
 ### 3. Run the Demo
 
 ```bash
-pnpm tsx app/twilio-demo.ts
+pnpm tsx examples/twilio-demo.ts
 ```
 
 ### 4. Connect the Web Client
 
-Open `app/web-client.ts` in a browser (or any WebSocket audio client) connecting to `ws://localhost:9900`.
+Run `pnpm web-client` and open http://localhost:8080 (or use any WebSocket audio client connecting to `ws://localhost:9900`).
 
 ### 5. Test
 
@@ -141,8 +141,8 @@ Expected flow:
 
 | Component | File | Purpose |
 |-----------|------|---------|
-| **Demo entry** | `app/twilio-demo.ts` | VoiceSession config with main + human agents |
-| **Human agent** | `app/lib/twilio-human-agent.ts` | `createHumanAgent()` factory with Twilio wiring |
+| **Demo entry** | `examples/twilio-demo.ts` | VoiceSession config with main + human agents |
+| **Human agent** | `examples/lib/twilio-human-agent.ts` | `createHumanAgent()` factory with Twilio wiring |
 | **TwilioBridge** | `src/telephony/twilio-bridge.ts` | Call lifecycle, audio bridge, status callbacks |
 | **Webhook server** | `src/telephony/twilio-webhook-server.ts` | TwiML, Media Streams WS, status callbacks |
 | **Audio codec** | `src/telephony/audio-codec.ts` | mulaw 8kHz ↔ PCM L16 16kHz conversion |
@@ -225,10 +225,10 @@ The status callback is required so the bridge can clear active-call state on ter
 
 ```bash
 # Terminal 1: Start any agent demo
-pnpm tsx app/gemini-realtime-tools.ts
+pnpm tsx examples/hello_world/agent.ts
 
 # Terminal 2: Start the inbound bridge
-pnpm tsx app/twilio-inbound-bridge.ts
+pnpm tsx examples/twilio-inbound-bridge.ts
 
 # Terminal 3: Start ngrok (if not already running)
 ngrok http 8766

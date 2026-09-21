@@ -1,6 +1,6 @@
 # Interviewer Example
 
-**Purpose:** Local **toy demo** for framework direction (persistent subagent + voice + KB). It is **not** the production Bodhi `./app` stack. Production-shaped recruiting voice lives in **[`app/agents/builtin/structured-screening/`](../../app/agents/builtin/structured-screening/README.md)** and the web **Recruiting voice demo** (`/screening-demo`).
+**Purpose:** Local **toy demo** for framework direction (persistent subagent + voice + KB).
 
 Document-driven software interviewer using one persistent `software_interviewer` subagent and a voice `MainAgent`.
 
@@ -28,7 +28,7 @@ pnpm tsx examples/interviewer/interviewer-demo.ts
 In another terminal:
 
 ```bash
-pnpm web-client:dev
+pnpm web-client
 ```
 
 Open the local web client and connect to `ws://localhost:9900`.
@@ -61,10 +61,10 @@ The example also tunes Gemini Live server-side VAD with `END_SENSITIVITY_HIGH` a
 
 ## Common Startup Notes
 
-There is no `examples/web-client.ts` for this example. Use the shared app web client:
+Use the shared web client:
 
 ```bash
-pnpm web-client:dev
+pnpm web-client
 ```
 
-The web client runs on Vite and connects to the demo WebSocket URL, usually `ws://localhost:9900`.
+It serves `http://localhost:8080` and connects to the demo WebSocket URL, usually `ws://localhost:9900`.

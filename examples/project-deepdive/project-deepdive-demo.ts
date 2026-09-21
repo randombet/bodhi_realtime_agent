@@ -15,7 +15,7 @@
  * Usage:
  *   1. Set GEMINI_API_KEY in .env or the environment.
  *   2. Run: pnpm tsx examples/project-deepdive/project-deepdive-demo.ts
- *   3. In another terminal: pnpm web-client:dev
+ *   3. In another terminal: pnpm web-client
  *   4. Open the local web client and connect to ws://localhost:9900.
  *
  * Environment Variables:
@@ -200,7 +200,7 @@ async function main() {
 	console.log(`  Project:         ${chosenProjectName}`);
 	console.log(`  Transcript:      ${TRANSCRIPT_DIR}/${SESSION_ID}.md`);
 	console.log();
-	console.log('Connect via: pnpm web-client:dev');
+	console.log('Connect via: pnpm web-client');
 	console.log('Press Ctrl+C to stop.');
 	console.log('============================================================');
 }

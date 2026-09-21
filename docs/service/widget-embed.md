@@ -105,19 +105,7 @@ Optional: **`data-bodhi-container="dom-id"`** mounts the iframe into that elemen
 
 ---
 
-## 4. Local cross-origin smoke test
-
-From the repo root:
-
-```bash
-pnpm examples:embed-widget-dump
-```
-
-Open the printed URL (default `http://127.0.0.1:8765/`). Run your **API** (`pnpm start`, `:9900`) and **web client** (`pnpm web-client:dev`, `:8080`) so the tester can load the script and call the API. See `examples/embed-widget-dump/README.md`.
-
----
-
-## 5. Iframe-only integration
+## 4. Iframe-only integration
 
 Call **`POST /api/embed/widget-sessions`** (from the visitor browser with the widget script, or from your backend if you proxy), then set:
 
@@ -125,7 +113,7 @@ Call **`POST /api/embed/widget-sessions`** (from the visitor browser with the wi
 
 ---
 
-## 6. Relationship to programmatic `/api/embed/*`
+## 5. Relationship to programmatic `/api/embed/*`
 
 | Endpoint | Audience |
 |----------|----------|
@@ -134,7 +122,7 @@ Call **`POST /api/embed/widget-sessions`** (from the visitor browser with the wi
 
 ---
 
-## 7. HTTPS / reverse proxy (nginx on EC2)
+## 6. HTTPS / reverse proxy (nginx on EC2)
 
 The widget does **not** introduce a new network service. It uses:
 
@@ -145,7 +133,7 @@ If nginx already terminates TLS and proxies to your Bodhi **app server** and **w
 
 ---
 
-## 8. Database
+## 7. Database
 
 Supabase migration: `app/server/supabase/009_agent_embed_widgets.sql`.
 Local dev without Supabase uses JSON files under **`./embed-widgets/`** on the server.

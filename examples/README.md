@@ -21,10 +21,24 @@ pnpm examples:setup spatialreal  # Python venv for SpatialReal avatar bridge
 
 See per-demo sections below for env vars and run commands.
 
+## Web client
+
+Most demos serve a voice WebSocket on `ws://localhost:9900`. Talk to them from the browser with
+the shared client — it negotiates the audio format with the server, so it works with Gemini,
+OpenAI and Qwen demos alike:
+
+```bash
+pnpm web-client   # then open http://localhost:8080 and click Connect
+```
+
 ## Quick Reference
 
 | Demo | Feature | Entry Point | Run |
 |------|---------|-------------|-----|
+| Hello World | Gemini voice assistant with search, image/video generation, agent transfer, speech speed | `hello_world/agent.ts` | `pnpm tsx examples/hello_world/agent.ts` |
+| Hello World (OpenAI) | Senior-friendly OpenAI Realtime assistant with tools and a math-helper transfer (also needs `GEMINI_API_KEY` for image/video) | `hello_world/openai-realtime-tools.ts` | `pnpm tsx examples/hello_world/openai-realtime-tools.ts` |
+| Claude Code | Voice-driven coding: a relay subagent delegates tasks to Claude Code | `claude_code/claude-demo.ts` | `pnpm tsx examples/claude_code/claude-demo.ts` |
+| Metrics | Minimal voice agent exposing Prometheus `/metrics` (see the observability guide) | `metrics-demo.ts` | `pnpm tsx examples/metrics-demo.ts` |
 | OpenAI Realtime | OpenAI native-audio voice assistant with tools/subagents | `openai-realtime-tools.ts` | `pnpm tsx examples/openai-realtime-tools.ts` |
 | Cartesia TTS | Custom voice synthesis via Cartesia Sonic | `cartesia-tts-demo.ts` | `pnpm tsx examples/cartesia-tts-demo.ts` |
 | Twilio Human Transfer | Transfer live call to a real human and back | `twilio-demo.ts` | `pnpm tsx examples/twilio-demo.ts` |
@@ -33,7 +47,6 @@ See per-demo sections below for env vars and run commands.
 | SpatialReal Avatar Host Sync | Voice agent + avatar keyframe sync (host mode bridge) | `spatialreal_avatar_websdk/demo.ts` | `pnpm tsx examples/spatialreal_avatar_websdk/demo.ts` |
 | Interviewer | Document-driven software interview with a planning subagent | `interviewer/interviewer-demo.ts` | `pnpm tsx examples/interviewer/interviewer-demo.ts` |
 | Direct RTC | Gemini Live voice agent over Opus WebRTC (no tools/subagents) | `direct-rtc-demo/server.ts` | `pnpm demo:direct-rtc` (needs `GEMINI_API_KEY`) |
-| Widget embed dump | Static page on port 8765 to test `wg_*` + `bodhi-widget.js` from another origin | `embed-widget-dump/server.mjs` | `pnpm examples:embed-widget-dump` |
 | Post-Session Processor | Executable spec verifying the post-session pipeline design (no keys/network; exits non-zero on failure) | `post-session-processor/post-session-processor-demo.ts` | `pnpm tsx examples/post-session-processor/post-session-processor-demo.ts` |
 
 ## OpenAI Realtime
@@ -70,7 +83,7 @@ pnpm tsx examples/twilio-demo.ts
 
 ## Twilio Inbound Bridge
 
-Works with any running VoiceSession (including the production server on port 9900).
+Works with any running VoiceSession example on port 9900.
 
 ```bash
 export TWILIO_WEBHOOK_URL="https://xxxx.ngrok-free.app"
@@ -118,15 +131,7 @@ See [interviewer/README.md](interviewer/README.md) for the document-driven inter
 export GEMINI_API_KEY="your-gemini-key"
 pnpm tsx examples/interviewer/interviewer-demo.ts
 # In another terminal:
-pnpm web-client:dev
-```
-
-## Publishable widget embed (cross-origin)
-
-See [embed-widget-dump/README.md](embed-widget-dump/README.md). Run the Bodhi API + web client, then:
-
-```bash
-pnpm examples:embed-widget-dump
+pnpm web-client
 ```
 
 ## Probes (`probes/`)
