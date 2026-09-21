@@ -4,7 +4,7 @@ This example mirrors the `openclaw` shape:
 
 - `demo.ts`: starts Bodhi realtime voice session (WebSocket) + token backend + avatar driving bridge
 - `web-client.ts`: browser client that connects to Bodhi voice WebSocket and renders SpatialReal host-mode avatar
-- `bridge/avatar_bridge.py`: python bridge (same role as `app/lib/spatialreal/bridge/`); the **venv lives only under `app/`** — one-time: `app/lib/spatialreal/bridge/setup-venv.sh`
+- `bridge/avatar_bridge.py`: python bridge; its venv lives in `bridge/.venv` (one-time setup below)
 
 ## Architecture
 
@@ -30,15 +30,14 @@ Put these in `.env` (or export them before running):
 - `SPATIALREAL_ENV` (`intl` or `cn`) for the browser SDK
 - optional: `HOST`, `PORT`, `SPATIALREAL_TOKEN_PORT`, `CLIENT_HOST`, `CLIENT_PORT`
 - optional: `SPATIALREAL_TOKEN_SERVER_URL` if your client should hit a non-default backend URL
-- optional: `SPATIALREAL_PYTHON` (defaults to `app/lib/spatialreal/bridge/.venv/.../python3` after you run the app bridge setup)
+- optional: `SPATIALREAL_PYTHON` (defaults to `bridge/.venv/.../python3` after you run the bridge setup)
 
-## Python (single venv under `app/`; avoids PEP 668)
+## Python (venv under `bridge/`; avoids PEP 668)
 
 One-time, from the repo root:
 
 ```bash
-cd app/lib/spatialreal/bridge
-./setup-venv.sh
+pnpm examples:setup spatialreal
 ```
 
 `demo.ts` spawns the bridge with that venv by default. Override with `SPATIALREAL_PYTHON` if needed.

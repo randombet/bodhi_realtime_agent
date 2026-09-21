@@ -14,7 +14,7 @@ usage() {
 Usage: pnpm examples:setup [TARGET]
 
 Targets (default: list):
-  spatialreal   Create Python venv for SpatialReal avatar bridge (shared by app + spatialreal example)
+  spatialreal   Create Python venv for the SpatialReal example's avatar bridge
   list          Print available targets (default when no argument)
 
 Main install stays a single command from repo root:
@@ -32,12 +32,12 @@ case "${1:-list}" in
     ;;
   list|"")
     echo "Optional example setup targets:"
-    echo "  spatialreal  —  cd app/lib/spatialreal/bridge && ./setup-venv.sh"
+    echo "  spatialreal  —  examples/spatialreal_avatar_websdk/bridge/setup-venv.sh"
     echo ""
     echo "Run: pnpm examples:setup spatialreal"
     ;;
   spatialreal)
-    BRIDGE="$ROOT/app/lib/spatialreal/bridge"
+    BRIDGE="$ROOT/examples/spatialreal_avatar_websdk/bridge"
     if [[ ! -f "$BRIDGE/setup-venv.sh" ]]; then
       echo "error: missing $BRIDGE/setup-venv.sh" >&2
       exit 1

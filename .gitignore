@@ -30,7 +30,6 @@ docs/api/
 /sutando-ledger/
 
 # SpatialReal Python host bridges: local venvs and bytecode (per-bridge .gitignore too)
-app/lib/spatialreal/bridge/.venv/
 examples/spatialreal_avatar_websdk/bridge/.venv/
 **/spatialreal/**/__pycache__/
 examples/spatialreal_avatar_websdk/**/__pycache__/

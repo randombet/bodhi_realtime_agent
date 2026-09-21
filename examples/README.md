@@ -92,7 +92,7 @@ pnpm tsx examples/openclaw/web-client.ts
 
 ## SpatialReal Avatar Web SDK
 
-See [spatialreal_avatar_websdk/README.md](spatialreal_avatar_websdk/README.md) for required env setup. Use the **single** Python venv under `app/lib/spatialreal/bridge/` (`./setup-venv.sh` once).
+See [spatialreal_avatar_websdk/README.md](spatialreal_avatar_websdk/README.md) for required env setup. Create the bridge's Python venv once with `pnpm examples:setup spatialreal`.
 
 ```bash
 pnpm tsx examples/spatialreal_avatar_websdk/demo.ts

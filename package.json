@@ -55,6 +55,7 @@
     "build:protocol": "tsc -p clients/client-protocol/tsconfig.json",
     "ensure:client-protocol": "tsc -p clients/client-protocol/tsconfig.json && tsc -p clients/web-voice/tsconfig.json",
     "demo:direct-rtc": "tsx examples/direct-rtc-demo/server.ts",
+    "examples:setup": "bash scripts/examples-setup.sh",
     "test": "pnpm ensure:client-protocol && vitest run",
     "test:watch": "pnpm ensure:client-protocol && vitest",
     "lint": "biome check src/ test/",

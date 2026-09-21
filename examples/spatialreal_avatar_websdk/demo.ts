@@ -21,25 +21,20 @@ const SPATIALREAL_APP_ID = process.env.SPATIALREAL_APP_ID ?? '';
 const SPATIALREAL_AVATAR_ID = process.env.SPATIALREAL_AVATAR_ID ?? '';
 const SPATIALREAL_REGION = process.env.SPATIALREAL_REGION ?? 'us-west';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-/** Shared venv: run `app/lib/spatialreal/bridge/setup-venv.sh` once (not under examples/). */
-const appBridgeVenvPython = path.join(
+/** Bridge venv: run `pnpm examples:setup spatialreal` (or `bridge/setup-venv.sh`) once. */
+const bridgeVenvPython = path.join(
 	__dirname,
-	'..',
-	'..',
-	'app',
-	'lib',
-	'spatialreal',
 	'bridge',
 	'.venv',
 	process.platform === 'win32' ? 'Scripts' : 'bin',
 	process.platform === 'win32' ? 'python.exe' : 'python3',
 );
-const SPATIALREAL_PYTHON = process.env.SPATIALREAL_PYTHON ?? appBridgeVenvPython;
+const SPATIALREAL_PYTHON = process.env.SPATIALREAL_PYTHON ?? bridgeVenvPython;
 
 if (!existsSync(SPATIALREAL_PYTHON)) {
 	console.error(
 		`Python for SpatialReal bridge not found at ${SPATIALREAL_PYTHON}.
-Run once:  cd app/lib/spatialreal/bridge && ./setup-venv.sh
+Run once:  pnpm examples:setup spatialreal
 Or set SPATIALREAL_PYTHON to a venv that has \`pip install -r\` the bridge requirements (avatarkit).`,
 	);
 	process.exit(1);
