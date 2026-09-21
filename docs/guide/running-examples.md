@@ -163,7 +163,7 @@ Bodhi + Claude Code — Voice-Driven Coding Assistant
   Session ID:      session_1234567890
 
 Start the web client in another terminal:
-  pnpm tsx examples/openclaw/web-client.ts
+  pnpm web-client
 
 Then open http://localhost:8080 and try saying:
   - 'Fix the bug in auth.py'                 (Claude Code)
@@ -181,7 +181,7 @@ Then open http://localhost:8080 and try saying:
 Same as the Gemini demo — the web client is shared:
 
 ```bash
-pnpm tsx examples/openclaw/web-client.ts
+pnpm web-client
 ```
 
 Open [http://localhost:8080](http://localhost:8080) in Chrome and click **Connect**.
@@ -237,7 +237,7 @@ pnpm tsx app/openclaw-demo.ts
 ### Start the Web Client
 
 ```bash
-pnpm tsx app/openclaw/web-client.ts
+pnpm web-client
 ```
 
 Open [http://localhost:8080](http://localhost:8080) in Chrome and click **Connect**.

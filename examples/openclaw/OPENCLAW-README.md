@@ -85,7 +85,7 @@ export OPENCLAW_TOKEN="your-gateway-auth-token"
 pnpm tsx app/openclaw/openclaw-demo.ts
 
 # Terminal 2: Start the web client
-pnpm tsx app/openclaw/web-client.ts
+pnpm web-client
 
 # Open http://localhost:8080 in Chrome and click Connect
 ```

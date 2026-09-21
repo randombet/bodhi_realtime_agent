@@ -119,7 +119,7 @@ curl -sS "$HERMES_URL/v1/models" -H "Authorization: Bearer $HERMES_API_KEY"
 pnpm tsx examples/hermes/hermes-demo.ts
 
 # Terminal 2: Start the web client (reused from the OpenClaw example)
-pnpm tsx examples/openclaw/web-client.ts
+pnpm web-client
 
 # Open http://localhost:8080 in Chrome and click Connect
 ```
@@ -150,7 +150,7 @@ pnpm tsx examples/openclaw/web-client.ts
 |------|-------------|
 | `hermes-demo.ts` | Agent server — defines tools, the main agent, Hermes wiring, starts VoiceSession |
 | `../lib/hermes-tools.ts` | `ask_hermes` tool + Hermes subagent factory (AI SDK OpenAI provider) |
-| `../openclaw/web-client.ts` | Browser UI for mic capture / playback (reused) |
+| `../web-client.ts` | Browser UI for mic capture / playback (reused) |
 
 ## Environment Variables
 

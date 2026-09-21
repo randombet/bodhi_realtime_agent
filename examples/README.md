@@ -87,7 +87,7 @@ See [openclaw/OPENCLAW-README.md](openclaw/OPENCLAW-README.md) for gateway setup
 export GEMINI_API_KEY="your-gemini-key"
 pnpm tsx examples/openclaw/openclaw-demo.ts
 # In another terminal:
-pnpm tsx examples/openclaw/web-client.ts
+pnpm web-client
 ```
 
 ## SpatialReal Avatar Web SDK

@@ -290,7 +290,7 @@ async function main() {
 	);
 	console.log();
 	console.log('Start the web client in another terminal:');
-	console.log('  pnpm tsx examples/openclaw/web-client.ts');
+	console.log('  pnpm web-client');
 	console.log();
 	console.log('Then open http://localhost:8080 and try saying:');
 	console.log(

@@ -116,7 +116,7 @@ export SUTANDO_RELAY_TOKEN="<the token from step 1>"
 pnpm tsx examples/sutando/sutando-demo.ts
 
 # Terminal 2: web client (reused from the OpenClaw example)
-pnpm tsx examples/openclaw/web-client.ts
+pnpm web-client
 
 # Open http://localhost:8080 in Chrome and click Connect
 ```

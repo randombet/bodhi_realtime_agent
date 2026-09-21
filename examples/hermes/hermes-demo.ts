@@ -19,7 +19,7 @@
  *      API_SERVER_KEY=<secret>, then run: hermes gateway
  *   2. Expose the Hermes API safely (tunnel/reverse proxy) and set env vars below
  *   3. Run: pnpm tsx examples/hermes/hermes-demo.ts
- *   4. In another terminal: pnpm tsx examples/openclaw/web-client.ts
+ *   4. In another terminal: pnpm web-client
  *   5. Open http://localhost:8080 in Chrome, click Connect
  *
  * Environment Variables:
@@ -253,7 +253,7 @@ async function main() {
 	console.log(`  Transcript:      ${TRANSCRIPT_DIR}/${SESSION_ID}.md`);
 	console.log();
 	console.log('Start the web client in another terminal:');
-	console.log('  pnpm tsx examples/openclaw/web-client.ts');
+	console.log('  pnpm web-client');
 	console.log();
 	console.log('Then open http://localhost:8080 and try saying:');
 	console.log("  - 'What is the weather in San Francisco?'      (Gemini Search)");
