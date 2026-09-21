@@ -175,7 +175,7 @@ describe('provider evidence live wiring (P2-5)', () => {
 
 	it('transport-declared kinds reach the ledger and onProviderEvidence feeds it', async () => {
 		const transport = createTransport();
-		transport.capabilities = {
+		(transport as { capabilities: LLMTransport['capabilities'] }).capabilities = {
 			...transport.capabilities,
 			providerEvidenceKinds: ['speech-window'],
 		};

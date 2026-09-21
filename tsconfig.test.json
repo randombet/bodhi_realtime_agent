@@ -9,6 +9,6 @@
     "noUnusedLocals": false,
     "noUnusedParameters": false
   },
-  "include": ["src", "test"],
+  "include": ["src", "test", "examples/lib/client-protocol-extensions.ts"],
   "exclude": ["node_modules", "dist"]
 }

@@ -6,7 +6,12 @@ import type { SegmentEvidence } from '../../../src/core/user-turn-evidence.js';
  *  skip-no-eligible-route / skip-non-agent; skip-already-answered stays
  *  inactive until the transport correlation-ID contract exists). */
 
-function ev(over: Partial<SegmentEvidence> = {}): SegmentEvidence {
+/** Like Partial<SegmentEvidence>, but `routed` may be partial too (missing flags default to false). */
+type EvidenceOverrides = Omit<Partial<SegmentEvidence>, 'routed'> & {
+	routed?: Partial<SegmentEvidence['routed']>;
+};
+
+function ev(over: EvidenceOverrides = {}): SegmentEvidence {
 	return {
 		segmentId: 1,
 		startedAtMs: 0,

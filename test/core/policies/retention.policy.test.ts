@@ -2,7 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { decideRetention } from '../../../src/core/policies/retention.policy.js';
 import type { SegmentEvidence } from '../../../src/core/user-turn-evidence.js';
 
-function ev(over: Partial<SegmentEvidence> = {}): SegmentEvidence {
+/** Like Partial<SegmentEvidence>, but `routed` may be partial too (missing flags default to false). */
+type EvidenceOverrides = Omit<Partial<SegmentEvidence>, 'routed'> & {
+	routed?: Partial<SegmentEvidence['routed']>;
+};
+
+function ev(over: EvidenceOverrides = {}): SegmentEvidence {
 	return {
 		segmentId: 1,
 		startedAtMs: 0,

@@ -7,7 +7,7 @@ import {
 	resolveGeminiRealtimeInputConfig,
 } from '../../src/transport/gemini-live-transport.js';
 import type { ToolDefinition } from '../../src/types/tool.js';
-import type { RealtimeLLMUsageEvent } from '../../src/types/transport.js';
+import type { LLMTransport, RealtimeLLMUsageEvent } from '../../src/types/transport.js';
 
 // Mock @google/genai
 let capturedConnectConfig: Record<string, unknown> = {};
@@ -126,7 +126,7 @@ describe('GeminiLiveTransport', () => {
 			await transport.connect();
 			mockSession.sendClientContent.mockClear();
 
-			expect(transport.elicitResponse).toBeUndefined();
+			expect((transport as LLMTransport).elicitResponse).toBeUndefined();
 
 			// The fallback the reconnector uses instead must stay silent on the wire.
 			transport.triggerGeneration();

@@ -26,7 +26,10 @@ function makeRouter(audioFormat: {
 	} as unknown as LLMTransport;
 	const router = new AudioRouter({
 		transport,
-		vad: new ClientVadDetector(),
+		vad: new ClientVadDetector(
+			{ onSpeechStart: vi.fn(), onVoicedFrame: vi.fn(), onSegmentResolved: vi.fn() },
+			vi.fn(),
+		),
 		clientAudioInputRate: 16000,
 		getSttProvider: () => undefined,
 		getWhisperProvider: () => undefined,
