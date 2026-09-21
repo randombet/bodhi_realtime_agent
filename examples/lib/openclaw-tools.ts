@@ -1,7 +1,7 @@
 import { tool } from 'ai';
 import { z } from 'zod';
-import type { OpenClawTransport } from '../../app/lib/integrations/openclaw/openclaw-transport.js';
-import type { ArtifactRegistry } from '../../app/lib/media/artifact-registry.js';
+import type { OpenClawTransport } from './openclaw-transport.js';
+import type { ArtifactRegistry } from './artifact-registry.js';
 import type { SubagentConfig } from '../../src/types/agent.js';
 import type { ToolDefinition } from '../../src/types/tool.js';
 import {

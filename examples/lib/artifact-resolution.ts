@@ -7,7 +7,7 @@
  * relay returns structured { status: 'error' }, persistent throws.
  */
 
-import type { ArtifactRegistry } from '../../app/lib/media/artifact-registry.js';
+import type { ArtifactRegistry } from './artifact-registry.js';
 import type { ChatAttachment } from './openclaw-client.js';
 
 // ---------------------------------------------------------------------------

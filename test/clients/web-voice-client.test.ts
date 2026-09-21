@@ -63,9 +63,7 @@ function makeClient(opts?: {
 			onTranscript: (e) => transcripts.push(e),
 			onServerMessage: (msg) => {
 				extensions.push(msg as Record<string, unknown>);
-				return (msg as { type?: string }).type === 'peer.session_ended'
-					? 'handled'
-					: 'unhandled';
+				return (msg as { type?: string }).type === 'peer.session_ended' ? 'handled' : 'unhandled';
 			},
 		},
 		{
@@ -167,10 +165,7 @@ describe('VoiceClient dispatch', () => {
 		const { client, extensions } = makeClient();
 		client.handleJson({ type: 'peer.session_ended', reason: 'timeout' });
 		client.handleJson({ type: 'future.unknown_frame', anything: 1 });
-		expect(extensions.map((m) => m.type)).toEqual([
-			'peer.session_ended',
-			'future.unknown_frame',
-		]);
+		expect(extensions.map((m) => m.type)).toEqual(['peer.session_ended', 'future.unknown_frame']);
 	});
 });
 

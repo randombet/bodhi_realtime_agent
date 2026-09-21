@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type {
 	ChatEvent,
 	OpenClawClient,
-} from '../../app/lib/integrations/openclaw/openclaw-client.js';
+} from '../lib/openclaw-client.js';
 import { SubagentSessionImpl } from '../../src/agent/subagent-session.js';
 import { runOpenClawInteractiveSession } from '../lib/openclaw-interactive-session.js';
 

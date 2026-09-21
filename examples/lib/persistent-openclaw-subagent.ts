@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import type { OpenClawTransport } from '../../app/lib/integrations/openclaw/openclaw-transport.js';
-import type { ArtifactRegistry } from '../../app/lib/media/artifact-registry.js';
+import type { OpenClawTransport } from './openclaw-transport.js';
+import type { ArtifactRegistry } from './artifact-registry.js';
 import type { PersistentSubagentInstance } from '../../src/agent/persistent-subagent-types.js';
 import {
 	type AdapterLimits,

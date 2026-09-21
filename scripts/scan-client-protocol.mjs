@@ -29,7 +29,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
 const ROOT = new URL('..', import.meta.url).pathname;
-const SCAN_DIRS = ['src', 'app', 'examples'];
+const SCAN_DIRS = ['src', 'examples'];
 const SKIP = new Set(['node_modules', 'dist', '.next', '.worktrees', 'data', 'public']);
 const EXT = /\.(ts|tsx|mts)$/;
 

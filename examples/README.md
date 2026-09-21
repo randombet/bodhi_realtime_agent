@@ -2,11 +2,11 @@
 
 Standalone single-user demos for testing individual framework features. Each example runs independently — start the script and connect a client.
 
-> These demos are for development and testing. The production multi-user server is in [`app/`](../app/).
+> These demos are for development and testing.
 
 ## Install vs optional setup
 
-From the **repository root**, a single install covers the framework, `app/`, and running these TypeScript examples (they import `src/` and some `app/lib` modules):
+From the **repository root**, a single install covers the framework and running these TypeScript examples (they import `src/` directly):
 
 ```bash
 pnpm install
@@ -25,7 +25,6 @@ See per-demo sections below for env vars and run commands.
 
 | Demo | Feature | Entry Point | Run |
 |------|---------|-------------|-----|
-| Standard Agent | Standalone demo that imports the production `standard` profile agents and wires hosted-only helpers locally (search, math, time, speed, image/video, image analysis, math-expert hand-off) | `standard-agent/standard-agent-demo.ts` | `pnpm tsx examples/standard-agent/standard-agent-demo.ts` |
 | OpenAI Realtime | OpenAI native-audio voice assistant with tools/subagents | `openai-realtime-tools.ts` | `pnpm tsx examples/openai-realtime-tools.ts` |
 | Cartesia TTS | Custom voice synthesis via Cartesia Sonic | `cartesia-tts-demo.ts` | `pnpm tsx examples/cartesia-tts-demo.ts` |
 | Twilio Human Transfer | Transfer live call to a real human and back | `twilio-demo.ts` | `pnpm tsx examples/twilio-demo.ts` |
@@ -36,22 +35,6 @@ See per-demo sections below for env vars and run commands.
 | Direct RTC | Gemini Live voice agent over Opus WebRTC (no tools/subagents) | `direct-rtc-demo/server.ts` | `pnpm demo:direct-rtc` (needs `GEMINI_API_KEY`) |
 | Widget embed dump | Static page on port 8765 to test `wg_*` + `bodhi-widget.js` from another origin | `embed-widget-dump/server.mjs` | `pnpm examples:embed-widget-dump` |
 | Post-Session Processor | Executable spec verifying the post-session pipeline design (no keys/network; exits non-zero on failure) | `post-session-processor/post-session-processor-demo.ts` | `pnpm tsx examples/post-session-processor/post-session-processor-demo.ts` |
-
-## Standard Agent
-
-Local, single-user demo that imports the hosted **Standard agent** profile agents and wires
-demo-only helpers locally. Also opts into `watchdogReplayRecovery` (watchdog-stall recovery via
-retained-utterance replay — dark by default framework-wide; see
-`dev_docs/framework/design-retained-user-content-recovery.md`). See
-[standard-agent/README.md](standard-agent/README.md).
-
-```bash
-export GEMINI_API_KEY="your-gemini-key"
-pnpm tsx examples/standard-agent/standard-agent-demo.ts
-# In another terminal (reuses the generic web client):
-pnpm tsx examples/openclaw/web-client.ts
-# Open http://localhost:8080 and click Connect.
-```
 
 ## OpenAI Realtime
 

@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 import type {
 	ChatEvent,
 	OpenClawClient,
-} from '../../app/lib/integrations/openclaw/openclaw-client.js';
-import { ArtifactRegistry } from '../../app/lib/media/artifact-registry.js';
+} from '../lib/openclaw-client.js';
+import { ArtifactRegistry } from '../lib/artifact-registry.js';
 import {
 	askGeneralAgentTool,
 	askWorkAgentTool,

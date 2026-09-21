@@ -1,4 +1,4 @@
-import type { OpenClawTransport } from '../../app/lib/integrations/openclaw/openclaw-transport.js';
+import type { OpenClawTransport } from './openclaw-transport.js';
 import { CancelledError } from '../../src/agent/subagent-session.js';
 import type { SubagentSession } from '../../src/agent/subagent-session.js';
 import { FrameworkError } from '../../src/core/errors.js';

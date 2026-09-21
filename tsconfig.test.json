@@ -9,6 +9,6 @@
     "noUnusedLocals": false,
     "noUnusedParameters": false
   },
-  "include": ["src", "test", "app/web-client/src/vite-env.d.ts", "app/web-client/src/theme.ts"],
+  "include": ["src", "test"],
   "exclude": ["node_modules", "dist"]
 }
