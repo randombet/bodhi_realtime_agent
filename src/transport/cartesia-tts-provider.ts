@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { WebSocket } from 'ws';
 import { SentenceBuffer } from '../audio/sentence-buffer.js';
 import type { TTSAudioConfig, TTSProvider } from '../types/tts.js';
@@ -10,7 +8,7 @@ export interface CartesiaTTSConfig {
 	apiKey: string;
 	/** Cartesia voice ID. Required. */
 	voiceId: string;
-	/** Model identifier. Default: `'sonic-2'`. */
+	/** Model identifier. Default: `'sonic-3.5'`. */
 	modelId?: string;
 	/** ISO 639-1 language code (e.g. `'en'`). Default: `'en'`. */
 	language?: string;
@@ -21,7 +19,7 @@ export interface CartesiaTTSConfig {
 }
 
 /** Cartesia API version header value. */
-const CARTESIA_VERSION = '2024-06-10';
+const CARTESIA_VERSION = '2026-03-01';
 
 /** WebSocket endpoint for Cartesia streaming TTS. */
 const WS_BASE_URL = 'wss://api.cartesia.ai/tts/websocket';
@@ -98,7 +96,7 @@ export class CartesiaTTSProvider implements TTSProvider {
 		}
 		this._apiKey = config.apiKey;
 		this._voiceId = config.voiceId;
-		this._modelId = config.modelId ?? 'sonic-2';
+		this._modelId = config.modelId ?? 'sonic-3.5';
 		this._language = config.language ?? 'en';
 		this._speed = config.speed ?? 'normal';
 		this._emotion = config.emotion ?? [];
@@ -299,15 +297,24 @@ export class CartesiaTTSProvider implements TTSProvider {
 
 		const contextId = typeof msg.context_id === 'string' ? msg.context_id : null;
 		const requestId = contextId ? this._contextToRequest.get(contextId) : undefined;
+		const isDone = msg.type === 'done' || msg.done === true;
 
 		// Suppress callbacks for cancelled requests (legacy guard).
 		// In normal cancel() flow we eagerly delete context mapping, so requestId is
 		// usually undefined here and callbacks are naturally skipped.
 		if (requestId !== undefined && this._cancelledRequests.has(requestId)) {
 			// Still handle 'done' to clean up context mapping
-			if (msg.type === 'done' && contextId) {
+			if (isDone && contextId) {
 				this._contextToRequest.delete(contextId);
 				this._cancelledRequests.delete(requestId);
+			}
+			return;
+		}
+
+		if (isDone) {
+			if (requestId !== undefined && contextId) {
+				this._contextToRequest.delete(contextId);
+				this.onDone?.(requestId);
 			}
 			return;
 		}
@@ -327,14 +334,6 @@ export class CartesiaTTSProvider implements TTSProvider {
 
 				// Parse word-level timestamps if present
 				this._parseWordTimestamps(msg, requestId);
-				break;
-			}
-
-			case 'done': {
-				if (requestId !== undefined && contextId) {
-					this._contextToRequest.delete(contextId);
-					this.onDone?.(requestId);
-				}
 				break;
 			}
 

@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Cartesia TTS Voice Demo
  *
@@ -7,8 +5,10 @@
  * Gemini's native audio. Demonstrates the pluggable TTS provider with custom
  * voice, speed, and emotion controls.
  *
- * The LLM requests dual output modalities (AUDIO + TEXT). The app consumes
- * only the TEXT stream and sends it to Cartesia for ultra-low-latency TTS.
+ * The live model's own audio is discarded; the app streams the model's text
+ * into Cartesia for ultra-low-latency TTS. For half-cascade models that text
+ * is real text parts; for native-audio models (including all Gemini 3.x live
+ * models) it is the transcript of the model's speech.
  *
  * Features:
  * - Custom Cartesia voice (configurable via CARTESIA_VOICE_ID)
@@ -21,7 +21,7 @@
  *   1. Set GEMINI_API_KEY and CARTESIA_API_KEY in .env or environment
  *   2. Optionally set CARTESIA_VOICE_ID (defaults to "a0e99841-438c-4a64-b679-ae501e7d6091")
  *   3. Run: pnpm tsx examples/cartesia-tts-demo.ts
- *   4. In another terminal: pnpm web-client:dev
+ *   4. In another terminal: pnpm web-client
  *   5. Open http://localhost:8080 in Chrome, click Connect
  *
  * Environment Variables:
@@ -38,10 +38,10 @@ import 'dotenv/config';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { z } from 'zod';
 import { VoiceSession } from '../src/core/voice-session.js';
-import { GeminiBatchSTTProvider } from '../src/transport/gemini-batch-stt-provider.js';
 import { CartesiaTTSProvider } from '../src/transport/cartesia-tts-provider.js';
+import { GeminiBatchSTTProvider } from '../src/transport/gemini-batch-stt-provider.js';
 import type { MainAgent } from '../src/types/agent.js';
-import type { ToolDefinition, ToolContext } from '../src/types/tool.js';
+import type { ToolContext, ToolDefinition } from '../src/types/tool.js';
 
 // =============================================================================
 // Helpers
@@ -77,7 +77,7 @@ const SPEED = (process.env.CARTESIA_SPEED || 'normal') as
 	| 'fast'
 	| 'fastest';
 const EMOTION = process.env.CARTESIA_EMOTION?.split(',').filter(Boolean) ?? [];
-const DEFAULT_LIVE_MODEL = 'gemini-2.5-flash-native-audio-preview-12-2025';
+const DEFAULT_LIVE_MODEL = 'gemini-3.1-flash-live-preview';
 
 const SESSION_ID = `session_${Date.now()}`;
 const google = createGoogleGenerativeAI({ apiKey: API_KEY });
@@ -199,7 +199,7 @@ async function main() {
 	const ttsProvider = new CartesiaTTSProvider({
 		apiKey: CARTESIA_API_KEY,
 		voiceId: VOICE_ID,
-		modelId: 'sonic-2',
+		modelId: 'sonic-3.5',
 		speed: SPEED,
 		emotion: EMOTION.length > 0 ? EMOTION : undefined,
 		language: 'en',
@@ -214,7 +214,11 @@ async function main() {
 		port: PORT,
 		host: HOST,
 		model: google('gemini-2.5-flash'),
+		orchestrationMode: 'actor',
 		ttsProvider,
+		// Exercise the audio.done / playback.ended handshake so a manual
+		// barge-in test against the web client runs the real protocol.
+		playbackStateProtocol: 'audio_done',
 		// Use a live model that can emit text; external TTS handles speech synthesis.
 		geminiModel: geminiLiveModel,
 		speechConfig: { voiceName: 'Puck' },
@@ -268,9 +272,9 @@ async function main() {
 	console.log(`  Voice:     ${VOICE_ID}`);
 	console.log(`  Speed:     ${SPEED}`);
 	console.log(`  Emotion:   ${EMOTION.length > 0 ? EMOTION.join(', ') : '(none)'}`);
-	console.log(`  Model:     ${geminiLiveModel} (AUDIO+TEXT; text stream → Cartesia sonic-2)`);
+	console.log(`  Model:     ${geminiLiveModel} (text stream → Cartesia sonic-3.5)`);
 	console.log();
-	console.log('Connect via: pnpm web-client:dev');
+	console.log('Connect via: pnpm web-client');
 	console.log('Press Ctrl+C to stop.');
 	console.log('============================================================');
 }

@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it, vi } from 'vitest';
 import { BehaviorManager } from '../../src/behaviors/behavior-manager.js';
 import { responseLanguage, speechSpeed, verbosity } from '../../src/behaviors/presets.js';

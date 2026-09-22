@@ -1,4 +1,8 @@
 {
   "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "paths": { "@bodhi/client-protocol": ["./clients/client-protocol/src/index.ts"] }
+  },
   "exclude": ["node_modules", "dist", "test"]
 }

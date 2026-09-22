@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { FrameworkHooks } from '../types/hooks.js';
 
 /**
@@ -23,6 +21,27 @@ export class HooksManager {
 	get onTurnLatency() {
 		return this.hooks.onTurnLatency;
 	}
+	get onTurnLatencyDropped() {
+		return this.hooks.onTurnLatencyDropped;
+	}
+	get onUserSpeechEnd() {
+		return this.hooks.onUserSpeechEnd;
+	}
+	get onTranscriptReady() {
+		return this.hooks.onTranscriptReady;
+	}
+	get onBargeInDetected() {
+		return this.hooks.onBargeInDetected;
+	}
+	get onTurnFinalized() {
+		return this.hooks.onTurnFinalized;
+	}
+	get onJumpIn() {
+		return this.hooks.onJumpIn;
+	}
+	get onAgentReentry() {
+		return this.hooks.onAgentReentry;
+	}
 	get onToolCall() {
 		return this.hooks.onToolCall;
 	}
@@ -43,6 +62,9 @@ export class HooksManager {
 	}
 	get onTTSSynthesis() {
 		return this.hooks.onTTSSynthesis;
+	}
+	get onBackgroundNotification() {
+		return this.hooks.onBackgroundNotification;
 	}
 	get onError() {
 		return this.hooks.onError;

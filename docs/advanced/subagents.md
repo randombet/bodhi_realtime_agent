@@ -2,6 +2,10 @@
 
 Subagents run in the background using the Vercel AI SDK while the voice model continues speaking to the user. They handle long-running operations that would otherwise block the voice stream.
 
+::: tip Persistent Runtime Flow
+For the actor-runtime persistent path (instance reuse, lifecycle states, and OpenClaw example), see [Persistent Subagent Lifecycle](/advanced/persistent-subagent-lifecycle).
+:::
+
 ::: info OpenClaw Demo Routing Note
 In `examples/openclaw/openclaw-demo.ts`, OpenClaw is not configured to generate images or videos. Media generation requests should route to `generate_image` / `generate_video`, even if the user explicitly mentions OpenClaw.
 :::
@@ -537,7 +541,7 @@ export PROJECT_DIR="/path/to/your/project"
 pnpm tsx examples/claude_code/claude-demo.ts
 
 # In another terminal, start the web client
-pnpm tsx examples/web-client.ts
+pnpm web-client
 
 # Open http://localhost:8080 in Chrome
 ```

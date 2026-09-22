@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { type LanguageModelV1, generateObject } from 'ai';
 import { z } from 'zod';
 import { DEFAULT_EXTRACTION_TIMEOUT_MS } from '../core/constants.js';
@@ -27,6 +25,11 @@ export interface MemoryDistillerConfig {
 	turnFrequency?: number;
 	/** Timeout for each extraction LLM call in milliseconds (default 30 000). */
 	extractionTimeoutMs?: number;
+	/**
+	 * Returns prompt-injected knowledge base text for the active agent (if any).
+	 * Used so extraction does not duplicate stable domain facts already in the KB.
+	 */
+	getKnowledgeBaseSummary?: () => string;
 }
 
 /**
@@ -50,6 +53,7 @@ export class MemoryDistiller {
 	private readonly extractionTimeoutMs: number;
 	private readonly userId: string;
 	private readonly sessionId: string;
+	private readonly getKnowledgeBaseSummary?: () => string;
 
 	constructor(
 		private conversationContext: ConversationContext,
@@ -62,6 +66,7 @@ export class MemoryDistiller {
 		this.sessionId = config.sessionId;
 		this.turnFrequency = config.turnFrequency ?? 5;
 		this.extractionTimeoutMs = config.extractionTimeoutMs ?? DEFAULT_EXTRACTION_TIMEOUT_MS;
+		this.getKnowledgeBaseSummary = config.getKnowledgeBaseSummary;
 	}
 
 	onTurnEnd(): void {
@@ -103,6 +108,9 @@ export class MemoryDistiller {
 
 			const recentTranscript = recentItems.map((i) => `[${i.role}]: ${i.content}`).join('\n');
 
+			const kbRaw = this.getKnowledgeBaseSummary?.()?.trim() ?? '';
+			const knowledgeBaseSummary = kbRaw.length > 0 ? kbRaw : '(none)';
+
 			const prompt = MEMORY_EXTRACTION_PROMPT.replace(
 				'{currentDateTime}',
 				new Date().toLocaleString('en-US', {
@@ -110,6 +118,7 @@ export class MemoryDistiller {
 					timeStyle: 'short',
 				}),
 			)
+				.replace('{knowledgeBaseSummary}', knowledgeBaseSummary)
 				.replace('{existingMemory}', existingMemory)
 				.replace('{recentTranscript}', recentTranscript);
 

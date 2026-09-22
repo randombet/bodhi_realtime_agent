@@ -1,10 +1,12 @@
-// SPDX-License-Identifier: MIT
-
 import type { ConversationContext } from '../core/conversation-context.js';
 import type { HooksManager } from '../core/hooks.js';
+import { processKnowledgeBase } from '../knowledge/knowledge-base-processor.js';
 import type { AgentContext, MainAgent } from '../types/agent.js';
+import type { AnyServerToClientMessage } from '../types/client-protocol.js';
 import type { ConversationItem } from '../types/conversation.js';
+import type { ProcessedKnowledgeBase } from '../types/knowledge-base.js';
 import type { MemoryFact } from '../types/memory.js';
+import type { ToolDefinition } from '../types/tool.js';
 
 /** Language name map for common BCP 47 tags used in system instruction directives. */
 const LANGUAGE_NAMES: Record<string, string> = {
@@ -60,6 +62,37 @@ export function resolveInstructions(agent: MainAgent): string {
 }
 
 /**
+ * Process a MainAgent's knowledge base (if any) and return augmented instructions + tools.
+ *
+ * Combines `resolveInstructions` with KB prompt injection, and appends the
+ * auto-generated search tool when the KB has tool-routed documents.
+ * Callers should use the returned `instructions` and `tools` instead of calling
+ * `resolveInstructions` + `agent.tools` separately.
+ */
+export function resolveAgentWithKnowledgeBase(agent: MainAgent): {
+	instructions: string;
+	tools: ToolDefinition[];
+	processedKB: ProcessedKnowledgeBase | null;
+} {
+	let instructions = resolveInstructions(agent);
+	const tools = [...agent.tools];
+	let processedKB: ProcessedKnowledgeBase | null = null;
+
+	if (agent.knowledgeBase?.documents?.length) {
+		processedKB = processKnowledgeBase(agent.knowledgeBase);
+
+		if (processedKB.promptInjection) {
+			instructions += processedKB.promptInjection;
+		}
+		if (processedKB.searchTool) {
+			tools.push(processedKB.searchTool);
+		}
+	}
+
+	return { instructions, tools, processedKB };
+}
+
+/**
  * Factory that builds an AgentContext object for agent lifecycle hooks.
  * Wires `injectSystemMessage` and `getRecentTurns` to the live ConversationContext.
  */
@@ -71,7 +104,7 @@ export function createAgentContext(options: {
 	memoryFacts?: MemoryFact[];
 	requestTransfer?: (toAgent: string) => void;
 	stopBufferingAndDrain?: (handler: (chunk: Buffer) => void) => void;
-	sendJsonToClient?: (message: Record<string, unknown>) => void;
+	sendJsonToClient?: (message: AnyServerToClientMessage) => void;
 	sendAudioToClient?: (data: Buffer) => void;
 	setExternalAudioHandler?: (handler: ((data: Buffer) => void) | null) => void;
 }): AgentContext {
@@ -94,7 +127,7 @@ export function createAgentContext(options: {
 		stopBufferingAndDrain(handler: (chunk: Buffer) => void): void {
 			options.stopBufferingAndDrain?.(handler);
 		},
-		sendJsonToClient(message: Record<string, unknown>): void {
+		sendJsonToClient(message: AnyServerToClientMessage): void {
 			options.sendJsonToClient?.(message);
 		},
 		sendAudioToClient(data: Buffer): void {

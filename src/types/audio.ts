@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * PCM 16-bit signed little-endian, 16 kHz mono — Gemini Live API's native audio format.
  * All audio buffers and transport operations assume this format.

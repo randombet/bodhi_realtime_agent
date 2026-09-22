@@ -1,9 +1,10 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it, vi } from 'vitest';
-import type { ChatEvent, OpenClawClient } from '../lib/openclaw-client.js';
-import { runOpenClawInteractiveSession } from '../lib/openclaw-interactive-session.js';
+import type {
+	ChatEvent,
+	OpenClawClient,
+} from '../lib/openclaw-client.js';
 import { SubagentSessionImpl } from '../../src/agent/subagent-session.js';
+import { runOpenClawInteractiveSession } from '../lib/openclaw-interactive-session.js';
 
 /**
  * Create a mock OpenClawClient with controllable event delivery.

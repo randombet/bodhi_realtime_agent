@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * HTTP client for OpenClaw gateway using the OpenAI Responses API format.
  *
@@ -269,9 +267,7 @@ export class OpenClawHttpClient implements OpenClawTransport {
 		}
 
 		const contextText =
-			originalMessage.trim().length > 0
-				? originalMessage
-				: 'Please process the attached image.';
+			originalMessage.trim().length > 0 ? originalMessage : 'Please process the attached image.';
 
 		return [
 			{
@@ -341,9 +337,7 @@ export class OpenClawHttpClient implements OpenClawTransport {
 					parsed = value as Record<string, unknown>;
 				}
 			} catch {
-				throw new Error(
-					`OpenClaw non-streaming response was not valid JSON (runId=${runId})`,
-				);
+				throw new Error(`OpenClaw non-streaming response was not valid JSON (runId=${runId})`);
 			}
 		}
 
@@ -495,9 +489,9 @@ export class OpenClawHttpClient implements OpenClawTransport {
 							const msg = output[0] as Record<string, unknown>;
 							const content = msg?.content as Record<string, unknown>[];
 							if (content?.length) {
-								const textPart = content.find(
-									(c) => c.type === 'output_text',
-								) as Record<string, unknown> | undefined;
+								const textPart = content.find((c) => c.type === 'output_text') as
+									| Record<string, unknown>
+									| undefined;
 								if (textPart?.text) {
 									fullText = textPart.text as string;
 								}
@@ -513,11 +507,8 @@ export class OpenClawHttpClient implements OpenClawTransport {
 						});
 					} else if (eventType === 'response.failed') {
 						const resp = parsed.response as Record<string, unknown>;
-						const error =
-							(resp?.error as Record<string, unknown>)?.message ?? 'Unknown error';
-						console.error(
-							`[OpenClaw][HTTP] response.failed runId=${runId} error=${String(error)}`,
-						);
+						const error = (resp?.error as Record<string, unknown>)?.message ?? 'Unknown error';
+						console.error(`[OpenClaw][HTTP] response.failed runId=${runId} error=${String(error)}`);
 						this._enqueueEvent(runId, {
 							source: 'chat',
 							runId,
@@ -642,20 +633,18 @@ export class OpenClawHttpClient implements OpenClawTransport {
 
 	private inputContainsImage(input: unknown): boolean {
 		if (!Array.isArray(input)) return false;
-		return input.some(
-			(item) => {
-				if (typeof item !== 'object' || item === null) return false;
-				const record = item as Record<string, unknown>;
-				if (record.type === 'input_image') return true;
-				if (record.type !== 'message' || !Array.isArray(record.content)) return false;
-				return record.content.some(
-					(part) =>
-						typeof part === 'object' &&
-						part !== null &&
-						(part as Record<string, unknown>).type === 'input_image',
-				);
-			},
-		);
+		return input.some((item) => {
+			if (typeof item !== 'object' || item === null) return false;
+			const record = item as Record<string, unknown>;
+			if (record.type === 'input_image') return true;
+			if (record.type !== 'message' || !Array.isArray(record.content)) return false;
+			return record.content.some(
+				(part) =>
+					typeof part === 'object' &&
+					part !== null &&
+					(part as Record<string, unknown>).type === 'input_image',
+			);
+		});
 	}
 
 	private buildErrorMessage(status: number, response: Response, bodyText: string): string {
@@ -681,8 +670,7 @@ export class OpenClawHttpClient implements OpenClawTransport {
 			parsed && parsed.error && typeof parsed.error === 'object'
 				? (parsed.error as Record<string, unknown>)
 				: parsed;
-		const gatewayMessage =
-			typeof envelope?.message === 'string' ? envelope.message : undefined;
+		const gatewayMessage = typeof envelope?.message === 'string' ? envelope.message : undefined;
 		const gatewayType = typeof envelope?.type === 'string' ? envelope.type : undefined;
 		const gatewayCode =
 			typeof envelope?.code === 'string' || typeof envelope?.code === 'number'

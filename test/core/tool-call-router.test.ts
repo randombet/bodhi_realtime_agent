@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { ToolCallRouter } from '../../src/core/tool-call-router.js';
@@ -24,7 +22,7 @@ function createBackgroundTool(name: string, pendingMessage?: string): ToolDefini
 describe('ToolCallRouter', () => {
 	it('uses createInstance() and records tool_call before handoff completion', async () => {
 		const createInstance = vi.fn();
-		let resolveHandoff: ((value: { text: string }) => void) | null = null;
+		let resolveHandoff!: (value: { text: string }) => void;
 		const handoff = vi.fn(
 			() =>
 				new Promise<{ text: string }>((resolve) => {
@@ -85,7 +83,7 @@ describe('ToolCallRouter', () => {
 		});
 		expect(addToolResult).not.toHaveBeenCalled();
 
-		resolveHandoff?.({ text: 'done' });
+		resolveHandoff({ text: 'done' });
 		await flushMicrotasks();
 
 		expect(addToolResult).toHaveBeenCalledWith({
@@ -145,5 +143,78 @@ describe('ToolCallRouter', () => {
 			error: 'handoff failed',
 		});
 		expect(reportError).toHaveBeenCalled();
+	});
+
+	it('acknowledges local background tools immediately before execution completes', async () => {
+		let resolveTool!: (value: {
+			toolCallId: string;
+			toolName: string;
+			result: unknown;
+		}) => void;
+		const handleToolCall = vi.fn(
+			() =>
+				new Promise<{ toolCallId: string; toolName: string; result: unknown }>((resolve) => {
+					resolveTool = resolve;
+				}),
+		);
+		const addToolCall = vi.fn();
+		const addToolResult = vi.fn();
+		const sendToolResult = vi.fn();
+
+		const router = new ToolCallRouter({
+			toolExecutor: {
+				handleToolCall,
+				cancel: vi.fn(),
+			} as never,
+			agentRouter: {
+				activeAgent: { name: 'main', tools: [createBackgroundTool('record_answer')] },
+				handoff: vi.fn(),
+				cancelSubagent: vi.fn(),
+			} as never,
+			conversationContext: {
+				addToolCall,
+				addToolResult,
+			} as never,
+			notificationQueue: { sendOrQueue: vi.fn() } as never,
+			transcriptManager: { flushInput: vi.fn(), saveOutputPrefix: vi.fn() } as never,
+			subagentConfigs: {},
+			sendToolResult,
+			transfer: vi.fn(),
+			reportError: vi.fn(),
+			log: vi.fn(),
+		});
+
+		router.handleToolCalls([{ id: 'tc_3', name: 'record_answer', args: { task: 'answer' } }]);
+
+		expect(handleToolCall).toHaveBeenCalledWith({
+			toolCallId: 'tc_3',
+			toolName: 'record_answer',
+			args: { task: 'answer' },
+		});
+		expect(addToolCall).toHaveBeenCalledWith({
+			toolCallId: 'tc_3',
+			toolName: 'record_answer',
+			args: { task: 'answer' },
+		});
+		expect(sendToolResult).toHaveBeenCalledWith({
+			id: 'tc_3',
+			name: 'record_answer',
+			result: expect.objectContaining({ status: 'accepted' }),
+			scheduling: 'immediate',
+		});
+		expect(addToolResult).not.toHaveBeenCalled();
+
+		resolveTool({
+			toolCallId: 'tc_3',
+			toolName: 'record_answer',
+			result: { status: 'recorded' },
+		});
+		await flushMicrotasks();
+
+		expect(addToolResult).toHaveBeenCalledWith({
+			toolCallId: 'tc_3',
+			toolName: 'record_answer',
+			result: { status: 'recorded' },
+		});
 	});
 });

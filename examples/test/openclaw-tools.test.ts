@@ -1,12 +1,14 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it, vi } from 'vitest';
+import type {
+	ChatEvent,
+	OpenClawClient,
+} from '../lib/openclaw-client.js';
 import { ArtifactRegistry } from '../lib/artifact-registry.js';
-import type { ChatEvent, OpenClawClient } from '../lib/openclaw-client.js';
 import {
 	askGeneralAgentTool,
 	askWorkAgentTool,
 	createOpenClawSubagentConfig,
+	createPersistentOpenClawSubagentConfig,
 } from '../lib/openclaw-tools.js';
 
 const TINY_PNG_B64 =
@@ -182,9 +184,7 @@ describe('openclaw tools', () => {
 		const result = await tools.openclaw_chat.execute({ message: 'Do thing' });
 		expect(result.status).toBe('completed');
 		// chatSend called with text only (no options object with attachments)
-		const call = (client.chatSend as ReturnType<typeof vi.fn>).mock.calls[0];
-		expect(call[1]).toBe('Do thing');
-		expect(call[2]).toBeUndefined();
+		expect(client.chatSend).toHaveBeenCalledWith('bodhi:test', 'Do thing', undefined);
 	});
 
 	it('openclaw_chat resolves artifactIds to attachments in chatSend', async () => {
@@ -310,5 +310,34 @@ describe('openclaw tools', () => {
 		});
 		expect(result.status).toBe('completed');
 		expect(result.attachmentWarning).toMatch(/expired\/missing/);
+	});
+
+	it('creates persistent OpenClaw config for actor-runtime path', async () => {
+		const client = createMockClient([
+			{
+				source: 'chat',
+				runId: 'run-1',
+				state: 'final',
+				text: 'Email sent.',
+				finalDisposition: 'completed',
+			},
+		]);
+
+		const config = createPersistentOpenClawSubagentConfig(client, 'session-42');
+		expect(config.lifetime).toBe('persistent_session');
+		expect(typeof config.persistentFactory).toBe('function');
+
+		const instance = await config.persistentFactory?.('ask_general_agent', config);
+		const text = await instance?.invoke('Fallback task', { task: 'Send the summary email' });
+
+		expect(client.sessionKey).toHaveBeenCalledWith('session-42');
+		expect(client.chatSend).toHaveBeenCalledWith(
+			'bodhi:test',
+			'Send the summary email',
+			expect.objectContaining({
+				idempotencyKey: expect.any(String),
+			}),
+		);
+		expect(text).toBe('Email sent.');
 	});
 });

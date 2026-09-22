@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it } from 'vitest';
 
 describe('module smoke test', () => {
@@ -11,7 +9,6 @@ describe('module smoke test', () => {
 		expect(mod.VoiceSession).toBeDefined();
 		expect(mod.EventBus).toBeDefined();
 		expect(mod.SessionManager).toBeDefined();
-		expect(mod.MultiUserSessionManager).toBeDefined();
 		expect(mod.ConversationContext).toBeDefined();
 		expect(mod.ConversationHistoryWriter).toBeDefined();
 		expect(mod.HooksManager).toBeDefined();
@@ -37,12 +34,6 @@ describe('module smoke test', () => {
 		expect(mod.ClientSenderAdapter).toBeDefined();
 		expect(mod.AudioBuffer).toBeDefined();
 		expect(mod.zodToJsonSchema).toBeDefined();
-
-		// Telephony/config
-		expect(mod.TwilioBridge).toBeDefined();
-		expect(mod.TwilioWebhookServer).toBeDefined();
-		expect(mod.twilioToFramework).toBeDefined();
-		expect(mod.loadConfig).toBeDefined();
 
 		// Memory
 		expect(mod.JsonMemoryStore).toBeDefined();

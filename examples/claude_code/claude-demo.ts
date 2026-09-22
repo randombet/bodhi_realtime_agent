@@ -16,7 +16,7 @@
  * Usage:
  *   1. Set environment variables (see below)
  *   2. Run: pnpm tsx examples/claude_code/claude-demo.ts
- *   3. In another terminal: pnpm tsx examples/openclaw/web-client.ts
+ *   3. In another terminal: pnpm web-client
  *   4. Open http://localhost:8080 in Chrome, click Connect
  *
  * Environment Variables:
@@ -448,7 +448,7 @@ async function main() {
 	console.log(`  Session ID:      ${SESSION_ID}`);
 	console.log();
 	console.log('Start the web client in another terminal:');
-	console.log('  pnpm tsx examples/openclaw/web-client.ts');
+	console.log('  pnpm web-client');
 	console.log();
 	console.log('Then open http://localhost:8080 and try saying:');
 	console.log("  - 'Fix the bug in auth.py'                 (Claude Code)");

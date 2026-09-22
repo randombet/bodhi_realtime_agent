@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it, vi } from 'vitest';
 import { MemoryCacheManager } from '../../src/core/memory-cache-manager.js';
 import type { MemoryStore } from '../../src/types/memory.js';

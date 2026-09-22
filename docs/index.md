@@ -4,7 +4,7 @@ layout: home
 hero:
   name: Bodhi Realtime Agent Framework
   text: Build Real-Time Voice Agents
-  tagline: TypeScript framework for voice AI applications with Gemini Live, OpenAI Realtime, custom TTS, subagents, and telephony bridges
+  tagline: TypeScript framework for voice AI applications — supports Google Gemini Live and OpenAI Realtime APIs
   actions:
     - theme: brand
       text: Get Started
@@ -13,12 +13,15 @@ hero:
       text: API Reference
       link: /api/
     - theme: alt
+      text: Hosted voice API
+      link: /service/hosted-voice-api
+    - theme: alt
       text: GitHub
       link: https://github.com/randombet/bodhi_realtime_agent
 
 features:
   - title: Real-Time Voice
-    details: Bidirectional audio streaming via a provider-agnostic LLMTransport interface. Supports Google Gemini Live and OpenAI Realtime APIs with server-side turn detection, pluggable STT providers, and normalized usage events.
+    details: Bidirectional audio streaming via a provider-agnostic LLMTransport interface. Supports Google Gemini Live and OpenAI Realtime APIs with server-side turn detection, pluggable STT providers, and sub-500ms latency.
   - title: Multi-Agent
     details: Define multiple agents with distinct personas and tool sets. Transfer between them mid-conversation with automatic context preservation.
   - title: Function Tools
@@ -31,8 +34,4 @@ features:
     details: Type-safe EventBus and lifecycle hooks for logging, metrics, and debugging. Zero overhead when unattached.
   - title: Multimodal
     details: Voice, text input, file upload, image generation, and artifact attachments on a single WebSocket connection. Mixed-mode interaction out of the box.
-  - title: Custom Speech
-    details: Swap native model audio for streaming TTS providers such as Cartesia or ElevenLabs, with sentence buffering, barge-in cancellation, word timing, and automatic resampling.
-  - title: Telephony
-    details: Bridge browser sessions to Twilio phone calls, accept inbound phone callers, and transfer between AI audio and external human audio while preserving session context.
 ---

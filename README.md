@@ -1,104 +1,21 @@
-<p align="center">
-  <img src="docs/images/icon_graphic_only.png" alt="Bodhi Agent" width="120" />
-</p>
+# Bodhi Realtime Agent Framework
 
-# Bodhi: High-Performance, Multi-Agent realtime Voice Stack
-
-[![npm version](https://img.shields.io/npm/v/bodhi-realtime-agent.svg)](https://www.npmjs.com/package/bodhi-realtime-agent)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-
-**Conversational voice agents with non-blocking background execution.** 
-(No other framework does this out of the box.)
-
----
-
-Most voice agent frameworks block conversation while tools execute. User says "generate me a video" and the agent goes silent for two minutes. Bodhi splits the work: **main agents** handle the live conversation (Gemini Live API by default, OpenAI Realtime also supported), while **background subagents** (Vercel AI SDK) run long tasks in parallel. When a task finishes, the agent naturally announces it.
-
-```
-User: "Make me a video of a sunset AND search for weather in Tokyo"
-
-Main Agent (Gemini/OpenAI Live — realtime voice):
-  "I'm generating your video and looking up the weather..."
-  │
-  ├─ Subagent 1: Video generation (2 min, Veo API)
-  ├─ Subagent 2: Web search (3 sec, Gemini)
-  │
-  "What else can I help with?"      ← keeps talking
-  │
-  [3s]  "The weather in Tokyo is..."  ← search result arrives
-  [2m]  "Your video is ready!"        ← video arrives
-```
-
-### Claude Code Demo — Voice-Driven Coding Assistant
-
-<p align="center">
-  <a href="https://youtube.com/watch?v=n3kNK-4expo">
-    <img src="https://img.youtube.com/vi/n3kNK-4expo/maxresdefault.jpg" alt="Watch the Claude Code demo" width="700" />
-  </a>
-  <br />
-  <em>Click to watch the demo</em>
-</p>
-
-Speak coding requests naturally — Claude Code reads, edits, creates files, runs commands, and searches your codebase in the background while you keep talking. See [examples/claude_code](examples/claude_code/) for setup.
-
-### OpenClaw Integration — Voice-Driven AI Agent
-
-<p align="center">
-  <a href="https://www.youtube.com/watch?v=skVLH2qCAQ4">
-    <img src="https://img.youtube.com/vi/skVLH2qCAQ4/maxresdefault.jpg" alt="Watch the OpenClaw demo" width="700" />
-  </a>
-  <br />
-  <em>Click to watch the demo</em>
-</p>
-
-The [OpenClaw demo](examples/openclaw/openclaw-demo.ts) shows a voice assistant backed by an **interactive background subagent**. Say "write a Python prime checker" or "summarize today's tech news by email" — the request is delegated to OpenClaw which can code, browse the web, send emails, and more. If it needs clarification, it asks the user via voice mid-task. See [examples/openclaw](examples/openclaw/) for setup.
-
+TypeScript framework for building real-time voice agent applications using the Google Gemini Live API.
 
 ## Features
 
-- **Background subagents**: Mark any tool as `execution: 'background'` — it hands off to a Vercel AI SDK subagent with its own tool-use loop (`maxSteps`), running in parallel while the voice agent continues the conversation. Subagents can be **interactive** — asking the user follow-up questions via voice mid-task
-- **Real-time voice**: Bidirectional audio streaming via Gemini Live API (default) or OpenAI Realtime API, with server-side VAD and turn detection
-- **Multi-agent transfers**: Define specialist agents with distinct personas and tools; transfer mid-conversation with context replay and audio buffering
-- **Inline + background tools**: `inline` tools block the turn (fast lookups); `background` tools run async (image/video generation, data analysis)
-- **Behaviors**: Declarative presets for speech speed, verbosity, language — auto-generates tools, manages state, syncs with client
-- **Google Search**: Built-in grounded web search via Gemini with source citations
-- **Image & video generation**: Generate media with Gemini/Veo and push to the client in real time
-- **Memory**: LLM-powered fact extraction and persistence across sessions with pluggable storage
+- **Real-time voice**: Bidirectional audio streaming with Gemini Live API and server-side turn detection
+- **Multi-agent**: Define multiple agents with distinct personas and tool sets; transfer between them mid-conversation
+- **Function tools**: Inline (blocking) and background (non-blocking) tool execution with Zod validation
+- **Background subagents**: Long-running tool calls hand off to Vercel AI SDK subagents while Gemini keeps talking
+- **Memory**: Automatic extraction and persistence of durable user facts across sessions
 - **Session resumption**: Transparent reconnection via Gemini resumption handles and audio buffering
 - **Observability**: Type-safe EventBus and lifecycle hooks for logging, metrics, and debugging
-- **Zero infrastructure.** No LiveKit server, no media SFU, no platform subscription. Just your Node.js server talking directly to Gemini (or OpenAI) over WebSocket.
-
-## How It Compares
-
-| | **Bodhi** | **LiveKit Agents** | **Pipecat** | **OpenAI Realtime Agents** | **ElevenLabs** |
-|---|---|---|---|---|---|
-| **Parallel background subagents** | Yes — built-in, each with own tool loop | No — manual async | No — manual frame injection | No — tools block | No |
-| **Voice keeps talking during tools** | Yes — `execution: 'background'` | No | No | No | No |
-| **Zero infrastructure** | Yes — direct to Gemini/OpenAI | No — requires LiveKit SFU | No — requires transport | Yes — but browser-only | No — hosted platform |
-| **Server-side tool execution** | Yes | Yes | Yes | No — browser sandbox | Yes — via webhooks |
-| **Multi-agent transfers** | Yes — with context replay | Yes — `updateAgent()` | Manual | Yes — declarative handoffs | Yes — visual editor |
-| **Provider support** | Gemini Live, OpenAI Realtime | OpenAI, Gemini, XAI | 60+ services | OpenAI only | Multiple LLMs |
-| **Memory / fact extraction** | Built-in | No | No | No | Platform-managed |
-| **Language** | TypeScript | TypeScript / Python | Python | TypeScript | REST API |
-
-### Who This Is For
-
-- You're building a **single-user voice assistant** that needs to do real work in the background (coding, research, data analysis, media generation) while staying conversational
-- You want **zero infrastructure** — no media servers, no platform subscriptions, just a Node.js process and an API key
-- You need **interactive background tasks** — subagents that can ask the user follow-up questions mid-task via voice
-- You're comfortable with TypeScript and want full control over your agent logic
-
-### Who This Is Not For
-
-- **Multi-participant rooms** (meetings, group calls) — use [LiveKit Agents](https://github.com/livekit/agents-js)
-- **Provider flexibility** (swap between 60+ STT/TTS/LLM services) — use [Pipecat](https://github.com/pipecat-ai/pipecat)
-- **Browser-only agents** (no server) — use [OpenAI Realtime Agents](https://github.com/openai/openai-agents-js)
-- **No-code / visual builder** — use [ElevenLabs](https://elevenlabs.io/)
 
 ## Requirements
 
 - Node.js >= 22
-- A Google API key for Gemini Live API (default), or an OpenAI API key for Realtime API
+- A Google API key with Gemini Live API access
 - pnpm (recommended)
 
 ## Installation
@@ -107,56 +24,15 @@ The [OpenClaw demo](examples/openclaw/openclaw-demo.ts) shows a voice assistant 
 pnpm add bodhi-realtime-agent
 ```
 
-## Quick Start
+To integrate the framework into your own backend: use `MultiClientTransport` to accept WebSockets, build a `SessionClientSender` per connection, and create a `VoiceSession` with that sender plus your agents and tools. Runnable demos live in [examples/](examples/README.md) — start with `pnpm tsx examples/hello_world/agent.ts` and `pnpm web-client`.
 
-```typescript
-import { createGoogleGenerativeAI } from '@ai-sdk/google';
-import { z } from 'zod';
-import { VoiceSession } from 'bodhi-realtime-agent';
-import type { MainAgent, ToolDefinition } from 'bodhi-realtime-agent';
+## Documentation
 
-// 1. Define tools
-const getCurrentTime: ToolDefinition = {
-  name: 'get_current_time',
-  description: 'Get the current date and time.',
-  parameters: z.object({
-    timezone: z.string().optional().describe('Timezone name'),
-  }),
-  execution: 'inline',
-  execute: async (args) => {
-    const { timezone } = args as { timezone?: string };
-    const now = new Date();
-    return {
-      time: now.toLocaleString('en-US', {
-        timeZone: timezone ?? undefined,
-        dateStyle: 'full',
-        timeStyle: 'long',
-      }),
-    };
-  },
-};
-
-// 2. Define agents
-const mainAgent: MainAgent = {
-  name: 'main',
-  instructions: 'You are a helpful voice assistant.',
-  tools: [getCurrentTime],
-};
-
-// 3. Create and start a session
-const session = new VoiceSession({
-  sessionId: `session_${Date.now()}`,
-  userId: 'user_1',
-  apiKey: process.env.GOOGLE_API_KEY!,
-  agents: [mainAgent],
-  initialAgent: 'main',
-  port: 9900,
-  model: createGoogleGenerativeAI({ apiKey: process.env.GOOGLE_API_KEY! })('gemini-2.5-flash'),
-});
-
-await session.start();
-// Connect a WebSocket audio client to ws://localhost:9900
-```
+| Audience | Location |
+| --- | --- |
+| **Framework wiki** (building on `src/`) | [docs/](docs/) (VitePress site source) and [docs/README.md](docs/README.md). |
+| **Hosted Bodhi API** (mobile / native clients over HTTPS + WSS) | [docs/service/hosted-voice-api.md](docs/service/hosted-voice-api.md). |
+| **Examples** (runnable demos + shared web client) | [examples/README.md](examples/README.md). |
 
 ## Core Concepts
 
@@ -301,39 +177,29 @@ const session = new VoiceSession({
 
 ### Memory
 
-The memory system automatically extracts durable facts about the user from conversation:
+The memory system automatically extracts durable facts about the user from conversation using a merge-on-write strategy — each extraction produces the complete updated fact list (deduped, contradictions resolved):
 
 ```typescript
-import { MarkdownMemoryStore, MemoryDistiller } from 'bodhi-realtime-agent';
+import { JsonMemoryStore } from 'bodhi-realtime-agent';
 
-const memoryStore = new MarkdownMemoryStore('./memory');
-const distiller = new MemoryDistiller(
-  conversationContext,
-  memoryStore,
-  hooksManager,
-  model,
-  { userId: 'user_1', sessionId: 'session_1' },
-);
-
-// Triggers extraction every 5 turns
-distiller.onTurnEnd();
-
-// Force extraction at checkpoints (agent transfer, session close)
-distiller.onCheckpoint();
-
-// Merge duplicate/contradictory facts
-await distiller.consolidate();
+const session = new VoiceSession({
+  // ...required config
+  memory: {
+    store: new JsonMemoryStore('./memory'),
+  },
+});
 ```
 
-Facts are persisted as Markdown files (`memory/{userId}.md`) organized by category:
+Facts are persisted as JSON files (`memory/{userId}.json`) with structured directives and categorized facts:
 
-```markdown
-## Preferences
-- Prefers dark mode
-- Likes concise answers
-
-## Entities
-- Works at Acme Corp
+```json
+{
+  "directives": { "pacing": "slow" },
+  "facts": [
+    { "content": "Prefers dark mode", "category": "preference" },
+    { "content": "Works at Acme Corp", "category": "entity" }
+  ]
+}
 ```
 
 ## Project Structure
@@ -361,18 +227,18 @@ src/
     audio-buffer.ts           # Bounded ring buffer for audio
     zod-to-schema.ts          # Zod → Gemini JSON Schema converter
   memory/            # User memory
-    markdown-memory-store.ts  # File-based memory persistence
-    memory-distiller.ts       # LLM-powered fact extraction
-    prompts.ts                # Extraction/consolidation prompt templates
+    json-memory-store.ts      # JSON file-based memory persistence
+    memory-distiller.ts       # LLM-powered fact extraction (merge-on-write)
+    prompts.ts                # Extraction prompt template
   types/             # TypeScript interfaces and type definitions
 test/                # Unit and integration tests (mirrors src/ structure)
-examples/            # Usage examples
+examples/            # Runnable demos (see examples/README.md)
 ```
 
 ## Development
 
 ```bash
-pnpm install        # Install dependencies
+pnpm install        # Install dependencies (single package — no nested workspaces)
 pnpm build          # Build with tsup (ESM + CJS + declarations)
 pnpm test           # Run tests with vitest
 pnpm test:watch     # Run tests in watch mode
@@ -381,18 +247,9 @@ pnpm lint:fix       # Auto-fix lint issues
 pnpm typecheck      # TypeScript type checking
 ```
 
-### Running the Examples
+Optional example-only setup (Python venv for SpatialReal, and similar) is **not** part of `pnpm install`; run `pnpm examples:setup` and see `examples/README.md`.
 
-```bash
-# Hello World — voice pacing, agent transfer, Google Search, image/video generation
-GEMINI_API_KEY=your_key pnpm tsx examples/hello_world/agent.ts
-
-# OpenClaw — voice-driven AI agent (coding, research, email, web browsing)
-# Requires an OpenClaw gateway running at ws://127.0.0.1:18789
-pnpm tsx examples/openclaw/openclaw-demo.ts
-```
-
-Then start the web client (`pnpm tsx examples/openclaw/web-client.ts`) and open http://localhost:8080 in Chrome. See [hello_world](examples/hello_world/) and [openclaw](examples/openclaw/) for details.
+Publishable browser embed packages (`@bodhi_lab/bodhi-sdk-core`, `@bodhi_lab/bodhi-web-sdk`, `@bodhi_lab/bodhi-widget`) live in a **separate git repository**, `bodhi-lab-client-packages`, typically cloned as a sibling of this repo.
 
 ### Integration Tests
 
@@ -404,4 +261,4 @@ GOOGLE_API_KEY=your_key pnpm test
 
 ## License
 
-[MIT](LICENSE)
+UNLICENSED

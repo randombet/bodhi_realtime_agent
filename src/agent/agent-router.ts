@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { LanguageModelV1 } from 'ai';
 import type { ConversationContext } from '../core/conversation-context.js';
 import { AgentError } from '../core/errors.js';
@@ -7,11 +5,13 @@ import type { IEventBus } from '../core/event-bus.js';
 import type { HooksManager } from '../core/hooks.js';
 import type { SessionManager } from '../core/session-manager.js';
 import type { MainAgent, SubagentConfig } from '../types/agent.js';
+import type { AnyServerToClientMessage } from '../types/client-protocol.js';
 import type { SubagentResult, ToolCall } from '../types/conversation.js';
+import type { MemoryFact } from '../types/memory.js';
 import type { IClientChannel } from '../types/session-client.js';
 import type { ToolDefinition } from '../types/tool.js';
 import type { LLMTransport } from '../types/transport.js';
-import { createAgentContext, resolveInstructions } from './agent-context.js';
+import { createAgentContext, resolveAgentWithKnowledgeBase } from './agent-context.js';
 import { runSubagent } from './subagent-runner.js';
 import type { SubagentMessage, SubagentSession } from './subagent-session.js';
 import { SubagentSessionImpl } from './subagent-session.js';
@@ -71,6 +71,9 @@ export class AgentRouter {
 	private activeSubagents = new Map<string, ActiveSubagent>();
 	/** Response modality to include in transfer SessionUpdate (set by VoiceSession for TTS). */
 	responseModality?: 'audio' | 'text';
+	/** H2 gate-aware transfer drain (set by VoiceSession): filters
+	 *  capture-tagged inbound frames and transform-sends admitted ones. */
+	drainBufferedInbound?: () => Buffer[];
 
 	constructor(
 		private sessionManager: SessionManager,
@@ -84,6 +87,10 @@ export class AgentRouter {
 		private extraTools: ToolDefinition[] = [],
 		private subagentCallbacks?: SubagentEventCallbacks,
 		private externalAudioCallbacks?: ExternalAudioCallbacks,
+		/** Cached user memory facts for subagent system prompts (VoiceSession wires from MemoryCacheManager). */
+		private getMemoryFacts?: () => MemoryFact[],
+		/** Prompt-injected KB text for the active main agent (VoiceSession wires from processed KB). */
+		private getKnowledgeBaseContext?: () => string | undefined,
 	) {}
 
 	registerAgents(agents: MainAgent[]): void {
@@ -111,6 +118,9 @@ export class AgentRouter {
 	 * Transfer the active LLM session to a different agent.
 	 * Uses transport.transferSession() — the transport decides whether to
 	 * apply in-place (OpenAI session.update) or reconnect-based (Gemini).
+	 *
+	 * @deprecated Use `MainAgentActor` via `RuntimeOrchestrator` instead.
+	 * Retained for backward compatibility during the actor runtime transition.
 	 */
 	async transfer(toAgentName: string): Promise<void> {
 		const toAgent = this.agents.get(toAgentName);
@@ -154,10 +164,11 @@ export class AgentRouter {
 					agentName: toAgent.name,
 				});
 			} else {
-				// Standard LLM agent: reconnect transport with new config
+				// Standard LLM agent: reconnect transport with new config (KB-aware)
 				const suffix = this.getInstructionSuffix?.() ?? '';
-				const resolvedInstructions = resolveInstructions(toAgent) + suffix;
-				const allTools = [...toAgent.tools, ...this.extraTools];
+				const resolved = resolveAgentWithKnowledgeBase(toAgent);
+				const resolvedInstructions = resolved.instructions + suffix;
+				const allTools = [...resolved.tools, ...this.extraTools];
 
 				const state = {
 					conversationHistory: this.conversationContext.toReplayContent(),
@@ -180,10 +191,17 @@ export class AgentRouter {
 					state,
 				);
 
-				// Stop buffering and replay audio
-				const buffered = this.clientTransport.stopBuffering();
-				for (const chunk of buffered) {
-					this.transport.sendAudio(chunk.toString('base64'));
+				// Stop buffering and replay audio. H2 gate-aware drain: when the
+				// session provides the drain (local ClientTransport with capture
+				// tagging), gate-active frames are discarded and admitted frames
+				// transform-sent; legacy raw path otherwise.
+				if (this.drainBufferedInbound) {
+					this.drainBufferedInbound();
+				} else {
+					const buffered = this.clientTransport.stopBuffering();
+					for (const chunk of buffered) {
+						this.transport.sendAudio(chunk.toString('base64'));
+					}
 				}
 
 				this.sessionManager.transitionTo('ACTIVE');
@@ -204,9 +222,9 @@ export class AgentRouter {
 				toAgent: toAgentName,
 			});
 		} catch (err) {
-			// Transfer failed — session is broken, clean up and transition to CLOSED
+			// Transfer failed — session is broken, clean up and close with a stable reason
 			this.clientTransport.stopBuffering();
-			this.sessionManager.transitionTo('CLOSED');
+			void this.sessionManager.closeWithReason('transfer_failed');
 			const error = new AgentError(
 				`Transfer to "${toAgentName}" failed: ${err instanceof Error ? err.message : String(err)}`,
 			);
@@ -239,6 +257,9 @@ export class AgentRouter {
 
 	/**
 	 * Spawn a background subagent to handle a tool call asynchronously.
+	 *
+	 * @deprecated Use `SubagentSupervisorActor` via `RuntimeOrchestrator` instead.
+	 * Retained for backward compatibility during the actor runtime transition.
 	 */
 	async handoff(
 		toolCall: ToolCall,
@@ -293,6 +314,8 @@ export class AgentRouter {
 		}
 
 		try {
+			const memoryFacts = this.getMemoryFacts?.() ?? [];
+			const kbContext = this.getKnowledgeBaseContext?.()?.trim();
 			const context = this.conversationContext.getSubagentContext(
 				{
 					description: `Execute tool: ${toolCall.toolName}`,
@@ -301,7 +324,9 @@ export class AgentRouter {
 					args: toolCall.args,
 				},
 				subagentConfig.instructions,
-				[],
+				memoryFacts,
+				10,
+				kbContext,
 			);
 
 			const result = await runSubagent({
@@ -366,7 +391,7 @@ export class AgentRouter {
 					handler(chunk);
 				}
 			},
-			sendJsonToClient: (message: Record<string, unknown>) => {
+			sendJsonToClient: (message: AnyServerToClientMessage) => {
 				this.clientTransport.sendJsonToClient(message);
 			},
 			sendAudioToClient: (data: Buffer) => {

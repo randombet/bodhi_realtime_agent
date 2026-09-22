@@ -1,10 +1,8 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Audio Fast-Path Invariant Tests
  *
- * These tests enforce the strict data/control plane separation defined in
- * dev_docs/framework/audio-fast-path-contract.md. They act as architectural guardrails
+ * These tests enforce the strict data/control plane separation of the audio
+ * fast path. They act as architectural guardrails
  * that fail if someone routes audio through the control plane.
  */
 
@@ -57,14 +55,14 @@ describe('Audio Fast-Path Invariant', () => {
 
 	// -- Transport interfaces carry audio via direct callbacks -----------------
 
-	it('LLMTransport audio callbacks are direct (not control-plane-routed)', () => {
+	it('LLMTransport audio callbacks are direct (not actor-routed)', () => {
 		// This test validates the architectural contract by checking the type shape.
-		// LLMTransport.sendAudio() is a direct method call, not a control-plane message.
+		// LLMTransport.sendAudio() is a direct method call, not an actor message.
 		// We import the type and verify it has a sendAudio method (not an envelope sender).
 
 		// The fact that LLMTransport has `sendAudio(base64: string): void` as a
 		// synchronous direct method (not async-envelope-based) is the invariant.
-		// If someone changes this to an envelope message, this import pattern will break.
+		// If someone changes this to an actor message, this import pattern will break.
 		type SendAudioFn = (base64: string) => void;
 
 		// Type-level assertion: this compiles only if sendAudio is a direct void method
@@ -119,11 +117,11 @@ describe('Audio Fast-Path Invariant', () => {
 		}
 	});
 
-	// -- Audio format is negotiated directly, not via control-plane messages ---
+	// -- Audio format is negotiated directly, not via actor messages -----------
 
 	it('audio format negotiation happens at transport construction, not via messages', () => {
 		// The LLMTransport interface exposes audioFormat as a property (direct access),
-		// not as a message exchange. This is by design:
+		// not as an actor message exchange. This is by design:
 		// format is known at construction time and doesn't change mid-session.
 		//
 		// This test documents the invariant: audio format is a transport property.

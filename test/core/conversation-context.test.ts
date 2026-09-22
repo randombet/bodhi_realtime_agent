@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it } from 'vitest';
 import { ConversationContext } from '../../src/core/conversation-context.js';
 
@@ -110,6 +108,16 @@ describe('ConversationContext', () => {
 			expect(ctx.getItemsSinceCheckpoint()).toHaveLength(1);
 			expect(ctx.getItemsSinceCheckpoint()[0].content).toBe('new');
 		});
+
+		it('{ alreadyPersisted: false } leaves the checkpoint so loaded items re-flush', () => {
+			const ctx = new ConversationContext();
+			ctx.loadItems([{ role: 'user' as const, content: 'resumed', timestamp: 1000 }], {
+				alreadyPersisted: false,
+			});
+			expect(ctx.items).toHaveLength(1);
+			// checkpoint NOT advanced → the loaded item is still pending flush (copy-mode)
+			expect(ctx.getItemsSinceCheckpoint()).toHaveLength(1);
+		});
 	});
 
 	describe('setSummary', () => {
@@ -153,6 +161,20 @@ describe('ConversationContext', () => {
 			expect(snapshot.recentTurns[0].content).toBe('turn2');
 			expect(snapshot.relevantMemoryFacts).toEqual(facts);
 			expect(snapshot.agentInstructions).toBe('You are a booking agent.');
+			expect(snapshot.knowledgeBaseContext).toBeUndefined();
+		});
+
+		it('includes knowledgeBaseContext on snapshot when provided', () => {
+			const ctx = new ConversationContext();
+			ctx.addUserMessage('turn1');
+			const task = {
+				description: 'Summarize',
+				toolCallId: 'tc_1',
+				toolName: 'summarize',
+				args: {},
+			};
+			const snapshot = ctx.getSubagentContext(task, 'Agent instr', [], 10, 'Injected KB text');
+			expect(snapshot.knowledgeBaseContext).toBe('Injected KB text');
 		});
 	});
 
@@ -218,6 +240,32 @@ describe('ConversationContext', () => {
 				toAgent: 'booking',
 			});
 		});
+
+		it('carries error through on an errored tool_result', () => {
+			const ctx = new ConversationContext();
+			ctx.addToolResult({ toolCallId: 'tc', toolName: 'fn', result: null, error: 'boom' });
+			const content = ctx.toReplayContent();
+			expect(content[0]).toEqual({
+				type: 'tool_result',
+				id: 'tc',
+				name: 'fn',
+				result: null,
+				error: 'boom',
+			});
+		});
+
+		it('drops + logs a malformed tool row instead of demoting it to assistant text', () => {
+			const ctx = new ConversationContext();
+			ctx.loadItems([
+				{ role: 'tool_call' as const, content: '{not valid json', timestamp: 1 },
+				{ role: 'user' as const, content: 'ok', timestamp: 2 },
+			]);
+			const logs: string[] = [];
+			const content = ctx.toReplayContent({ log: (m) => logs.push(m) });
+			// the malformed tool_call is NOT emitted (neither as tool_call nor as assistant text)
+			expect(content).toEqual([{ type: 'text', role: 'user', text: 'ok' }]);
+			expect(logs.some((l) => l.includes('tool_call'))).toBe(true);
+		});
 	});
 
 	it('items are exposed as readonly', () => {
@@ -226,5 +274,80 @@ describe('ConversationContext', () => {
 		const items = ctx.items;
 		// TypeScript prevents mutation, but at runtime it's an array reference
 		expect(Array.isArray(items)).toBe(true);
+	});
+
+	describe('reserved user messages (authoritative-transcript barrier)', () => {
+		it('holds the slot in timeline order and seals with the authoritative text', () => {
+			const ctx = new ConversationContext();
+			const id = ctx.reserveUserMessage('task.');
+			ctx.addAssistantMessage('Checking now.');
+
+			expect(ctx.sealUserMessage(id, 'Is there any pending task?')).toBe(true);
+			expect(ctx.items.map((i) => i.content)).toEqual([
+				'Is there any pending task?',
+				'Checking now.',
+			]);
+		});
+
+		it('replay reads the sealed text', () => {
+			const ctx = new ConversationContext();
+			const id = ctx.reserveUserMessage('cal');
+			ctx.sealUserMessage(id, 'How could it connect to my local Mac?');
+
+			expect(ctx.toReplayContent()[0]).toEqual({
+				type: 'text',
+				role: 'user',
+				text: 'How could it connect to my local Mac?',
+			});
+		});
+
+		it('withholds a pending item — and everything after it — from the store', () => {
+			const ctx = new ConversationContext();
+			ctx.addUserMessage('earlier turn');
+			const id = ctx.reserveUserMessage('provisional');
+			ctx.addAssistantMessage('later item');
+
+			// Only the settled prefix is flushable.
+			expect(ctx.getItemsSinceCheckpoint().map((i) => i.content)).toEqual(['earlier turn']);
+			ctx.markCheckpoint();
+			expect(ctx.getItemsSinceCheckpoint()).toEqual([]);
+
+			ctx.sealUserMessage(id, 'authoritative');
+			expect(ctx.getItemsSinceCheckpoint().map((i) => i.content)).toEqual([
+				'authoritative',
+				'later item',
+			]);
+		});
+
+		it('seals with the provisional text when no authoritative text arrives', () => {
+			const ctx = new ConversationContext();
+			const id = ctx.reserveUserMessage('provisional');
+
+			expect(ctx.sealUserMessage(id)).toBe(true);
+			expect(ctx.hasPendingUserMessages).toBe(false);
+			expect(ctx.getItemsSinceCheckpoint().map((i) => i.content)).toEqual(['provisional']);
+		});
+
+		it('ignores an unknown or already-sealed id', () => {
+			const ctx = new ConversationContext();
+			const id = ctx.reserveUserMessage('x');
+			ctx.sealUserMessage(id, 'y');
+
+			expect(ctx.sealUserMessage(id, 'z')).toBe(false);
+			expect(ctx.sealUserMessage('nope', 'z')).toBe(false);
+			expect(ctx.items[0].content).toBe('y');
+		});
+
+		it('a pending item survives summary eviction', () => {
+			const ctx = new ConversationContext();
+			ctx.addUserMessage('old');
+			ctx.markCheckpoint();
+			const id = ctx.reserveUserMessage('provisional');
+
+			ctx.setSummary('summary of earlier turns');
+
+			expect(ctx.sealUserMessage(id, 'authoritative')).toBe(true);
+			expect(ctx.items.map((i) => i.content)).toEqual(['authoritative']);
+		});
 	});
 });

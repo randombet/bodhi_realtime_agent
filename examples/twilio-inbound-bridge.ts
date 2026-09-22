@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Twilio Inbound Call Bridge
  *
@@ -10,7 +8,7 @@
  * Phone (PSTN) → Twilio → Bridge (:8766) → VoiceSession (:9900) → Gemini
  *
  * Usage:
- *   1. Start the server (pnpm start) or any demo agent
+ *   1. Start any demo agent (e.g. pnpm tsx examples/hello_world/agent.ts)
  *   2. Start ngrok: ngrok http 8766
  *   3. Set TWILIO_WEBHOOK_URL to the ngrok URL
  *   4. Configure your Twilio phone number's webhook to https://…/voice

@@ -1,7 +1,6 @@
-// SPDX-License-Identifier: MIT
-
 export {
 	AgentError,
+	CachePrefixMutationError,
 	FrameworkError,
 	MemoryError,
 	SessionError,
@@ -43,17 +42,23 @@ export type { SessionStore } from './session-store.js';
 
 export { MemoryCacheManager } from './memory-cache-manager.js';
 
-export { MultiUserSessionManager } from './multi-user-session-manager.js';
-export type {
-	MultiUserSessionManagerConfig,
-	SessionMetadata,
-} from './multi-user-session-manager.js';
-
 export { ToolCallRouter } from './tool-call-router.js';
 export type { ToolCallRouterDeps } from './tool-call-router.js';
 
 export { TranscriptManager } from './transcript-manager.js';
 export type { TranscriptSink } from './transcript-manager.js';
+
+export { Turn } from './turn.js';
+export type { TurnMatch, TurnSignalPurpose, TurnState } from './turn.js';
+
+export {
+	computeCacheHitRatio,
+	deriveProviderItemId,
+	deriveUsageSource,
+} from './usage-helpers.js';
+// RealtimeUsageSource is exported from src/types/index.ts as the canonical
+// public type (defined identically in both modules to avoid an import cycle
+// between types/events.ts and core/usage-helpers.ts).
 
 export { VoiceSession } from './voice-session.js';
 export type { VoiceSessionConfig } from './voice-session.js';

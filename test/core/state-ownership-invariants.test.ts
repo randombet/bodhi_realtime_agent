@@ -1,15 +1,13 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * State Ownership Invariant Tests
  *
- * Enforces the single-source-of-truth rule defined in
- * dev_docs/framework/state-ownership-map.md. Each state domain has exactly one
- * authoritative owner. Session components coordinate through these owners and
- * never maintain parallel copies of the same state.
+ * Enforces the single-source-of-truth rule: each state domain has exactly one
+ * authoritative owner. Actor components orchestrate over these owners —
+ * they never maintain parallel copies of the same state.
  */
 
 import { describe, expect, it, vi } from 'vitest';
+import { PersistentSubagentManager } from '../../src/agent/persistent-subagent-manager.js';
 import { SubagentSessionImpl } from '../../src/agent/subagent-session.js';
 import { InteractionModeManager } from '../../src/core/interaction-mode.js';
 import { SessionManager } from '../../src/core/session-manager.js';
@@ -110,6 +108,27 @@ describe('State Ownership Invariants', () => {
 			mgr.deactivate('tool-1');
 			await secondReady;
 			expect(mgr.getActiveToolCallId()).toBe('tool-2');
+		});
+	});
+
+	// -- PersistentSubagentManager owns persistent instance registry ----------
+
+	describe('PersistentSubagentManager is the sole persistent instance authority', () => {
+		it('maintains key → instance mapping with proper lifecycle', async () => {
+			const mgr = new PersistentSubagentManager();
+			const factory = vi.fn(async (key: string) => ({
+				key,
+				invoke: vi.fn().mockResolvedValue('ok'),
+				dispose: vi.fn().mockResolvedValue(undefined),
+			}));
+
+			expect(mgr.has('k1')).toBe(false);
+
+			await mgr.acquirePersistent('k1', { name: 'a', instructions: '', tools: {} }, factory);
+			expect(mgr.has('k1')).toBe(true);
+
+			await mgr.releasePersistent('k1');
+			expect(mgr.has('k1')).toBe(false);
 		});
 	});
 

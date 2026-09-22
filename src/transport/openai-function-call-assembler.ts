@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * OpenAI function call argument assembler.
  *

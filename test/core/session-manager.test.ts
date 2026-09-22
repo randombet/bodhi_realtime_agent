@@ -1,21 +1,46 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it, vi } from 'vitest';
 import { SessionError } from '../../src/core/errors.js';
 import { EventBus } from '../../src/core/event-bus.js';
 import { HooksManager } from '../../src/core/hooks.js';
-import { SessionManager } from '../../src/core/session-manager.js';
+import { SessionManager, type SessionPostProcessing } from '../../src/core/session-manager.js';
+import { InMemoryPostSessionPipeline } from '../../src/post-session/pipeline.js';
+import {
+	PostSessionProcessor,
+	type PostSessionSnapshot,
+	type PostSessionSnapshotBuilder,
+} from '../../src/post-session/types.js';
 
-function createManager() {
+function createManager(postSession?: SessionPostProcessing) {
 	const eventBus = new EventBus();
 	const hooks = new HooksManager();
 	const mgr = new SessionManager(
 		{ sessionId: 'sess_1', userId: 'user_1', initialAgent: 'general' },
 		eventBus,
 		hooks,
+		postSession,
 	);
 	return { mgr, eventBus, hooks };
 }
+
+const snapshotBuilder =
+	(opts?: { throwOnBuild?: boolean }): PostSessionSnapshotBuilder =>
+	(reason) => {
+		if (opts?.throwOnBuild) throw new Error('snapshot build failed');
+		const snapshot: PostSessionSnapshot = {
+			sessionId: 'sess_1',
+			userId: 'user_1',
+			initialAgentName: 'general',
+			finalAgentName: 'general',
+			transferPath: ['general'],
+			reason,
+			startedAt: 0,
+			endedAt: 1,
+			durationMs: 1,
+			conversation: { items: [] },
+			metrics: { turnCount: 0, toolCallCount: 0, agentTransferCount: 0 },
+		};
+		return { snapshot, stores: {} };
+	};
 
 describe('SessionManager', () => {
 	it('starts in CREATED state', () => {
@@ -166,6 +191,206 @@ describe('SessionManager', () => {
 		});
 	});
 
+	describe('closeWithReason', () => {
+		it('transitions to CLOSED and preserves the caller reason on onSessionEnd + session.close', () => {
+			const { mgr, eventBus, hooks } = createManager();
+			const onSessionEnd = vi.fn();
+			const onClose = vi.fn();
+			hooks.register({ onSessionEnd });
+			eventBus.subscribe('session.close', onClose);
+
+			mgr.transitionTo('CONNECTING');
+			mgr.transitionTo('ACTIVE');
+			mgr.closeWithReason('reconnect_failed');
+
+			expect(mgr.state).toBe('CLOSED');
+			expect(onSessionEnd).toHaveBeenCalledWith(
+				expect.objectContaining({ sessionId: 'sess_1', reason: 'reconnect_failed' }),
+			);
+			expect(onClose).toHaveBeenCalledWith({ sessionId: 'sess_1', reason: 'reconnect_failed' });
+		});
+
+		it('is idempotent — duplicate/re-entrant calls fire session.close exactly once', () => {
+			const { mgr, eventBus } = createManager();
+			const onClose = vi.fn();
+			eventBus.subscribe('session.close', onClose);
+
+			mgr.closeWithReason('user_hangup');
+			mgr.closeWithReason('error'); // racing path — must be a no-op
+			mgr.closeWithReason('timeout');
+
+			expect(onClose).toHaveBeenCalledOnce();
+			expect(onClose).toHaveBeenCalledWith({ sessionId: 'sess_1', reason: 'user_hangup' });
+		});
+
+		it('is a no-op when already CLOSED via direct transitionTo', () => {
+			const { mgr, eventBus } = createManager();
+			const onClose = vi.fn();
+			eventBus.subscribe('session.close', onClose);
+
+			mgr.transitionTo('CLOSED'); // legacy direct close → derives reason
+			mgr.closeWithReason('user_hangup'); // already closed → no-op
+
+			expect(onClose).toHaveBeenCalledOnce();
+			expect(onClose).toHaveBeenCalledWith({ sessionId: 'sess_1', reason: 'CREATED' });
+		});
+
+		it('legacy transitionTo(CLOSED) still derives a reason when no caller reason set', () => {
+			const { mgr, eventBus } = createManager();
+			const onClose = vi.fn();
+			eventBus.subscribe('session.close', onClose);
+
+			mgr.transitionTo('CONNECTING');
+			mgr.transitionTo('ACTIVE');
+			mgr.transitionTo('CLOSED');
+
+			expect(onClose).toHaveBeenCalledWith({ sessionId: 'sess_1', reason: 'normal' });
+		});
+	});
+
+	describe('pre-close finalizers + hook isolation', () => {
+		it('runs registered finalizers before session.close publishes', async () => {
+			const { mgr, eventBus } = createManager();
+			const order: string[] = [];
+			eventBus.subscribe('session.close', () => order.push('close'));
+			mgr.registerPreCloseFinalizer(() => {
+				order.push('finalizer-a');
+			});
+			mgr.registerPreCloseFinalizer(async () => {
+				order.push('finalizer-b');
+			});
+
+			await mgr.closeWithReason('normal');
+
+			expect(order).toEqual(['finalizer-a', 'finalizer-b', 'close']);
+			expect(mgr.state).toBe('CLOSED');
+		});
+
+		it('a throwing finalizer is logged but session.close still fires', async () => {
+			const { mgr, eventBus } = createManager();
+			const onClose = vi.fn();
+			eventBus.subscribe('session.close', onClose);
+			const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+			mgr.registerPreCloseFinalizer(() => {
+				throw new Error('finalizer boom');
+			});
+
+			await mgr.closeWithReason('normal');
+
+			expect(onClose).toHaveBeenCalledOnce();
+			expect(mgr.state).toBe('CLOSED');
+			expect(spy).toHaveBeenCalled();
+			spy.mockRestore();
+		});
+
+		it('a throwing onSessionEnd hook does not prevent session.close', () => {
+			const { mgr, eventBus, hooks } = createManager();
+			const onClose = vi.fn();
+			eventBus.subscribe('session.close', onClose);
+			const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+			hooks.register({
+				onSessionEnd: () => {
+					throw new Error('hook boom');
+				},
+			});
+
+			mgr.closeWithReason('normal');
+
+			expect(onClose).toHaveBeenCalledOnce();
+			expect(mgr.state).toBe('CLOSED');
+			spy.mockRestore();
+		});
+
+		it('a throwing onSessionStart hook does not prevent session.start', () => {
+			const { mgr, eventBus, hooks } = createManager();
+			const onStart = vi.fn();
+			eventBus.subscribe('session.start', onStart);
+			const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+			hooks.register({
+				onSessionStart: () => {
+					throw new Error('start boom');
+				},
+			});
+
+			mgr.transitionTo('CONNECTING');
+			mgr.transitionTo('ACTIVE');
+
+			expect(onStart).toHaveBeenCalledOnce();
+			expect(mgr.state).toBe('ACTIVE');
+			spy.mockRestore();
+		});
+	});
+
+	describe('post-session dispatch (phase 4)', () => {
+		it('dispatches the pipeline once on close and reports accepted', async () => {
+			const pipeline = new InMemoryPostSessionPipeline();
+			pipeline.freeze();
+			const reports: string[] = [];
+			pipeline.events.onProcessed((r) => reports.push(r.outcome));
+			const { mgr } = createManager({ pipeline });
+			mgr.registerSnapshotBuilder(snapshotBuilder());
+
+			mgr.transitionTo('CONNECTING');
+			mgr.transitionTo('ACTIVE');
+			await mgr.closeWithReason('normal');
+
+			expect(reports).toEqual(['accepted']);
+		});
+
+		it('does not dispatch when no pipeline is configured (unchanged behavior)', async () => {
+			const { mgr } = createManager();
+			await mgr.closeWithReason('normal');
+			expect(mgr.state).toBe('CLOSED'); // closes fine; nothing to assert beyond no throw
+		});
+
+		it('drain mode awaits the run report before resolving', async () => {
+			const pipeline = new InMemoryPostSessionPipeline();
+			let ran = false;
+			class Slow extends PostSessionProcessor {
+				readonly name = 'slow';
+				async run() {
+					await new Promise((r) => setTimeout(r, 15));
+					ran = true;
+				}
+			}
+			pipeline.register(new Slow());
+			pipeline.freeze();
+			const { mgr } = createManager({ pipeline, drain: true });
+			mgr.registerSnapshotBuilder(snapshotBuilder());
+
+			await mgr.closeWithReason('normal');
+			expect(ran).toBe(true); // drain awaited the processor
+		});
+
+		it('build thunk throwing yields a failed_to_start report', async () => {
+			const pipeline = new InMemoryPostSessionPipeline();
+			pipeline.freeze();
+			const outcomes: Array<{ outcome: string; failureReason?: string }> = [];
+			pipeline.events.onProcessed((r) =>
+				outcomes.push({ outcome: r.outcome, failureReason: r.failureReason }),
+			);
+			const { mgr } = createManager({ pipeline });
+			mgr.registerSnapshotBuilder(snapshotBuilder({ throwOnBuild: true }));
+
+			await mgr.closeWithReason('normal');
+
+			expect(outcomes).toEqual([{ outcome: 'failed_to_start', failureReason: 'snapshot_failed' }]);
+		});
+
+		it('dispatches exactly once under duplicate close', async () => {
+			const pipeline = new InMemoryPostSessionPipeline();
+			pipeline.freeze();
+			const reports: string[] = [];
+			pipeline.events.onProcessed((r) => reports.push(r.outcome));
+			const { mgr } = createManager({ pipeline });
+			mgr.registerSnapshotBuilder(snapshotBuilder());
+
+			await mgr.closeWithReason('user_hangup');
+			await mgr.closeWithReason('error'); // no-op
+			expect(reports).toEqual(['accepted']);
+		});
+	});
+
 	describe('resumption', () => {
 		it('starts with null handle', () => {
 			const { mgr } = createManager();
@@ -189,6 +414,22 @@ describe('SessionManager', () => {
 				sessionId: 'sess_1',
 				handle: 'handle_abc',
 			});
+		});
+
+		// P2: clear-on-non-resumable so reconnect-with-state cannot stale-resume
+		it('clearResumptionHandle resets to null', () => {
+			const { mgr } = createManager();
+			mgr.updateResumptionHandle('handle_abc');
+			expect(mgr.resumptionHandle).toBe('handle_abc');
+			mgr.clearResumptionHandle();
+			expect(mgr.resumptionHandle).toBeNull();
+		});
+
+		it('clearResumptionHandle is idempotent on already-null state', () => {
+			const { mgr } = createManager();
+			expect(mgr.resumptionHandle).toBeNull();
+			mgr.clearResumptionHandle();
+			expect(mgr.resumptionHandle).toBeNull();
 		});
 	});
 

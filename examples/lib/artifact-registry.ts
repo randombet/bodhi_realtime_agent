@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { randomBytes } from 'node:crypto';
 
 // ---------------------------------------------------------------------------
@@ -31,17 +29,12 @@ export interface ArtifactSummary {
 // Constants
 // ---------------------------------------------------------------------------
 
-const ALLOWED_MIME_TYPES = new Set([
-	'image/png',
-	'image/jpeg',
-	'image/webp',
-	'image/gif',
-]);
+const ALLOWED_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
 
 const DEFAULT_MAX_COUNT = 20;
 const DEFAULT_MAX_BUDGET_BYTES = 50 * 1024 * 1024; // 50 MB decoded
 const DEFAULT_MAX_ARTIFACT_BYTES = 5 * 1024 * 1024; // 5 MB decoded
-const DEFAULT_TTL_MS = Infinity; // Session lifetime by default
+const DEFAULT_TTL_MS = Number.POSITIVE_INFINITY; // Session lifetime by default
 
 // ---------------------------------------------------------------------------
 // ArtifactRegistry
@@ -93,12 +86,10 @@ export class ArtifactRegistry {
 	): string {
 		if (!ALLOWED_MIME_TYPES.has(mimeType)) {
 			const allowed = [...ALLOWED_MIME_TYPES].join(', ');
-			throw new Error(
-				`Unsupported MIME type "${mimeType}". Supported: ${allowed}.`,
-			);
+			throw new Error(`Unsupported MIME type "${mimeType}". Supported: ${allowed}.`);
 		}
 
-		const sizeBytes = Math.ceil(base64.length * 3 / 4);
+		const sizeBytes = Math.ceil((base64.length * 3) / 4);
 		if (sizeBytes > this.maxArtifactBytes) {
 			const limitMB = (this.maxArtifactBytes / (1024 * 1024)).toFixed(0);
 			throw new Error(
@@ -193,7 +184,7 @@ export class ArtifactRegistry {
 	// -- Private -------------------------------------------------------------
 
 	private isExpired(artifact: Artifact): boolean {
-		if (this.ttlMs === Infinity) return false;
+		if (this.ttlMs === Number.POSITIVE_INFINITY) return false;
 		return this.now() - artifact.createdAt > this.ttlMs;
 	}
 

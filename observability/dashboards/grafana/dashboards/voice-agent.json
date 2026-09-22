@@ -1,0 +1,133 @@
+{
+  "title": "Bodhi Voice Agent — HAI Metrics",
+  "uid": "bodhi-voice-agent",
+  "tags": ["voice", "hai", "observability"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": { "list": [] },
+  "panels": [
+    { "type": "row", "title": "Layer 1 — Infrastructure latency", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 } },
+    {
+      "type": "timeseries",
+      "title": "End-to-end latency P50/P95/P99 (ms)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "ms", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 800 } ] } } },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.50, sum(rate(voice_turn_latency_e2e_ms_bucket[5m])) by (le))", "legendFormat": "p50" },
+        { "refId": "B", "expr": "histogram_quantile(0.95, sum(rate(voice_turn_latency_e2e_ms_bucket[5m])) by (le))", "legendFormat": "p95" },
+        { "refId": "C", "expr": "histogram_quantile(0.99, sum(rate(voice_turn_latency_e2e_ms_bucket[5m])) by (le))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "TTFT (provider processing) & first-audio P95 (ms)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "ms" } },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.95, sum(rate(voice_turn_provider_processing_ms_bucket[5m])) by (le))", "legendFormat": "ttft p95" },
+        { "refId": "B", "expr": "histogram_quantile(0.95, sum(rate(voice_tts_ttfb_ms_bucket[5m])) by (le))", "legendFormat": "tts ttfb p95" }
+      ]
+    },
+    { "type": "row", "title": "Layer 2 — Execution quality (live)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 } },
+    {
+      "type": "timeseries",
+      "title": "Tool result rate by status (/s)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 10 },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(voice_tool_total[5m])) by (status)", "legendFormat": "{{status}}" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Error rate by severity (/s)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 10 },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(voice_error_total[5m])) by (severity)", "legendFormat": "{{severity}}" }
+      ]
+    },
+    { "type": "row", "title": "Layer 3 — User behavior", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 } },
+    {
+      "type": "timeseries",
+      "title": "Barge-in cancel latency P95 (ms)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 19 },
+      "fieldConfig": { "defaults": { "unit": "ms", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 60 } ] } } },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.95, sum(rate(voice_bargein_cancel_latency_ms_bucket[5m])) by (le))", "legendFormat": "cancel p95" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Barge-in recovery rate (15m)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 19 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1, "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 0.9 } ] } } },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(voice_bargein_recovered_total[15m])) / clamp_min(sum(rate(voice_turns_interrupted_total[15m])), 1)" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Interruption & jump-in rate (/s)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 19 },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(voice_turns_interrupted_total[5m]))", "legendFormat": "interrupted" },
+        { "refId": "B", "expr": "sum(rate(voice_jumpin_total[5m]))", "legendFormat": "jump-in" }
+      ]
+    },
+    { "type": "row", "title": "Layer 2/4 — Quality & business (OFFLINE — Phase 5 eval pipeline via Pushgateway)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 27 } },
+    {
+      "type": "timeseries",
+      "title": "WER trend (lower is better; target < 5%)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 28 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 0.05 }, { "color": "red", "value": 0.10 } ] } } },
+      "targets": [ { "refId": "A", "expr": "voice_eval_wer", "legendFormat": "WER" } ]
+    },
+    {
+      "type": "stat",
+      "title": "MOS (target ≥ 4.5)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 4, "x": 12, "y": 28 },
+      "fieldConfig": { "defaults": { "min": 1, "max": 5, "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "yellow", "value": 4.0 }, { "color": "green", "value": 4.5 } ] } } },
+      "targets": [ { "refId": "A", "expr": "avg(voice_eval_mos)" } ]
+    },
+    {
+      "type": "stat",
+      "title": "Task success / FCR (avg)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 4, "x": 16, "y": 28 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 } },
+      "targets": [
+        { "refId": "A", "expr": "avg(voice_eval_task_success)", "legendFormat": "TSR" },
+        { "refId": "B", "expr": "avg(voice_eval_fcr)", "legendFormat": "FCR" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Sentiment trend (-1..1)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 4, "x": 20, "y": 28 },
+      "fieldConfig": { "defaults": { "min": -1, "max": 1 } },
+      "targets": [ { "refId": "A", "expr": "avg(voice_eval_sentiment)", "legendFormat": "sentiment" } ]
+    },
+    { "type": "row", "title": "Metric coverage", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 36 } },
+    {
+      "type": "timeseries",
+      "title": "Latency samples dropped by reason (/s) — coverage gaps, not errors (no_anchor = quiet-mic voice turns)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 7, "w": 24, "x": 0, "y": 37 },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(voice_turn_latency_dropped_total[5m])) by (reason)", "legendFormat": "{{reason}}" }
+      ]
+    }
+  ]
+}

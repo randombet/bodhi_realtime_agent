@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { randomUUID } from 'node:crypto';
 import WebSocket from 'ws';
 import type { DeviceIdentity } from './openclaw-device-identity.js';
@@ -179,8 +177,7 @@ export function extractContentBlocks(content: unknown): ContentBlock[] {
 				blocks.push({
 					type: 'image',
 					base64: source.data,
-					mimeType:
-						typeof source.media_type === 'string' ? source.media_type : 'image/png',
+					mimeType: typeof source.media_type === 'string' ? source.media_type : 'image/png',
 				});
 			}
 			continue;
@@ -194,9 +191,7 @@ export function extractContentBlocks(content: unknown): ContentBlock[] {
 					type: 'document',
 					base64: source.data,
 					mimeType:
-						typeof source.media_type === 'string'
-							? source.media_type
-							: 'application/octet-stream',
+						typeof source.media_type === 'string' ? source.media_type : 'application/octet-stream',
 					fileName: typeof obj.name === 'string' ? obj.name : undefined,
 				});
 			}
@@ -331,9 +326,7 @@ export class OpenClawClient {
 		optionsOrKey?: ChatSendOptions | string,
 	): Promise<{ runId: string }> {
 		const options =
-			typeof optionsOrKey === 'string'
-				? { idempotencyKey: optionsOrKey }
-				: optionsOrKey;
+			typeof optionsOrKey === 'string' ? { idempotencyKey: optionsOrKey } : optionsOrKey;
 
 		const params: Record<string, unknown> = {
 			sessionKey,

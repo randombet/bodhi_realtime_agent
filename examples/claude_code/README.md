@@ -32,7 +32,7 @@ export PROJECT_DIR="/path/to/your/project"  # optional, defaults to cwd
 pnpm tsx examples/claude_code/claude-demo.ts
 
 # In another terminal, start the web client:
-pnpm tsx examples/openclaw/web-client.ts
+pnpm web-client
 # Then open http://localhost:8080 in Chrome
 ```
 

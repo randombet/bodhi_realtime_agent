@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { createHash, createPublicKey, generateKeyPairSync, sign } from 'node:crypto';
 import { mkdir, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';

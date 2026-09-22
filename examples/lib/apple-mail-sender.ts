@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Send email via macOS Mail.app using AppleScript (osascript).
  *
@@ -59,15 +57,13 @@ export function buildEmailScript(options: SendEmailOptions): string {
 
 	const toRecips = options.to
 		.map(
-			(a) =>
-				`make new to recipient at end of to recipients with properties {address:"${safe(a)}"}`,
+			(a) => `make new to recipient at end of to recipients with properties {address:"${safe(a)}"}`,
 		)
 		.join('\n        ');
 
 	const ccRecips = (options.cc ?? [])
 		.map(
-			(a) =>
-				`make new cc recipient at end of cc recipients with properties {address:"${safe(a)}"}`,
+			(a) => `make new cc recipient at end of cc recipients with properties {address:"${safe(a)}"}`,
 		)
 		.join('\n        ');
 
@@ -105,7 +101,14 @@ export async function sendEmail(options: SendEmailOptions): Promise<SendEmailRes
 	assertMacOS();
 
 	const script = buildEmailScript(options);
-	console.log('[sendEmail] to:', options.to, 'subject:', options.subject, 'draftOnly:', options.draftOnly ?? false);
+	console.log(
+		'[sendEmail] to:',
+		options.to,
+		'subject:',
+		options.subject,
+		'draftOnly:',
+		options.draftOnly ?? false,
+	);
 	console.log('[sendEmail] AppleScript:\n' + script);
 
 	try {

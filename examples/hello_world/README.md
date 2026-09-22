@@ -12,7 +12,7 @@ pnpm install
 GEMINI_API_KEY=your_key pnpm tsx examples/hello_world/agent.ts
 
 # Or use the web client for a browser-based UI:
-pnpm tsx examples/hello_world/web-client.ts
+pnpm web-client
 # Then open http://localhost:8080 in Chrome
 ```
 

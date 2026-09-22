@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Human agent factory — creates a MainAgent that bridges the user's voice
  * session to a real human via Twilio outbound call.
@@ -11,9 +9,9 @@
  * 4. When human hangs up, transfers back to the AI agent
  */
 
-import type { AgentContext, MainAgent } from '../../src/types/agent.js';
 import { TwilioBridge } from '../../src/telephony/twilio-bridge.js';
 import type { TwilioBridgeConfig } from '../../src/telephony/twilio-bridge.js';
+import type { AgentContext, MainAgent } from '../../src/types/agent.js';
 
 // ---------------------------------------------------------------------------
 // Config
@@ -115,6 +113,9 @@ export function createHumanAgent(config: HumanAgentConfig): MainAgent {
 					ctx.sendJsonToClient({
 						type: 'session.config',
 						audioFormat: clientAudioFormat(16000),
+						clientMedia: { kind: 'websocket' },
+						clientSignalSource: 'websocket_json',
+						clientAudioSource: 'websocket_pcm',
 					});
 					ctx.sendJsonToClient({
 						type: 'agent.human_transfer',
@@ -164,7 +165,9 @@ export function createHumanAgent(config: HumanAgentConfig): MainAgent {
 			try {
 				await bridge.dial(config.phoneNumber);
 			} catch (err) {
-				console.error(`[HumanAgent] Dial failed: ${err instanceof Error ? err.message : String(err)}`);
+				console.error(
+					`[HumanAgent] Dial failed: ${err instanceof Error ? err.message : String(err)}`,
+				);
 				ctx.sendJsonToClient({
 					type: 'agent.human_transfer',
 					status: 'error',
@@ -189,6 +192,9 @@ export function createHumanAgent(config: HumanAgentConfig): MainAgent {
 			_ctx.sendJsonToClient({
 				type: 'session.config',
 				audioFormat: clientAudioFormat(24000),
+				clientMedia: { kind: 'websocket' },
+				clientSignalSource: 'websocket_json',
+				clientAudioSource: 'websocket_pcm',
 			});
 		},
 	};

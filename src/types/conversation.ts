@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { MemoryFact } from './memory.js';
 
 /** The role of a conversation item, used to distinguish message types in the context. */
@@ -15,6 +13,11 @@ export interface ConversationItem {
 	timestamp: number;
 	/** Optional application-specific metadata. */
 	metadata?: Record<string, unknown>;
+	/** Stable handle for items whose content is revised after insertion — set
+	 *  only by `ConversationContext.reserveUserMessage`, which holds an ordered
+	 *  slot for a user turn while its authoritative transcript is still in
+	 *  flight. Absent on ordinary append-only items. */
+	id?: string;
 }
 
 /** A tool invocation request from the model. */
@@ -76,14 +79,15 @@ export interface SubagentContextSnapshot {
 	relevantMemoryFacts: MemoryFact[];
 	/** The subagent's own system instructions. */
 	agentInstructions: string;
+	/**
+	 * Prompt-injected knowledge base text for the active main agent (same slice as
+	 * appended to realtime system instructions). Lets background subagents align with domain docs.
+	 */
+	knowledgeBaseContext?: string;
 }
 
-/** Structured UI payload for dual-channel delivery (voice + UI). */
-export interface UIPayload {
-	/** The kind of UI element to render on the client. */
-	type: 'choice' | 'confirmation' | 'status' | 'form' | 'image';
-	/** Identifier for correlating UI responses back to the originating request. */
-	requestId?: string;
-	/** Type-specific data for rendering the UI element. */
-	data: Record<string, unknown>;
-}
+/** Structured UI payload for dual-channel delivery (voice + UI).
+ *  Canonically owned by `@bodhi/client-protocol` (it rides in the
+ *  `ui.payload` wire frame); re-exported here for framework importers. */
+export type { UIPayload } from '@bodhi/client-protocol';
+import type { UIPayload } from '@bodhi/client-protocol';

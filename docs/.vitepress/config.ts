@@ -8,12 +8,23 @@ export default withMermaid(
 		description:
 			'TypeScript framework for real-time voice agents — supports Google Gemini Live and OpenAI Realtime APIs',
 		base: '/bodhi_realtime_agent/',
-		ignoreDeadLinks: [/^http:\/\/localhost/],
+		ignoreDeadLinks: [
+			/^http:\/\/localhost/,
+			// Cross-repo references — links that escape the `docs/` root (e.g. into
+			// `examples/`, `observability/`, top-level `README.md`). The targets
+			// exist on disk and resolve correctly when the doc is viewed on GitHub,
+			// but VitePress's checker can't see outside the docs/ directory.
+			/^\.{1,2}\/(\.\.\/)*(examples|observability|README)(\/|$)/,
+			// Bare directory link to `./advanced/` (no `advanced/index.md` exists;
+			// the section's entry page is `advanced/subagents`).
+			/^\.\/advanced(\/(index)?)?$/,
+		],
 
 		themeConfig: {
 			nav: [
 				{ text: 'Guide', link: '/guide/' },
 				{ text: 'Advanced', link: '/advanced/subagents' },
+				{ text: 'Hosted API', link: '/service/integration-surfaces' },
 				{ text: 'API Reference', link: '/api/' },
 			],
 
@@ -31,13 +42,19 @@ export default withMermaid(
 						text: 'Core Concepts',
 						items: [
 							{ text: 'Architecture Overview', link: '/guide/architecture' },
+							{ text: 'Actor Runtime Pattern', link: '/guide/actor-pattern' },
 							{ text: 'VoiceSession', link: '/guide/voice-session' },
+							{ text: 'Playback Gate', link: '/guide/playback-gate' },
+							{ text: 'Greeting Control', link: '/guide/greeting-control' },
 							{ text: 'Agents', link: '/guide/agents' },
 							{ text: 'Tools', link: '/guide/tools' },
 							{ text: 'Behaviors', link: '/guide/behaviors' },
 							{ text: 'Memory', link: '/guide/memory' },
+							{ text: 'Knowledge base', link: '/guide/knowledge-base' },
 							{ text: 'Events & Hooks', link: '/guide/events' },
+							{ text: 'Observability', link: '/guide/observability' },
 							{ text: 'Transport', link: '/guide/transport' },
+							{ text: 'Known Issues', link: '/guide/known-issues' },
 						],
 					},
 				],
@@ -46,15 +63,42 @@ export default withMermaid(
 						text: 'Advanced Topics',
 						items: [
 							{ text: 'Subagent Patterns', link: '/advanced/subagents' },
-							{ text: 'Multimodal Features', link: '/advanced/multimodal' },
-							{ text: 'External TTS', link: '/advanced/tts' },
-							{ text: 'Telephony', link: '/advanced/telephony' },
+							{
+								text: 'Persistent Subagent Lifecycle',
+								link: '/advanced/persistent-subagent-lifecycle',
+							},
+							{ text: 'Background Agents', link: '/advanced/background-agents' },
+							{ text: 'Speech Evidence Model', link: '/advanced/speech-evidence' },
+							{
+								text: 'Watchdog & Stall Recovery',
+								link: '/advanced/watchdog-recovery',
+							},
 							{ text: 'Persistence', link: '/advanced/persistence' },
+							{ text: 'Multimodal Features', link: '/advanced/multimodal' },
 							{ text: 'Deployment', link: '/advanced/deployment' },
 						],
 					},
 				],
 				'/api/': typedocSidebar,
+				'/service/': [
+					{
+						text: 'Bodhi hosted service',
+						items: [
+							{
+								text: 'Integration surfaces overview',
+								link: '/service/integration-surfaces',
+							},
+							{
+								text: 'Programmable voice API (REST + WS)',
+								link: '/service/hosted-voice-api',
+							},
+							{
+								text: 'Publishable widget (`wg_*`)',
+								link: '/service/widget-embed',
+							},
+						],
+					},
+				],
 			},
 
 			socialLinks: [{ icon: 'github', link: 'https://github.com/randombet/bodhi_realtime_agent' }],

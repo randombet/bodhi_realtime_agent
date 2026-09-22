@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Twilio Human Transfer Demo
  *
@@ -176,10 +174,8 @@ async function main() {
 			onToolCall: (e) => console.log(`${ts()} [Hook] Tool called: ${e.toolName} (${e.execution})`),
 			onToolResult: (e) =>
 				console.log(`${ts()} [Hook] Tool result: ${e.toolCallId} (${e.durationMs}ms)`),
-			onAgentTransfer: (e) =>
-				console.log(`${ts()} [Transfer] ${e.fromAgent} → ${e.toAgent}`),
-			onError: (e) =>
-				console.error(`${ts()} [Error] ${e.component}: ${e.error}`),
+			onAgentTransfer: (e) => console.log(`${ts()} [Transfer] ${e.fromAgent} → ${e.toAgent}`),
+			onError: (e) => console.error(`${ts()} [Error] ${e.component}: ${e.error}`),
 		},
 	});
 

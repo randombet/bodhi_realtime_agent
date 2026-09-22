@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ElevenLabsSTTProvider } from '../../src/transport/elevenlabs-stt-provider.js';
 
@@ -69,14 +67,16 @@ vi.mock('ws', () => ({
 	WebSocket: MockWebSocket,
 }));
 
+type MockWebSocketInstance = InstanceType<typeof MockWebSocket>;
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function lastInstance(): MockWebSocket {
+function lastInstance(): MockWebSocketInstance {
 	return MockWebSocket.instances[MockWebSocket.instances.length - 1];
 }
 
 /** Simulate a successful connection: open → session_started. */
-function connectProvider(ws: MockWebSocket): void {
+function connectProvider(ws: MockWebSocketInstance): void {
 	ws.triggerOpen();
 	ws.triggerMessage({ message_type: 'session_started', session_id: 'test-session' });
 }

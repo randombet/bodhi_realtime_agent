@@ -1,45 +1,53 @@
 # Examples
 
-Standalone demos for testing framework features. Each example runs independently.
+Standalone single-user demos for testing individual framework features. Each example runs independently — start the script and connect a client.
+
+> These demos are for development and testing.
+
+## Install vs optional setup
+
+From the **repository root**, a single install covers the framework and running these TypeScript examples (they import `src/` directly):
+
+```bash
+pnpm install
+```
+
+Some demos need **extra** steps (not run by `pnpm install`). Use the helper:
+
+```bash
+pnpm examples:setup              # list optional targets
+pnpm examples:setup spatialreal  # Python venv for SpatialReal avatar bridge
+```
+
+See per-demo sections below for env vars and run commands.
+
+## Web client
+
+Most demos serve a voice WebSocket on `ws://localhost:9900`. Talk to them from the browser with
+the shared client — it negotiates the audio format with the server, so it works with Gemini,
+OpenAI and Qwen demos alike:
+
+```bash
+pnpm web-client   # then open http://localhost:8080 and click Connect
+```
 
 ## Quick Reference
 
 | Demo | Feature | Entry Point | Run |
 |------|---------|-------------|-----|
-| Gemini Realtime | Senior-friendly Gemini Live voice assistant with tools/transfers | `gemini-realtime-tools.ts` | `pnpm tsx examples/gemini-realtime-tools.ts` |
-| Gemini + Deepgram STT | Gemini Live voice assistant with Deepgram Nova-3 live user transcription | `gemini-deepgram-streaming-stt.ts` | `pnpm tsx examples/gemini-deepgram-streaming-stt.ts` |
-| Generic Web Client | Browser client for realtime voice demos | `web-client.ts` | `pnpm tsx examples/web-client.ts` |
+| Hello World | Gemini voice assistant with search, image/video generation, agent transfer, speech speed | `hello_world/agent.ts` | `pnpm tsx examples/hello_world/agent.ts` |
+| Hello World (OpenAI) | Senior-friendly OpenAI Realtime assistant with tools and a math-helper transfer (also needs `GEMINI_API_KEY` for image/video) | `hello_world/openai-realtime-tools.ts` | `pnpm tsx examples/hello_world/openai-realtime-tools.ts` |
+| Claude Code | Voice-driven coding: a relay subagent delegates tasks to Claude Code | `claude_code/claude-demo.ts` | `pnpm tsx examples/claude_code/claude-demo.ts` |
+| Metrics | Minimal voice agent exposing Prometheus `/metrics` (see the observability guide) | `metrics-demo.ts` | `pnpm tsx examples/metrics-demo.ts` |
 | OpenAI Realtime | OpenAI native-audio voice assistant with tools/subagents | `openai-realtime-tools.ts` | `pnpm tsx examples/openai-realtime-tools.ts` |
 | Cartesia TTS | Custom voice synthesis via Cartesia Sonic | `cartesia-tts-demo.ts` | `pnpm tsx examples/cartesia-tts-demo.ts` |
 | Twilio Human Transfer | Transfer live call to a real human and back | `twilio-demo.ts` | `pnpm tsx examples/twilio-demo.ts` |
 | Twilio Inbound Bridge | Call a Twilio number to talk to any agent | `twilio-inbound-bridge.ts` | `pnpm tsx examples/twilio-inbound-bridge.ts` |
 | OpenClaw | Multi-tool agent with search, images, video | `openclaw/openclaw-demo.ts` | `pnpm tsx examples/openclaw/openclaw-demo.ts` |
-
-## Gemini Realtime Voice Agent
-
-```bash
-export GEMINI_API_KEY="your-gemini-key"
-pnpm tsx examples/gemini-realtime-tools.ts
-pnpm tsx examples/web-client.ts
-```
-
-Then open `http://localhost:8080`, connect, and try:
-- "What time is it?"
-- "What is 25 times 17?"
-- "I need help with harder math"
-- "Speak slower please"
-- "Draw me a picture of a sunset"
-
-## Gemini Live + Deepgram Nova-3 STT
-
-See [DEEPGRAM-STT-README.md](DEEPGRAM-STT-README.md) for setup details.
-
-```bash
-export GEMINI_API_KEY="your-gemini-key"
-export DEEPGRAM_API_KEY="your-deepgram-key"
-pnpm tsx examples/gemini-deepgram-streaming-stt.ts
-pnpm tsx examples/web-client.ts
-```
+| SpatialReal Avatar Host Sync | Voice agent + avatar keyframe sync (host mode bridge) | `spatialreal_avatar_websdk/demo.ts` | `pnpm tsx examples/spatialreal_avatar_websdk/demo.ts` |
+| Interviewer | Document-driven software interview with a planning subagent | `interviewer/interviewer-demo.ts` | `pnpm tsx examples/interviewer/interviewer-demo.ts` |
+| Direct RTC | Gemini Live voice agent over Opus WebRTC (no tools/subagents) | `direct-rtc-demo/server.ts` | `pnpm demo:direct-rtc` (needs `GEMINI_API_KEY`) |
+| Post-Session Processor | Executable spec verifying the post-session pipeline design (no keys/network; exits non-zero on failure) | `post-session-processor/post-session-processor-demo.ts` | `pnpm tsx examples/post-session-processor/post-session-processor-demo.ts` |
 
 ## OpenAI Realtime
 
@@ -75,14 +83,14 @@ pnpm tsx examples/twilio-demo.ts
 
 ## Twilio Inbound Bridge
 
-Works with any running VoiceSession (including demos on port 9900).
+Works with any running VoiceSession example on port 9900.
 
 ```bash
 export TWILIO_WEBHOOK_URL="https://xxxx.ngrok-free.app"
 pnpm tsx examples/twilio-inbound-bridge.ts
 ```
 
-Configure your Twilio phone number webhook to `https://.../voice` (POST).
+Configure your Twilio phone number webhook to `https://…/voice` (POST).
 
 ## OpenClaw
 
@@ -92,5 +100,47 @@ See [openclaw/OPENCLAW-README.md](openclaw/OPENCLAW-README.md) for gateway setup
 export GEMINI_API_KEY="your-gemini-key"
 pnpm tsx examples/openclaw/openclaw-demo.ts
 # In another terminal:
-pnpm tsx examples/openclaw/web-client.ts
+pnpm web-client
 ```
+
+## SpatialReal Avatar Web SDK
+
+See [spatialreal_avatar_websdk/README.md](spatialreal_avatar_websdk/README.md) for required env setup. Create the bridge's Python venv once with `pnpm examples:setup spatialreal`.
+
+```bash
+pnpm tsx examples/spatialreal_avatar_websdk/demo.ts
+# In another terminal:
+pnpm tsx examples/spatialreal_avatar_websdk/web-client.ts
+```
+
+## Direct RTC (Opus WebRTC voice)
+
+See [direct-rtc-demo/README.md](direct-rtc-demo/README.md). Full Gemini Live conversation — audio over WebRTC instead of WebSocket binary.
+
+```bash
+export GEMINI_API_KEY="your-key"
+pnpm demo:direct-rtc
+# Open http://127.0.0.1:8788/
+```
+
+## Interviewer
+
+See [interviewer/README.md](interviewer/README.md) for the document-driven interview flow.
+
+```bash
+export GEMINI_API_KEY="your-gemini-key"
+pnpm tsx examples/interviewer/interviewer-demo.ts
+# In another terminal:
+pnpm web-client
+```
+
+## Probes (`probes/`)
+
+Not demos — standalone scripts that verify a provider behavior a design depends on (Phase 0
+gates run before building a feature).
+
+| Probe | Verifies | Run |
+|-------|----------|-----|
+| `probes/gemini-inline-audio-replay.ts` | Gemini Live answers a `clientContent` inline-audio user turn with `turnComplete: true` (retained-utterance recovery replay shape), in clean and post-barge-in states | `pnpm tsx examples/probes/gemini-inline-audio-replay.ts` (needs `GEMINI_API_KEY`) |
+| `probes/hosted-replay-recovery.ts` | Stage-1 watchdog-stall replay + R7a mid-speech deferral + R7b transcript promotion, end-to-end in the hosted session shape (`feedAudioFromClient` + `ClientSenderAdapter`); stall forced via a short `PROBE_WATCHDOG_MS` | `pnpm tsx examples/probes/hosted-replay-recovery.ts` (needs `GEMINI_API_KEY`) |
+| `probes/hosted-reconnect-freshness.ts` | R7c reconnect-window verdicts (`none`/`hosted-speech`/`unknown`) on a real resumption-handle reconnect, by controlling what flows through `feedAudioFromClient` during the window | `pnpm tsx examples/probes/hosted-reconnect-freshness.ts [silence\|speech\|none\|all]` (needs `GEMINI_API_KEY`) |

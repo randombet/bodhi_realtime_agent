@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /** A single preset within a behavior category. */
 export interface BehaviorPreset {
 	/** Machine-readable preset name (enum value in tool schema). */

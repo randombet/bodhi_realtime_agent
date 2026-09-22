@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 /**
  * Transport-agnostic interface for OpenClaw gateway communication.
  *

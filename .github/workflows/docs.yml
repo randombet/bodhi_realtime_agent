@@ -1,4 +1,4 @@
-name: Deploy docs to GitHub Pages
+name: Deploy Documentation
 
 on:
   push:
@@ -20,30 +20,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: pnpm/action-setup@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
 
-      - run: pnpm install --frozen-lockfile
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
 
-      - name: Build docs (typedoc + vitepress)
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate API docs and build site
         run: pnpm docs:build
-
-      - uses: actions/configure-pages@v5
 
       - uses: actions/upload-pages-artifact@v3
         with:
           path: docs/.vitepress/dist
 
   deploy:
-    needs: build
-    runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+    needs: build
+    runs-on: ubuntu-latest
     steps:
       - name: Deploy to GitHub Pages
         id: deployment

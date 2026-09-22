@@ -348,7 +348,9 @@ export class ClaudeCodeSession {
 				// Reuse saved next promise if available (from a prior question-won race)
 				const nextMsg =
 					this.pendingNext ??
-					iterator.next().then((r) => ({ kind: 'msg' as const, ...r }));
+					iterator
+						.next()
+						.then((r) => ({ kind: 'msg' as const, done: r.done ?? false, value: r.value }));
 				this.pendingNext = null;
 
 				const winner = await Promise.race([

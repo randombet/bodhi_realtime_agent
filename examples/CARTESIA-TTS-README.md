@@ -34,14 +34,10 @@ export CARTESIA_API_KEY=your_cartesia_key
 pnpm tsx examples/cartesia-tts-demo.ts
 
 # 3. In another terminal, start the web client
-pnpm web-client:dev
+pnpm web-client
 
 # 4. Open http://localhost:8080 in Chrome and click Connect
 ```
-
-### Production Bodhi app (`pnpm start`)
-
-The same Cartesia pipeline is wired into `createBodhiSessionConfig()` when `CARTESIA_TTS_ENABLED=true` and `CARTESIA_API_KEY` are set in `.env`. Without `CARTESIA_TTS_ENABLED=true`, the production server uses native Gemini audio even if the key is present. Use `pnpm start` and `pnpm web-client:dev`; optional voice/speed/emotion overrides are available in the Talk page under **Output voice (Cartesia)** (query params: `cartesiaVoiceId`, `cartesiaSpeed`, `cartesiaEmotion`). Not used when `LLM_PROVIDER=openai` (OpenAI Realtime supplies its own audio).
 
 ## Environment Variables
 
@@ -95,7 +91,7 @@ The demo agent ("Bodhi") comes with three inline tools:
 
 ```
 ┌─────────────┐     WebSocket      ┌──────────────────────────────────────────┐
-│  Browser /   │◄──────────────────►│  VoiceSession                             │
+│  Browser /   │◄──────────────────►│  VoiceSession (actor mode)               │
 │  web-client  │   audio + JSON     │                                          │
 └─────────────┘                     │  ┌──────────────┐  ┌──────────────────┐  │
                                     │  │ Gemini Live   │  │ CartesiaTTS      │  │
@@ -111,7 +107,7 @@ The demo agent ("Bodhi") comes with three inline tools:
 ```
 
 Key components:
-- **VoiceSession** with a `ttsProvider` — enables the pluggable TTS pipeline
+- **VoiceSession** in `actor` orchestration mode — enables the pluggable TTS pipeline
 - **CartesiaTTSProvider** — streams text to Cartesia via WebSocket, receives PCM audio chunks
 - **SentenceBuffer** — buffers LLM tokens and emits at sentence boundaries for natural prosody
 - **GeminiBatchSTTProvider** — transcribes user speech for display (separate from TTS)

@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it, vi } from 'vitest';
 import { BackgroundNotificationQueue } from '../../src/core/background-notification-queue.js';
 

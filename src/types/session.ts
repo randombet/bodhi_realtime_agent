@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import type { ClientMessage } from './audio.js';
 import type { ConversationItem } from './conversation.js';
 
@@ -22,13 +20,34 @@ export type SessionState =
 	| 'TRANSFERRING'
 	| 'CLOSED';
 
+/**
+ * Why a session ended. The known set is enumerated for discovery/narrowing;
+ * `(string & {})` keeps it open to transport-specific reasons without collapsing
+ * the literals to plain `string`. This is the single canonical reason type,
+ * threaded from the close caller through `onSessionEnd` → `session.close` →
+ * post-session processors.
+ */
+export type KnownSessionEndReason =
+	| 'normal'
+	| 'user_hangup'
+	| 'client_disconnect'
+	| 'server_shutdown'
+	| 'idle_timeout'
+	| 'tts_fatal_error'
+	| 'reconnect_failed'
+	| 'transfer_failed'
+	| 'error'
+	| 'timeout';
+
+export type SessionEndReason = KnownSessionEndReason | (string & {});
+
 /** Initial configuration for creating a session manager. */
 export interface SessionConfig {
 	/** Unique session identifier. */
 	sessionId: string;
 	/** User identifier for this session. */
 	userId: string;
-	/** Gemini model to use (e.g. "gemini-2.5-flash-live-001"). */
+	/** Gemini model to use (e.g. "gemini-3.1-flash-live-preview"). */
 	geminiModel?: string;
 	/** Name of the agent to activate when the session starts. */
 	initialAgent: string;

@@ -1,137 +1,65 @@
 # Transport
 
-Transport abstracts provider-specific realtime APIs behind a common `LLMTransport` interface. `VoiceSession` owns agent/tool orchestration and delegates provider wire protocol details to the active transport.
+Transport abstracts provider-specific realtime APIs behind a common interface.
 
-## Realtime LLM Providers
+**Two legs (do not conflate them):**
 
-| Transport | Use When | Notes |
-|-----------|----------|-------|
-| `GeminiLiveTransport` | You want Gemini Live native audio, Google Search grounding, session resumption, or Gemini input/output transcription. | Created automatically when `VoiceSession` receives an API key and no custom transport. |
-| `OpenAIRealtimeTransport` | You want OpenAI Realtime native audio and OpenAI session semantics. | Pass a constructed transport through `VoiceSessionConfig.transport`. |
-
-Both transports expose:
-
-- `audioFormat` so clients and STT/TTS providers can match the provider's PCM rate
-- `capabilities` so orchestration branches on features instead of provider names
-- tool-call and tool-result mapping
-- turn completion, interruption, transcript, error, close, and usage callbacks
-- `transferSession()` so agent transfers can update provider instructions and tools
-
-## Using OpenAI Realtime
-
-```typescript
-import { google } from '@ai-sdk/google';
-import {
-  OpenAIRealtimeTransport,
-  VoiceSession,
-} from 'bodhi-realtime-agent';
-
-const transport = new OpenAIRealtimeTransport({
-  apiKey: process.env.OPENAI_API_KEY!,
-  model: 'gpt-realtime',
-  voice: 'alloy',
-});
-
-const session = new VoiceSession({
-  sessionId: 'session_1',
-  userId: 'user_1',
-  apiKey: process.env.GEMINI_API_KEY!, // still used by background subagents
-  agents: [mainAgent],
-  initialAgent: 'main',
-  model: google('gemini-2.5-flash'),
-  transport,
-  port: 9900,
-});
+```text
+[Browser or device] ─── Leg 1 ───> [App server / VoiceSession] ─── Leg 2 ───> [Gemini or OpenAI]
 ```
 
-## STT Providers
+- **Leg 2** in this doc’s main sections is **`LLMTransport`** — Gemini Live or OpenAI Realtime from **your server** to the **vendor**.
+- **Leg 1** is **client media** (`IClientChannel`, `ClientMediaProfile`) — the **user’s** connection **into** your app / `VoiceSession`. See the section *Client media* below and [VoiceSession](/guide/voice-session).
 
-`VoiceSessionConfig.sttProvider` attaches an external transcription provider. The provider receives the transport's actual input format through `configure()` before it starts.
+## LLM transport (Gemini / OpenAI)
 
-```typescript
-import {
-  GeminiBatchSTTProvider,
-  VoiceSession,
-} from 'bodhi-realtime-agent';
+This is what most people mean by “transport” in the framework: the **`LLMTransport`** that connects **`VoiceSession`** to the **cloud realtime voice model** (Gemini Live or OpenAI Realtime).
 
-const session = new VoiceSession({
-  // ...
-  sttProvider: new GeminiBatchSTTProvider({
-    apiKey: process.env.GEMINI_API_KEY!,
-    model: 'gemini-3-flash-preview',
-  }),
-});
-```
+### Providers
 
-When an external STT provider is set, `VoiceSession` feeds every client audio chunk into the provider and commits the provider at model-turn boundaries. Gemini built-in transcription can still be used as a post-hoc correction path when available.
+- Gemini Live transport
+- OpenAI Realtime transport
 
-Deepgram Nova-3 live streaming can be used when you want lower-latency partial user transcripts:
+### Responsibilities
 
-```typescript
-import {
-  DeepgramSTTProvider,
-  VoiceSession,
-} from 'bodhi-realtime-agent';
+- live session connect/disconnect
+- turn and interruption handling
+- tool call/result protocol mapping
+- provider-specific session update and recovery logic
 
-const session = new VoiceSession({
-  // ...
-  sttProvider: new DeepgramSTTProvider({
-    apiKey: process.env.DEEPGRAM_API_KEY!,
-    model: 'nova-3',
-    language: 'en-US',
-  }),
-  inputAudioTranscription: false, // Optional: make Deepgram the only input transcript source.
-});
-```
+### STT/TTS
 
-Deepgram receives the active transport's PCM input format through `configure()`. With Gemini Live that is 16 kHz mono PCM16; with OpenAI Realtime that is 24 kHz mono PCM16.
+- Built-in transcription is supported via transport/provider capabilities.
+- External STT/TTS providers can be attached at session level. For TTS, `VoiceSession` receives a framework `ttsProvider`; your application code should resolve human-facing choices such as named Cartesia/ElevenLabs/Hume presets into provider config before constructing the session.
+- Do not use provider API-key environment variables as provider selectors. They are fallback credentials only; product selection should come from saved agent config or an explicit session/query override.
 
-## TTS Providers
+---
 
-`VoiceSessionConfig.ttsProvider` switches the realtime LLM to text-mode responses and routes text deltas into a streaming `TTSProvider`.
+## Client media (separate from LLM transport)
 
-Built-in providers:
+The **client ↔ framework** audio/control path is **not** the same socket as the LLM vendor connection. It is implemented by **`IClientChannel`** (see `createClientChannel` in the framework) and selected with **`ClientMediaProfile`** on **`VoiceSessionConfig`**.
 
-- `CartesiaTTSProvider`
-- `ElevenLabsTTSProvider`
+| Profile | Meaning |
+|---------|--------|
+| **`websocket` (default)** | Mic and assistant PCM use **binary WebSocket** frames on the same connection as JSON control (or local `ClientTransport` when the server does not own the socket). |
+| **`direct_rtc`** | **Split plane:** JSON control (and RTC signaling) stay on the **WebSocket** via **`SessionClientSender.sendJson`**; optional **Opus RTP** for mic/assistant audio when `rtcAudio: 'werift_opus'` is enabled. |
 
-See [External TTS](/advanced/tts) for details.
+**Important:** `direct_rtc` does **not** replace **`VoiceSession`** or **`LLMTransport`**. Gemini/OpenAI still use their **existing** provider WebSockets from the server. Only the **device ↔ your app server ↔ `VoiceSession` input/output** audio encoding changes when you opt into direct RTC.
 
-## Client Transports
+### Playback-state support
 
-There are two client-connection modes:
+The playback gate needs one ordered path for assistant audio and JSON. It is
+supported on WebSocket PCM surfaces that render audio through the buffered client
+playback path. It is not supported when assistant audio is delivered over
+`direct_rtc` Opus RTP, because the audio and `audio.done` JSON frame no longer
+share ordering.
 
-| Mode | Config | Use Case |
-|------|--------|----------|
-| Local session socket | `port` / `host` | Simple examples and local development. `VoiceSession` creates a `ClientTransport`. |
-| Server-owned socket | `clientSender` plus `feedAudioFromClient()` / `feedJsonFromClient()` | Multi-user servers that route many WebSocket connections to many sessions. |
+For server-owned sockets, expose this capability with
+`SessionClientSender.supportsPlaybackStateProtocol` and implement
+`sendJsonAfterAudio`. See [Playback Gate](/guide/playback-gate).
 
-`MultiClientTransport` is the server-owned socket helper. It accepts many WebSocket clients, assigns each connection a `ConnectionContext`, and lets application code bind that connection to a `VoiceSession`.
+See also:
 
-```typescript
-const transport = new MultiClientTransport(9900, {
-  onAudioFromClient: (_ws, data, context) => {
-    const session = sessions.getSession(context.sessionId!);
-    session?.feedAudioFromClient(data);
-  },
-  onJsonFromClient: (_ws, message, context) => {
-    const session = sessions.getSession(context.sessionId!);
-    session?.feedJsonFromClient(message);
-  },
-});
-
-await transport.start();
-```
-
-## Audio Formats
-
-The framework normalizes around PCM L16 mono, but sample rates are provider-specific:
-
-| Provider Path | Input | Output |
-|---------------|-------|--------|
-| Gemini Live | 16 kHz PCM | 24 kHz PCM |
-| OpenAI Realtime | 24 kHz PCM | 24 kHz PCM |
-| Twilio Media Streams | mulaw 8 kHz | mulaw 8 kHz |
-| Framework telephony bridge | 16 kHz PCM | 16 kHz PCM |
-
-STT providers receive the transport input format. TTS providers receive the preferred output format and can return a different supported PCM rate; `VoiceSession` resamples to the client format when needed.
+- [VoiceSession](/guide/voice-session) — `clientMedia`, `clientSender`, and session wiring
+- [Playback Gate](/guide/playback-gate) — `audio.done` / `playback.ended` turn-completion gating
+- [Architecture overview](/guide/architecture) — two independent realtime links (client leg vs vendor leg)

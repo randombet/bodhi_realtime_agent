@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 import { describe, expect, it, vi } from 'vitest';
 import type {
 	AudioFormatSpec,
@@ -54,7 +52,8 @@ describe('LLMTransport type definitions', () => {
 
 	it('AudioFormatSpec specifies PCM audio format', () => {
 		const format: AudioFormatSpec = {
-			sampleRate: 16000,
+			inputSampleRate: 16000,
+			outputSampleRate: 24000,
 			channels: 1,
 			bitDepth: 16,
 			encoding: 'pcm',
@@ -131,7 +130,7 @@ describe('LLMTransport type definitions', () => {
 			sendAudio: vi.fn(),
 			commitAudio: vi.fn(),
 			clearAudio: vi.fn(),
-			updateSession: vi.fn(),
+			updateSession: vi.fn(async () => {}),
 			transferSession: vi.fn(),
 			sendContent: vi.fn(),
 			sendFile: vi.fn(),
@@ -147,11 +146,11 @@ describe('LLMTransport type definitions', () => {
 	it('LLMTransportConfig supports all auth types', () => {
 		const apiKeyConfig: LLMTransportConfig = {
 			auth: { type: 'api_key', apiKey: 'test' },
-			model: 'gemini-live-2.5-flash-preview',
+			model: 'gemini-3.1-flash-live-preview',
 		};
 		const saConfig: LLMTransportConfig = {
 			auth: { type: 'service_account', projectId: 'my-project', location: 'us-central1' },
-			model: 'gemini-live-2.5-flash-preview',
+			model: 'gemini-3.1-flash-live-preview',
 			instructions: 'Be helpful',
 			providerOptions: { googleSearch: true },
 		};
@@ -176,6 +175,20 @@ describe('LLMTransport type definitions', () => {
 			responseModality: 'text',
 		};
 		expect(config.responseModality).toBe('text');
+	});
+
+	it('LLMTransportConfig accepts realtimeInputConfig', () => {
+		const config: LLMTransportConfig = {
+			auth: { type: 'api_key', apiKey: 'test' },
+			model: 'test-model',
+			realtimeInputConfig: {
+				automaticActivityDetection: {
+					endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
+					silenceDurationMs: 500,
+				},
+			},
+		};
+		expect(config.realtimeInputConfig).toBeDefined();
 	});
 
 	it('TransportCapabilities accepts optional textResponseModality', () => {
@@ -218,7 +231,7 @@ describe('LLMTransport type definitions', () => {
 			sendAudio: vi.fn(),
 			commitAudio: vi.fn(),
 			clearAudio: vi.fn(),
-			updateSession: vi.fn(),
+			updateSession: vi.fn(async () => {}),
 			transferSession: vi.fn(),
 			sendContent: vi.fn(),
 			sendFile: vi.fn(),
