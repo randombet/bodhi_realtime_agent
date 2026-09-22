@@ -6,8 +6,6 @@ This document is for **teams building mobile or native apps** that call a **depl
 
 **Who this is for:** product engineers calling **hosted Bodhi** over the public internet. The production API host is **`https://bodhiagent.live`**; all paths below are **relative to that origin**. If you use a **self‑hosted** deployment with another public HTTPS origin, substitute your host (same path layout: `/api/...`, `/ws/mobile`).
 
-**Related:** Bodhi operators maintain reverse-proxy routing and TLS; see [internal routing notes](../../dev_docs/app/server/http-websocket-routing.md) in this repo (not required reading for app-only integrators).
-
 **Integration surfaces:** This page documents **Surface A — programmable API** (REST + WebSocket, full control). For **Surface B — publishable browser widget** (`wg_*`, allowlisted origins, hosted `/embed/avatar`), see [Integration surfaces](./integration-surfaces.md) and [Widget embed](./widget-embed.md).
 
 ### First time here? How the two connections fit
@@ -43,7 +41,7 @@ All sessions are keyed by a string **`userId`** resolved by the server (from you
 
 **What hosted Bodhi documents and supports today:** **`/ws/mobile`** is **PCM over WebSocket** (binary frames) plus **JSON** text frames for control and transcripts, as described in §4. Do **not** assume a public **hosted** WebRTC/Opus-RTP leg exists until your operator ships and documents it.
 
-The TypeScript framework separately supports **`clientMedia: { kind: 'direct_rtc' }`** for **self-hosted** or custom app servers that wire `SessionClientSender`, relay **`rtc.*`** JSON on the same WebSocket, and own STUN/TURN policy. That is **orthogonal** to the vendor **`LLMTransport`** socket to Gemini/OpenAI — see [Transport](/guide/transport) and [Client voice transport (app server)](../../app/docs/client-voice-transport.md) (repo path).
+The TypeScript framework separately supports **`clientMedia: { kind: 'direct_rtc' }`** for **self-hosted** or custom app servers that wire `SessionClientSender`, relay **`rtc.*`** JSON on the same WebSocket, and own STUN/TURN policy. That is **orthogonal** to the vendor **`LLMTransport`** socket to Gemini/OpenAI — see [Transport](/guide/transport).
 
 ---
 
@@ -78,7 +76,7 @@ Base path (hosted): **`https://bodhiagent.live/api/`** — use your own origin i
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `POST` | `/api/mobile/sessions` | Create a **short-lived session intent**. Optional JSON body: `agentProfile` (a registered catalog id from `app/agents/agent-profiles-catalog.ts` — unknown values are treated as `standard` — **or**, when enabled on your deployment, a saved Agent Studio id `ua_` + 16 hex with a **Bodhi integration key**, see §2.1), `deviceId`, `resumeSessionId`, `speechOutput`. Response includes `sessionIntentId`, `token`, `expiresAt`, `wsPath` (typically `/ws/mobile`). |
+| `POST` | `/api/mobile/sessions` | Create a **short-lived session intent**. Optional JSON body: `agentProfile` (a registered catalog id — unknown values are treated as `standard` — **or**, when enabled on your deployment, a saved Agent Studio id `ua_` + 16 hex with a **Bodhi integration key**, see §2.1), `deviceId`, `resumeSessionId`, `speechOutput`. Response includes `sessionIntentId`, `token`, `expiresAt`, `wsPath` (typically `/ws/mobile`). |
 | `POST` | `/api/mobile/device-events` | Send **summarized** context while a voice session is **active** (e.g. location, motion, health aggregates). Body: `sessionId`, `eventType`, `payload` (object), optional `deviceId`, `timestamp`. Expect **`202`** when accepted. |
 | `POST` | `/api/mobile/sessions/:sessionId/close` | Close that session for the authenticated user. |
 | `GET` | `/api/voice/speech-output-options` | Return supported native voices, TTS providers, featured presets, model choices, and required BYOK key names. |
@@ -154,13 +152,10 @@ If the deployment uses another LLM provider, **`session.config`** carries the au
 
 ### 4.3 JSON (text frames)
 
-> **Source of truth:** this section is checked in CI against the typed
-> hosted-mobile profile (`app/lib/client/hosted-mobile-profile.ts`, composed
-> from `@bodhi/client-protocol`). The machine-readable manifest below is
-> diffed against the profile's message and field lists by
-> `test/app/hosted-mobile-manifest.test.ts` — **a profile change must update
-> this section in the same PR** (a core-protocol change first forces a hosted
-> disposition in the profile's exhaustive map).
+> **Source of truth:** this section mirrors the service's typed hosted-mobile
+> profile (composed from `@bodhi/client-protocol`). The machine-readable
+> manifest below lists exactly the messages and fields the hosted `/ws/mobile`
+> surface sends and accepts.
 
 <!-- hosted-mobile-manifest:server
 session.config type!:enum(session.config),audioFormat!:object,clientMedia!:object,clientSignalSource!:enum(websocket_json),clientAudioSource!:enum(websocket_pcm)
@@ -317,7 +312,7 @@ curl -sS -H 'Authorization: Bearer <token>' \
 
 ### Related: browser avatar embed (Spatial Real)
 
-For a **first-party web embed** (iframe or hosted page on the same Bodhi origin) that shows the avatar plus voice on **`/ws`** (not `/ws/mobile`), see **`app/docs/avatar-integration.md` §2.5–2.6**: `POST /api/embed/avatar-sessions`, `POST /api/embed/avatar-session-token` (legacy alias: `/api/embed/spatial-session-token`), and the **`/embed/avatar`** route. That path uses short-lived **embed intents** on the WebSocket instead of shipping a long-lived `bsk_` secret to an untrusted browser. **§2.6** contrasts this with the normal **`/api/users/me/agents`** CRUD API (persistence vs bootstrap-only).
+For a **first-party web embed** (iframe or hosted page on the same Bodhi origin) that shows the avatar plus voice on **`/ws`** (not `/ws/mobile`), use `POST /api/embed/avatar-sessions`, `POST /api/embed/avatar-session-token` (legacy alias: `/api/embed/spatial-session-token`), and the **`/embed/avatar`** route. That path uses short-lived **embed intents** on the WebSocket instead of shipping a long-lived `bsk_` secret to an untrusted browser. Unlike the **`/api/users/me/agents`** CRUD API, these endpoints only bootstrap a session; they don't persist anything.
 
 ### Related: remote coding worker from Agent Studio
 
@@ -352,4 +347,4 @@ If you use Agent Studio with `remote_persistent_worker` (main voice agent in Bod
 | Speaker ← server | PCM s16le mono **24 kHz** (default Gemini path) |
 | Text frames | Single JSON object per message |
 
-For **framework and server implementation** details (forking or self-hosting), this repository’s [app README](../../app/README.md) and internal [developer documentation](../../dev_docs/README.md) apply — they are not required reading for API-only integration.
+To build your own voice server on the open-source framework instead, start with the [Quick Start](/guide/quickstart) — it is not required reading for API-only integration.

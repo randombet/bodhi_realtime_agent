@@ -31,7 +31,7 @@ Open **Agent Studio → Docs** (or **Advanced & testing**) and use **Publishable
 
 For **`voice + avatar`** (or switching an existing widget to that mode):
 
-1. Server must have avatar authoring enabled (`BODHI_AVATAR_ENABLED` + Spatial Real bridge env — see `env.example_avatar` and `app/docs/avatar-integration.md`).
+1. Your deployment must have avatar authoring enabled (an operator setting).
 2. Under **Avatar**, turn **Use avatar for this saved agent** on, pick **Avatar provider** and **Character**, then **Save advanced changes**.
 3. The **New voice + avatar widget** button stays disabled until the saved agent actually has **`avatarConfig`** with a preset; if the UI shows a character but the button is still disabled, save again from **Advanced & testing**.
 
@@ -85,7 +85,7 @@ For `embedMode: "voice"`, `avatarPresetId`, `spatialAvatarId`, and `avatarProvid
 
 ## 3. One-line install (hosted script)
 
-Ship **`bodhi-widget.js`** from your Bodhi **web** deployment (`app/web-client/public/bodhi-widget.js`). Third-party sites add:
+Load **`bodhi-widget.js`** from your Bodhi **web** host (served at `/bodhi-widget.js`). Third-party sites add:
 
 ```html
 <script
@@ -119,21 +119,3 @@ Call **`POST /api/embed/widget-sessions`** (from the visitor browser with the wi
 |----------|----------|
 | `POST /api/embed/avatar-sessions` | Authenticated integrators (Supabase session or **`bsk_*`**) — **Surface A**. |
 | `POST /api/embed/widget-sessions` | Visitor browsers with a **published** **`wg_*`** — **Surface B**. |
-
----
-
-## 6. HTTPS / reverse proxy (nginx on EC2)
-
-The widget does **not** introduce a new network service. It uses:
-
-- Existing **HTTPS** (or HTTP) to your **API** for `POST /api/embed/widget-sessions` and the voice **WebSocket** (same paths you already expose).
-- Existing **HTTPS** to your **web** host for **`bodhi-widget.js`** and **`/embed/avatar`**.
-
-If nginx already terminates TLS and proxies to your Bodhi **app server** and **web client** the same way you do today, you typically **do not** add new server blocks or certificates **unless** you put the script or API on a **new hostname** or port. Same-origin vs split API/web hosts only affect the two URL values in the snippet (`src` vs `data-bodhi-api-base`), not the number of TLS fronts.
-
----
-
-## 7. Database
-
-Supabase migration: `app/server/supabase/009_agent_embed_widgets.sql`.
-Local dev without Supabase uses JSON files under **`./embed-widgets/`** on the server.

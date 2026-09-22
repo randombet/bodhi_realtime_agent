@@ -25,7 +25,7 @@ Surface A and Surface B both attach at **Leg 1** (HTTPS + WebSocket or embed). T
 | **HTTPS** `POST /api/mobile/sessions` (and related REST) | Authenticated bootstrap; returns short-lived **session intent** + token. |
 | **WSS** `/ws/mobile` | Realtime PCM + JSON control after connecting with intent query params. |
 
-**Transport mode (today):** Surface A’s hosted path is **WebSocket PCM + JSON** on **`/ws/mobile`**. Framework-level **`direct_rtc`** (Opus RTP on the client leg, JSON + `rtc.*` signaling still on WebSocket) is a **self-hosted / app-server integration** option until a future hosted surface exposes it with its own contract, auth, and TURN story — see [Hosted Bodhi voice API](./hosted-voice-api.md) (“Current hosted contract vs framework `direct_rtc`”) and [Client voice transport](../../app/docs/client-voice-transport.md).
+**Transport mode (today):** Surface A’s hosted path is **WebSocket PCM + JSON** on **`/ws/mobile`**. Framework-level **`direct_rtc`** (Opus RTP on the client leg, JSON + `rtc.*` signaling still on WebSocket) is a **self-hosted / app-server integration** option until a future hosted surface exposes it with its own contract, auth, and TURN story — see [Hosted Bodhi voice API](./hosted-voice-api.md) (“Current hosted contract vs framework `direct_rtc`”) and [Transport](/guide/transport).
 
 **Identifiers:**
 
@@ -70,5 +70,3 @@ Surface A and Surface B both attach at **Leg 1** (HTTPS + WebSocket or embed). T
 ## Relationship to internal embed APIs
 
 Endpoints such as `POST /api/embed/avatar-sessions` remain the **programmable, authenticated** path for developers who already have **Supabase session or `bsk_*`** and want to drive `/embed/avatar` explicitly. They are **foundational** for tooling and advanced flows; the **productized** external embed path for third-party sites is **`wg_*`** + `POST /api/embed/widget-sessions`.
-
-See [Avatar integration](../../app/docs/avatar-integration.md) (repo path `app/docs/avatar-integration.md`) for app-layer avatar wiring details.
