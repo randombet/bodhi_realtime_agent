@@ -9,8 +9,6 @@ export type NotificationPriority = 'normal' | 'high';
  * (reached via `runtime.tell`). It funnels every `_isActorMode ? … : …`
  * notification branch in `VoiceSession` so later extractions depend only on this
  * interface, not the mode flag.
- *
- * See dev_docs/framework/investigation-voice-session-modularity.md (Step 1).
  */
 export interface NotificationSink {
 	/** The model began producing audio this turn. Debounced once-per-turn in

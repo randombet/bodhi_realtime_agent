@@ -160,8 +160,7 @@ export class RuntimeOrchestrator {
 		// envelopes (session.connected, session.reconnected,
 		// session.close_requested, transport.closed) to that address; the host
 		// invokes onStart / onReconnect / onStop on each registered
-		// BackgroundAgent. See
-		// dev_docs/framework/design-background-notification-actor.md.
+		// BackgroundAgent.
 		this.sessionActor = new SessionActor(
 			'session',
 			sendFn,

@@ -22,9 +22,6 @@ export interface TurnManagerDeps {
  * `finalizeTurn` itself stays in `VoiceSession` (its completion effects are
  * session-wide); it drives the counter through this unit via {@link advance}
  * and {@link resetTurnScopedUsage}.
- *
- * See dev_docs/framework/design-turn-lifecycle-refactor.md and
- * dev_docs/framework/investigation-voice-session-modularity.md (Step 6b).
  */
 export class TurnManager {
 	private turnId = 0;
@@ -68,8 +65,6 @@ export class TurnManager {
 	 *
 	 * `explicitServerId` (a transport callback's own id) wins over the live
 	 * `getActiveServerTurnId()` accessor, which may have moved on.
-	 *
-	 * See dev_docs/framework/design-turn-lifecycle-refactor.md § Turn birth.
 	 */
 	ensureCurrent(explicitServerId?: number): Turn | null {
 		const cur = this._current;
@@ -96,9 +91,6 @@ export class TurnManager {
 	 * Map a transport completion/interrupt/usage signal to the `Turn` it
 	 * concerns — `match` (an existing turn), `new` (newer than any known, the
 	 * caller may birth one), or `stale` (already gone, ignore).
-	 *
-	 * See dev_docs/framework/design-turn-lifecycle-refactor.md
-	 * § Transport-signal correlation.
 	 */
 	resolve(serverTurnId: number | undefined, purpose: TurnSignalPurpose): TurnMatch {
 		const cur = this._current;

@@ -47,7 +47,7 @@ export interface VoiceClientCallbacks {
 	onTranscript(event: TranscriptEvent): void;
 	/**
 	 * Extension escape hatch: every JSON frame the core dispatch does not own
-	 * is offered here (app/peer frames like `peer.session_ended`,
+	 * is offered here (app or peer frames like `peer.session_ended`,
 	 * `sessions_list`, …). Return `'handled'` to consume; `'unhandled'`
 	 * frames are ignored (forward compatibility — never an error).
 	 */

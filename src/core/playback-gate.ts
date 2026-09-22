@@ -7,8 +7,6 @@ import type { Turn } from './turn.js';
  * external TTS), formalizing the object `VoiceSession.liveGate()` used to return
  * inline. The completion arbiter and the VAD barge-in policy read a turn's
  * playback state through this interface without knowing which path is active.
- *
- * See dev_docs/framework/investigation-voice-session-modularity.md (Step 4).
  */
 export interface PlaybackGate {
 	/** A post-synthesis turn is awaiting playback-end (barge-in still possible). */

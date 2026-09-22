@@ -2,11 +2,10 @@
  * Core client-plane message unions, split by direction and composed with
  * open extension registries (module augmentation).
  *
- * Shapes mirror the actual emit/dispatch sites recorded in
- * dev_docs/framework/client-protocol-audit.md — do not add fields here that
+ * Shapes mirror the actual emit/dispatch sites — do not add fields here that
  * no emitter sends. App-server frames (`session.error`, `sessions_list`, …)
- * live in `app/lib/client/`; peer frames (`peer.*`) in peer code; both
- * register via the extension interfaces below.
+ * and peer frames (`peer.*`) live in app or peer code and register via the
+ * extension interfaces below.
  */
 
 import type {

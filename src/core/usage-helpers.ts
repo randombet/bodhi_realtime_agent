@@ -2,7 +2,7 @@ import type { RealtimeLLMUsageEvent } from '../types/transport.js';
 
 /** Source identifier for a published `realtime.usage` EventBus event.
  *  Provider-prefixed so consumers never have to disambiguate by inspecting
- *  other fields. See dev_docs/framework/design-context-caching.md §4. */
+ *  other fields. */
 export type RealtimeUsageSource =
 	| 'openai.response'
 	| 'openai.transcription'

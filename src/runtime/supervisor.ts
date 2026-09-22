@@ -2,8 +2,8 @@
  * Supervision policies for the actor runtime.
  *
  * Each actor has a supervision policy that determines what happens when
- * it fails during message processing. Policies follow the per-actor matrix
- * from dev_docs/framework/actor-supervision-policy.md.
+ * it fails during message processing. Per-actor policies live in
+ * `DEFAULT_POLICIES` below.
  */
 
 import type { ActorId } from './envelope.js';
@@ -146,9 +146,7 @@ export const DEFAULT_POLICIES: Record<string, SupervisionPolicy> = {
 	// subscriber registration (their onStart only runs when they themselves
 	// restart). With `resume`, the actor instance plus its queue and
 	// subscribers map all survive a thrown handler — matching the legacy
-	// queue's catch-and-continue behavior. See
-	// dev_docs/framework/design-background-notification-actor.md for the
-	// full rationale.
+	// queue's catch-and-continue behavior.
 	notification: {
 		defaultAction: 'resume',
 	},

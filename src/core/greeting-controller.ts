@@ -63,8 +63,6 @@ export interface GreetingControllerDeps {
  *  - `shouldDropOutbound()` (the AudioRouter mic-drop gate),
  *  - `requestInterrupt(source)` (the grace gate behind every interrupt site),
  *  - `resetForClientConnected()` (per-client grace reset).
- *
- * See dev_docs/framework/design-greeting-interrupt-grace.md §4–§6, §8.
  */
 export class GreetingController {
 	/** Pass-2-final greeting interrupt grace window (ms). `0` disables the
@@ -164,7 +162,6 @@ export class GreetingController {
 		// `resetForClientConnected` (which runs between session-ready and
 		// sendGreeting in the common "client connects later" path) — and
 		// before `startMic` runs there are no mic frames to gate anyway.
-		// See dev_docs/framework/design-greeting-interrupt-grace.md §6, §8.
 	}
 
 	/** Idempotent arming hook called from every assistant-audio chunk site
@@ -320,7 +317,6 @@ export class GreetingController {
 		// risked racing two active responses on OpenAI Realtime — see
 		// `conversation_already_has_active_response`). Combining keeps the
 		// grace-window invariant "first audio = greeting" intact.
-		// See dev_docs/framework/design-greeting-interrupt-grace.md §6.
 		const cachedFacts = this.deps.getMemoryFacts();
 		const memoryPrefix =
 			cachedFacts.length > 0

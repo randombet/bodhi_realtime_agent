@@ -1,7 +1,6 @@
 /**
  * UserTurnEvidenceLedger — session-scoped, three-level user-speech evidence
- * (DETECTED / ROUTED / RECOGNIZED). Phase 1 of
- * dev_docs/framework/design-speech-evidence-architecture.md: one mutable
+ * (DETECTED / ROUTED / RECOGNIZED): one mutable
  * ACTIVE record updated with allocation-free field writes on the audio fast
  * path, plus a private preallocated terminal ring holding EVERY outcome
  * (completed, ignored, aborted — all can carry routed audio and receive late

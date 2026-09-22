@@ -19,8 +19,7 @@ export const DEFAULT_RECONNECT_TIMEOUT_MS = 45_000;
 export const DEFAULT_RESPONSE_WATCHDOG_MS = 5_000;
 
 /** Max age of a retained user utterance eligible for watchdog-stall recovery
- *  replay (ms) — never replay stale speech. See
- *  dev_docs/framework/design-retained-user-content-recovery.md. */
+ *  replay (ms) — never replay stale speech. */
 export const DEFAULT_REPLAY_MAX_AGE_MS = 30_000;
 
 /** Default timeout for subagent execution (ms). */

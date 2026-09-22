@@ -3,7 +3,7 @@
  *
  * A standalone `LLMTransport` on the raw `ws` package (no provider SDK). The
  * Qwen realtime protocol is OpenAI-Realtime-shaped; wire shapes were validated
- * live in the Phase 0 spike — see dev_docs/framework/design-qwen-realtime-transport.md.
+ * live in the Phase 0 spike.
  *
  * Key Phase 0 findings baked in here:
  *  - server_vad turn-taking works (auto `response.created` after trailing silence).

@@ -5,12 +5,12 @@
  * bodhi voice server and its browser/device clients, plus the few runtime
  * constants both sides must agree on (pacing table, client-media default).
  *
- * Rules (enforced; see dev_docs/framework/client-protocol-audit.md):
+ * Rules (enforced):
  * - Zero dependencies, browser-safe: no Node, DOM-optional, no framework
  *   imports. A lint check forbids `src/` imports from this package.
  * - `src/types/client-protocol.ts` re-exports this package for framework-side
- *   importers; app-server unions live in `app/lib/client/`; peers extend via
- *   the module-augmentation registries.
+ *   importers; app servers and peers extend it via the module-augmentation
+ *   registries.
  */
 
 export const PROTOCOL_PACKAGE = '@bodhi/client-protocol' as const;

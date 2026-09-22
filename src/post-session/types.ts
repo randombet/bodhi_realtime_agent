@@ -6,7 +6,6 @@ export type { SessionEndReason, KnownSessionEndReason } from '../types/session.j
 
 /**
  * Top-level contracts for the post-session processing pipeline.
- * See `dev_docs/framework/design-post-session-processor.md`.
  *
  * `ConversationSnapshot`, `SessionMetricsSnapshot`, and `PostSessionStores` are
  * intentionally minimal in v1 — they grow as concrete processors land.

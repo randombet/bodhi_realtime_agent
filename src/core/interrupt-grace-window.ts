@@ -14,8 +14,6 @@
  * The class is logging-agnostic: `VoiceSession.requestInterrupt(source)`
  * wraps `isActive()` and emits the suppression log through the session's
  * own log channel.
- *
- * See dev_docs/framework/design-greeting-interrupt-grace.md §4, §6.
  */
 export class InterruptGraceWindow {
 	private _until = 0;

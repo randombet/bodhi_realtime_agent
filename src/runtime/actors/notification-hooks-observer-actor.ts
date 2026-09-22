@@ -5,9 +5,6 @@
  * priority) and fires `FrameworkHooks.onBackgroundNotification` for each
  * delivered notification. Constructed by `RuntimeOrchestrator` only when
  * the user actually configured a callback — zero-overhead when unattached.
- *
- * See `dev_docs/framework/design-background-notification-actor.md`,
- * "Built-in observability subscriber" section.
  */
 
 import type { Actor } from '../actor-runtime.js';

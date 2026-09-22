@@ -40,8 +40,7 @@ import { zodToJsonSchema } from './zod-to-schema.js';
  * OpenAI Realtime cache configuration. Lives on `OpenAIRealtimeConfig.cacheConfig`.
  *
  * P3 lands `truncation` (the documented cache-preservation lever); P5 wires
- * `enforcePrefixStability`; P6 adds `experimental.promptCacheKey`. See
- * dev_docs/framework/design-context-caching.md for the full design.
+ * `enforcePrefixStability`; P6 adds `experimental.promptCacheKey`.
  */
 export interface OpenAIRealtimeCacheConfig extends CacheConfigCommon {
 	/**
@@ -410,7 +409,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	// across responses until unquiesce()).
 	private _suppressAudio = false;
 
-	// Active-response waiter — see dev_docs/framework/design-greeting-interrupt-grace.md §2.
+	// Active-response waiter.
 	// Resolved when the in-flight response terminates (`response.done` any status,
 	// disconnect, or transport error). `cancelResponse({ waitForDone: true })`
 	// returns a promise that races this waiter against a 2000 ms timeout so
@@ -452,7 +451,6 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		// Compute framework-owned-interrupt + grace from the single
 		// turn-detection resolver — wire config and capabilities cannot
 		// disagree because they are computed together from one source.
-		// See dev_docs/framework/design-greeting-interrupt-grace.md §3.
 		const { wire, effective } = this.resolveTurnDetectionConfig();
 		// VAD-disabled mode (`turn_detection: null`) means no speech-driven
 		// interrupt machinery runs at all — neither provider nor framework
@@ -652,14 +650,12 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		// remain distinct on the interface so VoiceSession can document
 		// "discard pre-arming echo residue" intent at the call site without
 		// coupling to the legacy clearAudio name.
-		// See dev_docs/framework/design-greeting-interrupt-grace.md §8.
 		if (!this.rt || !this._isConnected) return;
 		this.rt.send({ type: 'input_audio_buffer.clear' });
 	}
 
 	/** Cancel the in-flight response — wire-only actuation. See
 	 *  `LLMTransport.cancelResponse` JSDoc on the interface for the contract.
-	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §2, §7.
 	 *
 	 *  Returns `Promise<void>`. Never rejects — transient send failures are
 	 *  caught and logged internally. */
@@ -674,7 +670,6 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		// caller requested `waitForDone`, we must NOT short-circuit — we
 		// have to wait for that pending response to complete, otherwise the
 		// caller's subsequent `response.create` will race the pending one.
-		// See dev_docs/framework/design-greeting-interrupt-grace.md §7.5.
 		const responsePending = this._resolveActiveResponseDone !== null;
 		if (!this._isModelGenerating && !opts?.truncate && !(opts?.waitForDone && responsePending)) {
 			return;
@@ -728,8 +723,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	 *  (~10-100 ms). Without pre-arming, a second direct input enqueued in
 	 *  that gap sees `_activeResponseDone` still resolved (from before),
 	 *  skips the wait, and sends its own `response.create` — producing
-	 *  `conversation_already_has_active_response`. See
-	 *  dev_docs/framework/design-greeting-interrupt-grace.md §7.5. */
+	 *  `conversation_already_has_active_response`. */
 	private markResponsePending(): void {
 		if (this._resolveActiveResponseDone === null) {
 			this._activeResponseDone = new Promise<void>((resolve) => {
@@ -745,8 +739,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	 *  `_isModelGenerating`. No top-level no-op guard — internal callers
 	 *  invoke only when they know a response is in flight (or want the
 	 *  state-mutation parity even when one isn't).
-	 *  Never rejects — wraps wire sends in try/catch + console.warn.
-	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §7. */
+	 *  Never rejects — wraps wire sends in try/catch + console.warn. */
 	private actuateCancelInternal(truncate?: CancelResponseOptions['truncate']): void {
 		this._suppressAudio = true;
 		if (truncate && this.lastAssistantItemId) {
@@ -1023,7 +1016,6 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		// response. Public API remains sync; the internal queue serializes
 		// cancel -> response.done(cancelled) -> item/create so OpenAI never sees
 		// a new response.create while the cancelled response is still active.
-		// See dev_docs/framework/design-greeting-interrupt-grace.md §7.
 		if (
 			scheduling === 'interrupt' &&
 			(this._isModelGenerating || this._resolveActiveResponseDone !== null)
@@ -1429,8 +1421,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	 *  Phase B4 keeps `interrupt_response: true` as the default to preserve
 	 *  pre-design behaviour. Phase B8 flips this default to `false` (the
 	 *  framework-owned interrupt mode) and runtime-computes the capability
-	 *  flags from the resolved value.
-	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §3. */
+	 *  flags from the resolved value. */
 	private resolveTurnDetectionConfig(): {
 		wire: Record<string, unknown> | null;
 		effective: { interrupt_response: boolean; create_response: boolean };
@@ -1765,7 +1756,6 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		// the server auto-cancels the response itself. We still issue the
 		// local truncate so the stored item reflects what was heard, and fire
 		// onInterrupted so the framework can finalize.
-		// See dev_docs/framework/design-greeting-interrupt-grace.md §3.
 		rt.on('input_audio_buffer.speech_started', () => {
 			// Always fire onSpeechStarted first — TTS barge-in (and the
 			// framework's wireNativeBargeIn) need it regardless of mode.

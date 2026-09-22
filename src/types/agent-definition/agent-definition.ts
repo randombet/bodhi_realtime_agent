@@ -252,7 +252,7 @@ export const persistedKbBundleSchema = z.object({
 export type PersistedKbBundle = z.infer<typeof persistedKbBundleSchema>;
 
 /**
- * Optional client-leg media preference for app/server surfaces.
+ * Optional client-leg media preference for app or server surfaces.
  * This is separate from `realtimeProvider` (Gemini vs OpenAI vendor transport).
  * `iceServers` remain surface/operator concerns and are not persisted per agent.
  */

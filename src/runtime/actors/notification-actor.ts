@@ -10,10 +10,6 @@
  * Audio bytes never enter this actor's mailbox. Only one once-per-turn
  * `notification.audio_started` control-plane message arrives from
  * `VoiceSession.handleAudioOutput` (debounced at the call site).
- *
- * See `dev_docs/framework/design-background-notification-actor.md` for the
- * full design — message contracts, lifecycle ownership matrix, decision
- * algorithm, label normalization, supervision policy.
  */
 
 import { randomUUID } from 'node:crypto';

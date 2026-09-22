@@ -1,8 +1,8 @@
 /**
  * Browser PCM capture + playback for bodhi voice sessions.
  *
- * Seeded from a distilled copy (itself distilled from
- * app/web-client/src/audio.ts) with the web client's hardening ported in
+ * Seeded from a distilled copy (itself distilled from the Bodhi web
+ * client's audio module) with the web client's hardening ported in
  * (plan step B3): eager AudioContext creation via {@link primeAudioContext}
  * so server audio arriving before mic permission still plays, `playbackRate`
  * scaling for speech pacing, and delayed context close on teardown so a fast
@@ -21,7 +21,7 @@ const CAPTURE_BUF = 2048;
 const FALLBACK_SETTLE_MS = 250;
 
 /** Delay before actually closing the AudioContext on teardown — a reconnect
- *  within this window reuses it (mirrors app/web-client's 2s delayed close). */
+ *  within this window reuses it (mirrors the web client's 2s delayed close). */
 const CONTEXT_CLOSE_DELAY_MS = 2000;
 
 function downsample(input: Float32Array, fromRate: number, toRate: number): Float32Array {

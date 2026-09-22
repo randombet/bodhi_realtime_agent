@@ -9,7 +9,6 @@
  * dictation, external-audio agents) can never produce a replayable turn.
  *
  * Memory only, bounded (pre-roll ring + per-segment cap), never persisted.
- * See dev_docs/framework/design-retained-user-content-recovery.md.
  */
 
 import type { RetainedUserTurn } from '../types/transport.js';

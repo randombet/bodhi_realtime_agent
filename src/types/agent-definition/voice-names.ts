@@ -2,9 +2,8 @@
 
 /**
  * Realtime voice + STT model name constants for the persisted agent definition.
- * Extracted here (from the legacy `app/agents/user-agent-record.ts`) so the
- * `AgentDefinitionV2` schema cluster is dependency-light and reusable from `src/`
- * without reaching into `app/`.
+ * Kept here so the `AgentDefinitionV2` schema cluster is dependency-light and
+ * reusable from `src/`.
  */
 
 /** Allowed Gemini Live prebuilt voice names (all 30 HD presets). */

@@ -49,8 +49,6 @@ export interface TtsPipelineDeps {
  * `ttsProvider`/`ttsGate` pair, reaching the provider for start/stop/cancel and
  * the gate for its lifecycle ops (the completion arbiter and `liveGate()` still
  * consult `gate` directly — a session is TTS *or* native, never both).
- *
- * See dev_docs/framework/investigation-voice-session-modularity.md (Step 5b).
  */
 export class TtsPipeline {
 	readonly provider: TTSProvider;
@@ -225,7 +223,6 @@ export class TtsPipeline {
 		//     we need to cancel the LLM response so it stops emitting more
 		//     text; in provider-owned mode the server's auto-cancel + the
 		//     transport's own truncate already handle this via onInterrupted.
-		// See dev_docs/framework/design-greeting-interrupt-grace.md §4.
 		const prevSpeechStarted = transport.onSpeechStarted;
 		transport.onSpeechStarted = () => {
 			// Chain-preserve any earlier handler (e.g. the session's raw-fact

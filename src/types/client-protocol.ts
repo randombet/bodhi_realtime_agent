@@ -3,8 +3,7 @@
  *
  * The canonical definitions live in `@bodhi/client-protocol`
  * (`clients/client-protocol/` — zero-dep, browser-safe, built before every
- * framework build/typecheck; see the audit table in
- * dev_docs/framework/client-protocol-audit.md). Server-side code imports from
+ * framework build/typecheck). Server-side code imports from
  * here; browser packages import `@bodhi/client-protocol` directly.
  */
 

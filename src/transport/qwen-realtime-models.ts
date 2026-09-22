@@ -3,8 +3,6 @@
  * DashScope). Mirrors `openai-realtime-models.ts`: one row per model, one column
  * per gated feature. Unknown model IDs still work — they opt out of gated
  * features (`supports()` returns false).
- *
- * See dev_docs/framework/design-qwen-realtime-transport.md (Phase 0 results).
  */
 
 /** Default Singapore (international) realtime endpoint. */

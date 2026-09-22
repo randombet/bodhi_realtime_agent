@@ -254,8 +254,7 @@ export interface SessionReconnected {
 // `BackgroundNotificationQueue`. Producers send `notification.publish` to
 // inject a synthetic user turn into the live LLM; the actor handles priority,
 // audio-received gating, turn-complete flushing, and label-filtered fan-out
-// to subscribers via `notification.delivered`. See
-// `dev_docs/framework/design-background-notification-actor.md`.
+// to subscribers via `notification.delivered`.
 
 /**
  * Documented label vocabulary used by in-tree emitters. Producers may pass any

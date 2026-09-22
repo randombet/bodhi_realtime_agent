@@ -8,8 +8,7 @@
  *
  * Motivated by `NotificationActor` needing to carry `Envelope.correlationId`
  * from a `notification.publish` envelope onto its `notification.delivered`
- * fan-out envelopes — see
- * `dev_docs/framework/design-background-notification-actor.md`.
+ * fan-out envelopes.
  */
 
 import type { ActorId, CorrelationId } from './envelope.js';

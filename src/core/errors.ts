@@ -76,7 +76,7 @@ export class ValidationError extends FrameworkError {
  * `cacheConfig.enforcePrefixStability: true` when a connected, non-transfer
  * `updateSession()` or `transferSession()` call would mutate the cache prefix
  * (instructions or tools). Pre-connect mutations are always allowed; same-
- * canonical-prefix calls do not throw. See dev_docs/framework/design-context-caching.md §2.
+ * canonical-prefix calls do not throw.
  */
 export class CachePrefixMutationError extends FrameworkError {
 	constructor(message: string, options?: { severity?: ErrorSeverity; cause?: Error }) {

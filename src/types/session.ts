@@ -25,7 +25,7 @@ export type SessionState =
  * `(string & {})` keeps it open to transport-specific reasons without collapsing
  * the literals to plain `string`. This is the single canonical reason type,
  * threaded from the close caller through `onSessionEnd` → `session.close` →
- * post-session processors (see `dev_docs/framework/design-post-session-processor.md`).
+ * post-session processors.
  */
 export type KnownSessionEndReason =
 	| 'normal'

@@ -28,9 +28,6 @@
  * Throws inside any hook are caught and logged; per the
  * `'background-agents': resume` supervision policy, a misbehaving agent
  * does not bring down the session.
- *
- * See `dev_docs/framework/design-background-notification-actor.md` —
- * "BackgroundAgent and BackgroundAgentHostActor" section.
  */
 
 import { randomUUID } from 'node:crypto';

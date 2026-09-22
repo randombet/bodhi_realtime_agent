@@ -47,8 +47,7 @@ export interface TransportCapabilities {
 	 *  native playback-end gate must supply playback-end gating itself.
 	 *  Optional — `undefined` means `false`. EVERY transport should set this
 	 *  explicitly; the default exists only so adding the flag does not break
-	 *  compilation of existing custom transports.
-	 *  See dev_docs/framework/design-playback-end-gating-openai-native.md. */
+	 *  compilation of existing custom transports. */
 	playbackGatedTurnComplete?: boolean;
 	/** Recommended grace window (ms) at session-first-audio during which
 	 *  user-driven interrupts are suppressed and outbound mic frames are
@@ -56,8 +55,7 @@ export interface TransportCapabilities {
 	 *  echo-triggered events count as barge-in.
 	 *  Defaults: OpenAI Realtime → 1000 (runtime-computed iff
 	 *  `frameworkOwnsInterrupt` is `true`), Gemini Live → 0,
-	 *  unknown → 0. Optional — `undefined` means `0`.
-	 *  See dev_docs/framework/design-greeting-interrupt-grace.md. */
+	 *  unknown → 0. Optional — `undefined` means `0`. */
 	greetingInterruptGraceMs?: number;
 	/** True if this transport's interrupt actuation is framework-owned:
 	 *  `cancelResponse()` is the wire path the framework uses to stop
@@ -80,8 +78,7 @@ export interface TransportCapabilities {
 	 *  relies on `cancelResponse()` to stop the trailing audio. A transport that
 	 *  sets this MUST implement `cancelResponse` to suppress its current-turn
 	 *  audio. Gemini Live → `true`; OpenAI/Qwen → `false` (cancelResponse cancels
-	 *  generation). Optional — `undefined` means `false`.
-	 *  See dev_docs/framework/design-noncancellable-transport-barge-in.md. */
+	 *  generation). Optional — `undefined` means `false`. */
 	bufferedUncancellableAudio?: boolean;
 }
 
@@ -424,8 +421,7 @@ export interface RealtimeLLMUsageEvent {
  * exposing static capabilities and handling provider-specific wire protocols internally.
  */
 /** Options for `LLMTransport.cancelResponse`. See the method's JSDoc on
- *  `LLMTransport` for full semantics.
- *  See dev_docs/framework/design-greeting-interrupt-grace.md §2. */
+ *  `LLMTransport` for full semantics. */
 export interface CancelResponseOptions {
 	/** Truncate the stored assistant audio item alongside cancelling the
 	 *  response. `{ audioEndMs }` provides an explicit value (floored).
@@ -496,8 +492,7 @@ export interface LLMTransport {
 	 *  `input_audio_buffer.clear`). Optional — Gemini and other transports
 	 *  without a server-side append-then-commit input buffer omit this.
 	 *  Called by `VoiceSession` at grace-window arming to discard any
-	 *  pre-arming echo residue; safe to call when the buffer is empty.
-	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §8. */
+	 *  pre-arming echo residue; safe to call when the buffer is empty. */
 	clearInputAudio?(): void;
 
 	// --- Quiesce / unquiesce (optional; advertised via capabilities.quiescible) ---
@@ -570,8 +565,7 @@ export interface LLMTransport {
 	 *  connection, then once more after a reconnect if the model stays silent.
 	 *  Returns true if the transport dispatched it; false/absent → caller falls
 	 *  back. Optional. Gemini sends `clientContent` inline audio with an explicit
-	 *  `turnComplete` (no server-VAD dependence; Phase 0 validated — see
-	 *  dev_docs/framework/design-retained-user-content-recovery.md). */
+	 *  `turnComplete` (no server-VAD dependence; Phase 0 validated). */
 	replayUserTurn?(turn: RetainedUserTurn): boolean;
 
 	// --- Turn correlation (optional) ---

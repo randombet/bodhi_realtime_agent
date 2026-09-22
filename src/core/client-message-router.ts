@@ -102,8 +102,6 @@ export interface ClientMessageRouterDeps {
  * exactly as before and is NOT forwarded to `onClientJson`. `onClientJson` fires
  * only for an unrecognized `type` — the former silent-drop fall-through — so the
  * change is byte-identical unless a consumer wires the hook.
- *
- * See dev_docs/framework/investigation-voice-session-controllers.md (Unit 1).
  */
 export class ClientMessageRouter {
 	constructor(private readonly deps: ClientMessageRouterDeps) {}
@@ -161,7 +159,6 @@ export class ClientMessageRouter {
 	 * in-progress potential barge-in via `finishOrDeferForVad`). The guards
 	 * reject every signal that does not concern the live, post-synthesis turn —
 	 * source-agnostic via `getLiveGate()` (external TTS or native audio).
-	 * See dev_docs/framework/design-playback-end-gating-openai-native.md §5.
 	 */
 	private handlePlaybackEnded(playbackId: number): void {
 		if (!this.deps.getPlaybackStateProtocolActive()) return;

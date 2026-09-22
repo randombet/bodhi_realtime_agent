@@ -81,9 +81,6 @@ function parseToolResult(content: string): ToolResult | null {
  * WhatsApp-style markdown chat-log writer. Implements
  * `ConversationHistoryStore` for transparent integration with
  * `ConversationHistoryWriter`, but is **write-only**: read methods throw.
- *
- * See `dev_docs/framework/design-markdown-conversation-history-store.md`
- * for the format spec, lifecycle, and design rationale.
  */
 export class MarkdownConversationHistoryStore implements ConversationHistoryStore {
 	private readonly opts: MarkdownConversationHistoryStoreOptions;

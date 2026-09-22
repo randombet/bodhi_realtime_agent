@@ -1,7 +1,7 @@
 /**
  * The audio.done → drain → settle → playback.ended handshake, standalone
  * (plan step D3). `VoiceClient` uses it internally; apps that own their
- * socket (app/web-client) drive it directly from their handlers so the
+ * socket drive it directly from their handlers so the
  * protocol's subtlest ordering lives in exactly one place:
  *
  * - acknowledge only after the server marked the turn's audio done AND the

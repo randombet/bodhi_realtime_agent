@@ -104,8 +104,7 @@ export abstract class BaseTransportAdapter implements TransportAdapter {
 	 *  available — works for both OpenAI (sends `response.cancel`) and Gemini
 	 *  (no-op via the resolved-promise stub). Subclasses may override for
 	 *  transports without `cancelResponse`, but the default is correct for
-	 *  the two transports the framework ships today.
-	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §2. */
+	 *  the two transports the framework ships today. */
 	cancelGeneration(): void {
 		// Fire-and-forget — the actor-runtime caller is synchronous. Promise
 		// rejections never occur (cancelResponse contracts to resolve, never

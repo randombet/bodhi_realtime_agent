@@ -9,7 +9,7 @@
  *
  * - **Legacy** (no `guarded` option): the historical flow — handlers are
  *   registered immediately and `onConnection` runs afterwards. Preserved
- *   byte-compatible for existing consumers (`app/server`), with one global
+ *   byte-compatible for existing consumers, with one global
  *   bug fix: `onDisconnection` now fires exactly once per connection
  *   (previously `stop()` invoked it directly AND the socket's close handler
  *   fired it again).

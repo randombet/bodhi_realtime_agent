@@ -18,9 +18,6 @@
  *     `session.reconnected`, stopped on `session.close_requested` /
  *     `transport.closed`. It produces notifications proactively, without
  *     being invoked by the live LLM.
- *
- * See `dev_docs/framework/design-background-notification-actor.md` —
- * "BackgroundAgent and BackgroundAgentHostActor" section.
  */
 
 import type { KnownNotificationLabel } from '../runtime/messages.js';

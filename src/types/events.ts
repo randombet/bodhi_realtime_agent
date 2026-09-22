@@ -34,7 +34,7 @@ export type RealtimeUsageSource =
  * and once for transcription completion; Gemini fires for interim updates
  * and once at `turnComplete`.
  *
- * Aggregation key recommendations (see dev_docs/framework/design-context-caching.md §4):
+ * Aggregation key recommendations:
  * - openai.response       → (sessionId, turnId, source, providerItemId)
  * - openai.transcription  → (sessionId, source, providerItemId)  // turnId is null
  * - gemini.turn.final     → (sessionId, turnId, source)

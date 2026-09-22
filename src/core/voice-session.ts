@@ -194,8 +194,7 @@ const NATIVE_BARGEIN_ECHO_SKIP_MS = 400;
  *  numeric range. Returns `undefined` when omitted (no caller override —
  *  inherit transport default at pass 2); returns `0` for `NaN`, negative,
  *  or non-finite inputs; returns the clamped value otherwise.
- *  Exported for tests; consumers should not depend on this directly.
- *  See dev_docs/framework/design-greeting-interrupt-grace.md §5. */
+ *  Exported for tests; consumers should not depend on this directly. */
 export function clampGraceMs(raw: number | undefined): number | undefined {
 	if (raw === undefined) return undefined;
 	if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 0) return 0;
@@ -257,8 +256,7 @@ export interface VoiceSessionConfig {
 	/** Model-silence watchdog (ms) after the user's turn ends. If the model emits
 	 *  nothing for this long, force a reconnect. Default 5000; `<= 0` disables. */
 	responseWatchdogMs?: number;
-	/** Watchdog-stall recovery via retained-utterance replay (see
-	 *  dev_docs/framework/design-retained-user-content-recovery.md). When true,
+	/** Watchdog-stall recovery via retained-utterance replay. When true,
 	 *  the last routed user utterance is retained (bounded, memory-only) and a
 	 *  response-watchdog stall replays it — in-place first, then once more after
 	 *  a reconnect. Default false (ships dark until live-validated). */
@@ -315,14 +313,12 @@ export interface VoiceSessionConfig {
 	/** Playback-state protocol mode for this session's client surface.
 	 *  `'audio_done'` enables the `audio.done` / `playback.ended` handshake;
 	 *  `'disabled'` (default) keeps the estimate-only fallback. Effective
-	 *  participation additionally requires the client sender to support it.
-	 *  See dev_docs/framework/design-playback-state-protocol.md. */
+	 *  participation additionally requires the client sender to support it. */
 	playbackStateProtocol?: 'disabled' | 'audio_done';
 	/** Rollout switch for native-audio playback-end gating (the OpenAI native
 	 *  path). Default `false`. When `true`, and the session is on the native
 	 *  audio path with a generation-gated transport and `playbackStateProtocol`
-	 *  active, native turn completion is gated on playback end.
-	 *  See dev_docs/framework/design-playback-end-gating-openai-native.md. */
+	 *  active, native turn completion is gated on playback end. */
 	nativePlaybackGating?: boolean;
 	/** Initial transcription mode for the session. Default `'agent'`.
 	 *  - `'agent'` (default): mic audio flows to `transport`; the agent
@@ -415,8 +411,7 @@ export interface VoiceSessionConfig {
 	 * User-defined `BackgroundAgent` instances. Hosted by
 	 * `BackgroundAgentHostActor`; each agent's `onStart` fires once on the
 	 * first `session.connected` envelope. Actor-mode only — ignored in
-	 * legacy mode (the legacy queue has no equivalent host). See
-	 * `dev_docs/framework/design-background-notification-actor.md`.
+	 * legacy mode (the legacy queue has no equivalent host).
 	 */
 	backgroundAgents?: BackgroundAgent[];
 	/** Override the transport-recommended greeting interrupt grace window.
@@ -430,8 +425,7 @@ export interface VoiceSessionConfig {
 	 *  transport that does not advertise `frameworkOwnsInterrupt` (or does
 	 *  not implement `cancelResponse`) is downgraded to `0` at connect time
 	 *  with a warning log. Phone sessions should pass `0` explicitly (no
-	 *  browser AEC; dropping caller audio would silence real speech).
-	 *  See dev_docs/framework/design-greeting-interrupt-grace.md. */
+	 *  browser AEC; dropping caller audio would silence real speech). */
 	greetingInterruptGraceMs?: number;
 	/** When `false`, the greeting is uninterruptible end-to-end: from the
 	 *  greeting send until the greeting turn finalizes (post-playback where
@@ -500,16 +494,14 @@ export class VoiceSession {
 	private processedKnowledgeBase: ProcessedKnowledgeBase | null = null;
 	/** Turn lifecycle — numeric counter, current/previous `Turn` pointers,
 	 *  per-turn usage sequence, finalized-input-turn set. `finalizeTurn` stays
-	 *  here but drives the counter through this unit. See
-	 *  dev_docs/framework/design-turn-lifecycle-refactor.md. */
+	 *  here but drives the counter through this unit. */
 	private readonly turns = new TurnManager({
 		getActiveAgentName: () => this.agentRouter.activeAgent.name,
 		getActiveServerTurnId: () => this.transport.getActiveServerTurnId?.(),
 	});
 	private sttProvider?: STTProvider;
 	/** Last routed user utterance for watchdog-stall recovery replay. Only
-	 *  constructed when `config.watchdogReplayRecovery` is true (dark rollout).
-	 *  See dev_docs/framework/design-retained-user-content-recovery.md. */
+	 *  constructed when `config.watchdogReplayRecovery` is true (dark rollout). */
 	private utteranceRetainer?: LastUtteranceRetainer;
 	/** R7c reconnect-window freshness tee (hosted): frames/speech observed at
 	 *  `feedAudioFromClient` while RECONNECTING — captured BEFORE the router's
@@ -545,8 +537,7 @@ export class VoiceSession {
 	 *  unfinalized active turn then sends the new content — and the next
 	 *  enqueued body waits for the previous to fully finish. Prevents two
 	 *  rapid inputs from both calling `response.create` and triggering
-	 *  `conversation_already_has_active_response`.
-	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §7.5. */
+	 *  `conversation_already_has_active_response`. */
 	private _directInputChain: Promise<void> = Promise.resolve();
 	/** Native-audio playback-end gate (the OpenAI native path). Present for every
 	 *  native (non-TTS) session — its barge-in runs regardless of gating — but
@@ -626,8 +617,7 @@ export class VoiceSession {
 	private readonly responseWatchdogMs: number;
 	/** G5 drain-normalization flag (rollback = false → legacy raw bytes). */
 	private readonly normalizeDrainedInbound: boolean;
-	// --- Server-turn finalization dedup (external-TTS turn completion).
-	//     See dev_docs/framework/design-external-tts-turn-completion.md. ---
+	// --- Server-turn finalization dedup (external-TTS turn completion). ---
 	private config: VoiceSessionConfig;
 	/** Injectable ms clock for metric/latency math (default `Date.now`). */
 	private readonly nowMs: () => number;
@@ -711,8 +701,7 @@ export class VoiceSession {
 	private ownsClientTransport: boolean;
 	/** Margin (ms) added to the VAD-defer force-completion timeout. */
 	/** Default and floor (ms) for the TTS fallback-completion margin — estimate
-	 *  padding before the server force-completes a turn with no playback signal.
-	 *  See dev_docs/framework/design-playback-state-protocol.md. */
+	 *  padding before the server force-completes a turn with no playback signal. */
 	private static readonly TTS_PLAYBACK_FALLBACK_MARGIN_DEFAULT_MS = 1500;
 	private static readonly TTS_PLAYBACK_FALLBACK_MARGIN_FLOOR_MS = 500;
 	/** Slowest client `playbackRate` — the fallback estimate divides the
@@ -1037,8 +1026,7 @@ export class VoiceSession {
 				// route — the model owes nothing. Abort the (unfed) retainer
 				// segment so its pre-roll seed cannot leak into a candidate, and
 				// notify the reconnector so an earlier deferred fire re-evaluates
-				// instead of stranding. See
-				// dev_docs/framework/investigation-greeting-suppression-watchdog-regreet.md.
+				// instead of stranding.
 				// Phase-2 re-bind: retainer/watchdog ACTUATION moved to the ledger's
 				// terminal observer (actuateTerminalPolicies) — this legacy handler
 				// keeps only playback resolution, latency/hook publication, and
@@ -2549,7 +2537,7 @@ export class VoiceSession {
 		// Grace check goes BEFORE marking fired — otherwise a frame at t=500ms
 		// within a 1s grace would set the "fired" flag, and the `hasBargeInFired`
 		// guard above would skip the next loud frame at t=1100ms (post-grace),
-		// defeating real barge-ins. See dev_docs/framework/design-greeting-interrupt-grace.md §4.
+		// defeating real barge-ins.
 		if (!this.requestInterrupt('client-vad')) {
 			// Threshold-passing barge-in declined (e.g. greeting grace): a *missed*
 			// barge-in. Emit once per segment so the rate isn't inflated per-frame.
@@ -2801,7 +2789,6 @@ export class VoiceSession {
 		// call below can request the first audio chunk. Idempotent — safe to
 		// re-run on transfer/reconnect setup-complete callbacks, but in
 		// practice runs once per VoiceSession lifecycle.
-		// See dev_docs/framework/design-greeting-interrupt-grace.md §5.
 		this.finalizeGreetingInterruptGrace();
 		// Resume (§2): prefill the model with the loaded history on the INITIAL connect, BEFORE the
 		// ACTIVE transition and any greeting/first send — so the first turn always sees the prior
@@ -2922,7 +2909,6 @@ export class VoiceSession {
 		// Native playback-end gate: when this terminal response produced audio
 		// and dispatched no tool call, defer finalization until the client
 		// reports playback end (playback.ended) or the fallback timer fires.
-		// See dev_docs/framework/design-playback-end-gating-openai-native.md.
 		if (path === 'native-gate' && this.nativeGate) {
 			// Arm the gate fully BEFORE sendJsonAfterAudio so a sender that
 			// synchronously echoes audio.done back as playback.ended meets an
@@ -2943,8 +2929,6 @@ export class VoiceSession {
 	 * handleTurnCompleteInternal() and handleInterrupted() bodies. Idempotency
 	 * is structural: Turn.finalize() runs the side effects only for the first
 	 * caller; every later signal resolving to the same Turn is a no-op.
-	 *
-	 * See dev_docs/framework/design-turn-lifecycle-refactor.md § Idempotent finalization.
 	 */
 	private finalizeTurn(turn: Turn | null, opts: { interrupted: boolean }): void {
 		if (!turn) return;
@@ -3202,7 +3186,6 @@ export class VoiceSession {
 	 * The live playback-completion gate for this session — the external-TTS gate
 	 * when a `ttsProvider` is set, the native-audio gate when native playback-end
 	 * gating is active, else `null`. A session is TTS *or* native, never both.
-	 * See dev_docs/framework/design-playback-end-gating-openai-native.md §6.
 	 */
 	private liveGate(): PlaybackGate | null {
 		if (this.ttsPipeline) {
@@ -3216,8 +3199,7 @@ export class VoiceSession {
 
 	/** Single-flight FIFO for direct-input bodies. Each enqueued body runs
 	 *  to completion before the next begins, even across `handleTextInput` /
-	 *  `injectTranscript` / `injectDictationBuffer` interleaving.
-	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §7.5. */
+	 *  `injectTranscript` / `injectDictationBuffer` interleaving. */
 	private enqueueDirectInput(work: () => Promise<void>): Promise<void> {
 		// `.then(work, work)` lets the chain continue even if a prior body
 		// rejected. We then catch on the chain itself so a rejection does not
@@ -3233,8 +3215,7 @@ export class VoiceSession {
 	 *  direct-input body sends `sendContent`. When the transport implements
 	 *  `cancelResponse`, awaits the trailing `response.done(cancelled)` so the
 	 *  next `response.create` does not race the cancel. Returns when both
-	 *  steps complete.
-	 *  See dev_docs/framework/design-greeting-interrupt-grace.md §7.5. */
+	 *  steps complete. */
 	private async preEmptForDirectInput(): Promise<void> {
 		// Direct input supersedes any held voice candidate: idle a recovery
 		// held behind the greeting gate BEFORE the dispatch below releases
@@ -3292,7 +3273,6 @@ export class VoiceSession {
 		// active would suppress new-client mic frames before its own first
 		// audio chunk armed — leaking the prior session's grace into a
 		// different audio context.
-		// See dev_docs/framework/design-greeting-interrupt-grace.md §6.
 		this.greeting.resetForClientConnected();
 		const bootstrap = () => {
 			if (!this.clientConnected || generation !== this.clientConnectionGeneration) return;

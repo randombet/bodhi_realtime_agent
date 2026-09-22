@@ -198,8 +198,7 @@ export class GeminiLiveTransport implements LLMTransport {
 	private _textFromOutputTranscription = false;
 	/** Latest Gemini `usageMetadata` for the active model turn (cleared on `turnComplete`). */
 	private _cachedGeminiUsage: unknown | null = null;
-	// --- Server-turn state machine (external-TTS turn completion).
-	//     See dev_docs/framework/design-external-tts-turn-completion.md. ---
+	// --- Server-turn state machine (external-TTS turn completion). ---
 	/** Gemini server-turn lifecycle: idle → generating → (ended_early) → closed. */
 	private _serverTurnState: 'idle' | 'generating' | 'ended_early' | 'closed' = 'idle';
 	/** Monotonic id of the current Gemini server turn (for finalization dedup). */
@@ -677,8 +676,7 @@ export class GeminiLiveTransport implements LLMTransport {
 	 *  widened contract ("stop the current response reaching the user") by
 	 *  suppressing the current server turn's *remaining* outbound audio until the
 	 *  next server turn (the response to the barge-in) begins. Drives the
-	 *  `bufferedUncancellableAudio` capability.
-	 *  See dev_docs/framework/design-noncancellable-transport-barge-in.md. */
+	 *  `bufferedUncancellableAudio` capability. */
 	async cancelResponse(): Promise<void> {
 		this._suppressedServerTurnId = this.getActiveServerTurnId() ?? null;
 	}
