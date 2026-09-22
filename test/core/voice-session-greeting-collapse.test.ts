@@ -12,7 +12,6 @@ import type {
 /**
  * Phase B5 verification — sendGreeting() collapses memory facts + session
  * directives + greeting into ONE sendContent call.
- * See dev_docs/framework/design-greeting-interrupt-grace.md §6.
  */
 
 const mockModel = { modelId: 'test-model' } as unknown as LanguageModelV1;

@@ -80,8 +80,7 @@ const OPENCLAW_URL = process.env.OPENCLAW_URL || 'ws://127.0.0.1:18789';
 const OPENCLAW_TOKEN = process.env.OPENCLAW_TOKEN || '';
 const SESSION_ID = `session_${Date.now()}`;
 // Where the WhatsApp-style markdown transcript for each session is written.
-// Each session lands as `{TRANSCRIPT_DIR}/{sessionId}.md`. See
-// dev_docs/framework/design-markdown-conversation-history-store.md.
+// Each session lands as `{TRANSCRIPT_DIR}/{sessionId}.md`.
 const TRANSCRIPT_DIR = process.env.TRANSCRIPT_DIR || './transcripts';
 const LIVE_MODEL = 'gemini-2.5-flash-native-audio-preview-12-2025';
 const google = createGoogleGenerativeAI({ apiKey: API_KEY });

@@ -15,8 +15,7 @@ import type { TTSAudioConfig, TTSProvider } from '../../src/types/tts.js';
  * "a late callback after teardown is a no-op" behavior that the Step 4–5 gate
  * extractions (`NativeAudioPlaybackGate`, `ExternalTtsPlaybackGate`) must
  * preserve: `_nativePlaybackId` / `_ttsCurrentRequestId` reject stale, premature,
- * and post-teardown signals. See
- * dev_docs/framework/investigation-voice-session-modularity.md.
+ * and post-teardown signals.
  */
 
 const mockModel = { modelId: 'test-model' } as unknown as LanguageModelV1;

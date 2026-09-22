@@ -943,7 +943,6 @@ describe('OpenAIRealtimeTransport', () => {
 	});
 
 	describe('cancelResponse + _activeResponseDone waiter', () => {
-		// dev_docs/framework/design-greeting-interrupt-grace.md §2.
 		// `_isModelGenerating` is read/set by these tests via the test mock
 		// access pattern used throughout this file.
 
@@ -1177,7 +1176,6 @@ describe('OpenAIRealtimeTransport', () => {
 	});
 
 	describe('resolveTurnDetectionConfig (shared resolver)', () => {
-		// dev_docs/framework/design-greeting-interrupt-grace.md §3.
 		// B8 flips the default to `interrupt_response: false` (framework-owned).
 
 		function resolve(t: OpenAIRealtimeTransport) {
@@ -1266,8 +1264,6 @@ describe('OpenAIRealtimeTransport', () => {
 	});
 
 	describe('B8 atomic flip: framework-owned capabilities + speech_started dual-mode', () => {
-		// dev_docs/framework/design-greeting-interrupt-grace.md §1, §3.
-
 		function resolveCaps(t: OpenAIRealtimeTransport) {
 			// biome-ignore lint/suspicious/noExplicitAny: test mock access
 			return (t as any).resolveCapabilities();
@@ -1831,7 +1827,7 @@ describe('OpenAIRealtimeTransport — Phase 1 features (gpt-realtime-2)', () => 
 		});
 	});
 
-	// P3: OpenAI cacheConfig.truncation mapping. See dev_docs/framework/design-context-caching.md
+	// P3: OpenAI cacheConfig.truncation mapping.
 	describe('cacheConfig.truncation (P3)', () => {
 		it('validateOpenAICacheConfig accepts valid object form', async () => {
 			const { validateOpenAICacheConfig } = await import(
@@ -2006,7 +2002,7 @@ describe('OpenAIRealtimeTransport — Phase 1 features (gpt-realtime-2)', () => 
 		});
 	});
 
-	// P5: enforcePrefixStability + sendSessionUpdateAndWait. See dev_docs/framework/design-context-caching.md §2.
+	// P5: enforcePrefixStability + sendSessionUpdateAndWait.
 	describe('enforcePrefixStability (P5)', () => {
 		it('pre-connect updateSession is always allowed (no baseline yet)', async () => {
 			const { OpenAIRealtimeTransport: T } = await import(
@@ -2127,7 +2123,7 @@ describe('OpenAIRealtimeTransport — Phase 1 features (gpt-realtime-2)', () => 
 		});
 	});
 
-	// P6: experimental.promptCacheKey probe. See dev_docs/framework/design-context-caching.md §6.
+	// P6: experimental.promptCacheKey probe.
 	describe('experimental.promptCacheKey probe (P6)', () => {
 		it('derivePromptCacheKeyProbeScope produces stable scope strings', async () => {
 			const { derivePromptCacheKeyProbeScope } = await import(

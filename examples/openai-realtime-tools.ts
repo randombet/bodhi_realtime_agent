@@ -31,8 +31,8 @@
  *      AND logged to the server console — so a web client (`pnpm web-client`) can
  *      render live dictation, and you can see it from the server logs too.
  *
- * Optional context-caching env vars (see dev_docs/framework/design-context-caching.md
- * and the Cache configuration block below for the full details):
+ * Optional context-caching env vars (see the Cache configuration block below
+ * for the full details):
  *
  *   CACHE_TRUNCATION_RATIO=0.8    Set cacheConfig.truncation = retention_ratio:0.8.
  *                                  The documented OpenAI cost-preservation lever —
@@ -107,7 +107,7 @@ const SESSION_ID = `session_${Date.now()}`;
 const google = createGoogleGenerativeAI({ apiKey: GEMINI_API_KEY });
 
 // =============================================================================
-// Cache configuration (env-driven, see dev_docs/framework/design-context-caching.md)
+// Cache configuration (env-driven)
 // =============================================================================
 //
 // CACHE_TRUNCATION_RATIO  — float in [0, 1]. When set, maps to

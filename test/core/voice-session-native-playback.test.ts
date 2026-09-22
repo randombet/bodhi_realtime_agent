@@ -12,7 +12,6 @@ import type {
  * Unit tests for native-audio playback-end gating (the OpenAI native path).
  * The mock transport reports `playbackGatedTurnComplete: false`, so the gate
  * engages; a mock client sender carries `supportsPlaybackStateProtocol`.
- * See dev_docs/framework/design-playback-end-gating-openai-native.md.
  */
 
 const mockModel = { modelId: 'test-model' } as unknown as LanguageModelV1;

@@ -1,6 +1,5 @@
 /**
- * SutandoTaskLedger — the M2 durable submitted-task ledger from
- * dev_docs/design-sutando-persistent-subagent.md.
+ * SutandoTaskLedger — the M2 durable submitted-task ledger.
  *
  * Append-only JSONL, one file per session nonce, every append fsync'd —
  * "acked on the Mac" must imply "recorded on the bodhi host" (the ack commit

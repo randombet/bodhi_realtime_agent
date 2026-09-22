@@ -337,8 +337,7 @@ describe('response watchdog', () => {
 });
 
 /**
- * Phase-0 phantom-arm fix (investigation tests 1-4, 3b — see
- * dev_docs/framework/investigation-greeting-suppression-watchdog-regreet.md).
+ * Phase-0 phantom-arm fix (investigation tests 1-4, 3b).
  * The watchdog must arm only for segments whose voiced audio was admitted
  * past the greeting gate; fully gated segments skip (and log), abort
  * retention, and notify the reconnector instead.

@@ -1,6 +1,5 @@
 /**
- * Example-owned frame registrations for the client-plane contract
- * (dev_docs/framework/client-protocol-audit.md — "example-owned" rows).
+ * Example-owned frame registrations for the client-plane contract.
  *
  * The examples emit a handful of demo frames (`session_end`,
  * `dictation_transcript`, `speech_speed`, `agent.human_transfer`, legacy

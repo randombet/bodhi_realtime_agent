@@ -118,7 +118,7 @@ curl -sS "$HERMES_URL/v1/models" -H "Authorization: Bearer $HERMES_API_KEY"
 # Terminal 1: Start the voice agent server
 pnpm tsx examples/hermes/hermes-demo.ts
 
-# Terminal 2: Start the web client (reused from the OpenClaw example)
+# Terminal 2: Start the shared web client
 pnpm web-client
 
 # Open http://localhost:8080 in Chrome and click Connect

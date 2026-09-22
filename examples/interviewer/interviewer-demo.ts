@@ -52,8 +52,7 @@ const PORT = Number(process.env.PORT) || 9900;
 const HOST = process.env.HOST || '0.0.0.0';
 const SESSION_ID = `interviewer_${Date.now()}`;
 // Where the WhatsApp-style markdown transcript for each session is written.
-// Each session lands as `{TRANSCRIPT_DIR}/{sessionId}.md`. See
-// dev_docs/framework/design-markdown-conversation-history-store.md.
+// Each session lands as `{TRANSCRIPT_DIR}/{sessionId}.md`.
 const TRANSCRIPT_DIR = process.env.TRANSCRIPT_DIR || './transcripts';
 const LIVE_MODEL = process.env.GEMINI_LIVE_MODEL || 'gemini-3.1-flash-live-preview';
 const REASONING_MODEL = process.env.INTERVIEWER_REASONING_MODEL || 'gemini-2.5-flash';
@@ -102,8 +101,7 @@ async function main() {
 
 	// Periodic time-remaining reminder (5 min interval, 30 min total budget).
 	// Demonstrates the actor-mode BackgroundAgent surface: produces wall-clock
-	// notifications without holding a VoiceSession reference. See
-	// `dev_docs/framework/design-background-notification-actor.md`.
+	// notifications without holding a VoiceSession reference.
 	const timingReminder = new TimingReminderBackgroundAgent(state);
 
 	// Markdown transcript store — emits a per-session .md chat log to

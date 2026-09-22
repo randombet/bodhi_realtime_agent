@@ -74,8 +74,7 @@ const HERMES_URL = process.env.HERMES_URL || 'http://127.0.0.1:8642';
 const HERMES_MODEL = process.env.HERMES_MODEL || 'hermes-agent';
 const SESSION_ID = `hermes_${Date.now()}`;
 // Where the WhatsApp-style markdown transcript for each session is written.
-// Each session lands as `{TRANSCRIPT_DIR}/{sessionId}.md`. See
-// dev_docs/framework/design-markdown-conversation-history-store.md.
+// Each session lands as `{TRANSCRIPT_DIR}/{sessionId}.md`.
 const TRANSCRIPT_DIR = process.env.TRANSCRIPT_DIR || './transcripts';
 const LIVE_MODEL = 'gemini-2.5-flash-native-audio-preview-12-2025';
 const google = createGoogleGenerativeAI({ apiKey: API_KEY });

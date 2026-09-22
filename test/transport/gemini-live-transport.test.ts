@@ -1401,7 +1401,7 @@ describe('GeminiLiveTransport', () => {
 		});
 	});
 
-	// P2: sessionResumption refactor — see dev_docs/framework/design-context-caching.md
+	// P2: sessionResumption refactor.
 	describe('sessionResumption (P2)', () => {
 		it('sessionResumption: false omits the field from connectConfig', async () => {
 			const transport = new GeminiLiveTransport(

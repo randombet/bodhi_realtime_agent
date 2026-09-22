@@ -4,7 +4,6 @@ import { describe, expect, it } from 'vitest';
 
 // Boundary check for the browser-safe packages under clients/: they must not
 // import the framework tree (src/) or any third-party runtime dependency.
-// See dev_docs/framework/client-protocol-audit.md and the reuse plan S2.
 
 const CLIENTS_ROOT = join(__dirname, '..', '..', 'clients');
 const ALLOWED_PACKAGE_IMPORTS = new Set(['@bodhi/client-protocol']);

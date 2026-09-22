@@ -115,7 +115,7 @@ export SUTANDO_RELAY_TOKEN="<the token from step 1>"
 # Terminal 1: voice agent + relay
 pnpm tsx examples/sutando/sutando-demo.ts
 
-# Terminal 2: web client (reused from the OpenClaw example)
+# Terminal 2: shared web client
 pnpm web-client
 
 # Open http://localhost:8080 in Chrome and click Connect

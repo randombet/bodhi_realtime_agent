@@ -2,10 +2,9 @@
 // Client-protocol literal scanner (audit step A1 of the peer-server reuse plan).
 //
 // Sweeps every boundary-API population for wire message-type literals and
-// prints one row per literal with where it was seen. The audit table
-// (dev_docs/framework/client-protocol-audit.md) must classify EVERY candidate
-// this script emits — rerun after protocol changes; an unclassified literal
-// means the table (or the unions) are stale.
+// prints one row per literal with where it was seen. Rerun after protocol
+// changes and check every literal against the message unions — an
+// unaccounted-for literal means the unions are stale.
 //
 //   node scripts/scan-client-protocol.mjs            # human-readable
 //   node scripts/scan-client-protocol.mjs --json     # machine-readable

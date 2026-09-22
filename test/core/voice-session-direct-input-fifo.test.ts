@@ -11,7 +11,6 @@ import type {
 
 /**
  * Phase B6 verification — direct-input single-flight FIFO.
- * See dev_docs/framework/design-greeting-interrupt-grace.md §7.5.
  *
  * `handleTextInput`, `injectTranscript`, and `injectDictationBuffer` all
  * share `_directInputChain`. Each enqueued body awaits

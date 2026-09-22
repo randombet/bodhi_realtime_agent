@@ -6,7 +6,7 @@
  * screen, coding — through Sutando's remote-gateway relay protocol. The Mac
  * dials OUT to this process (no inbound port, tunnel, or Mac reconfiguration),
  * so this demo can run anywhere close to the user: on the MacBook itself, a
- * GCP VM, or a LAN box. See dev_docs/design-sutando-persistent-subagent.md.
+ * GCP VM, or a LAN box.
  *
  * Mirrors examples/hermes/hermes-demo.ts with two deliberate deviations:
  *  (a) the voice WebSocket binds to 127.0.0.1 by default and FAILS CLOSED on
@@ -82,7 +82,7 @@ const SESSION_ID = `sutando_${Date.now()}`;
 // Google Search grounding — ON by default (SUTANDO_GOOGLE_SEARCH=0 disables).
 const GOOGLE_SEARCH = process.env.SUTANDO_GOOGLE_SEARCH !== '0';
 // Live model — always the 3.1 Live model (~1.32s replies with a 62ms spread;
-// probed 2026-07-26, dev_docs/framework/investigation-sutando-voice-latency.md).
+// probed 2026-07-26).
 // Caveat: on a FREE-TIER key, declaring google_search at connect on this model
 // is rejected with 1011 "quota exceeded" (the grounding entitlement, not a
 // rate limit) — set SUTANDO_GOOGLE_SEARCH=0 there and lookups fall back to
@@ -97,7 +97,7 @@ if (!LOOPBACK.has(HOST) && process.env.VOICE_FRONT_AUTH_CONFIRMED !== 'true') {
 	console.error(`Error: HOST=${HOST} binds the (unauthenticated) voice WebSocket beyond loopback.`);
 	console.error('Front it with an authenticated layer (TLS proxy + session auth, VPN/tailnet, or');
 	console.error('network allowlist + Origin checking), then set VOICE_FRONT_AUTH_CONFIRMED=true.');
-	console.error('See dev_docs/design-sutando-persistent-subagent.md §6.');
+	console.error('See examples/sutando/README.md (Deployment topologies).');
 	process.exit(1);
 }
 

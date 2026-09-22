@@ -8,8 +8,6 @@
  * Cartesia TTS) over LiveKit's WebRTC transport, instead of one
  * speech-to-speech model over a raw WebSocket.
  *
- * Design: dev_docs/framework/design-livekit-stt-llm-tts-example.md
- *
  * Providers (PROVIDER env, default "plugins"):
  *   - "plugins":   Deepgram STT + OpenAI LLM + Cartesia TTS (your own API keys)
  *   - "inference": LiveKit Cloud inference gateway for all three (LIVEKIT_* only)

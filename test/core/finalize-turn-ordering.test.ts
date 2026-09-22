@@ -12,8 +12,7 @@ import type { TTSAudioConfig, TTSProvider } from '../../src/types/tts.js';
 
 /**
  * Characterization oracle for `VoiceSession.finalizeTurn` (Step 0 of the
- * VoiceSession modularization plan, see
- * dev_docs/framework/investigation-voice-session-modularity.md).
+ * VoiceSession modularization plan).
  *
  * It records the ORDER of the observable side effects finalizeTurn drives —
  * STT (commit / complete / interrupt), external-TTS cancel, transcript flush,

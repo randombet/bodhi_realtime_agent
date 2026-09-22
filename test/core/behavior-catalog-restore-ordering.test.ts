@@ -173,7 +173,7 @@ describe('behavior.catalog restore ordering (reuse plan B5)', () => {
 		const starting = session.start();
 		try {
 			// Let directives finish while provider connect is still deliberately
-			// blocked, matching app/server's pre-notify exposure window.
+			// blocked, matching a host server's pre-notify exposure window.
 			await new Promise((resolve) => setTimeout(resolve, 20));
 			session.feedJsonFromClient({ type: 'text_input', text: 'queued before notify' });
 			await Promise.resolve();

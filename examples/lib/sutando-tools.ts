@@ -1,6 +1,5 @@
 /**
- * Sutando wiring for bodhi voice agents — the drop-in construct from
- * dev_docs/design-sutando-persistent-subagent.md.
+ * Sutando wiring for bodhi voice agents — a drop-in construct.
  *
  * `createSutandoAgentConfig()` packages everything a bodhi app needs to use
  * the owner's Sutando (on their Mac, reached via the relay) as its execution

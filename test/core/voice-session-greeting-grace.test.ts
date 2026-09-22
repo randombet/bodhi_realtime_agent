@@ -10,7 +10,6 @@ import type {
 
 /**
  * Phase A5 verification — two-pass `greetingInterruptGraceMs` resolution.
- * See dev_docs/framework/design-greeting-interrupt-grace.md §5.
  *
  * Pass 1 (constructor): clamps the caller override and stores it.
  * Pass 2 (handleSetupComplete, before sendGreeting): combines override with

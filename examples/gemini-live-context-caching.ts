@@ -13,9 +13,6 @@
  *   does NOT expose a `cacheConfig` field on `GeminiTransportConfig` —
  *   shipping a no-op safety knob would mislead callers.
  *
- *   See dev_docs/framework/design-context-caching.md §Background and
- *   architecture.md "Session resumption (P2)" for the full rationale.
- *
  * What this demo DOES show:
  *   1. `sessionResumption` — the privacy/ZDR opt-out and the resumable-handle
  *      lifecycle. Toggle SESSION_RESUMPTION_DISABLE=1 to opt out.
@@ -146,7 +143,7 @@ const LIVE_MODEL = process.env.GEMINI_LIVE_MODEL || DEFAULT_GEMINI_LIVE_MODEL;
 // exceeded" on a free-tier key (plain connects succeed seconds apart; the
 // same key grounds fine on the 2.5 native-audio models). If startup dies
 // with a quota error, either set GOOGLE_SEARCH=0 or pick a 2.5 model via
-// GEMINI_LIVE_MODEL. See dev_docs/framework/investigation-sutando-voice-latency.md.
+// GEMINI_LIVE_MODEL.
 const GOOGLE_SEARCH = process.env.GOOGLE_SEARCH !== '0';
 
 if (SESSION_RESUMPTION_DISABLE && SESSION_RESUMPTION_RESUME) {

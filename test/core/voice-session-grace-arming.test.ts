@@ -10,7 +10,6 @@ import type {
 
 /**
  * Phase C2/C3 verification — grace arming + interrupt suppression.
- * See dev_docs/framework/design-greeting-interrupt-grace.md §4, §6.
  */
 
 const mockModel = { modelId: 'test-model' } as unknown as LanguageModelV1;

@@ -11,10 +11,10 @@ export default withMermaid(
 		ignoreDeadLinks: [
 			/^http:\/\/localhost/,
 			// Cross-repo references — links that escape the `docs/` root (e.g. into
-			// `dev_docs/`, `app/`, `examples/`, top-level `README.md`). The targets
+			// `examples/`, `observability/`, top-level `README.md`). The targets
 			// exist on disk and resolve correctly when the doc is viewed on GitHub,
 			// but VitePress's checker can't see outside the docs/ directory.
-			/^\.{1,2}\/(\.\.\/)*(dev_docs|app|examples|observability|README)(\/|$)/,
+			/^\.{1,2}\/(\.\.\/)*(examples|observability|README)(\/|$)/,
 			// Bare directory link to `./advanced/` (no `advanced/index.md` exists;
 			// the section's entry page is `advanced/subagents`).
 			/^\.\/advanced(\/(index)?)?$/,

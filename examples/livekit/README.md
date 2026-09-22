@@ -8,8 +8,6 @@ background image/video generation, multi-agent transfer, graceful end — but bu
 **cascaded pipeline** (Deepgram STT → OpenAI LLM → Cartesia TTS) over LiveKit's WebRTC
 transport instead of one speech-to-speech model over a raw WebSocket.
 
-Design doc: [`dev_docs/framework/design-livekit-stt-llm-tts-example.md`](../../dev_docs/framework/design-livekit-stt-llm-tts-example.md)
-
 ## What it does
 
 - **Persona & pacing** — senior-friendly Bodhi, one idea per turn (greeting fires once).

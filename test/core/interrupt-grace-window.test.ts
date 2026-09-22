@@ -3,7 +3,6 @@ import { InterruptGraceWindow } from '../../src/core/interrupt-grace-window.js';
 
 /**
  * Phase C1 verification — InterruptGraceWindow class.
- * See dev_docs/framework/design-greeting-interrupt-grace.md §4.
  */
 
 function makeClock(initial = 0): { now: () => number; advance: (ms: number) => void } {
