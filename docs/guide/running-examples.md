@@ -44,17 +44,18 @@ Press Ctrl+C to stop.
 
 ## Start the Agent Server (OpenAI)
 
-Alternatively, run the same tools and agents with OpenAI's Realtime API:
+Alternatively, run a voice assistant on OpenAI's Realtime API:
 
 ```bash
-# Set your API key
+# Set your API keys (Gemini powers the image/video subagents)
 export OPENAI_API_KEY="your-key-here"
+export GEMINI_API_KEY="your-gemini-key"
 
 # Start the voice agent
 pnpm tsx examples/hello_world/openai-realtime-tools.ts
 ```
 
-The OpenAI example has the same tools (calculator, current time, image generation, slow search) and agents (main, math expert) as the Gemini example. The web client works with either server without changes — audio format is negotiated automatically via `session.config`.
+The OpenAI example is a senior-friendly assistant: calculator, current time, speech speed, image and video generation, and a transfer to a patient math helper. The web client works with either server without changes — audio format is negotiated automatically via `session.config`.
 
 ## Start the Web Client
 

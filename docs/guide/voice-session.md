@@ -35,15 +35,6 @@ Use native realtime-model audio by omitting `ttsProvider`.
 
 The framework accepts a `ttsProvider` instance; the app layer turns saved agent/UI choices into that instance.
 
-In the Bodhi app:
-
-- `/talk` shows one **Speech output** dropdown. **Use selected agent's saved speech output** sends no override; native Gemini/OpenAI voice choices send `ttsProvider=native`, `realtimeProvider`, and `geminiRealtimeVoice` or `openaiRealtimeVoice`; external TTS presets send generic `ttsProvider` query params; custom choices reveal provider-specific IDs.
-- Agent Studio uses the same **Speech output** dropdown. Native choices persist as `geminiVoiceName` or `openaiVoice` with `ttsConfig.provider = "native"`; external choices persist as saved-agent `ttsConfig`.
-- Hosted/mobile and phone dial-out APIs accept a typed `speechOutput` object for per-session voice/TTS overrides.
-- Signed-in users can store provider keys through the existing BYOK key table/API. Server environment keys are fallback credentials only.
-- `BODHI_TTS_EMERGENCY_OVERRIDE` is the only env behavior override, and it is reserved for operator intervention.
-
-The normal resolver order is emergency override, explicit WebSocket query override, per-session API `speechOutput`, saved `ttsConfig`, built-in profile `speechOutput`, then native realtime-model audio.
 
 ### Cartesia Presets
 

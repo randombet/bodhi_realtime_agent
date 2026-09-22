@@ -2,8 +2,6 @@
 
 The framework can attach a **structured knowledge base** to a **`MainAgent`**: documents are loaded, split into prompt vs tool-backed chunks, and optionally exposed as an inline **`search_knowledge_base`** tool. This page explains how to integrate KB for **main** vs **subagents**, and how it differs from **persistent memory**.
 
-**Also read (product / hosted Studio):** `app/docs/agent-studio-knowledge-base.md` — upload limits, persisted shapes, and what the web UI exposes. When answering user questions about KB, use **both** docs.
-
 ## Layers: memory vs prompt KB vs “retrieval” (tool KB)
 
 These are **separate mechanisms** in the codebase; KB is not a special case of memory, and “search” in KB does not mean Google or the open web.
@@ -30,8 +28,8 @@ So: **prompt KB** = always visible (up to context limits). **Tool KB** = on-dema
 | Concern | Abstraction in `src/` |
 |--------|------------------------|
 | **Read / load `file`** | Default: sync **`readFileSync`** with `cwd` resolution. Optional: **`KnowledgeBaseProcessContext.readFileText`** passed into `processKnowledgeBase()` so hosts can read from sandboxes, object storage, etc., without changing core logic. |
-| **Read / load hosted bytes** | **Not in `src/`** — the Bodhi app downloads Storage objects and passes **`source: 'text'`** into the framework (`materialize-knowledge-base-attachments.ts`). |
-| **Edit / modify KB at runtime** | **No** dedicated KB editor API. You change **`MainAgent.knowledgeBase`** (or persisted Studio JSON), then re-run **`resolveAgentWithKnowledgeBase`** / rebuild the session config so the processor runs again. |
+| **Read / load remote bytes** | **Not in `src/`** — fetch documents yourself (object storage, uploads, …) and pass **`source: 'text'`** into the framework, or supply **`readFileText`** (above). |
+| **Edit / modify KB at runtime** | **No** dedicated KB editor API. You change **`MainAgent.knowledgeBase`**, then re-run **`resolveAgentWithKnowledgeBase`** / rebuild the session config so the processor runs again. |
 
 ## What the framework treats as “knowledge” (formats & limits)
 
@@ -83,23 +81,6 @@ Documents use `source: 'text'` (inline string) or `source: 'file'` (path resolve
 - **`MemoryStore`** — long-lived user facts; updated by distillation / tools. Not a document corpus.
 - **`KnowledgeBaseConfig`** — session compile-time corpus for **instructions + optional search tool** on the main agent, plus the **prompt-only** excerpt for subagents as above.
 
-## App layer (Bodhi server)
-
-Hosted **Agent Studio** resolves Supabase-backed attachments **before** compile and passes **`source: 'text'`** into the framework. See **`app/docs/agent-studio-knowledge-base.md`** for upload paths, ingestion, lifecycle, naming, the **a/b/c support matrix** (framework vs service vs web UI), **infra checklist**, **integration steps**, and **service-layer TODOs**.
-
-**Roadmap** (ingestion providers, noise, limits, subagent KB): `dev_docs/app/design-knowledge-base-roadmap.md`.
-
-**Structured screening / recruiting screen:** built-in profile `structured_screening` uses in-memory markdown (`source: 'text'`) from **`app/agents/builtin/structured-screening/defaults.ts`** or from a short-lived draft created via **`POST /api/profile-session-context/draft`** (wired from `/screening-demo` and Voice recruiting studio). Local **`examples/interviewer/`** is a separate framework toy demo.
-
-## Built-in profiles vs Studio-compiled agents
-
-| Source | Where `KnowledgeBaseConfig` comes from | Typical `source` |
-|--------|----------------------------------------|------------------|
-| **Built-in catalog** (e.g. structured screening) | **`assembleBodhiProfile`** merges text KB for `structured_screening` — see **`app/agents/builtin/structured-screening/knowledge-base.ts`** (`buildStructuredScreeningKnowledgeBaseFromTexts`). |
-| **User agents (`ua_*`)** | `AgentDefinitionV2.knowledgeBaseByAgentName` → **`materializeKnowledgeBaseByAgentName`** on the server | **`text`** only at framework boundary (Storage/inline resolved in `app/`). |
-
-As a framework developer you interact with the **same** `processKnowledgeBase()` / `resolveAgentWithKnowledgeBase()` APIs once `MainAgent.knowledgeBase` is set; only the **producer** of that config differs.
-
 ## Integration quickstart (framework developers)
 
 1. Build a **`KnowledgeBaseConfig`** with one or more **`KnowledgeBaseDocument`** entries (`source: 'text'` or **`file`**).
@@ -110,10 +91,10 @@ As a framework developer you interact with the **same** `processKnowledgeBase()`
 
 ## Open directions (framework-adjacent)
 
-These are mostly **product / app** concerns but affect how you wire KB:
+These are outside the framework today but affect how you wire KB:
 
 | Topic | Note |
 |-------|------|
-| **Subagent-owned KB** | No first-class **`SubagentConfig.knowledgeBase`** yet; subagents get **`knowledgeBaseContext`** (prompt slice only). Roadmap: `dev_docs/app/design-knowledge-base-roadmap.md` §5. |
+| **Subagent-owned KB** | No first-class **`SubagentConfig.knowledgeBase`** yet; subagents get **`knowledgeBaseContext`** (prompt slice only). |
 | **Vector / SQL / web RAG** | Not built into KB — add normal **`ToolDefinition`s** or workers and keep KB for static reference text. |
-| **Binary formats** | Framework does not parse PDF/DOCX; the **app** ingestion layer normalizes to text where configured (`app/agents/kb/*`). |
+| **Binary formats** | Framework does not parse PDF/DOCX; convert documents to text before passing them in (`source: 'text'`). |

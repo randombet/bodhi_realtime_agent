@@ -2,8 +2,7 @@
 
 Voice agents on **Qwen Omni Realtime** (Alibaba DashScope) via
 `QwenRealtimeTransport`. The transport is a standalone `LLMTransport` on raw
-WebSocket — see the design + live Phase 0 probe results in
-[`dev_docs/framework/design-qwen-realtime-transport.md`](../../dev_docs/framework/design-qwen-realtime-transport.md).
+WebSocket.
 
 ## Setup
 

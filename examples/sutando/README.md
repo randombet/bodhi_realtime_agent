@@ -9,7 +9,7 @@ endpoint), Sutando's core is a Claude Code CLI session behind NAT with no API
 server — so this demo inverts the connection: it hosts Sutando's
 **remote-gateway relay contract** (4 HTTP endpoints), and the Mac's shipping
 bridge client **dials out** to it. No inbound port, tunnel, or code change on
-the Mac. Design doc: `dev_docs/design-sutando-persistent-subagent.md`.
+the Mac.
 
 ## Features
 

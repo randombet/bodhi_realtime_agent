@@ -2,7 +2,7 @@
 
 A **`BackgroundAgent`** is an always-on, user-defined producer that injects synthetic user turns into the live LLM in actor mode. Use it for wall-clock reminders, external-channel alerts, polling for changes in another system — anything that should be spoken by the live agent without being invoked by a tool call.
 
-This page covers what background agents are, how their lifecycle works, how to publish notifications, and how to wire one into a `VoiceSession`. The full design is in [`design-background-notification-actor.md`](../../dev_docs/framework/design-background-notification-actor.md).
+This page covers what background agents are, how their lifecycle works, how to publish notifications, and how to wire one into a `VoiceSession`.
 
 ## How they differ from subagents
 
@@ -157,8 +157,6 @@ The TTS-aware lifecycle ticks (`turn_complete`, `interrupted`, `reset_audio`) co
 - [Actor Runtime Pattern](/guide/actor-pattern) — the full actor graph and notification subsystem zoom-in
 - [Subagent Patterns](/advanced/subagents) — for tool-driven (rather than always-on) producers
 - [Persistent Subagent Lifecycle](/advanced/persistent-subagent-lifecycle) — long-running tool subagents
-- [Investigation: background notifications status quo](../../dev_docs/framework/investigation-background-agent-status-quo.md)
-- [Design: NotificationActor + BackgroundAgent](../../dev_docs/framework/design-background-notification-actor.md)
 - [API: `BackgroundAgent`](/api/interfaces/BackgroundAgent)
 - [API: `BackgroundAgentContext`](/api/interfaces/BackgroundAgentContext)
 - [API: `PublishNotification`](/api/interfaces/PublishNotification)

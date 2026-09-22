@@ -35,7 +35,7 @@ Main actors:
 - `MainAgentActor`: agent transfer lifecycle hooks
 - `ClientGatewayActor`: client message bridge
 
-Notification subsystem (implemented — see [Background Agents](/advanced/background-agents) for usage and [design-background-notification-actor.md](../../dev_docs/framework/design-background-notification-actor.md) for the full design):
+Notification subsystem (implemented — see [Background Agents](/advanced/background-agents) for usage):
 
 - `NotificationActor`: owns the **background notification queue** as a first-class actor — handles `notification.publish`, priority + audio-received + turn-complete gating, dedup, label normalization, and pub/sub fan-out to subscribers. Replaces the in-process `BackgroundNotificationQueue` in actor mode.
 - `BackgroundAgentHostActor`: hosts user-defined `BackgroundAgent` instances (always-on producers — wall-clock reminders, polling, external alerts). Drives their `onStart` / `onAgentTransfer` / `onReconnect` / `onStop` lifecycle from session events.
@@ -166,9 +166,7 @@ flowchart LR
   SUB1 -->|adapter.sendContent| L
 ```
 
-The four producer rows on the left are the **only** sources of `notification.publish` in actor mode. The four lifecycle ticks are the **only** way `NotificationActor` learns about the model's turn state (audio chunks themselves never enter the mailbox — see "Audio fast-path bridge" in the design doc). Three of those ticks (`turn_complete`, `interrupted`, `reset_audio`) are owned by `VoiceSession`'s effective turn boundary so TTS gating is honored; only `audio_started` comes directly from `TransportActor`. Fan-out is one envelope per matching subscriber, so adding observability or a label-filtered consumer is a `notification.subscribe` away.
-
-See [design-background-notification-actor.md](../../dev_docs/framework/design-background-notification-actor.md) for the full notification message contracts, lifecycle ownership matrix, and step-by-step implementation plan.
+The four producer rows on the left are the **only** sources of `notification.publish` in actor mode. The four lifecycle ticks are the **only** way `NotificationActor` learns about the model's turn state (audio chunks themselves never enter the mailbox). Three of those ticks (`turn_complete`, `interrupted`, `reset_audio`) are owned by `VoiceSession`'s effective turn boundary so TTS gating is honored; only `audio_started` comes directly from `TransportActor`. Fan-out is one envelope per matching subscriber, so adding observability or a label-filtered consumer is a `notification.subscribe` away.
 
 ## How to enable actor mode
 
@@ -213,5 +211,3 @@ Use legacy mode only if you need minimal migration risk for older flows.
 - [Persistent Subagent Lifecycle](/advanced/persistent-subagent-lifecycle)
 - [API: ActorRuntime](/api/classes/ActorRuntime)
 - [API: RuntimeOrchestrator](/api/classes/RuntimeOrchestrator)
-- [Investigation: background notifications status quo](../../dev_docs/framework/investigation-background-agent-status-quo.md) — emitters, abstractions, original gaps that motivated `NotificationActor`.
-- [Design: `NotificationActor` + `BackgroundAgent`](../../dev_docs/framework/design-background-notification-actor.md) — message contracts, lifecycle ownership matrix, full implementation plan.

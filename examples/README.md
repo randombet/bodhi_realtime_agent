@@ -137,7 +137,7 @@ pnpm web-client
 ## Probes (`probes/`)
 
 Not demos — standalone scripts that verify a provider behavior a design depends on (Phase 0
-gates; results are recorded in the corresponding `dev_docs/framework/design-*.md`).
+gates run before building a feature).
 
 | Probe | Verifies | Run |
 |-------|----------|-----|

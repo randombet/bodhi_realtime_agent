@@ -17,22 +17,14 @@ script builds it on install.
   (plus `client-media.ts` / `rtc-signaling.ts` re-exports). Never deep-import.
 - **Apps / peers** — the package name directly. Register extension frames by
   augmenting `ClientProtocolServerExtensions` / `ClientProtocolClientExtensions`
-  (see `app/lib/client/client-protocol-extensions.ts` for a live example).
+  (see `examples/lib/client-protocol-extensions.ts` for a live example).
 - **Browser clients** — the package name; `import type` for shapes, value
   imports only for the pacing constants.
 
 ## Change rules
 
-1. **Adding/changing a core union member** fails compilation in
-   `app/lib/client/hosted-mobile-profile.ts` until the new member is
-   classified `hosted` or excluded-with-reason — assess the hosted impact,
-   don't suppress the error.
-2. **A hosted-profile change must update `docs/service/hosted-voice-api.md`
-   §4 in the same PR** — `test/app/hosted-mobile-manifest.test.ts` diffs the
-   doc's machine-readable manifest against the profile and fails CI on drift.
-3. **Deprecations:** `SubagentCompletionMessage.status` value `'failed'` is
+1. **Deprecations:** `SubagentCompletionMessage.status` value `'failed'` is
    deprecated (both emit paths now send `'failure'`); it stays in the union
    for one release for consumers compiled against the historical value.
-4. Message shapes mirror the real emit sites recorded in
-   `dev_docs/framework/client-protocol-audit.md` (regenerate candidates with
+2. Message shapes mirror the real emit sites (regenerate candidates with
    `node scripts/scan-client-protocol.mjs`). Don't add speculative fields.

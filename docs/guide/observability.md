@@ -617,4 +617,3 @@ deletions over reference length), case- and whitespace-insensitive.
 - [Playback Gate](./playback-gate.md) — the playback handshake the barge-in path builds on
 - [Transport](./transport.md) — where `onModelTurnStart` / `onFirstAudioChunk` come from
 - [`observability/dashboards/README.md`](../../observability/dashboards/README.md) — stack wiring walkthrough
-- Design history: `dev_docs/framework/investment-hai-metrics-observability.md` (decisions, alternatives, phased plan)

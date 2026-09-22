@@ -30,7 +30,7 @@ This is what most people mean by “transport” in the framework: the **`LLMTra
 ### STT/TTS
 
 - Built-in transcription is supported via transport/provider capabilities.
-- External STT/TTS providers can be attached at session level. For TTS, `VoiceSession` receives a framework `ttsProvider`; app/server code should resolve human-facing choices such as named Cartesia/ElevenLabs/Hume presets into provider config before constructing the session.
+- External STT/TTS providers can be attached at session level. For TTS, `VoiceSession` receives a framework `ttsProvider`; your application code should resolve human-facing choices such as named Cartesia/ElevenLabs/Hume presets into provider config before constructing the session.
 - Do not use provider API-key environment variables as provider selectors. They are fallback credentials only; product selection should come from saved agent config or an explicit session/query override.
 
 ---
@@ -63,5 +63,3 @@ See also:
 - [VoiceSession](/guide/voice-session) — `clientMedia`, `clientSender`, and session wiring
 - [Playback Gate](/guide/playback-gate) — `audio.done` / `playback.ended` turn-completion gating
 - [Architecture overview](/guide/architecture) — two independent realtime links (client leg vs vendor leg)
-
-Internal implementation notes: `dev_docs/framework/low-signal-client-transport-implementation-plan.md` (repository path).

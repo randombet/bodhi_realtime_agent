@@ -1,7 +1,6 @@
 # Post-Session Processor — examples
 
-Runnable companions to the architecture in
-[`dev_docs/framework/design-post-session-processor.md`](../../dev_docs/framework/design-post-session-processor.md).
+Runnable companions to the post-session processing pipeline.
 Both scripts drive the **real** `InMemoryPostSessionPipeline` from `src/post-session/`, so
 they cannot drift from production behavior.
 

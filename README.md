@@ -24,7 +24,7 @@ TypeScript framework for building real-time voice agent applications using the G
 pnpm add bodhi-realtime-agent
 ```
 
-To integrate the framework into your own backend: use `MultiClientTransport` to accept WebSockets, build a `SessionClientSender` per connection, and create a `VoiceSession` with that sender plus your agents and tools. A reference app (server + web client) lives in **app/** — see **app/README.md** for how to run it.
+To integrate the framework into your own backend: use `MultiClientTransport` to accept WebSockets, build a `SessionClientSender` per connection, and create a `VoiceSession` with that sender plus your agents and tools. Runnable demos live in [examples/](examples/README.md) — start with `pnpm tsx examples/hello_world/agent.ts` and `pnpm web-client`.
 
 ## Documentation
 
@@ -32,8 +32,7 @@ To integrate the framework into your own backend: use `MultiClientTransport` to 
 | --- | --- |
 | **Framework wiki** (building on `src/`) | [docs/](docs/) (VitePress site source) and [docs/README.md](docs/README.md). |
 | **Hosted Bodhi API** (mobile / native clients over HTTPS + WSS) | [docs/service/hosted-voice-api.md](docs/service/hosted-voice-api.md). |
-| **Internal design & implementation** | [dev_docs/README.md](dev_docs/README.md) — framework vs `app/` server, touchpoints, integrations. |
-| **Reference app** (runbook, features, env) | [app/README.md](app/README.md). |
+| **Examples** (runnable demos + shared web client) | [examples/README.md](examples/README.md). |
 
 ## Core Concepts
 
@@ -233,7 +232,7 @@ src/
     prompts.ts                # Extraction prompt template
   types/             # TypeScript interfaces and type definitions
 test/                # Unit and integration tests (mirrors src/ structure)
-app/                 # Usage examples
+examples/            # Runnable demos (see examples/README.md)
 ```
 
 ## Development

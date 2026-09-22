@@ -56,8 +56,7 @@ OpenAI's server VAD, which the client thresholds do not gate.
 - **Greeting interrupt grace window** (default 1000 ms on OpenAI). Suppresses
   user-driven interrupts and drops outbound mic frames during the session's
   first assistant audio, giving AEC time to start converging without echo
-  feeding back. See
-  [`dev_docs/framework/design-greeting-interrupt-grace.md`](https://github.com/bodhi-tech/bodhi_realtime_agent_framework/blob/main/dev_docs/framework/design-greeting-interrupt-grace.md).
+  feeding back.
 - **Default `eagerness: 'low'`** for `semantic_vad`. Makes the server VAD
   require slightly more sustained speech to fire `speech_started`, rejecting
   most under-converged echo. This is the framework's primary defence against

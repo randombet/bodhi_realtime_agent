@@ -66,7 +66,3 @@ The example tunes Gemini Live server-side VAD with `END_SENSITIVITY_HIGH` and `s
 | Outcomes-anchor heuristic | None | Fallback `follow_up` when answer lacks quantified numbers (no %, ms, x, users, etc.) |
 
 The implementation file structure and the framework wiring are otherwise identical — same persistent subagent + voice MainAgent + KB pattern, same `MarkdownConversationHistoryStore` integration, same `TimingReminderBackgroundAgent` (re-exported from the interviewer example, no copy).
-
-## Design Doc
-
-See [`dev_docs/framework/design-project-deepdive-example.md`](../../dev_docs/framework/design-project-deepdive-example.md).
