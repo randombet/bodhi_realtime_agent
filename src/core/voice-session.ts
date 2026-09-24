@@ -77,6 +77,7 @@ import { ValidationError } from './errors.js';
 import { EventBus } from './event-bus.js';
 import { GreetingController } from './greeting-controller.js';
 import { HooksManager } from './hooks.js';
+import { DialGenerationFence, SyntheticOutputHold } from './host-recovery.js';
 import { InteractionModeManager } from './interaction-mode.js';
 import { LastUtteranceRetainer } from './last-utterance-retainer.js';
 import { MemoryCacheManager } from './memory-cache-manager.js';
@@ -672,6 +673,15 @@ export class VoiceSession {
 	 *  `maybeArmGraceOnFirstAudio`, `requestInterrupt`, `shouldDropOutbound`,
 	 *  and `resetForClientConnected` to it. See `greeting-controller.ts`. */
 	private greeting!: GreetingController;
+	/** Synthetic-output hold: the gate every framework-generated send (greeting,
+	 *  directive reinforcement, guarded generation triggers, hold-respecting
+	 *  injections, watchdog recovery) passes, released by fresh user evidence.
+	 *  Nothing engages it outside a host recovery. See `host-recovery.ts`. */
+	private hold!: SyntheticOutputHold;
+	/** Drops tool results and external-STT captures that belong to a provider
+	 *  connection a host recovery abandoned; inert until a recovery marks a
+	 *  boundary. Wraps `transport.sendToolResult`. See `host-recovery.ts`. */
+	private fence!: DialGenerationFence;
 	/** Per-session single-flight FIFO chaining direct-user-input bodies
 	 *  (`handleTextInput`, `injectTranscript`, `injectDictationBuffer`). Each
 	 *  body awaits `cancelResponse({ waitForDone: true })` then finalizes any
@@ -947,6 +957,13 @@ export class VoiceSession {
 				this.runtimeOrchestrator?.runtime.tell(type, payload, to),
 			);
 		}
+		// The hold drives notification delivery through the sink: legacy only,
+		// since the actor sink refuses to hold.
+		this.hold = new SyntheticOutputHold({
+			setNotificationsHeld: (held) => this.notificationSink.setHeld(held),
+			drainNotifications: () => this.drainNotificationsWhenIdle(),
+			log: (msg) => this.log(msg),
+		});
 
 		if (config.hooks) {
 			this.hooks.register(config.hooks);
@@ -1256,6 +1273,12 @@ export class VoiceSession {
 			config.ttsPlaybackFallbackMarginMs,
 		);
 
+		// Dial-generation fence: it wraps `transport.sendToolResult` here, BEFORE
+		// the dictation controller below captures that sender, so tool results
+		// the controller queues in transcription mode and drains later still
+		// pass through the fence.
+		this.fence = new DialGenerationFence(this.transport, (msg) => this.log(msg));
+
 		// Transcription/dictation subsystem. Owns `internalMode`, the dictation
 		// buffer, the Whisper provider, and the §3.5 send-guard wrappers — its
 		// constructor installs the `transport.sendToolResult` / `sendContent`
@@ -1319,6 +1342,9 @@ export class VoiceSession {
 			// `turnId < turns.staleInputCutoff` prevents dropping valid late results while
 			// still rejecting truly stale transcripts from 2+ turns ago.
 			this.sttProvider.onTranscript = (text, turnId) => {
+				// Placed by its capture, not its arrival: a capture committed on a
+				// connection a host recovery abandoned is not fresh user evidence.
+				const captureStale = this.fence.isSttCaptureStale(turnId);
 				// A reserved user message for this turn is waiting on exactly this
 				// transcript — resolve it even though the turn has already finalized
 				// (and regardless of the stale cutoff, since the reservation, not the
@@ -1326,9 +1352,21 @@ export class VoiceSession {
 				// whenever the batch call outlives its turn.
 				if (turnId !== undefined && this.transcriptManager.sealReservedInput(turnId, text)) {
 					this.clearReservationTimer(turnId);
+					if (!captureStale) this.hold.release('external-stt-final');
 					return;
 				}
 				if (turnId !== undefined && turnId < this.turns.staleInputCutoff) return; // Drop stale results (2+ turns old)
+				// The turn window above admits the preceding turn, which is exactly
+				// where a capture from before a host recovery lands: drop it.
+				if (captureStale) {
+					this.log(
+						`[Transcript] Dropped transcript for turn ${turnId}: captured before a host recovery`,
+					);
+					return;
+				}
+				// Any capture in the window from the current connection is fresh
+				// evidence, even one for a turn whose input has already finalized.
+				this.hold.release('external-stt-final');
 				if (turnId !== undefined && this.turns.isInputFinalized(turnId)) return;
 				// New user input ends the post-interrupt correction-skip window, but
 				// only for a genuinely *new* turn. The interrupted turn's own barge-in
@@ -1357,6 +1395,8 @@ export class VoiceSession {
 			// immediately as a display-only partial; the batch STT then corrects
 			// and finalizes it via handleInput/flush.
 			this.transport.onInputTranscription = (text) => {
+				// The provider heard the user: fresh evidence.
+				this.hold.release('input-transcription');
 				// Liveness: the provider is transcribing the committed turn, so a
 				// response is in the pipeline — extend the response watchdog (capped)
 				// instead of letting it force a reconnect under an active turn.
@@ -1371,6 +1411,7 @@ export class VoiceSession {
 		} else {
 			// No external STT — use transport built-in transcription
 			this.transport.onInputTranscription = (text) => {
+				this.hold.release('input-transcription'); // fresh evidence (see above)
 				this.reconnector.notifyProviderActivity(); // liveness (see above)
 				this.logInputTranscriptionLatency(text, 'provider');
 				this.transcriptManager.handleInput(text);
@@ -1402,6 +1443,18 @@ export class VoiceSession {
 			this._turnTiming.modelStartMs = this.nowMs();
 			this._turnTiming.firstAudioMs = null;
 			const modelTurn = this.turns.ensureCurrent();
+			// A recovery the synthetic-output hold holds (rather than the greeting
+			// gate, whose own model start is ambiguous) is answered by this start:
+			// nothing synthetic can open a model turn while the hold is engaged,
+			// so the model is responding. Idle it, or the first fresh evidence
+			// would re-fire it mid-answer; the clears below then run as usual.
+			if (
+				modelTurn &&
+				this.reconnector.isRecoveryHeld() &&
+				!this.greeting.isUninterruptibleGreetingActive()
+			) {
+				this.reconnector.cancelHeldRecovery();
+			}
 			// Correlated model activity consumed the pending utterance — clear the
 			// recovery-replay candidate, the replay stage, and the response
 			// watchdog. Trailing model-start for a just-finalized turn
@@ -1449,6 +1502,7 @@ export class VoiceSession {
 			this.logProviderUserTurnRecognition('model/tool processing started');
 			if (this.sttProvider && !this._commitFiredForTurn) {
 				this._commitFiredForTurn = true;
+				this.fence.stampSttCommit(this.turns.numericId);
 				this.sttProvider.commit(this.turns.numericId);
 			}
 		};
@@ -1592,6 +1646,7 @@ export class VoiceSession {
 				resetNotificationAudio: () => this.notificationSink.resetAudio(),
 				// H4: a held recovery re-evaluates when the gate releases.
 				onGateReleased: () => this.reconnector.onGreetingGateReleased(),
+				isSyntheticHeld: () => !this.hold.gate('greeting'),
 				log: (msg) => this.log(msg),
 			},
 			{
@@ -1697,6 +1752,9 @@ export class VoiceSession {
 				// H4 hold predicate: FULL-greeting suppression only (the greeting
 				// controller's uninterruptible state — never grace windows).
 				isGreetingSuppressionArmed: () => this.greeting.isUninterruptibleGreetingActive(),
+				// A watchdog fire under the synthetic-output hold is held, never
+				// replayed, nudged or reconnected; the hold's release re-evaluates it.
+				isSyntheticHeld: () => this.hold.isActive(),
 				// Exhaustion policy, and the host-owned recovery gate it enables
 				// under 'hold'.
 				upstreamLossPolicy: config.upstreamLossPolicy ?? 'close',
@@ -1731,6 +1789,7 @@ export class VoiceSession {
 			},
 			this.responseWatchdogMs,
 		);
+		this.hold.onRelease(() => this.reconnector.onSyntheticHoldReleased());
 	}
 
 	private buildAgentRouter(
@@ -2048,6 +2107,8 @@ export class VoiceSession {
 			}
 		};
 		this.transport.onToolCall = (calls) => {
+			// Stamp each call with the dial it was issued on, for the tool-result fence.
+			this.fence.stampToolCalls(calls.map((c) => c.id));
 			this.reconnector.disarmResponseWatchdog();
 			// Native playback-end gate: this response dispatched a tool call, so
 			// it is not the turn's terminal spoken response.
@@ -2760,11 +2821,8 @@ export class VoiceSession {
 		this.directiveManager.clearAgent();
 
 		// Send the new agent's greeting if configured
-		if (this.clientConnected) {
-			if (this.agentRouter.activeAgent.greeting) {
-				this._pendingResponseOrigin = 'assistant_initiated';
-			}
-			this.greeting.sendGreeting();
+		if (this.clientConnected && this.greeting.sendGreeting()) {
+			this._pendingResponseOrigin = 'assistant_initiated';
 		}
 	}
 
@@ -3316,6 +3374,7 @@ export class VoiceSession {
 		// uses the turn being completed and stale-drop rejects prior-turn results.
 		if (this.sttProvider) {
 			if (!this._commitFiredForTurn) {
+				this.fence.stampSttCommit(this.turns.numericId);
 				safeStep('stt.commit', () => this.sttProvider?.commit(this.turns.numericId));
 			}
 			safeStep('stt.complete', () => this.sttProvider?.handleTurnComplete());
@@ -3388,11 +3447,15 @@ export class VoiceSession {
 	private reinforceDirectives(): void {
 		const text = this.directiveManager.getReinforcementText();
 		if (!text) return;
+		if (!this.hold.gate('directive-reinforcement')) return;
 		this.log(`Reinforcing directives: ${text.slice(0, 120)}...`);
 		this.transport.sendContent([{ role: 'user', text }], false);
 	}
 
 	private handleInterrupted(serverTurnId?: number): void {
+		// The provider detected user speech over model output: fresh evidence,
+		// whichever turn the interrupt resolves to.
+		this.hold.release('provider-interrupted');
 		// Correlate the interrupt to its Turn. A `stale` interrupt for a
 		// long-gone turn is ignored; `new` (no turn / interrupt before any model
 		// output) births one via the no-turn net. The structural idempotency of
@@ -3554,8 +3617,20 @@ export class VoiceSession {
 		}
 	}
 
+	/** Typed or injected text is direct user action: fresh evidence that
+	 *  releases the synthetic-output hold. It also supersedes a watchdog fire
+	 *  the hold held, so that recovery is idled first, as
+	 *  `preEmptForDirectInput` does for the greeting gate: the release would
+	 *  otherwise re-fire it (replay, nudge or reconnect) ahead of the text. */
+	private releaseHoldForDirectInput(): void {
+		if (!this.hold.isActive()) return;
+		this.reconnector.cancelHeldRecovery();
+		this.hold.release('typed-input');
+	}
+
 	private handleTextInput(text: string): Promise<void> {
 		if (!this.sessionManager.isActive || !text.trim()) return Promise.resolve();
+		this.releaseHoldForDirectInput();
 		const trimmed = text.trim();
 		return this.enqueueDirectInput(async () => {
 			await this.preEmptForDirectInput();
@@ -3637,12 +3712,12 @@ export class VoiceSession {
 			return;
 		}
 		this.greetingClientGeneration = generation;
-		// Only mark the origin when a greeting will actually send — a stale
-		// pending origin would otherwise taint the next real response.
-		if (this.agentRouter.activeAgent.greeting) {
+		// Only mark the origin when a greeting was actually sent (none configured
+		// or held sends nothing) — a stale pending origin would otherwise taint
+		// the next real response.
+		if (this.greeting.sendGreeting()) {
 			this._pendingResponseOrigin = 'assistant_initiated';
 		}
-		this.greeting.sendGreeting();
 	}
 
 	private handleClientDisconnected(): void {
@@ -3844,6 +3919,8 @@ export class VoiceSession {
 	 *  cancel-then-create sequence. */
 	injectTranscript(text: string): Promise<void> {
 		if (!text) return Promise.resolve();
+		// Also the path injectDictationBuffer takes.
+		this.releaseHoldForDirectInput();
 		return this.enqueueDirectInput(async () => {
 			await this.preEmptForDirectInput();
 			this._pendingResponseOrigin = 'user_text';
@@ -3956,9 +4033,18 @@ export class VoiceSession {
 
 	/** Whether the synthetic-output hold is active. The hold suppresses
 	 *  framework-generated input (such as transcription corrections) until the
-	 *  user is heard again; nothing engages it yet, so this reports `false`. */
+	 *  user is heard again. */
 	private isSyntheticHoldActive(): boolean {
-		return false;
+		return this.hold.isActive();
+	}
+
+	/** Deliver one held-back notification once a dial window has released the
+	 *  notification hold, but only while the model is idle: no framework turn
+	 *  open and no requested response still waiting to start. Otherwise the
+	 *  next turn completion delivers it, as usual. */
+	private drainNotificationsWhenIdle(): void {
+		if (this.turns.active() !== null || this._pendingResponseOrigin !== null) return;
+		this.notificationSink.turnComplete();
 	}
 
 	/** Pre-start the whisper session without flipping audio routing. Useful
@@ -3987,7 +4073,8 @@ export class VoiceSession {
 
 	/** Defensive wrapper around triggerGeneration. Throws if invoked while
 	 *  not in agent mode — surfaces preset bugs loudly in tests rather than
-	 *  silently leaking audio into a dictation flow. */
+	 *  silently leaking audio into a dictation flow. Triggers nothing (logged)
+	 *  while the synthetic-output hold is engaged. */
 	guardedTriggerGeneration(
 		instructions?: string,
 		overrides?: Parameters<LLMTransport['triggerGeneration']>[1],
@@ -3997,6 +4084,9 @@ export class VoiceSession {
 				`TRANSCRIPTION_MODE_LOCKED: triggerGeneration is blocked while transcription mode is '${this.dictation.mode}'`,
 			);
 		}
+		// A framework-owned proactive generation is synthetic output: nothing
+		// is triggered while the hold is engaged.
+		if (!this.hold.gate('assistant-initiated')) return;
 		// Generation-capable path: invalidate a live greeting token so the
 		// triggered turn can never bind as the greeting (H1 enforcement).
 		this.triggerCoordinator.dispatch('assistant-initiated');
