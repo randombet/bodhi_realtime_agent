@@ -158,6 +158,18 @@ export interface EventPayloadMap {
 	};
 	'session.resume': { sessionId: string; handle: string };
 	'session.goaway': { sessionId: string; timeLeft: string };
+	/** A host recovery (`recoverUpstream()`) crossed its boundary: the active
+	 *  turn was finalized as interrupted and the connection abandoned; the
+	 *  replacement dials next. `attemptEpoch` is the dial generation the
+	 *  replacement dials on. `transportGeneration` carries the same dial
+	 *  generation under its older name: it is not the post-setup counter that
+	 *  `turn.start.transportGeneration` reports. */
+	'session.reconnectBoundary': {
+		sessionId: string;
+		reason: string;
+		transportGeneration: number;
+		attemptEpoch: number;
+	};
 	/** The session parked in UPSTREAM_LOST (`upstreamLossPolicy: 'hold'`): the
 	 *  provider connection is gone, nothing was finalized, and no automatic
 	 *  dial follows. `code`/`detail` carry the transport close code and reason

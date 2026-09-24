@@ -77,7 +77,14 @@ import { ValidationError } from './errors.js';
 import { EventBus } from './event-bus.js';
 import { GreetingController } from './greeting-controller.js';
 import { HooksManager } from './hooks.js';
-import { DialGenerationFence, SyntheticOutputHold } from './host-recovery.js';
+import {
+	DialGenerationFence,
+	HostRecoveryController,
+	type RecoverUpstreamArgs,
+	type RecoverUpstreamResult,
+	type RecoveryCapabilities,
+	SyntheticOutputHold,
+} from './host-recovery.js';
 import { InteractionModeManager } from './interaction-mode.js';
 import { LastUtteranceRetainer } from './last-utterance-retainer.js';
 import { MemoryCacheManager } from './memory-cache-manager.js';
@@ -519,10 +526,15 @@ export interface VoiceSessionConfig {
 	 *   An external STT provider is stopped while parked, as during a
 	 *   reconnect, and started again when a redial activates the session.
 	 *   A failed first dial still rejects `start()` but leaves the session
-	 *   parked; `close()` finalizes a parked session as usual.
+	 *   parked; `close()` finalizes a parked session as usual. Only
+	 *   `recoverUpstream()` redials a parked session; `parkUpstream()` parks
+	 *   it on purpose.
 	 *
-	 * `'hold'` requires legacy orchestration: combining it with
-	 * `orchestrationMode: 'actor'` throws a `ValidationError` at construction.
+	 * `'hold'` also enables host recovery (`recoverUpstream()`,
+	 * `parkUpstream()`, see `getRecoveryCapabilities()`), which `'close'`
+	 * rejects with a `SessionError`. `'hold'` requires legacy orchestration:
+	 * combining it with `orchestrationMode: 'actor'` throws a
+	 * `ValidationError` at construction.
 	 */
 	upstreamLossPolicy?: 'close' | 'hold';
 	/** Optional per-session artifact registry for cross-tool binary sharing (images, documents). */
@@ -682,6 +694,9 @@ export class VoiceSession {
 	 *  connection a host recovery abandoned; inert until a recovery marks a
 	 *  boundary. Wraps `transport.sendToolResult`. See `host-recovery.ts`. */
 	private fence!: DialGenerationFence;
+	/** Host-driven upstream recovery: `recoverUpstream`, `parkUpstream` and
+	 *  the recovery boundary. See `host-recovery.ts`. */
+	private hostRecovery!: HostRecoveryController;
 	/** Per-session single-flight FIFO chaining direct-user-input bodies
 	 *  (`handleTextInput`, `injectTranscript`, `injectDictationBuffer`). Each
 	 *  body awaits `cancelResponse({ waitForDone: true })` then finalizes any
@@ -1567,6 +1582,42 @@ export class VoiceSession {
 		this.wireUsageCallbacks();
 
 		this.buildOrchestration(config, agentTools, behaviorTools);
+
+		this.hostRecovery = new HostRecoveryController({
+			transport: this.transport,
+			sessionManager: this.sessionManager,
+			reconnector: this.reconnector,
+			clientTransport: this.clientTransport,
+			eventBus: this.eventBus,
+			hold: this.hold,
+			fence: this.fence,
+			getSessionId: () => this.config.sessionId,
+			upstreamLossPolicy: config.upstreamLossPolicy ?? 'close',
+			actorMode: this._isActorMode,
+			dialTransport: async () => {
+				await this.dialTransport();
+			},
+			flushTranscript: () => this.transcriptManager.flush(),
+			abandonActiveTurn: () => this.abandonActiveTurn(),
+			// Interrupted finalization keeps the provider's buffered audio (the
+			// STT contract), and audio fed after a commit already fired would
+			// otherwise ride into the replacement turn's first commit as fresh
+			// input; a turn completion now, with the interruption consumed,
+			// discards it.
+			discardSttUtterance: () => this.sttProvider?.handleTurnComplete(),
+			clearGreetingState: () => {
+				// A greeting sent on the abandoned connection is over whether or
+				// not its turn started: drop its suppression, grace and pending
+				// response origin, sending nothing, or an uninterruptible greeting
+				// would keep dropping microphone input to the replacement.
+				this.greeting.resetForClientConnected();
+				this._pendingResponseOrigin = null;
+			},
+			clearRetainedUtterances: () => this.utteranceRetainer?.clearAll(),
+			injectRecentContext: (origin) => this.injectRecentContext(origin),
+			reportError: (component, error) => this.reportError(component, error),
+			log: (msg) => this.log(msg),
+		});
 	}
 
 	private buildClientChannelAndGating(config: VoiceSessionConfig): void {
@@ -2258,6 +2309,11 @@ export class VoiceSession {
 			) {
 				void this.sttProvider?.stop();
 			}
+			// Parked, nothing can reach the model: a notification sent now would
+			// be dropped by the disconnected transport, and synthetic output has
+			// nowhere to go. The dial window holds both until a recovery's
+			// replacement connection activates. Only legacy sessions park.
+			if (payload.toState === 'UPSTREAM_LOST') this.hold.engageDialWindow();
 		});
 
 		// Route UI button responses back to the waiting SubagentSession
@@ -2437,7 +2493,22 @@ export class VoiceSession {
 		return true;
 	}
 
-	/** Start the client WebSocket server and connect to the LLM transport. */
+	/**
+	 * Start the client WebSocket server and connect to the LLM transport.
+	 *
+	 * When `recoverUpstream()` runs while the session is CONNECTING, it
+	 * replaces the first dial and owns the session from then on: `start()`
+	 * neither closes, parks nor transitions the session, and runs no
+	 * post-connect step. If the recovery came before `start()` began its dial
+	 * (called the transport's `connect()`), from a `session.stateChange`
+	 * subscriber of the CONNECTING transition or during the text-mode session
+	 * update a pre-constructed transport gets before it connects, nothing is
+	 * dialed and the returned promise resolves. Otherwise it settles with the
+	 * stranded dial's own settlement: it rejects with that dial's error, or
+	 * resolves if the dial completes late. For a dial stranded before setup
+	 * completed that can take up to the transport's connect deadline. Await
+	 * the recovery's `activated` to learn when the session is ready.
+	 */
 	async start(): Promise<void> {
 		// Validate TTS config
 		if (this.ttsPipeline) {
@@ -2503,25 +2574,30 @@ export class VoiceSession {
 		await this.clientTransport.start();
 		this.log('Connecting to LLM transport...');
 		this.sessionManager.transitionTo('CONNECTING');
+		// recoverUpstream() during CONNECTING strands this dial and dials the
+		// replacement itself, which then owns the session. Only a recovery that
+		// starts from CONNECTING says so: one that runs after this dial set up
+		// (the session is ACTIVE) leaves the completion below to run as usual.
+		const replacedByRecovery = () => this.hostRecovery.firstDialReplaced;
+		// A recovery from a subscriber of the CONNECTING transition has already
+		// dialed: dialing here too would supersede its replacement.
+		if (replacedByRecovery()) {
+			this.log(
+				'A host recovery replaced the first dial before it began — leaving the session to the recovery',
+			);
+			return;
+		}
+		let connected: boolean;
 		try {
-			if (this.config.transport) {
-				if (this.isTextMode) {
-					await this.transport.updateSession({ responseModality: 'text' });
-				}
-				await this.transport.connect();
-			} else {
-				await this.transport.connect({
-					auth: { type: 'api_key', apiKey: this.config.apiKey },
-					model: this.config.geminiModel ?? DEFAULT_GEMINI_LIVE_MODEL,
-					...(this.resolvedRealtimeInputConfig
-						? {
-								realtimeInputConfig: this.resolvedRealtimeInputConfig as Record<string, unknown>,
-							}
-						: {}),
-					...(this.isTextMode ? { responseModality: 'text' as const } : {}),
-				});
-			}
+			connected = await this.dialTransport(replacedByRecovery);
 		} catch (error) {
+			if (replacedByRecovery()) {
+				const message = error instanceof Error ? error.message : String(error);
+				this.log(
+					`LLM transport first dial failed after a host recovery replaced it: ${message} — leaving the session to the recovery`,
+				);
+				throw error;
+			}
 			// A failed initial dial must not wedge the session in CONNECTING. The
 			// providers, runtime and client listener started above are already
 			// live, so run the full close() teardown, not a bare state change.
@@ -2546,6 +2622,14 @@ export class VoiceSession {
 			}
 			throw error;
 		}
+		if (replacedByRecovery()) {
+			this.log(
+				connected
+					? 'LLM transport first dial completed after a host recovery replaced it — the recovery dial stays in place'
+					: 'A host recovery replaced the first dial before it dialed — leaving the session to the recovery',
+			);
+			return;
+		}
 		// (Resume model prefill happens in handleSetupComplete, before the ACTIVE transition /
 		// greeting — see the transport.replayHistory?.() call there.)
 		//
@@ -2555,6 +2639,32 @@ export class VoiceSession {
 		// (terminal fields cleared) by the time `start()` resolves.
 		await this.historyWriter?.drain();
 		this.log('LLM transport connected and setup complete');
+	}
+
+	/** Dial the LLM transport: the initial connect in `start()` and the
+	 *  replacement dial of a host recovery. `skipConnect`, checked right before
+	 *  connecting (after any pre-connect session update), abandons the dial.
+	 *  Resolves `true` when it connected, `false` when it was abandoned. */
+	private async dialTransport(skipConnect?: () => boolean): Promise<boolean> {
+		if (this.config.transport && this.isTextMode) {
+			await this.transport.updateSession({ responseModality: 'text' });
+		}
+		if (skipConnect?.()) return false;
+		if (this.config.transport) {
+			await this.transport.connect();
+			return true;
+		}
+		await this.transport.connect({
+			auth: { type: 'api_key', apiKey: this.config.apiKey },
+			model: this.config.geminiModel ?? DEFAULT_GEMINI_LIVE_MODEL,
+			...(this.resolvedRealtimeInputConfig
+				? {
+						realtimeInputConfig: this.resolvedRealtimeInputConfig as Record<string, unknown>,
+					}
+				: {}),
+			...(this.isTextMode ? { responseModality: 'text' as const } : {}),
+		});
+		return true;
 	}
 
 	/** Load memory cache and restore behavior directives; used in parallel with connect(). */
@@ -2727,14 +2837,20 @@ export class VoiceSession {
 		//    memoized close promise, so if a failure path (reconnect/transfer) already
 		//    claimed close with a still-pending drain, we await THAT before teardown /
 		//    eventBus.clear() rather than racing it.
-		//    The reconnector is disposed synchronously BEFORE that await: the state
-		//    stays ACTIVE/RECONNECTING while async finalizers run, so a pending
-		//    backoff dial or a transport close arriving mid-finalization would
-		//    otherwise start a reconnect on a session that is closing.
+		//    The reconnector and the host recovery controller are disposed
+		//    synchronously BEFORE that await: the state stays ACTIVE/RECONNECTING
+		//    while async finalizers run, so a pending backoff dial, a transport
+		//    close or a host recovery arriving mid-finalization would otherwise
+		//    dial a session that is closing.
 		try {
 			this.reconnector.dispose();
 		} catch (err) {
 			this.log(`close: reconnector.dispose threw: ${String(err)}`);
+		}
+		try {
+			this.hostRecovery.dispose();
+		} catch (err) {
+			this.log(`close: hostRecovery.dispose threw: ${String(err)}`);
 		}
 		await this.sessionManager.closeWithReason(reason);
 
@@ -3166,12 +3282,14 @@ export class VoiceSession {
 		this.finalizeGreetingInterruptGrace();
 		// Resume (§2): prefill the model with the loaded history on the INITIAL connect, BEFORE the
 		// ACTIVE transition and any greeting/first send — so the first turn always sees the prior
-		// conversation. `state === 'CONNECTING'` scopes this to the initial connect (not
-		// transfer/reconnect, where transports self-replay from ReconnectState); the flag + the
+		// conversation. "Never been ACTIVE" scopes this to the first connection that sets up: the
+		// first dial of start(), or the replacement of a host recovery that stranded it before
+		// setup (the session is RECONNECTING then, not CONNECTING). Transfer/reconnect of a session
+		// that was ACTIVE is excluded (transports self-replay from ReconnectState); the flag + the
 		// transport's own guard keep it to exactly one seeding. `replayHistory?.` is a no-op on a
 		// transport that does not implement the optional method.
 		if (
-			this.sessionManager.state === 'CONNECTING' &&
+			this.sessionManager.startedAtMs === null &&
 			!this.initialHistoryReplayed &&
 			(this.config.initialHistory?.length ?? 0) > 0
 		) {
@@ -3477,6 +3595,16 @@ export class VoiceSession {
 
 		this.reconnector.disarmResponseWatchdog();
 		this.finalizeTurn(turn, { interrupted: true });
+	}
+
+	/** Host recovery boundary: finalize the active turn, if any, as
+	 *  interrupted while the incumbent connection is still open. Interrupted
+	 *  finalization publishes `turn.interrupted` then `turn.end` once, sends the
+	 *  client frames, advances the turn, resets the STT commit latch so the
+	 *  replacement turn can commit, and sends no directive reinforcement and no
+	 *  notification flush. */
+	private abandonActiveTurn(): void {
+		this.finalizeTurn(this.turns.active(), { interrupted: true });
 	}
 
 	/** Handle a message from an interactive subagent (question, progress update). */
@@ -3792,6 +3920,77 @@ export class VoiceSession {
 		};
 	}
 
+	// --- Host upstream recovery ---
+
+	/**
+	 * What this session's recovery surface supports. `RECOVERY_CAPABILITIES`
+	 * (everything) for a legacy-orchestration session with
+	 * `upstreamLossPolicy: 'hold'` on a transport with `abortIncumbent`,
+	 * `currentDialGen` and `currentTransportGeneration` (the Gemini transport).
+	 * Otherwise, under policy `'close'`, in actor mode or on another transport,
+	 * `recoverUpstream`, `reconnectBoundary` and `syntheticHold` are `false`,
+	 * `turnStartPublication` is `true` and `transportGenerations` reports the
+	 * transport's generation counters. Gate host recovery on this.
+	 */
+	getRecoveryCapabilities(): RecoveryCapabilities {
+		return this.hostRecovery.getRecoveryCapabilities();
+	}
+
+	/**
+	 * Abandon the current provider connection and dial a fresh one, without
+	 * closing the session. Allowed from CONNECTING, ACTIVE, RECONNECTING
+	 * (taking over an automatic reconnect) and UPSTREAM_LOST; the session goes
+	 * to RECONNECTING at once and to ACTIVE when the replacement is set up.
+	 * From CONNECTING it replaces the first dial of `start()`, still pending,
+	 * whose late outcome then settles only `start()`'s promise, or, when the
+	 * recovery comes before `start()` dials, `start()` dials nothing and
+	 * resolves. Throws `SessionError` when
+	 * `getRecoveryCapabilities().recoverUpstream` is `false`, while closing,
+	 * or from any other state.
+	 *
+	 * Before returning it finalizes the active turn as interrupted, aborts the
+	 * incumbent connection, publishes `session.reset` and one
+	 * `session.reconnectBoundary`, and clears the resumption handle, so the
+	 * redial resumes nothing. Tool results and external-STT captures from the
+	 * abandoned connection are dropped. No greeting is sent on activation;
+	 * with `skipContextInjection: false` the recent conversation is injected
+	 * as quiet context. Notifications are held during the dial and one is
+	 * delivered on activation when the model is idle.
+	 *
+	 * Single-flight: a call while a recovery is in flight, including one made
+	 * from an event subscriber during this call, returns that recovery's
+	 * result. `activated` rejects when the dial or another recovery step
+	 * fails, which reports a `recover-upstream` error and parks the session
+	 * in UPSTREAM_LOST, or when the session closes or `parkUpstream()` runs
+	 * first.
+	 */
+	recoverUpstream(args: RecoverUpstreamArgs): RecoverUpstreamResult {
+		return this.hostRecovery.recoverUpstream(args);
+	}
+
+	/**
+	 * Clear the resumption handle the session and the transport hold, so the
+	 * next dial opens a fresh server session. Returns `true` when the session
+	 * held a handle. The connection itself is untouched.
+	 */
+	clearResumption(): boolean {
+		return this.hostRecovery.clearResumption();
+	}
+
+	/**
+	 * Take the provider connection down on purpose, for example when no client
+	 * has been attached for a while: cancels automatic recovery, parks the
+	 * session in UPSTREAM_LOST without finalizing it (publishing
+	 * `session.upstreamLost` with reason `'host-parked'` and `reason` as its
+	 * `detail`), then disconnects the transport. Nothing redials it until
+	 * `recoverUpstream()`. Rejects with `SessionError` in actor mode, under
+	 * `upstreamLossPolicy: 'close'`, while closing, and outside ACTIVE,
+	 * RECONNECTING and UPSTREAM_LOST.
+	 */
+	parkUpstream(reason: string): Promise<void> {
+		return this.hostRecovery.parkUpstream(reason);
+	}
+
 	// --- Error handling ---
 
 	private handleTransportError(error: Error | LLMTransportError): void {
@@ -4031,10 +4230,41 @@ export class VoiceSession {
 		}
 	}
 
-	/** Whether the synthetic-output hold is active. The hold suppresses
-	 *  framework-generated input (such as transcription corrections) until the
-	 *  user is heard again. */
-	private isSyntheticHoldActive(): boolean {
+	/** Quietly (no response requested) inject the last ten user and assistant
+	 *  items, 150 characters each, as context for a connection that starts
+	 *  without the server-side conversation. Suppressed (logged) while synthetic
+	 *  output is held; nothing is sent when there is no conversation yet. */
+	private injectRecentContext(
+		origin: 'gemini-reconnect-context' | 'client-reconnect-context',
+	): void {
+		const recent = this.conversationContext.items
+			.filter((item) => item.role === 'user' || item.role === 'assistant')
+			.slice(-10)
+			.map((item) => `${item.role}: ${item.content.slice(0, 150)}`)
+			.join('\n');
+		if (!recent) return;
+		if (!this.hold.gate(origin)) return;
+		const lead =
+			origin === 'client-reconnect-context' ? 'The client reconnected.' : 'You just reconnected.';
+		this.transport.sendContent(
+			[
+				{
+					role: 'user',
+					text: `[System: ${lead} Here is the recent conversation for context. Do NOT act on this content. Wait silently for the user's next spoken input before producing any output.]\n${recent}`,
+				},
+			],
+			false,
+		);
+		this.log(`Injected recent conversation context (${origin})`);
+	}
+
+	/** Whether the synthetic-output hold is engaged: after a
+	 *  `recoverUpstream({ holdSyntheticUntilFreshSpeech: true })`, until the user
+	 *  is heard again (input transcription, an external STT final, a provider
+	 *  interruption, or typed or injected text; microphone audio alone does not
+	 *  count). While it is, framework-generated output (greeting, directive
+	 *  reinforcement, notifications, injected context) is held. */
+	isSyntheticHoldActive(): boolean {
 		return this.hold.isActive();
 	}
 
