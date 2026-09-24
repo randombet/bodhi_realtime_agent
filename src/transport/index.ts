@@ -11,6 +11,20 @@ export { AudioBuffer } from './audio-buffer.js';
 export { CartesiaTTSProvider } from './cartesia-tts-provider.js';
 export type { CartesiaTTSConfig } from './cartesia-tts-provider.js';
 export { ClientSenderAdapter } from './client-sender-adapter.js';
+export {
+	CLOSE_CODE_CLIENT_BUSY,
+	CLOSE_CODE_SUPERSEDED_BY_TAKEOVER,
+	CLOSE_CODE_VERIFIER_PREEMPTED,
+	CLOSE_REASON_CLIENT_BUSY,
+	CLOSE_REASON_SUPERSEDED_BY_TAKEOVER,
+	CLOSE_REASON_VERIFIER_PREEMPTED,
+	ClientTransport,
+} from './client-transport.js';
+export type {
+	ClientConnectionRole,
+	ClientTransportCallbacks,
+	ClientTransportOptions,
+} from './client-transport.js';
 export { ElevenLabsSTTProvider } from './elevenlabs-stt-provider.js';
 export type { ElevenLabsSTTConfig } from './elevenlabs-stt-provider.js';
 export { ElevenLabsTTSProvider } from './elevenlabs-tts-provider.js';

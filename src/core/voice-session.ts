@@ -291,6 +291,20 @@ export interface VoiceSessionConfig {
 	host?: string;
 	/** Listen timeout for local client WebSocket server startup (legacy/local mode). */
 	listenTimeoutMs?: number;
+	/** Supplies the JSON state frame sent to `?probe=1` health-probe connections
+	 *  on the local client WebSocket server. When absent, probes are upgraded and
+	 *  closed (code 1000) without a frame. Probe sockets never attach as the
+	 *  client and never run connect/disconnect handling. Local server only: with
+	 *  `clientSender` the host owns the socket and must implement probes itself. */
+	probeState?: () => object;
+	/** A verification-role (`?verify=1`) connection attached to the local client
+	 *  WebSocket server. Narrow hook for embedders (e.g. to wake the upstream);
+	 *  real-client connect handling (greeting, `session.config`, attachment
+	 *  accounting) never runs for it. Local server only. */
+	onVerifierConnected?: () => void;
+	/** The verification-role connection detached (clean close or preemption by
+	 *  an arriving real client). Local server only. */
+	onVerifierDisconnected?: () => void;
 	/** Model-silence watchdog (ms) after the user's turn ends. If the model emits
 	 *  nothing for this long, force a reconnect. Default 5000; `<= 0` disables. */
 	responseWatchdogMs?: number;
@@ -1421,10 +1435,31 @@ export class VoiceSession {
 				onJsonFromClient: (message) => this.handleJsonFromClient(message),
 				onClientConnected: () => this.handleClientConnected(),
 				onClientDisconnected: () => this.handleClientDisconnected(),
+				// Verifier hooks go straight to the host: a verification-role
+				// connection never runs handleClientConnected, so it never greets,
+				// bootstraps or counts as the attached client.
+				onVerifierConnected: config.onVerifierConnected,
+				onVerifierDisconnected: config.onVerifierDisconnected,
 			},
+			// Spelled out on purpose: hosts detect probe support with
+			// String(VoiceSession).includes('probeState'), so this property access
+			// must stay in the class body.
+			options: { probeState: config.probeState },
 		});
 		this.directRtcChannel =
 			this.clientTransport instanceof DirectRtcClientChannel ? this.clientTransport : null;
+		if (!(this.clientTransport instanceof ClientTransport)) {
+			const roleOptions = [
+				...(config.probeState ? ['probeState'] : []),
+				...(config.onVerifierConnected ? ['onVerifierConnected'] : []),
+				...(config.onVerifierDisconnected ? ['onVerifierDisconnected'] : []),
+			];
+			if (roleOptions.length > 0) {
+				this.log(
+					`[WARN] ${roleOptions.join(', ')} configured, but the client channel is host-owned (clientSender): the framework never sees the socket upgrade, so ?probe=1 and ?verify=1 connections are not recognized; probe isolation must be implemented by the host.`,
+				);
+			}
+		}
 
 		// Resolve effective playback-state protocol participation: the surface
 		// must intend it AND the client channel must support ordered delivery.

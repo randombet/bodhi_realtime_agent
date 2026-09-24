@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type {
+	ClientConnectionRole,
+	ClientTransportCallbacks,
+	ClientTransportOptions,
 	ConnectionLifecycleEvent,
 	LiveUsageMetadata,
 	TransportDiagnostics,
@@ -90,5 +93,26 @@ describe('module smoke test', () => {
 
 		const mod = await import('../src/index.js');
 		expect('ConnectionLifecycleLedger' in mod).toBe(false);
+	});
+
+	it('root-exports ClientTransport, its option and role types and the client close codes', async () => {
+		const mod = await import('../src/index.js');
+		expect(typeof mod.ClientTransport).toBe('function');
+		expect(mod.CLOSE_CODE_CLIENT_BUSY).toBe(4409);
+		expect(mod.CLOSE_REASON_CLIENT_BUSY).toBe('client-busy');
+		expect(mod.CLOSE_CODE_SUPERSEDED_BY_TAKEOVER).toBe(4410);
+		expect(mod.CLOSE_REASON_SUPERSEDED_BY_TAKEOVER).toBe('superseded-by-takeover');
+		expect(mod.CLOSE_CODE_VERIFIER_PREEMPTED).toBe(4411);
+		expect(mod.CLOSE_REASON_VERIFIER_PREEMPTED).toBe('verifier-preempted');
+
+		// Type-level: fails typecheck:tests if any name stops resolving from the root.
+		const role: ClientConnectionRole = 'verify';
+		const callbacks: ClientTransportCallbacks = { onVerifierConnected: () => {} };
+		const options: ClientTransportOptions = { probeState: () => ({ type: 'agent.state' }) };
+		expect([role, typeof callbacks.onVerifierConnected, typeof options.probeState]).toEqual([
+			'verify',
+			'function',
+			'function',
+		]);
 	});
 });
