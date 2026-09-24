@@ -25,6 +25,8 @@ export type {
 	ClientTransportCallbacks,
 	ClientTransportOptions,
 } from './client-transport.js';
+export { bestEnvelopeLag, EchoGuard, envelopePearson } from './echo-guard.js';
+export type { EchoCheckResult, EchoEnvEntry, EchoGuardConfig } from './echo-guard.js';
 export { ElevenLabsSTTProvider } from './elevenlabs-stt-provider.js';
 export type { ElevenLabsSTTConfig } from './elevenlabs-stt-provider.js';
 export { ElevenLabsTTSProvider } from './elevenlabs-tts-provider.js';

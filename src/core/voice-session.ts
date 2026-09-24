@@ -21,6 +21,7 @@ import { ToolExecutor } from '../tools/tool-executor.js';
 import { createClientChannel } from '../transport/client-channel-factory.js';
 import { ClientTransport } from '../transport/client-transport.js';
 import { DirectRtcClientChannel } from '../transport/direct-rtc-client-channel.js';
+import { EchoGuard, type EchoGuardConfig } from '../transport/echo-guard.js';
 import {
 	DEFAULT_GEMINI_LIVE_MODEL,
 	type GeminiCompressionConfig,
@@ -503,6 +504,18 @@ export interface VoiceSessionConfig {
 	 *  transcription mode or the synthetic-output hold send nothing.
 	 *  Default `false` (observation only). */
 	divergenceCorrection?: boolean;
+	/** Acoustic echo suppression at the audio-ingestion chokepoint: inbound
+	 *  client audio whose energy envelope correlates with recently played
+	 *  native model audio (speakerphone loopback) is dropped before the client
+	 *  VAD, the model and STT hear it, which stops the model transcribing its
+	 *  own voice as phantom user commands. OPT-IN: pass `{ enabled: true }` to
+	 *  activate (double-talk on strong-echo paths can drop overlapped user
+	 *  speech, a deliberate per-deployment choice); the environment variable
+	 *  `BODHI_ECHO_GUARD=0` hard-disables it. The reference is the native
+	 *  model audio only: `ttsProvider` output is not fed, and combining the
+	 *  two logs a warning at construction. Suppressed frames are counted in
+	 *  `getDiagnostics().echoSuppressed`. */
+	echoGuard?: EchoGuardConfig;
 	/** Sample rate of inbound client PCM (what `handleAudioFromClient` receives).
 	 *  When omitted, defaults to `transport.audioFormat.inputSampleRate` — which
 	 *  matches what the framework instructs clients to send (browser RTC, voice
@@ -756,6 +769,9 @@ export class VoiceSession {
 	/** Observation-only second transcription (`config.shadowSttProvider`).
 	 *  Absent when unset or when `sttProvider` replaces built-in transcription. */
 	private shadowStt?: ShadowSttController;
+	/** Acoustic echo suppressor (`config.echoGuard`), fed the decoded native
+	 *  model audio and consulted by the audio router. Absent when unset. */
+	private echoGuard?: EchoGuard;
 	/** Last routed user utterance for watchdog-stall recovery replay. Only
 	 *  constructed when `config.watchdogReplayRecovery` is true (dark rollout). */
 	private utteranceRetainer?: LastUtteranceRetainer;
@@ -1381,6 +1397,18 @@ export class VoiceSession {
 			this.nowMs,
 		);
 
+		// Echo suppression: the router checks inbound audio against the native
+		// model audio fed in `handleAudioOutput`. Opt-in inside the guard.
+		if (config.echoGuard) {
+			this.echoGuard = new EchoGuard({
+				...config.echoGuard,
+				log: config.echoGuard.log ?? ((msg) => this.log(msg)),
+			});
+			if (this.echoGuard.enabled) {
+				this.log('EchoGuard enabled (envelope-correlation echo suppression)');
+			}
+		}
+
 		// Inbound client-audio fast path. Dependencies are read through
 		// getters/predicates so the router observes the same call-time values the
 		// former inline `handleAudioFromClient` did (providers, mode, gate, and
@@ -1397,6 +1425,7 @@ export class VoiceSession {
 			getWhisperProvider: () => this.dictation.whisper,
 			isSessionActive: () => this.sessionManager.isActive && this.clientInputReady,
 			isRtcAudioReady: () => this.directRtcChannel?.isRtcAudioReady ?? false,
+			echoGuard: this.echoGuard,
 			getMode: () => this.dictation.mode,
 			shouldDropOutbound: () => this.greeting.shouldDropOutbound(),
 			retainer: this.utteranceRetainer,
@@ -1687,6 +1716,13 @@ export class VoiceSession {
 
 		// Wire TTS provider (actor-mode only)
 		if (config.ttsProvider && config.orchestrationMode === 'actor') {
+			// The echo guard's reference is the native model audio only; external
+			// TTS output never reaches it, so it cannot recognize echo of that speech.
+			if (this.echoGuard) {
+				this.log(
+					'[WARN] echoGuard is configured with ttsProvider: external TTS output is not fed to the echo guard, so its echo is not suppressed',
+				);
+			}
 			this.ttsPipeline = new TtsPipeline(config.ttsProvider, {
 				transport: this.transport,
 				getClientTransport: () => this.clientTransport,
@@ -3447,6 +3483,9 @@ export class VoiceSession {
 		// it consumes the transport's audioFormat directly via its own bridge.
 		const outEnc = this.transport.audioFormat.outputEncoding ?? this.transport.audioFormat.encoding;
 		const buffer: Buffer = outEnc === 'pcmu' ? decodeMulawToPcm(raw) : raw;
+		// Echo reference: remember what is being played so the audio router can
+		// recognize (and drop) its echo coming back through the client mic.
+		this.echoGuard?.feedReference(buffer, this.transport.audioFormat.outputSampleRate);
 		if (this.audioOutputObservers.size > 0) {
 			this.notifyAudioObservers(this.audioOutputObservers, 'audio-output-observer', buffer, {
 				turnId: turn.id,
@@ -4261,14 +4300,14 @@ export class VoiceSession {
 	 * `upstream`/`transportGeneration` are null on transports that do not report
 	 * diagnostics (injected fakes, OpenAI, Qwen) — null means unobserved, never
 	 * zero. `echoSuppressed` is session-owned (suppressed frames never reach the
-	 * transport counters); this session suppresses no echo frames, so it is 0.
+	 * transport counters): the echo guard's suppressed count, 0 without one.
 	 */
 	getDiagnostics(): VoiceSessionDiagnostics {
 		const t = this.transport.getDiagnostics?.();
 		return {
 			upstream: t?.upstream ?? null,
 			transportGeneration: t?.transportGeneration ?? null,
-			echoSuppressed: 0,
+			echoSuppressed: this.echoGuard?.suppressedCount ?? 0,
 		};
 	}
 
