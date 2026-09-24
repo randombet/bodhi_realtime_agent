@@ -505,6 +505,25 @@ export interface VoiceSessionConfig {
 	transport?: LLMTransport;
 	/** Orchestration engine for tool routing/subagent lifecycle (default: legacy). */
 	orchestrationMode?: 'legacy' | 'actor';
+	/**
+	 * What happens when the provider connection is lost for good.
+	 *
+	 * - `'close'` (default): today's behavior. Once automatic reconnection is
+	 *   exhausted (attempt budget spent, no resumption handle, or a failed or
+	 *   timed-out attempt) the session closes with `reconnect_failed`, and a
+	 *   failed first dial in `start()` closes it with `connect_failed`.
+	 * - `'hold'`: the session parks in `UPSTREAM_LOST` instead. Nothing is
+	 *   finalized (no `session.close`, no `onSessionEnd`, no post-session run),
+	 *   the client listener stays up, and `session.upstreamLost` is published.
+	 *   An external STT provider is stopped while parked, as during a
+	 *   reconnect, and started again when a redial activates the session.
+	 *   A failed first dial still rejects `start()` but leaves the session
+	 *   parked; `close()` finalizes a parked session as usual.
+	 *
+	 * `'hold'` requires legacy orchestration: combining it with
+	 * `orchestrationMode: 'actor'` throws a `ValidationError` at construction.
+	 */
+	upstreamLossPolicy?: 'close' | 'hold';
 	/** Optional per-session artifact registry for cross-tool binary sharing (images, documents). */
 	artifactRegistry?: {
 		store(
@@ -547,6 +566,12 @@ export interface VoiceSessionConfig {
 	 *  covers post-greeting AEC convergence. Default `true`. */
 	greetingInterruptible?: boolean;
 }
+
+/** Internal view of an optional host hook reporting that the host owns
+ *  upstream recovery. It is not a declared `VoiceSessionConfig` option, so it
+ *  is read defensively; the reconnector consults it only under
+ *  `upstreamLossPolicy: 'hold'`. */
+type HostRecoveryGateConfig = { suppressClientAutoActions?: () => boolean };
 
 /**
  * Top-level integration hub that wires all framework components together.
@@ -827,6 +852,14 @@ export class VoiceSession {
 	private static readonly MIN_PLAYBACK_RATE = MIN_PLAYBACK_RATE;
 
 	constructor(config: VoiceSessionConfig) {
+		// Parking a lost upstream is legacy-orchestration only: the actor runtime
+		// runs its own retry loop, which must never contend with a held session.
+		if (config.orchestrationMode === 'actor' && config.upstreamLossPolicy === 'hold') {
+			throw new ValidationError(
+				"VoiceSession: upstreamLossPolicy 'hold' requires legacy orchestration; " +
+					"orchestrationMode 'actor' supports only 'close'.",
+			);
+		}
 		this.config = config;
 		this.nowMs = config.nowMs ?? Date.now;
 		this.ownsClientTransport = !config.clientSender;
@@ -1664,6 +1697,13 @@ export class VoiceSession {
 				// H4 hold predicate: FULL-greeting suppression only (the greeting
 				// controller's uninterruptible state — never grace windows).
 				isGreetingSuppressionArmed: () => this.greeting.isUninterruptibleGreetingActive(),
+				// Exhaustion policy, and the host-owned recovery gate it enables
+				// under 'hold'.
+				upstreamLossPolicy: config.upstreamLossPolicy ?? 'close',
+				hostOwnsRecovery: () =>
+					(
+						this.config as VoiceSessionConfig & HostRecoveryGateConfig
+					).suppressClientAutoActions?.() === true,
 				// H2: gate-aware drain + candidate-wide replay freshness.
 				drainBufferedInbound: (reason) => this.drainCapturedInboundFrames(reason),
 				isCandidateReplayEligible: (retained) => {
@@ -2143,11 +2183,18 @@ export class VoiceSession {
 			this.clientTransport.sendJsonToClient({ type: 'ui.payload', payload: payload.payload });
 		});
 
-		// Bind STT lifecycle to session state: start when ACTIVE (agent ready), stop when disconnecting
+		// Bind STT lifecycle to session state: start when ACTIVE (agent ready), stop when disconnecting.
+		// A session parked in UPSTREAM_LOST is disconnected too (and routes no
+		// microphone audio), so STT stops there as well; a redial's activation
+		// starts it again.
 		this.eventBus.subscribe('session.stateChange', (payload: { toState: string }) => {
 			if (payload.toState === 'ACTIVE') {
 				this.startSttProvider();
-			} else if (payload.toState === 'RECONNECTING' || payload.toState === 'TRANSFERRING') {
+			} else if (
+				payload.toState === 'RECONNECTING' ||
+				payload.toState === 'TRANSFERRING' ||
+				payload.toState === 'UPSTREAM_LOST'
+			) {
 				void this.sttProvider?.stop();
 			}
 		});
@@ -2417,16 +2464,23 @@ export class VoiceSession {
 			// A failed initial dial must not wedge the session in CONNECTING. The
 			// providers, runtime and client listener started above are already
 			// live, so run the full close() teardown, not a bare state change.
+			// Under upstreamLossPolicy 'hold' the session parks in UPSTREAM_LOST
+			// instead, unfinalized and with the listener still up, so a host can
+			// redial it later; start() still rejects.
 			if (this.sessionManager.state === 'CONNECTING') {
-				this.log(
-					`LLM transport connect failed: ${error instanceof Error ? error.message : String(error)} — closing session`,
-				);
-				try {
-					await this.close('connect_failed');
-				} catch (closeError) {
-					this.log(
-						`close('connect_failed') failed: ${closeError instanceof Error ? closeError.message : String(closeError)}`,
-					);
+				const message = error instanceof Error ? error.message : String(error);
+				if (this.config.upstreamLossPolicy === 'hold') {
+					this.log(`LLM transport connect failed: ${message} — session parked in UPSTREAM_LOST`);
+					this.reconnector.parkUpstreamLost('connect-failed', { reason: message });
+				} else {
+					this.log(`LLM transport connect failed: ${message} — closing session`);
+					try {
+						await this.close('connect_failed');
+					} catch (closeError) {
+						this.log(
+							`close('connect_failed') failed: ${closeError instanceof Error ? closeError.message : String(closeError)}`,
+						);
+					}
 				}
 			}
 			throw error;

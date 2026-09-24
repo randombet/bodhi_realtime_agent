@@ -333,6 +333,14 @@ export class ClientTransport {
 		return this.audioBuffer.drain();
 	}
 
+	/** Leave buffering mode and drop the buffered microphone frames (and their
+	 *  capture tags) without returning them, so none reaches the model. */
+	discardBuffered(): void {
+		this._buffering = false;
+		this._capturedTags = [];
+		this.audioBuffer.clear();
+	}
+
 	/** @internal H2: install the session's frame classifier for the NEXT
 	 *  buffering window (gate predicate + lightweight energy check). */
 	installInboundCaptureClassifier(

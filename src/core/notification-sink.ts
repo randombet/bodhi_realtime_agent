@@ -1,4 +1,5 @@
 import type { BackgroundNotificationQueue } from './background-notification-queue.js';
+import { SessionError } from './errors.js';
 
 /** Delivery priority for a published notification. */
 export type NotificationPriority = 'normal' | 'high';
@@ -23,6 +24,9 @@ export interface NotificationSink {
 	turnComplete(): void;
 	/** Publish a labelled background / subagent / system notification. */
 	publish(label: string, text: string, priority: NotificationPriority): void;
+	/** Hold (queue everything, flush nothing) or release notification
+	 *  delivery. Legacy orchestration only: the actor back-end throws. */
+	setHeld(held: boolean): void;
 }
 
 /** Legacy in-process back-end: wraps `BackgroundNotificationQueue`. */
@@ -49,6 +53,10 @@ export class LegacyNotificationSink implements NotificationSink {
 		this.queue.sendOrQueue([{ role: 'user', parts: [{ text: `[${label}]: ${text}` }] }], true, {
 			priority,
 		});
+	}
+
+	setHeld(held: boolean): void {
+		this.queue.setHeld(held);
 	}
 }
 
@@ -89,5 +97,13 @@ export class ActorNotificationSink implements NotificationSink {
 
 	publish(label: string, text: string, priority: NotificationPriority): void {
 		this.tell('notification.publish', { label, text, priority }, 'notification');
+	}
+
+	/** Holding notification delivery is a legacy-orchestration feature; the
+	 *  actor back-end has no hold. */
+	setHeld(_held: boolean): void {
+		throw new SessionError(
+			'Notification hold is not supported with orchestrationMode "actor"; it requires legacy orchestration',
+		);
 	}
 }

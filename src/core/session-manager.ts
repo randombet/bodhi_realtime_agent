@@ -15,10 +15,14 @@ export interface SessionPostProcessing {
 /** Legal state transitions — any unlisted transition throws SessionError. */
 const VALID_TRANSITIONS: Record<SessionState, SessionState[]> = {
 	CREATED: ['CONNECTING', 'CLOSED'],
-	CONNECTING: ['ACTIVE', 'CLOSED'],
-	ACTIVE: ['RECONNECTING', 'TRANSFERRING', 'CLOSED'],
-	RECONNECTING: ['ACTIVE', 'CLOSED'],
+	// RECONNECTING only for a host recovery that replaces a still-pending first
+	// dial; automatic reconnects start from ACTIVE only.
+	CONNECTING: ['ACTIVE', 'RECONNECTING', 'UPSTREAM_LOST', 'CLOSED'],
+	ACTIVE: ['RECONNECTING', 'TRANSFERRING', 'UPSTREAM_LOST', 'CLOSED'],
+	RECONNECTING: ['ACTIVE', 'UPSTREAM_LOST', 'CLOSED'],
 	TRANSFERRING: ['ACTIVE', 'CLOSED'],
+	// Parked without finalization: only a redial or a real close leaves it.
+	UPSTREAM_LOST: ['RECONNECTING', 'CLOSED'],
 	CLOSED: [],
 };
 
@@ -73,7 +77,11 @@ export class SessionManager {
 	}
 
 	get isDisconnected(): boolean {
-		return this._state === 'RECONNECTING' || this._state === 'TRANSFERRING';
+		return (
+			this._state === 'RECONNECTING' ||
+			this._state === 'TRANSFERRING' ||
+			this._state === 'UPSTREAM_LOST'
+		);
 	}
 
 	get resumptionHandle(): string | null {

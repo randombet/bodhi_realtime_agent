@@ -71,4 +71,11 @@ export class ClientSenderAdapter implements IClientChannel {
 		}
 		return [];
 	}
+
+	/** Leave buffering mode and drop the buffered assistant audio without
+	 *  sending it to the client (audio from an abandoned turn). */
+	discardBuffered(): void {
+		this._buffering = false;
+		this.audioBuffer.clear();
+	}
 }
