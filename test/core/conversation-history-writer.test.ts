@@ -432,6 +432,44 @@ describe('ConversationHistoryWriter', () => {
 		expect(store.createSession).not.toHaveBeenCalled();
 	});
 
+	it('flushNow persists unflushed items once and a later turn.end does not re-persist them', async () => {
+		const eventBus = new EventBus();
+		const convCtx = new ConversationContext();
+		const store = createMockStore();
+
+		const writer = new ConversationHistoryWriter(
+			'sess_1',
+			'user_1',
+			'echo',
+			eventBus,
+			convCtx,
+			store,
+		);
+
+		convCtx.addUserMessage('Hello');
+		convCtx.addAssistantMessage('Hi there');
+		writer.flushNow();
+		await writer.drain();
+
+		expect(store.addItems).toHaveBeenCalledOnce();
+		expect(store.addItems.mock.calls[0][1].map((i: { content: string }) => i.content)).toEqual([
+			'Hello',
+			'Hi there',
+		]);
+
+		eventBus.publish('turn.end', { sessionId: 'sess_1', turnId: 'turn_1' });
+		await writer.drain();
+		expect(store.addItems).toHaveBeenCalledOnce();
+
+		convCtx.addUserMessage('Later');
+		eventBus.publish('turn.end', { sessionId: 'sess_1', turnId: 'turn_2' });
+		await writer.drain();
+		expect(store.addItems).toHaveBeenCalledTimes(2);
+		expect(store.addItems.mock.calls[1][1].map((i: { content: string }) => i.content)).toEqual([
+			'Later',
+		]);
+	});
+
 	it('drain() awaits ordered writes: session.close report lands even with a delayed store', async () => {
 		const eventBus = new EventBus();
 		const convCtx = new ConversationContext();
