@@ -33,6 +33,11 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
+      # Packed-consumer gate (scripts/verify-pack.mjs): pack, clean --ignore-scripts install,
+      # ESM/CJS/declaration resolution and the node_modules-free bundle run.
+      - name: Verify pack
+        run: pnpm verify:pack
+
       # OIDC trusted publishing — no NPM_TOKEN needed.
       # Configure the trust relationship at:
       #   https://www.npmjs.com/package/bodhi-realtime-agent/access
