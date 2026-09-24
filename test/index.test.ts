@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { ConnectionLifecycleEvent } from '../src/index.js';
 
 describe('module smoke test', () => {
 	it('imports without throwing and exports key APIs', async () => {
@@ -41,5 +42,18 @@ describe('module smoke test', () => {
 
 		// Types (constants)
 		expect(mod.AUDIO_FORMAT).toBeDefined();
+	});
+
+	it('root-exports the ConnectionLifecycleEvent type; the lifecycle ledger stays internal', async () => {
+		// Type-level: fails typecheck:tests if the name stops resolving from the root.
+		const event: ConnectionLifecycleEvent = {
+			kind: 'setup-ok',
+			connectAttemptId: 'att_1',
+			transportGeneration: 1,
+		};
+		expect(event.kind).toBe('setup-ok');
+
+		const mod = await import('../src/index.js');
+		expect('ConnectionLifecycleLedger' in mod).toBe(false);
 	});
 });

@@ -8,6 +8,7 @@ import { DEFAULT_CONNECT_TIMEOUT_MS, DEFAULT_RECONNECT_TIMEOUT_MS } from '../cor
 import type { ToolDefinition } from '../types/tool.js';
 import type {
 	AudioFormatSpec,
+	ConnectionLifecycleEvent,
 	ContentTurn,
 	LLMTransport,
 	LLMTransportConfig,
@@ -21,6 +22,7 @@ import type {
 	TransportToolCall,
 	TransportToolResult,
 } from '../types/transport.js';
+import { ConnectionLifecycleLedger } from './connection-lifecycle-ledger.js';
 import { normalizeGeminiUsageMetadata } from './realtime-usage-normalize.js';
 import { zodToJsonSchema } from './zod-to-schema.js';
 
@@ -161,6 +163,8 @@ export interface GeminiTransportCallbacks {
 	onGoAway?(timeLeft: string): void;
 	/** New session resumption handle available. */
 	onResumptionUpdate?(handle: string, resumable: boolean): void;
+	/** Connection-lifecycle facts (attempt / setup / close). */
+	onConnectionLifecycle?(event: ConnectionLifecycleEvent): void;
 	/** Grounding metadata from Google Search results. */
 	onGroundingMetadata?(metadata: Record<string, unknown>): void;
 	/** Transport-level error. */
@@ -195,12 +199,24 @@ export class GeminiLiveTransport implements LLMTransport {
 	 *  reach the live handlers. */
 	private dialGen = 0;
 	/** Post-setup generation counter, distinct from the dial counter (which also
-	 *  advances on failed and aborted dials). Not minted yet: stays 0. */
+	 *  advances on failed and aborted dials). Minted by the lifecycle ledger on
+	 *  each `setupComplete` and adopted from its setup-ok event; 0 until then. */
 	private transportGeneration = 0;
 	/** The close `disconnect()` is awaiting on the session it detached, kept until
 	 *  that close settles so `abortIncumbent()` can still bound it. Only the call
 	 *  that recorded it clears it. */
 	private pendingDisconnectClose: Promise<void> | null = null;
+	/** Attempt/generation identity, fed this transport's `dialGen` (the fence in
+	 *  `connect()` keeps superseded dials' socket events away from it). */
+	private readonly lifecycle = new ConnectionLifecycleLedger((event) => {
+		// Adopt the minted generation before any observer runs, so a setup-ok
+		// observer reading `currentTransportGeneration` sees it.
+		if (event.kind === 'setup-ok') this.transportGeneration = event.transportGeneration;
+		this.notifyObserver('onConnectionLifecycle', () =>
+			this.callbacks.onConnectionLifecycle?.(event),
+		);
+		this.notifyObserver('onConnectionLifecycle', () => this.onConnectionLifecycle?.(event));
+	});
 	/** Tracks whether onModelTurnStart has already fired for the current turn. */
 	private _modelTurnStarted = false;
 	/** Tracks whether onFirstAudioChunk has already fired for the current response. */
@@ -316,6 +332,10 @@ export class GeminiLiveTransport implements LLMTransport {
 	onTextDone?: () => void;
 	onSpeechStarted?: () => void;
 	onRealtimeLLMUsage?: (usage: RealtimeLLMUsageEvent) => void;
+	/** Connection-lifecycle facts, property form (VoiceSession wires this one).
+	 *  Initialized (not just typed) so it exists on every instance: VoiceSession
+	 *  warns at construction when a transport does not declare it. */
+	onConnectionLifecycle?: (event: ConnectionLifecycleEvent) => void = undefined;
 
 	constructor(config: GeminiTransportConfig, callbacks: GeminiTransportCallbacks) {
 		this.ai = new GoogleGenAI({ apiKey: config.apiKey });
@@ -411,10 +431,13 @@ export class GeminiLiveTransport implements LLMTransport {
 		//   1. cfg.sessionResumption === false → omit (privacy/ZDR opt-out wins).
 		//   2. effectiveResumptionHandle !== null → use it (server-issued or seeded).
 		//   3. otherwise → {} (fresh resumable session, current default).
+		// `handleSupplied` (lifecycle `attempt`) records whether this dial resumes.
+		let handleSupplied = false;
 		if (this.config.sessionResumption === false) {
 			// omit sessionResumption entirely
 		} else if (this.effectiveResumptionHandle !== null) {
 			connectConfig.sessionResumption = { handle: this.effectiveResumptionHandle };
+			handleSupplied = true;
 		} else {
 			connectConfig.sessionResumption = {};
 		}
@@ -453,6 +476,7 @@ export class GeminiLiveTransport implements LLMTransport {
 		closedBeforeSetup.catch(() => {});
 
 		const gen = ++this.dialGen;
+		this.lifecycle.beginAttempt(gen, handleSupplied);
 		const dial = this.ai.live.connect({
 			model,
 			config: connectConfig,
@@ -475,6 +499,7 @@ export class GeminiLiveTransport implements LLMTransport {
 					if (!setupDone) {
 						failSetup(new Error(`Gemini socket closed before setupComplete (code=${code})`));
 					}
+					this.lifecycle.socketClosed(code, reason);
 					this.callbacks.onClose?.(code, reason);
 					if (this.onClose) this.onClose(code, reason);
 				},
@@ -495,6 +520,11 @@ export class GeminiLiveTransport implements LLMTransport {
 			if (gen === this.dialGen) {
 				this.dialGen++;
 				this.session = null;
+				// Fenced like every other stale-dial signal (a superseded dial's late
+				// failure would follow a newer attempt's setup-ok with a stale event),
+				// and emitted after the fence advanced, so an observer that redials
+				// from it starts a dial nothing supersedes.
+				this.lifecycle.setupFailed(err instanceof Error ? err.message : String(err));
 			} else if (dialSession !== undefined && this.session === dialSession) {
 				this.session = null;
 			}
@@ -617,6 +647,10 @@ export class GeminiLiveTransport implements LLMTransport {
 		// nothing below touches `this.session` once the close completes.
 		const incumbent = this.detachSession();
 		if (!incumbent) return;
+		// The socket's own onclose usually lands after the next dial has advanced
+		// the fence, so a locally initiated close is reported here (once per
+		// attempt; `abortIncumbent()` deliberately does not).
+		this.lifecycle.localDisconnect();
 		// Recorded so a concurrent abortIncumbent() can bound this close; cleared
 		// only if no later disconnect() has recorded its own close since.
 		const closing = (async () => {
@@ -1089,9 +1123,24 @@ export class GeminiLiveTransport implements LLMTransport {
 		return usage;
 	}
 
+	/** Run one observer in isolation: its failure is logged, never reaches the
+	 *  connection state machine (lifecycle events fire from inside `connect()`,
+	 *  socket close and `disconnect()`), and never keeps the next observer (the
+	 *  constructor callback, then the property form) from running. */
+	private notifyObserver(label: string, fn: () => void): void {
+		try {
+			fn();
+		} catch (err) {
+			console.warn(`[GeminiLiveTransport] ${label} observer threw; dispatch continues:`, err);
+		}
+	}
+
 	// biome-ignore lint/suspicious/noExplicitAny: LiveServerMessage is a complex union type
 	private handleMessage(msg: any): void {
 		if (msg.setupComplete) {
+			// A connection that completed setup is a new generation: the ledger mints
+			// it, and its emit adopts it before the setup-ok observers run.
+			this.lifecycle.setupOk();
 			// Resolve the connect() promise so callers know Gemini is ready
 			if (this.setupResolver) {
 				this.setupResolver();
