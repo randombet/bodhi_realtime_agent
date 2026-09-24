@@ -1,7 +1,8 @@
 import type { LanguageModelV1 } from 'ai';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
-import { VoiceSession } from '../../src/core/voice-session.js';
+import { ValidationError } from '../../src/core/errors.js';
+import { VoiceSession, type VoiceSessionConfig } from '../../src/core/voice-session.js';
 import { InMemoryPostSessionPipeline } from '../../src/post-session/pipeline.js';
 import { type PostSessionContext, PostSessionProcessor } from '../../src/post-session/types.js';
 import { DirectRtcClientChannel } from '../../src/transport/direct-rtc-client-channel.js';
@@ -20,17 +21,20 @@ import type {
 declare module '@google/genai' {
 	function _getMessageHandler(): ((message: unknown) => void) | null;
 	function _getMockSession(): Record<string, ReturnType<typeof vi.fn>> | null;
+	function _getLastConnectConfig(): Record<string, unknown> | null;
 }
 
 // Mock the external deps
 vi.mock('@google/genai', () => {
 	let messageHandler: ((msg: unknown) => void) | null = null;
 	let mockSession: Record<string, ReturnType<typeof vi.fn>> | null = null;
+	let lastConnectConfig: Record<string, unknown> | null = null;
 
 	return {
 		GoogleGenAI: vi.fn().mockImplementation(() => ({
 			live: {
 				connect: vi.fn(async (params: Record<string, unknown>) => {
+					lastConnectConfig = params.config as Record<string, unknown>;
 					const cbs = params.callbacks as Record<string, (...args: unknown[]) => void>;
 					messageHandler = cbs.onmessage as (msg: unknown) => void;
 					// Fire setupComplete so connect() resolves (it awaits this)
@@ -47,6 +51,7 @@ vi.mock('@google/genai', () => {
 		})),
 		_getMessageHandler: () => messageHandler,
 		_getMockSession: () => mockSession,
+		_getLastConnectConfig: () => lastConnectConfig,
 	};
 });
 
@@ -3489,6 +3494,102 @@ describe('VoiceSession realtimeInputConfig defaulting', () => {
 		// The injected transport's connect was not pre-called with VAD args; we just
 		// confirm it was used by VoiceSession (updateSession was invoked at construct).
 		expect(injected.updateSession).toHaveBeenCalled();
+	});
+
+	function builtInConfig(
+		sessionId: string,
+		port: number,
+		options: Partial<VoiceSessionConfig>,
+	): VoiceSessionConfig {
+		return {
+			sessionId,
+			userId: 'user_1',
+			apiKey: 'test-key',
+			agents: [createEchoAgent()],
+			initialAgent: 'echo',
+			port,
+			model: mockModel,
+			...options,
+		};
+	}
+
+	/** Starts the session and returns the config its Gemini dial sent. */
+	async function startAndReadConnectConfig(s: VoiceSession): Promise<Record<string, unknown>> {
+		const { _getLastConnectConfig } = await import('@google/genai');
+		await s.start();
+		const connectConfig = _getLastConnectConfig();
+		expect(connectConfig).not.toBeNull();
+		return connectConfig as Record<string, unknown>;
+	}
+
+	it('realtimeInputConfig: false resolves to undefined and the dial sends no realtimeInputConfig key', async () => {
+		session = new VoiceSession(
+			builtInConfig('sess_vad_opt_out', 9970, { realtimeInputConfig: false }),
+		);
+		expect(getResolved(session)).toBeUndefined();
+
+		const connectConfig = await startAndReadConnectConfig(session);
+		expect(Object.hasOwn(connectConfig, 'realtimeInputConfig')).toBe(false);
+
+		// A reconnect dials again from the transport's retained config.
+		const { _getLastConnectConfig } = await import('@google/genai');
+		await (session as unknown as { transport: LLMTransport }).transport.reconnect();
+		const redialConfig = _getLastConnectConfig() as Record<string, unknown>;
+		expect(redialConfig).not.toBe(connectConfig);
+		expect(Object.hasOwn(redialConfig, 'realtimeInputConfig')).toBe(false);
+	});
+
+	it('compressionConfig: {} reaches the connect config as { slidingWindow: {} }', async () => {
+		session = new VoiceSession(builtInConfig('sess_compression', 9971, { compressionConfig: {} }));
+
+		const connectConfig = await startAndReadConnectConfig(session);
+		// Strict: an unset threshold must be absent, not present as undefined.
+		expect(connectConfig.contextWindowCompression).toStrictEqual({ slidingWindow: {} });
+	});
+
+	it('mediaResolution reaches the connect config', async () => {
+		session = new VoiceSession(
+			builtInConfig('sess_media_resolution', 9972, { mediaResolution: 'MEDIA_RESOLUTION_LOW' }),
+		);
+
+		const connectConfig = await startAndReadConnectConfig(session);
+		expect(connectConfig.mediaResolution).toBe('MEDIA_RESOLUTION_LOW');
+	});
+
+	it.each([
+		['maps verbatim with no default sensitivity merged', { silenceDurationMs: 200 }, 9973],
+		['sends an empty automaticActivityDetection when empty', {}, 9974],
+		['passes disabled: true through', { disabled: true }, 9975],
+		['keeps zero-valued durations', { silenceDurationMs: 0, prefixPaddingMs: 0 }, 9976],
+	])('vadConfig %s', async (_label, vadConfig, port) => {
+		session = new VoiceSession(builtInConfig(`sess_vad_${port}`, port, { vadConfig }));
+
+		const connectConfig = await startAndReadConnectConfig(session);
+		expect(connectConfig.realtimeInputConfig).toEqual({ automaticActivityDetection: vadConfig });
+	});
+
+	it('throws ValidationError when realtimeInputConfig and vadConfig are both supplied', () => {
+		expect(
+			() =>
+				new VoiceSession(
+					builtInConfig('sess_vad_both', 9977, {
+						realtimeInputConfig: { automaticActivityDetection: { silenceDurationMs: 500 } },
+						vadConfig: { silenceDurationMs: 200 },
+					}),
+				),
+		).toThrow(ValidationError);
+	});
+
+	it('throws ValidationError when realtimeInputConfig: false and vadConfig are both supplied', () => {
+		expect(
+			() =>
+				new VoiceSession(
+					builtInConfig('sess_vad_both_off', 9978, {
+						realtimeInputConfig: false,
+						vadConfig: { silenceDurationMs: 200 },
+					}),
+				),
+		).toThrow(ValidationError);
 	});
 });
 
