@@ -84,6 +84,9 @@ importers:
       dotenv:
         specifier: ^16.4.5
         version: 16.6.1
+      esbuild:
+        specifier: ^0.28.2
+        version: 0.28.2
       mermaid:
         specifier: ^11.12.2
         version: 11.17.2
