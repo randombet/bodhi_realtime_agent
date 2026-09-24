@@ -21,6 +21,14 @@ export interface SessionClientSender {
 	supportsPlaybackStateProtocol?: boolean;
 }
 
+/** Point-in-time state of the attached client socket, read from the WebSocket itself. */
+export interface ClientSocketHealth {
+	/** WebSocket `readyState`: 0 connecting, 1 open, 2 closing, 3 closed. */
+	readyState: number;
+	/** Bytes queued on the socket that have not been written to the network yet. */
+	bufferedAmount: number;
+}
+
 /** Internal channel used by VoiceSession (send + buffering). Implemented by ClientSenderAdapter. */
 export interface IClientChannel {
 	start(): Promise<void>;
@@ -40,4 +48,13 @@ export interface IClientChannel {
 	sendJsonAfterAudio?(message: AnyServerToClientMessage): void;
 	/** Whether this channel supports the playback-state protocol. */
 	supportsPlaybackStateProtocol?: boolean;
+	/** State of the attached client socket, or `null` when none is attached.
+	 *  Optional: only a channel that owns the client socket (the local
+	 *  `ClientTransport`) can report it. */
+	getSocketHealth?(): ClientSocketHealth | null;
+	/** Close the attached client socket and nothing else; the channel keeps
+	 *  accepting connections. Returns `false` when no socket was attached.
+	 *  Optional: only a channel that owns the client socket (the local
+	 *  `ClientTransport`) can close it. */
+	closeClient?(code?: number, reason?: string): boolean;
 }

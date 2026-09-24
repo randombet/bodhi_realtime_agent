@@ -1,6 +1,7 @@
 import type { IncomingMessage } from 'node:http';
 import { type WebSocket, WebSocketServer } from 'ws';
 import type { AnyServerToClientMessage, HostClientFrame } from '../types/client-protocol.js';
+import type { ClientSocketHealth } from '../types/session-client.js';
 import { AudioBuffer } from './audio-buffer.js';
 
 /** Callbacks fired by ClientTransport when client events occur. */
@@ -297,6 +298,23 @@ export class ClientTransport {
 				});
 			});
 		}
+	}
+
+	/** `readyState` and `bufferedAmount` of the attached socket, or `null`
+	 *  when no connection holds the client slot. */
+	getSocketHealth(): ClientSocketHealth | null {
+		if (!this.client) return null;
+		return { readyState: this.client.readyState, bufferedAmount: this.client.bufferedAmount };
+	}
+
+	/** Close the attached socket with the given close code and reason. The
+	 *  listener keeps accepting connections (`stop()` is the listener
+	 *  teardown), and the socket's close runs the usual disconnect handling.
+	 *  Returns `false` when no connection holds the client slot. */
+	closeClient(code?: number, reason?: string): boolean {
+		if (!this.client) return false;
+		this.client.close(code, reason);
+		return true;
 	}
 
 	/** Send raw PCM audio to the client as a binary frame. */

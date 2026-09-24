@@ -487,7 +487,52 @@ describe('recovery surface', () => {
 		sendSpy.mockRestore();
 	});
 
-	it.todo('the hold gates greetings, directive reinforcement and reconnect context injection');
+	it('the hold gates greetings, directive reinforcement and reconnect context injection', async () => {
+		const lines: string[] = [];
+		session = await startSession(
+			{},
+			{
+				reattachGreeting: 'until-first-turn',
+				reattachContextReplay: true,
+				log: (l: string) => lines.push(l),
+			},
+			echo({ greeting: 'Greet the user warmly.' }),
+		);
+		// One completed turn, so a client attach takes the context-replay branch.
+		(await fire())({ serverContent: { modelTurn: { parts: [{ inlineData: { data: 'AAAA' } }] } } });
+		(await fire())({ serverContent: { turnComplete: true } });
+		session.conversationContext.addUserMessage('what is the weather');
+		session.conversationContext.addAssistantMessage('sunny');
+		const sent: unknown[] = [];
+		const sendSpy = vi
+			.spyOn(transportOf(session), 'sendContent')
+			.mockImplementation((c: unknown) => {
+				sent.push(c);
+			});
+		const r = session.recoverUpstream({
+			reason: 'active-silence',
+			skipContextInjection: true,
+			holdSyntheticUntilFreshSpeech: true,
+		});
+		await r.activated;
+		expect(session.isSyntheticHoldActive()).toBe(true);
+		const priv = session as unknown as {
+			greeting: { sendGreeting: () => boolean };
+			reinforceDirectives: () => void;
+			directiveManager: { set: (k: string, v: string, s: string) => void };
+		};
+		priv.greeting.sendGreeting();
+		priv.directiveManager.set('pace', 'slow', 'session');
+		priv.reinforceDirectives();
+		session.notifyClientConnected();
+		const text = JSON.stringify(sent);
+		expect(text.includes('Greet')).toBe(false);
+		expect(text.includes('pace')).toBe(false);
+		expect(text.includes('reconnected')).toBe(false);
+		// The attach reached the context replay, and the hold suppressed it.
+		expect(lines.some((l) => l.includes('suppressed client-reconnect-context'))).toBe(true);
+		sendSpy.mockRestore();
+	});
 
 	it('a tool result issued before recovery is dropped, not sent into the replacement session', async () => {
 		let resolveTool!: (v: string) => void;

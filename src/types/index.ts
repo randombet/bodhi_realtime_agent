@@ -67,6 +67,7 @@ export type { RtcClientSignalingMessage, RtcServerSignalingMessage } from './rtc
 export { tryParseRtcClientSignaling } from './rtc-signaling.js';
 
 export type {
+	ClientSocketHealth,
 	IClientChannel,
 	SessionClientSender,
 } from './session-client.js';
