@@ -409,7 +409,14 @@ const session = new VoiceSession({
 The transport layer contributes two uniform timing callbacks, wired identically
 across Gemini, OpenAI, and Qwen:
 
-- `onModelTurnStart` — provider began **any** response (audio or tool call)
+- `onModelTurnStart` — provider began a response (its first audio, text or
+  tool call). On Gemini it fires once per **generation** (one model answer),
+  not once per provider turn: a tool call that arrives after `turnComplete` is
+  the tail of the answer already underway and does not fire it again. The
+  session publishes each Gemini generation as a `generation.start` /
+  `generation.end` pair; on every transport it publishes `turn.start` at most
+  once per framework turn, and only for a turn that receives a model start (a
+  turn born from a bare `turnComplete` or a bare interrupt gets none)
 - `onFirstAudioChunk` — first audio chunk of the response, once per response
   (the stop-to-first-audio anchor; re-arms when a new response begins)
 - `onUserSpeechStopped` — provider server-VAD end-of-speech

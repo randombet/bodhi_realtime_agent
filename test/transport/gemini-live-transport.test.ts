@@ -2595,6 +2595,266 @@ describe('GeminiLiveTransport', () => {
 		});
 	});
 
+	// A generation is one model answer, the unit a consumer builds per-answer
+	// state on; it can outlive the server turn, because the tool call that
+	// finishes an answer may arrive after turnComplete. These assert the paired
+	// start/end TRACE, not only a count.
+	describe('generation lifecycle', () => {
+		const AUDIO = { serverContent: { modelTurn: { parts: [{ inlineData: { data: 'AAAA' } }] } } };
+		const TOOL_CALL = {
+			toolCall: { functionCalls: [{ id: 'fc_1', name: 'get_weather', args: { city: 'Boston' } }] },
+		};
+		const TURN_COMPLETE = { serverContent: { turnComplete: true } };
+		const GEN_COMPLETE = { serverContent: { generationComplete: true } };
+		const INTERRUPTED = { serverContent: { interrupted: true } };
+
+		/** Connect a transport (audio mode unless `text`) and record its generation trace. */
+		async function traced(mode: 'audio' | 'text' = 'audio') {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect(
+				mode === 'text'
+					? {
+							auth: { type: 'api_key', apiKey: 'test-key' },
+							model: 'gemini-3.1-flash-live-preview',
+							responseModality: 'text',
+						}
+					: undefined,
+			);
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			const lifecycle: string[] = [];
+			const modelTurnStart = vi.fn();
+			transport.onModelTurnStart = modelTurnStart;
+			transport.onGenerationStart = (id) => lifecycle.push(`start:${id}`);
+			transport.onGenerationEnd = (id, reason) => lifecycle.push(`end:${id}:${reason}`);
+			transport.onTextOutput = () => {};
+			transport.onTextDone = () => {};
+			transport.onTurnComplete = () => {};
+			const fire = (...msgs: unknown[]) => {
+				for (const msg of msgs) cbs.onmessage(msg);
+			};
+			return { transport, fire, lifecycle, modelTurnStart };
+		}
+
+		it('audio → turnComplete → toolCall fires onModelTurnStart once and leaves gen_0 draining', async () => {
+			const { fire, lifecycle, modelTurnStart } = await traced();
+			fire(AUDIO, TURN_COMPLETE, TOOL_CALL);
+			expect(modelTurnStart).toHaveBeenCalledOnce();
+			expect(lifecycle).toEqual(['start:gen_0']);
+		});
+
+		it('the answer built from the tool result is gen_1, after gen_0 ends superseded', async () => {
+			const { fire, lifecycle, modelTurnStart } = await traced();
+			fire(AUDIO, TURN_COMPLETE, TOOL_CALL, AUDIO);
+			expect(lifecycle).toEqual(['start:gen_0', 'end:gen_0:superseded', 'start:gen_1']);
+			expect(modelTurnStart.mock.calls).toEqual([['gen_0'], ['gen_1']]);
+		});
+
+		it('generationComplete ends the generation; the next output opens a new one', async () => {
+			const { fire, lifecycle } = await traced();
+			fire(AUDIO, GEN_COMPLETE, TURN_COMPLETE, TOOL_CALL);
+			expect(lifecycle).toEqual(['start:gen_0', 'end:gen_0:generationComplete', 'start:gen_1']);
+		});
+
+		it('an interrupt ends the generation; a following toolCall opens a new one', async () => {
+			const { fire, lifecycle } = await traced();
+			fire(AUDIO, INTERRUPTED, TOOL_CALL);
+			expect(lifecycle).toEqual(['start:gen_0', 'end:gen_0:interrupted', 'start:gen_1']);
+		});
+
+		it('three plain turns without generationComplete are three generations, each closed superseded', async () => {
+			const { fire, lifecycle, modelTurnStart } = await traced();
+			fire(AUDIO, TURN_COMPLETE, AUDIO, TURN_COMPLETE, AUDIO, TURN_COMPLETE);
+			expect(lifecycle).toEqual([
+				'start:gen_0',
+				'end:gen_0:superseded',
+				'start:gen_1',
+				'end:gen_1:superseded',
+				'start:gen_2',
+			]);
+			expect(modelTurnStart).toHaveBeenCalledTimes(3);
+		});
+
+		it('a duplicate generationComplete or interrupted ends the generation once and does not wedge it', async () => {
+			const { fire, lifecycle } = await traced();
+			fire(AUDIO, GEN_COMPLETE, GEN_COMPLETE, INTERRUPTED, TURN_COMPLETE, AUDIO);
+			expect(lifecycle).toEqual(['start:gen_0', 'end:gen_0:generationComplete', 'start:gen_1']);
+		});
+
+		for (const mode of ['audio', 'text'] as const) {
+			it(`trailing parts after generationComplete inside the open server turn do not reopen (${mode} mode)`, async () => {
+				const { fire, lifecycle, modelTurnStart } = await traced(mode);
+				fire(
+					AUDIO,
+					{ serverContent: { outputTranscription: { text: 'Hello.' } } },
+					GEN_COMPLETE,
+					AUDIO,
+					AUDIO,
+				);
+				expect(modelTurnStart).toHaveBeenCalledOnce();
+				expect(lifecycle).toEqual(['start:gen_0', 'end:gen_0:generationComplete']);
+				// Once that server turn closes, the next output is a new generation.
+				fire(TURN_COMPLETE, AUDIO);
+				expect(modelTurnStart).toHaveBeenCalledTimes(2);
+				expect(lifecycle).toEqual(['start:gen_0', 'end:gen_0:generationComplete', 'start:gen_1']);
+			});
+
+			it(`trailing parts after interrupted inside the open server turn do not reopen (${mode} mode)`, async () => {
+				const { fire, lifecycle, modelTurnStart } = await traced(mode);
+				fire(AUDIO, INTERRUPTED, AUDIO, AUDIO);
+				expect(modelTurnStart).toHaveBeenCalledOnce();
+				expect(lifecycle).toEqual(['start:gen_0', 'end:gen_0:interrupted']);
+				fire(TURN_COMPLETE, AUDIO);
+				expect(modelTurnStart).toHaveBeenCalledTimes(2);
+				expect(lifecycle).toEqual(['start:gen_0', 'end:gen_0:interrupted', 'start:gen_1']);
+			});
+		}
+
+		it('onGenerationComplete fires in every mode, before the text-mode early turn end', async () => {
+			const audio = await traced();
+			const audioComplete = vi.fn();
+			audio.transport.onGenerationComplete = audioComplete;
+			audio.fire(GEN_COMPLETE);
+			expect(audioComplete).toHaveBeenCalledOnce();
+
+			const text = await traced('text');
+			const order: string[] = [];
+			text.transport.onGenerationEnd = (id, reason) => order.push(`end:${id}:${reason}`);
+			text.transport.onGenerationComplete = () => order.push('generationComplete');
+			text.transport.onTextDone = () => order.push('textDone');
+			text.transport.onTurnComplete = () => order.push('turnComplete');
+			text.fire({ serverContent: { outputTranscription: { text: 'Hi.' } } }, AUDIO, GEN_COMPLETE);
+			expect(order).toEqual([
+				'end:gen_0:generationComplete',
+				'generationComplete',
+				'textDone',
+				'turnComplete',
+			]);
+		});
+
+		it('disconnect() ends an open generation with disconnected, and the next connection starts fresh', async () => {
+			const { transport, fire, lifecycle, modelTurnStart } = await traced();
+			const connectedAtEnd: boolean[] = [];
+			const recordEnd = transport.onGenerationEnd;
+			transport.onGenerationEnd = (id, reason) => {
+				connectedAtEnd.push(transport.isConnected);
+				recordEnd?.(id, reason);
+			};
+			fire(AUDIO, TURN_COMPLETE); // draining
+			await transport.disconnect();
+			expect(lifecycle).toEqual(['start:gen_0', 'end:gen_0:disconnected']);
+			// The end is reported once the session is already detached.
+			expect(connectedAtEnd).toEqual([false]);
+			await transport.disconnect(); // nothing open: no second end
+			expect(lifecycle).toHaveLength(2);
+
+			await transport.connect();
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage(TOOL_CALL);
+			expect(modelTurnStart.mock.calls).toEqual([['gen_0'], ['gen_1']]);
+			expect(lifecycle).toEqual(['start:gen_0', 'end:gen_0:disconnected', 'start:gen_1']);
+		});
+
+		it('abortIncumbent() ends an open generation with disconnected', async () => {
+			const { transport, fire, lifecycle } = await traced();
+			fire(AUDIO);
+			await expect(transport.abortIncumbent()).resolves.toBe('closed');
+			expect(lifecycle).toEqual(['start:gen_0', 'end:gen_0:disconnected']);
+		});
+
+		it('a throwing onGenerationEnd does not stop disconnect() from closing the session', async () => {
+			const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			const { transport, fire } = await traced();
+			transport.onGenerationEnd = () => {
+				throw new Error('observer failed');
+			};
+			fire(AUDIO); // gen_0 open: disconnect() ends it with `disconnected`
+
+			await expect(transport.disconnect()).resolves.toBeUndefined();
+			expect(mockSession.close).toHaveBeenCalledOnce();
+			expect(transport.isConnected).toBe(false);
+			expect(warn).toHaveBeenCalledWith(
+				expect.stringContaining('onGenerationEnd observer threw'),
+				expect.any(Error),
+			);
+			warn.mockRestore();
+		});
+
+		it('throwing generation observers do not suppress dispatch on the same message', async () => {
+			const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			const boom = () => {
+				throw new Error('observer failed');
+			};
+			const ctor = {
+				onModelTurnStart: vi.fn(boom),
+				onGenerationStart: vi.fn(boom),
+				onGenerationComplete: vi.fn(boom),
+			};
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, ctor);
+			const onModelTurnStart = vi.fn(boom);
+			const onGenerationStart = vi.fn(boom);
+			const onGenerationEnd = vi.fn(boom);
+			const onAudioOutput = vi.fn();
+			const onTurnComplete = vi.fn();
+			transport.onModelTurnStart = onModelTurnStart;
+			transport.onGenerationStart = onGenerationStart;
+			transport.onGenerationEnd = onGenerationEnd;
+			transport.onGenerationComplete = boom;
+			transport.onAudioOutput = onAudioOutput;
+			transport.onTurnComplete = onTurnComplete;
+			await transport.connect();
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+
+			expect(() => cbs.onmessage(AUDIO)).not.toThrow();
+			// Every observer ran, each isolated from the one before it.
+			expect(ctor.onModelTurnStart).toHaveBeenCalledWith('gen_0');
+			expect(onModelTurnStart).toHaveBeenCalledWith('gen_0');
+			expect(ctor.onGenerationStart).toHaveBeenCalledWith('gen_0');
+			expect(onGenerationStart).toHaveBeenCalledWith('gen_0');
+			expect(onAudioOutput).toHaveBeenCalledWith('AAAA');
+
+			expect(() => cbs.onmessage(GEN_COMPLETE)).not.toThrow();
+			expect(onGenerationEnd).toHaveBeenCalledWith('gen_0', 'generationComplete');
+			expect(ctor.onGenerationComplete).toHaveBeenCalledOnce();
+
+			expect(() => cbs.onmessage(TURN_COMPLETE)).not.toThrow();
+			expect(onTurnComplete).toHaveBeenCalledTimes(1);
+			for (const label of [
+				'onModelTurnStart',
+				'onGenerationStart',
+				'onGenerationEnd',
+				'onGenerationComplete',
+			]) {
+				expect(warn).toHaveBeenCalledWith(
+					expect.stringContaining(`${label} observer threw`),
+					expect.any(Error),
+				);
+			}
+			warn.mockRestore();
+		});
+
+		it('onModelTurnStart and the generation callbacks receive the id, on both callback forms', async () => {
+			const ctor = {
+				onModelTurnStart: vi.fn(),
+				onGenerationStart: vi.fn(),
+				onGenerationEnd: vi.fn(),
+				onGenerationComplete: vi.fn(),
+			};
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, ctor);
+			const onModelTurnStart = vi.fn();
+			transport.onModelTurnStart = onModelTurnStart;
+			await transport.connect();
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+
+			cbs.onmessage(TOOL_CALL);
+			cbs.onmessage(GEN_COMPLETE);
+			expect(ctor.onModelTurnStart).toHaveBeenCalledWith('gen_0');
+			expect(onModelTurnStart).toHaveBeenCalledWith('gen_0');
+			expect(ctor.onGenerationStart).toHaveBeenCalledWith('gen_0');
+			expect(ctor.onGenerationEnd).toHaveBeenCalledWith('gen_0', 'generationComplete');
+			expect(ctor.onGenerationComplete).toHaveBeenCalledOnce();
+		});
+	});
+
 	// P2: sessionResumption refactor.
 	describe('sessionResumption (P2)', () => {
 		it('sessionResumption: false omits the field from connectConfig', async () => {

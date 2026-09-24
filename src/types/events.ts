@@ -2,7 +2,7 @@ import type { ExternalEvent } from './agent.js';
 import type { SubagentResult, ToolCall, ToolResult, UIPayload } from './conversation.js';
 import type { TurnLatencySegments } from './hooks.js';
 import type { SessionEndReason, SessionState } from './session.js';
-import type { RealtimeLLMUsageEvent } from './transport.js';
+import type { GenerationEndReason, RealtimeLLMUsageEvent } from './transport.js';
 import type { UIResponse } from './ui.js';
 
 /** Which VAD produced a speech timing fact. */
@@ -103,9 +103,27 @@ export interface EventPayloadMap {
 	'tool.cancel': { sessionId: string; toolCallIds: string[] };
 
 	// Turn events
-	'turn.start': { sessionId: string; turnId: string };
+	// `turn.start` fires once per framework Turn, on its first model start.
+	// transportGeneration is the POST-SETUP counter (correlates with lifecycle
+	// setup-ok); attemptEpoch is the DIAL counter. Different domains: never
+	// compare one with the other. Both are undefined on transports that do not
+	// expose them.
+	'turn.start': {
+		sessionId: string;
+		turnId: string;
+		transportGeneration?: number;
+		attemptEpoch?: number;
+	};
 	'turn.end': { sessionId: string; turnId: string };
 	'turn.interrupted': { sessionId: string; turnId: string };
+
+	// Generation lifecycle — a PAIR, and a different boundary from the turn
+	// events above: a generation outlives the provider's turnComplete, because
+	// the tool call that finishes an answer can arrive after it. Per-answer
+	// state keys on these. generationId is the transport's own counter, not a
+	// turnId.
+	'generation.start': { sessionId: string; generationId: string };
+	'generation.end': { sessionId: string; generationId: string; reason: GenerationEndReason };
 
 	// Raw latency facts (observability design §11 — consumed by TurnLatencyTracker).
 	// `atMs` is the SOURCE EDGE on the session metric clock: client-VAD events
