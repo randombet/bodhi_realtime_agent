@@ -23,8 +23,9 @@
 //   node scripts/verify-pack.mjs                      # full gate
 //   node scripts/verify-pack.mjs --skip-declarations  # omit (d) and the (c) checks for
 //                                                     # ClientTransport, CLOSE_CODE_CLIENT_BUSY
-//                                                     # and VoiceSession.RECONNECT_DEADLINE_MS
-//                                                     # until the probe's API names all exist
+//                                                     # and VoiceSession.RECONNECT_DEADLINE_MS;
+//                                                     # prepublishOnly and release.yml never
+//                                                     # pass it
 //   node scripts/verify-pack.mjs --keep               # leave the temp directories for inspection
 //
 // Exits non-zero on the first failure.
@@ -285,19 +286,19 @@ function stepRuntime(consumer) {
 			if (result.ClientTransport !== 'function') {
 				fail(
 					'c',
-					`${label}: typeof ClientTransport is ${result.ClientTransport}, expected function (not root-exported yet; pass --skip-declarations until ClientTransport is exported)`,
+					`${label}: typeof ClientTransport is ${result.ClientTransport}, expected function (the root entry must export ClientTransport)`,
 				);
 			}
 			if (result.CLOSE_CODE_CLIENT_BUSY !== 4409) {
 				fail(
 					'c',
-					`${label}: CLOSE_CODE_CLIENT_BUSY is ${result.CLOSE_CODE_CLIENT_BUSY}, expected 4409 (pass --skip-declarations until CLOSE_CODE_CLIENT_BUSY is root-exported)`,
+					`${label}: CLOSE_CODE_CLIENT_BUSY is ${result.CLOSE_CODE_CLIENT_BUSY}, expected 4409 (the root entry must export CLOSE_CODE_CLIENT_BUSY)`,
 				);
 			}
 			if (result.RECONNECT_DEADLINE_MS !== 30_000) {
 				fail(
 					'c',
-					`${label}: VoiceSession.RECONNECT_DEADLINE_MS is ${result.RECONNECT_DEADLINE_MS}, expected 30000 (pass --skip-declarations until VoiceSession.RECONNECT_DEADLINE_MS exists)`,
+					`${label}: VoiceSession.RECONNECT_DEADLINE_MS is ${result.RECONNECT_DEADLINE_MS}, expected 30000 (VoiceSession must carry the static RECONNECT_DEADLINE_MS)`,
 				);
 			}
 		}

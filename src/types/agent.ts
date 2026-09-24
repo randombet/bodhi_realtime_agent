@@ -94,6 +94,14 @@ export interface SubagentConfig {
 	 * When omitted, the session default (`VoiceSessionConfig.model`) is used.
 	 */
 	reasoningModel?: LanguageModelV1;
+	/**
+	 * @deprecated A model name, kept so configs that set it still compile. It is accepted
+	 * but ignored, as it was by the builds that declared it: the subagent runs on
+	 * `reasoningModel` when set, otherwise on the session default, and a session logs one
+	 * warning per subagent that sets `model` without `reasoningModel`. Set `reasoningModel`
+	 * instead.
+	 */
+	model?: string;
 	/** When true, a SubagentSession with user interaction capabilities is created. */
 	interactive?: boolean;
 	/**
