@@ -43,6 +43,7 @@ function makeHarness(
 		facts?: MemoryFact[];
 		override?: number | undefined;
 		interruptible?: boolean;
+		isSyntheticHeld?: () => boolean;
 	} = {},
 ): Harness {
 	const transport = opts.transport ?? fakeTransport();
@@ -58,6 +59,7 @@ function makeHarness(
 		getMemoryFacts: () => facts,
 		getSessionSuffix: () => suffix.value,
 		resetNotificationAudio,
+		isSyntheticHeld: opts.isSyntheticHeld,
 		log,
 	};
 	const config: GreetingControllerConfig = {
@@ -215,9 +217,46 @@ describe('GreetingController shouldDropOutbound + sendGreeting', () => {
 	it('sendGreeting is a no-op (no sendContent) when the agent has no greeting', () => {
 		const h = makeHarness({ override: 1000, agent: { name: 'NoGreet' } as unknown as MainAgent });
 		h.controller.finalizeGreetingInterruptGrace();
-		h.controller.sendGreeting();
+		expect(h.controller.sendGreeting()).toBe(false);
 		expect(h.sendContent).not.toHaveBeenCalled();
 		expect(h.controller.shouldDropOutbound()).toBe(false);
+	});
+
+	it('sendGreeting returns true once the greeting is sent', () => {
+		const h = makeHarness({ override: 1000 });
+		h.controller.finalizeGreetingInterruptGrace();
+		expect(h.controller.sendGreeting()).toBe(true);
+		expect(h.sendContent).toHaveBeenCalledTimes(1);
+	});
+
+	it('sendGreeting is a no-op and arms nothing while isSyntheticHeld() is true', () => {
+		vi.useFakeTimers();
+		try {
+			let held = true;
+			const h = makeHarness({ override: 1000, interruptible: false, isSyntheticHeld: () => held });
+			h.controller.finalizeGreetingInterruptGrace();
+
+			expect(h.controller.sendGreeting()).toBe(false);
+			// Nothing sent, nothing reset, nothing armed: no pre-audio mic drop,
+			// no full-greeting suppression, no no-start timer.
+			expect(h.sendContent).not.toHaveBeenCalled();
+			expect(h.resetNotificationAudio).not.toHaveBeenCalled();
+			expect(h.controller.shouldDropOutbound()).toBe(false);
+			expect(h.controller.isUninterruptibleGreetingActive()).toBe(false);
+			expect(h.controller.requestInterrupt('vad')).toBe(true);
+			vi.advanceTimersByTime(10_000);
+			expect(logHas(h.log, 'no-start timeout')).toBe(false);
+			expect(logHas(h.log, 'Sending greeting')).toBe(false);
+
+			// Released: the next greeting sends and arms as usual.
+			held = false;
+			expect(h.controller.sendGreeting()).toBe(true);
+			expect(h.sendContent).toHaveBeenCalledTimes(1);
+			expect(h.controller.shouldDropOutbound()).toBe(true);
+			expect(h.controller.isUninterruptibleGreetingActive()).toBe(true);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });
 
