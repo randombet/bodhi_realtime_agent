@@ -3,7 +3,11 @@ import type { ClientMediaProfile } from '../types/client-media.js';
 import type { IClientChannel } from '../types/session-client.js';
 import type { SessionClientSender } from '../types/session-client.js';
 import { ClientSenderAdapter } from './client-sender-adapter.js';
-import { ClientTransport, type ClientTransportCallbacks } from './client-transport.js';
+import {
+	ClientTransport,
+	type ClientTransportCallbacks,
+	type ClientTransportOptions,
+} from './client-transport.js';
 import { DirectRtcClientChannel } from './direct-rtc-client-channel.js';
 
 /** PCM bridge for `direct_rtc` + `rtcAudio: 'werift_opus'` (see {@link createClientChannel}). */
@@ -25,6 +29,8 @@ export interface CreateClientChannelParams {
 	readonly host?: string;
 	readonly listenTimeoutMs?: number;
 	readonly callbacks: ClientTransportCallbacks;
+	/** Local `ClientTransport` options such as `probeState` (ignored when `clientSender` is set). */
+	readonly options?: ClientTransportOptions;
 }
 
 /**
@@ -86,5 +92,6 @@ export function createClientChannel(params: CreateClientChannelParams): IClientC
 		params.callbacks,
 		params.host ?? '0.0.0.0',
 		params.listenTimeoutMs ?? 10_000,
+		params.options,
 	);
 }

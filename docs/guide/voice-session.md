@@ -59,7 +59,7 @@ Hume custom setup exposes voice name, voice ID, `HUME_AI` vs `CUSTOM_VOICE`, Oct
 
 `VoiceSession` supports two ways to attach an end-user client:
 
-1. **Local `ClientTransport` (default in simple examples)** — the framework listens on a TCP port; the client connects as the only peer.
+1. **Local `ClientTransport` (default in simple examples)** — the framework listens on a TCP port and attaches one real client at a time. Health probes (`?probe=1`), a background verifier (`?verify=1`) and a user-confirmed takeover (`?takeover=1`) are recognized from the connection URL; see [Local client connection roles](#local-client-connection-roles).
 2. **Server-owned WebSocket (`clientSender`)** — your app server holds the WebSocket and forwards **binary** and **JSON** into `feedAudioFromClient` / `feedJsonFromClient`, and calls `notifyClientConnected` / `notifyClientDisconnected` when the socket opens or closes.
 
 When you use **`clientSender`**, you must also choose how **media** is carried:
@@ -83,6 +83,59 @@ const session = new VoiceSession({
   orchestrationMode: 'actor',
 });
 ```
+
+## Local client connection roles
+
+The local `ClientTransport` reads the query string of each WebSocket upgrade
+request before it attaches the connection. One connection holds the client slot
+at a time, and only a real client counts as the attached client.
+
+| Connection URL | Role | Behavior |
+|----------------|------|----------|
+| `ws://host:port/` (no role query) | Real client | Attaches and runs connect handling (greeting, `session.config`). While another real client is attached, the newcomer is closed with `4409` `client-busy` and the incumbent is unaffected. If a verifier holds the slot, the verifier is closed with `4411` `verifier-preempted` and the newcomer attaches. |
+| `?probe=1` | Health probe | The upgrade completes, the probe receives one JSON text frame from `probeState` when that option is configured (no frame otherwise), and the socket closes with `1000`. A probe never attaches, never runs connect or disconnect handling, and leaves an attached client untouched. |
+| `?verify=1` | Verifier | Low-priority background check. Attaches only when the slot is free; while a real client or another verifier is attached it is closed with `4409` `client-busy`. It receives outbound frames, but its inbound audio and JSON are dropped, and it never counts as the attached client, so it gets no greeting and no `session.config`. A real client arriving preempts it with `4411` `verifier-preempted`. |
+| `?takeover=1` | Real client (takeover) | Closes an attached real client with `4410` `superseded-by-takeover`, then attaches in its place. With no incumbent it attaches like any real client. |
+
+A socket that loses the slot through takeover or preemption can no longer send
+audio or JSON into the session. An incumbent whose socket is already closing
+does not hold the slot, so an immediate reconnect from the same user is not
+rejected as busy.
+
+Clients can branch on the close code: on `4409` a real client can tell the user
+another client is connected and, once the user confirms, reconnect with
+`?takeover=1`; a verifier closed with `4409` or `4411` should retry later; a
+client closed with `4410` was replaced on purpose and should not reconnect on
+its own. The codes and reasons are exported from `bodhi-realtime-agent` as
+`CLOSE_CODE_CLIENT_BUSY` / `CLOSE_REASON_CLIENT_BUSY`,
+`CLOSE_CODE_SUPERSEDED_BY_TAKEOVER` / `CLOSE_REASON_SUPERSEDED_BY_TAKEOVER`
+and `CLOSE_CODE_VERIFIER_PREEMPTED` / `CLOSE_REASON_VERIFIER_PREEMPTED`.
+
+Three `VoiceSession` options configure these roles:
+
+```ts
+const session = new VoiceSession({
+  // ...same options as above
+  port: 9900,
+  // Sent as one JSON text frame to each ?probe=1 connection.
+  probeState: () => ({ type: 'app.health', ready: true }),
+  // Verifier attached: a narrow hook, for example to wake the upstream.
+  onVerifierConnected: () => {},
+  // Verifier detached: clean close or preemption by a real client.
+  onVerifierDisconnected: () => {},
+});
+```
+
+- **`probeState`** returns the object sent to a probe. If it is absent, or it
+  throws, the probe still closes with `1000`, without a frame.
+- **`onVerifierConnected` / `onVerifierDisconnected`** fire for the verifier
+  only. Real-client connect and disconnect handling never runs for a verifier,
+  so these hooks should not start user-facing work.
+
+These roles apply to the local `ClientTransport` only. With `clientSender` your
+server performs the WebSocket upgrade, so the framework never sees the query
+string; implement probes and roles in your server. Passing `probeState` or the
+verifier hooks together with `clientSender` logs a warning.
 
 ## Typical setup (app server owns the WebSocket, PCM on socket)
 

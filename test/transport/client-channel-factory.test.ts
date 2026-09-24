@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import WebSocket from 'ws';
 import { TransportError } from '../../src/core/errors.js';
 import { createClientChannel } from '../../src/transport/client-channel-factory.js';
 import { ClientTransport } from '../../src/transport/client-transport.js';
@@ -153,5 +154,35 @@ describe('createClientChannel', () => {
 			port: 19_876,
 		});
 		expect(ch).toBeInstanceOf(ClientTransport);
+	});
+
+	it('passes options.probeState to the owned ClientTransport', async () => {
+		const probeState = vi.fn(() => ({ type: 'agent.state', v: 1, initialized: true }));
+		const ch = createClientChannel({
+			profile: { kind: 'websocket' },
+			callbacks: {},
+			port: 19_877,
+			host: '127.0.0.1',
+			options: { probeState },
+		});
+		expect(ch).toBeInstanceOf(ClientTransport);
+		await ch.start();
+		try {
+			const frames = await new Promise<string[]>((resolve, reject) => {
+				const received: string[] = [];
+				const ws = new WebSocket('ws://127.0.0.1:19877/?probe=1');
+				ws.on('message', (data, isBinary) => {
+					if (!isBinary) received.push(data.toString());
+				});
+				ws.on('close', () => resolve(received));
+				ws.on('error', reject);
+			});
+			expect(frames.map((frame) => JSON.parse(frame))).toEqual([
+				{ type: 'agent.state', v: 1, initialized: true },
+			]);
+			expect(probeState).toHaveBeenCalledOnce();
+		} finally {
+			await ch.stop();
+		}
 	});
 });
