@@ -315,6 +315,28 @@ describe('TranscriptManager', () => {
 		});
 	});
 
+	describe('onBeforeFlush', () => {
+		it('runs at the top of flush(), before the output buffer is committed, and not from flushInput()', () => {
+			const sink = createSink();
+			const mgr = new TranscriptManager(sink);
+			const calls: string[][] = [];
+			mgr.onBeforeFlush = () => {
+				calls.push([...sink.assistantMessages]);
+				mgr.handleOutput(' and the held rest');
+			};
+
+			mgr.handleInput('question');
+			mgr.handleOutput('An answer');
+			mgr.flushInput();
+			expect(calls).toEqual([]);
+
+			mgr.flush();
+
+			expect(calls).toEqual([[]]);
+			expect(sink.assistantMessages).toEqual(['An answer and the held rest']);
+		});
+	});
+
 	it('handles no-overlap prefix + buffer by joining with space', () => {
 		const sink = createSink();
 		const mgr = new TranscriptManager(sink);
