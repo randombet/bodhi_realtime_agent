@@ -47,6 +47,7 @@ import type { SessionEndReason } from '../types/session.js';
 import type { ToolDefinition } from '../types/tool.js';
 import type {
 	ConnectionLifecycleEvent,
+	ContentTurn,
 	LLMTransport,
 	LLMTransportError,
 	STTProvider,
@@ -224,6 +225,39 @@ export interface VoiceSessionDiagnostics {
 	/** Client audio frames suppressed as echo, monotonic per session; 0 when no
 	 *  echo suppression is active. */
 	echoSuppressed: number;
+}
+
+/** Options for {@link VoiceSession.injectText}. */
+export interface InjectTextOptions {
+	/**
+	 * `'live'`: realtime input the model responds to, as if the user had just
+	 * said it (`transport.sendLiveText`, or `sendContent(turns, true)` on a
+	 * transport without it).
+	 *
+	 * `'quiet'`: context added to the conversation without completing the
+	 * turn (`sendContent(turns, false)`), so it prompts no response by itself.
+	 *
+	 * Neither mode records the text in the session's `ConversationContext`.
+	 */
+	mode: 'live' | 'quiet';
+}
+
+/** Options of the internal injection path. The public `injectText` passes only
+ *  `mode`; the rest serve framework-generated corrections. */
+interface InjectTextInternalOptions extends InjectTextOptions {
+	/** Serialize on the direct-input FIFO and, at its head, cancel the in-flight
+	 *  response and finalize its turn as interrupted before sending (the
+	 *  `injectTranscript` preemption). */
+	preempt?: boolean;
+	/** Refuse to send while the synthetic-output hold is active, checked before
+	 *  any preemption. Host content leaves this unset and bypasses the hold. */
+	respectSyntheticHold?: boolean;
+	/** Evaluated once: at the head of the direct-input FIFO before preemption
+	 *  when `preempt` is set, otherwise immediately before sending. `false`
+	 *  abandons the injection. */
+	stillValid?: () => boolean;
+	/** Label for log lines. */
+	origin?: string;
 }
 
 /**
@@ -3729,6 +3763,113 @@ export class VoiceSession {
 			// so the user turn shows up in history / memory / subagent context.
 			this.conversationContext.addUserMessage(text);
 		});
+	}
+
+	/**
+	 * Inject host-generated text into the model's conversation: live input the
+	 * model responds to, or quiet context (see {@link InjectTextOptions}).
+	 *
+	 * Resolves `true` once the text was handed to the transport (in live mode,
+	 * a send the transport accepts into a send buffer counts as handed over)
+	 * and `false` when nothing was sent: empty text, the transport not
+	 * connected, transcription mode, or a transport send that failed (logged).
+	 * It never rejects for a transport failure, so callers can fire and forget
+	 * it.
+	 *
+	 * Unlike {@link injectTranscript}, the text is not recorded in the
+	 * `ConversationContext` and an in-flight response is not cancelled.
+	 */
+	injectText(input: string | ContentTurn[], opts: InjectTextOptions): Promise<boolean> {
+		return this.injectTextInternal(input, { mode: opts.mode });
+	}
+
+	/**
+	 * Send an image or audio clip (base64) to the model as realtime input
+	 * through `transport.sendFile`, e.g. a camera or screen frame. Nothing is
+	 * recorded in the conversation history. Returns `false`, sending nothing,
+	 * in transcription mode or when the transport is not connected, and
+	 * `false` when the transport send throws (the error is logged, never
+	 * rethrown); otherwise `true`, and the transport decides which MIME types it
+	 * carries (the Gemini transport takes `image/*` and `audio/*`).
+	 */
+	sendRealtimeMedia(base64Data: string, mimeType: string): boolean {
+		if (!this.transport.isConnected || !this.dictation.isAgentMode()) return false;
+		try {
+			this.transport.sendFile(base64Data, mimeType);
+		} catch (err) {
+			this.log(
+				`sendRealtimeMedia(${mimeType}) failed: ${err instanceof Error ? err.message : String(err)}`,
+			);
+			return false;
+		}
+		return true;
+	}
+
+	/** The injection path behind {@link injectText}, with the options that
+	 *  framework-generated corrections need. With `preempt` it runs on the
+	 *  direct-input FIFO; otherwise it sends immediately. */
+	private injectTextInternal(
+		input: string | ContentTurn[],
+		opts: InjectTextInternalOptions,
+	): Promise<boolean> {
+		const turns: ContentTurn[] =
+			typeof input === 'string' ? [{ role: 'user', text: input }] : input;
+		if (!turns.some((t) => t.text.trim())) return Promise.resolve(false);
+		if (!opts.preempt) return this.sendInjectedText(turns, opts);
+		let sent = false;
+		return this.enqueueDirectInput(async () => {
+			sent = await this.sendInjectedText(turns, opts);
+		}).then(() => sent);
+	}
+
+	/** Checks, optional preemption and the send itself. Never rejects. */
+	private async sendInjectedText(
+		turns: ContentTurn[],
+		opts: InjectTextInternalOptions,
+	): Promise<boolean> {
+		const origin = opts.origin ?? 'host-inject';
+		const skip = (why: string): false => {
+			this.log(`injectText (${origin}): not sent — ${why}`);
+			return false;
+		};
+		if (!this.transport.isConnected) return skip('transport not connected');
+		if (!this.dictation.isAgentMode()) return skip('transcription mode');
+		// Before any preemption, so a held injection leaves the in-flight turn alone.
+		if (opts.respectSyntheticHold && this.isSyntheticHoldActive()) {
+			return skip('synthetic output is held');
+		}
+		try {
+			if (opts.stillValid && !opts.stillValid()) return skip('no longer valid');
+			if (opts.preempt) await this.preEmptForDirectInput();
+			if (opts.mode === 'quiet') {
+				this.transport.sendContent(turns, false);
+				return true;
+			}
+			// Generation-capable: invalidate a live greeting token so the
+			// response can never bind as the greeting (as guardedTriggerGeneration
+			// does). The input has no user speech to measure latency from.
+			this.triggerCoordinator.dispatch('assistant-initiated');
+			this._pendingResponseOrigin = 'assistant_initiated';
+			if (!this.transport.sendLiveText) {
+				this.transport.sendContent(turns, true);
+				return true;
+			}
+			const sent = this.transport.sendLiveText(turns);
+			if (!sent) this.log(`injectText (${origin}): live text was not delivered`);
+			return sent;
+		} catch (err) {
+			this.log(
+				`injectText (${origin}): send failed: ${err instanceof Error ? err.message : String(err)}`,
+			);
+			return false;
+		}
+	}
+
+	/** Whether the synthetic-output hold is active. The hold suppresses
+	 *  framework-generated input (such as transcription corrections) until the
+	 *  user is heard again; nothing engages it yet, so this reports `false`. */
+	private isSyntheticHoldActive(): boolean {
+		return false;
 	}
 
 	/** Pre-start the whisper session without flipping audio routing. Useful
