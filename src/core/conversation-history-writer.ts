@@ -117,6 +117,18 @@ export class ConversationHistoryWriter {
 		await this.tail.catch(() => {});
 	}
 
+	/**
+	 * Persist the items added since the last checkpoint now, instead of waiting
+	 * for the next `turn.end`, `agent.transfer` or `session.close`. The write
+	 * joins the serial queue (so `drain()` awaits it) and the checkpoint
+	 * advances at once, so a later flush does not persist the same items again.
+	 * Items behind a still-pending reserved user message stay unflushed, as with
+	 * every other flush.
+	 */
+	flushNow(): void {
+		this.flush();
+	}
+
 	/** Chain `fn` onto the serial queue so store writes complete in enqueue order. */
 	private enqueue(label: string, fn: () => Promise<void>): void {
 		const run = (): Promise<void> =>

@@ -207,6 +207,7 @@ export class ToolCallRouter {
 							},
 						],
 						true,
+						{ toolCallId: call.toolCallId },
 					);
 				} else {
 					this.deps.sendToolResult({
@@ -238,6 +239,7 @@ export class ToolCallRouter {
 							},
 						],
 						true,
+						{ toolCallId: call.toolCallId },
 					);
 				} else {
 					this.deps.sendToolResult({

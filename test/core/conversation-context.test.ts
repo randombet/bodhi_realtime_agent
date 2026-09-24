@@ -120,6 +120,35 @@ describe('ConversationContext', () => {
 		});
 	});
 
+	describe('clear', () => {
+		it('empties items and rebases the checkpoint and pending ids so the next item flushes', () => {
+			const ctx = new ConversationContext();
+			ctx.addUserMessage('first');
+			ctx.addAssistantMessage('second');
+			ctx.markCheckpoint();
+			ctx.addUserMessage('third');
+			ctx.reserveUserMessage('provisional');
+
+			expect(ctx.clear()).toBe(4);
+
+			expect(ctx.items).toEqual([]);
+			expect(ctx.hasPendingUserMessages).toBe(false);
+			expect(ctx.pendingUserMessageIds()).toEqual([]);
+			expect(ctx.getItemsSinceCheckpoint()).toEqual([]);
+
+			ctx.addUserMessage('after reset');
+			expect(ctx.getItemsSinceCheckpoint().map((i) => i.content)).toEqual(['after reset']);
+		});
+
+		it('returns 0 on an empty context and keeps the summary', () => {
+			const ctx = new ConversationContext();
+			ctx.setSummary('earlier');
+
+			expect(ctx.clear()).toBe(0);
+			expect(ctx.summary).toBe('earlier');
+		});
+	});
+
 	describe('setSummary', () => {
 		it('stores summary and evicts old items', () => {
 			const ctx = new ConversationContext();

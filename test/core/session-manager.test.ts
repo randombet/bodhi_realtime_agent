@@ -10,7 +10,7 @@ import {
 	type PostSessionSnapshotBuilder,
 } from '../../src/post-session/types.js';
 
-function createManager(postSession?: SessionPostProcessing) {
+function createManager(postSession?: SessionPostProcessing, managed?: boolean) {
 	const eventBus = new EventBus();
 	const hooks = new HooksManager();
 	const mgr = new SessionManager(
@@ -18,6 +18,7 @@ function createManager(postSession?: SessionPostProcessing) {
 		eventBus,
 		hooks,
 		postSession,
+		managed,
 	);
 	return { mgr, eventBus, hooks };
 }
@@ -450,6 +451,140 @@ describe('SessionManager', () => {
 			await mgr.closeWithReason('user_hangup');
 			await mgr.closeWithReason('error'); // no-op
 			expect(reports).toEqual(['accepted']);
+		});
+	});
+
+	describe('reset', () => {
+		it('returns a closed standalone manager to CREATED, and the next cycle closes again with its own reason', async () => {
+			const { mgr, eventBus } = createManager();
+			const onClose = vi.fn();
+			eventBus.subscribe('session.close', onClose);
+
+			mgr.transitionTo('CONNECTING');
+			mgr.transitionTo('ACTIVE');
+			const firstStartedAt = mgr.startedAtMs;
+			mgr.updateResumptionHandle('handle_1');
+			mgr.bufferMessage({ type: 'audio', data: 'chunk', timestamp: 1 });
+			await mgr.closeWithReason('user_hangup');
+			expect(mgr.state).toBe('CLOSED');
+
+			mgr.reset();
+
+			expect(mgr.state).toBe('CREATED');
+			expect(mgr.resumptionHandle).toBeNull();
+			expect(mgr.drainBufferedMessages()).toEqual([]);
+			expect(mgr.startedAtMs).toBe(firstStartedAt);
+
+			mgr.transitionTo('CONNECTING');
+			mgr.transitionTo('ACTIVE');
+			const second = mgr.closeWithReason('timeout');
+			// Inside one cycle a repeated close stays idempotent.
+			expect(mgr.closeWithReason('error')).toBe(second);
+			await second;
+
+			expect(mgr.state).toBe('CLOSED');
+			expect(onClose).toHaveBeenCalledTimes(2);
+			expect(onClose).toHaveBeenNthCalledWith(1, { sessionId: 'sess_1', reason: 'user_hangup' });
+			expect(onClose).toHaveBeenNthCalledWith(2, { sessionId: 'sess_1', reason: 'timeout' });
+		});
+
+		it('throws while a close is in flight, before the CLOSED transition', async () => {
+			const { mgr } = createManager();
+			let releaseFinalizer!: () => void;
+			mgr.registerPreCloseFinalizer(
+				() =>
+					new Promise<void>((resolve) => {
+						releaseFinalizer = resolve;
+					}),
+			);
+			mgr.transitionTo('CONNECTING');
+			mgr.transitionTo('ACTIVE');
+
+			const closing = mgr.closeWithReason('normal');
+			expect(mgr.state).toBe('ACTIVE');
+			expect(() => mgr.reset()).toThrow(SessionError);
+			expect(() => mgr.reset()).toThrow(/in flight/);
+
+			releaseFinalizer();
+			await closing;
+			mgr.reset();
+			expect(mgr.state).toBe('CREATED');
+		});
+
+		it('throws after the CLOSED transition while a drained post-session report is pending, and succeeds once it settles', async () => {
+			let releaseProcessor!: () => void;
+			class Held extends PostSessionProcessor {
+				readonly name = 'held';
+				async run() {
+					await new Promise<void>((resolve) => {
+						releaseProcessor = resolve;
+					});
+				}
+			}
+			const pipeline = new InMemoryPostSessionPipeline();
+			pipeline.register(new Held());
+			pipeline.freeze();
+			const { mgr } = createManager({ pipeline, drain: true });
+			mgr.registerSnapshotBuilder(snapshotBuilder());
+			mgr.transitionTo('CONNECTING');
+			mgr.transitionTo('ACTIVE');
+
+			const closing = mgr.closeWithReason('normal');
+			expect(mgr.state).toBe('CLOSED');
+			await vi.waitFor(() => expect(releaseProcessor).toBeTypeOf('function'));
+			expect(() => mgr.reset()).toThrow(SessionError);
+			expect(mgr.state).toBe('CLOSED');
+
+			releaseProcessor();
+			await closing;
+			mgr.reset();
+			expect(mgr.state).toBe('CREATED');
+		});
+
+		it('a managed manager resets like a standalone one before it starts', () => {
+			const { mgr } = createManager(undefined, true);
+			mgr.updateResumptionHandle('handle_1');
+			mgr.bufferMessage({ type: 'audio', data: 'chunk', timestamp: 1 });
+
+			mgr.reset();
+
+			expect(mgr.state).toBe('CREATED');
+			expect(mgr.resumptionHandle).toBeNull();
+			expect(mgr.drainBufferedMessages()).toEqual([]);
+		});
+
+		it('a managed manager throws once a close has been claimed, and after it settles', async () => {
+			const { mgr } = createManager(undefined, true);
+			let releaseFinalizer!: () => void;
+			mgr.registerPreCloseFinalizer(
+				() =>
+					new Promise<void>((resolve) => {
+						releaseFinalizer = resolve;
+					}),
+			);
+			mgr.transitionTo('CONNECTING');
+			mgr.transitionTo('ACTIVE');
+
+			const closing = mgr.closeWithReason('normal');
+			expect(mgr.state).toBe('ACTIVE');
+			expect(() => mgr.reset()).toThrow(SessionError);
+			expect(() => mgr.reset()).toThrow(/managed/);
+
+			releaseFinalizer();
+			await closing;
+			expect(() => mgr.reset()).toThrow(/managed/);
+			expect(mgr.state).toBe('CLOSED');
+		});
+
+		it('a managed manager throws after a direct transitionTo(CLOSED)', () => {
+			const { mgr } = createManager(undefined, true);
+			mgr.transitionTo('CONNECTING');
+			mgr.transitionTo('ACTIVE');
+			mgr.transitionTo('CLOSED');
+
+			expect(() => mgr.reset()).toThrow(SessionError);
+			expect(() => mgr.reset()).toThrow(/managed/);
+			expect(mgr.state).toBe('CLOSED');
 		});
 	});
 
