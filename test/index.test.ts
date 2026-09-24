@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import type { ConnectionLifecycleEvent } from '../src/index.js';
+import type {
+	ConnectionLifecycleEvent,
+	LiveUsageMetadata,
+	TransportDiagnostics,
+	TransportUsageMetadata,
+	UpstreamCounters,
+	UpstreamSlotCounters,
+	VoiceSessionDiagnostics,
+} from '../src/index.js';
 
 describe('module smoke test', () => {
 	it('imports without throwing and exports key APIs', async () => {
@@ -44,14 +52,41 @@ describe('module smoke test', () => {
 		expect(mod.AUDIO_FORMAT).toBeDefined();
 	});
 
-	it('root-exports the ConnectionLifecycleEvent type; the lifecycle ledger stays internal', async () => {
-		// Type-level: fails typecheck:tests if the name stops resolving from the root.
+	it('root-exports the diagnostics and lifecycle types; the lifecycle ledger stays internal', async () => {
+		// Type-level: fails typecheck:tests if any name stops resolving from the root.
+		const slot: UpstreamSlotCounters = {
+			attempted: 0,
+			queued: 0,
+			skippedNoSession: 0,
+			threw: 0,
+			attemptedRawBytes: 0,
+			queuedRawBytes: 0,
+			attemptedWireBytesEstimate: 0,
+			queuedWireBytesEstimate: 0,
+			lastAttemptedAt: null,
+			lastQueuedAt: null,
+			lastSkippedAt: null,
+			lastThrewAt: null,
+		};
+		const upstream: UpstreamCounters = {
+			audio: slot,
+			video: { ...slot, unsupportedMime: 0 },
+			text: { ...slot, skippedEmpty: 0 },
+		};
+		const transport: TransportDiagnostics = { upstream, transportGeneration: 1 };
+		const session: VoiceSessionDiagnostics = { ...transport, echoSuppressed: 0 };
 		const event: ConnectionLifecycleEvent = {
 			kind: 'setup-ok',
 			connectAttemptId: 'att_1',
 			transportGeneration: 1,
 		};
-		expect(event.kind).toBe('setup-ok');
+		const usage: TransportUsageMetadata = { promptTokenCount: 1 };
+		const live: LiveUsageMetadata = { ...usage, cachedContentTokenCount: 0 };
+		expect([session.transportGeneration, event.kind, live.promptTokenCount]).toEqual([
+			1,
+			'setup-ok',
+			1,
+		]);
 
 		const mod = await import('../src/index.js');
 		expect('ConnectionLifecycleLedger' in mod).toBe(false);
