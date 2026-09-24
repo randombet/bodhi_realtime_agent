@@ -33,6 +33,7 @@ function makeRouter(over: Partial<AudioRouterDeps> & { transport: AudioRouterDep
 		getWhisperProvider: over.getWhisperProvider ?? (() => undefined),
 		isSessionActive: over.isSessionActive ?? (() => true),
 		isRtcAudioReady: over.isRtcAudioReady ?? (() => false),
+		echoGuard: over.echoGuard,
 		getMode: over.getMode ?? (() => 'agent'),
 		shouldDropOutbound: over.shouldDropOutbound ?? (() => false),
 		routeExternalAudio: over.routeExternalAudio ?? (() => false),
@@ -197,6 +198,68 @@ describe('AudioRouter — shadow STT feed', () => {
 		router.handleFromClient(FRAME, 'websocket');
 		expect(whisper.feedAudio).toHaveBeenCalledTimes(1);
 		expect(shadow.feedAudio).not.toHaveBeenCalled();
+	});
+});
+
+describe('AudioRouter — echo guard', () => {
+	function guard(suppress: boolean) {
+		return {
+			enabled: true,
+			check: vi.fn(() => ({ suppress, corr: suppress ? 0.9 : 0.1, lagMs: suppress ? 300 : -1 })),
+		};
+	}
+
+	function routerWithFeeds(over: Partial<AudioRouterDeps> = {}) {
+		const transport = mockTransport(16000, 'pcm');
+		const stt = { supportedEncodings: ['pcm'], feedAudio: vi.fn() };
+		const shadow = { feedAudio: vi.fn() };
+		const made = makeRouter({
+			transport,
+			getSttProvider: () => stt as unknown as STTProvider,
+			getShadowSttProvider: () => shadow,
+			...over,
+		});
+		return { ...made, transport, stt, shadow };
+	}
+
+	it('a suppressed frame reaches neither VAD, transport nor STT', () => {
+		const echoGuard = guard(true);
+		const { router, vad, transport, stt, shadow } = routerWithFeeds({ echoGuard });
+		router.handleFromClient(FRAME, 'websocket');
+		expect(echoGuard.check).toHaveBeenCalledTimes(1);
+		expect(vad.process).not.toHaveBeenCalled();
+		expect(transport.sendAudio).not.toHaveBeenCalled();
+		expect(stt.feedAudio).not.toHaveBeenCalled();
+		expect(shadow.feedAudio).not.toHaveBeenCalled();
+	});
+
+	it('a passing frame flows unchanged', () => {
+		const echoGuard = guard(false);
+		const { router, vad, transport, stt, shadow } = routerWithFeeds({ echoGuard });
+		router.handleFromClient(FRAME, 'websocket');
+		expect(echoGuard.check).toHaveBeenCalledWith(FRAME, 16000);
+		expect(vad.process).toHaveBeenCalledWith(FRAME);
+		expect(transport.sendAudio).toHaveBeenCalledWith(FRAME.toString('base64'));
+		expect(stt.feedAudio).toHaveBeenCalledWith(FRAME.toString('base64'));
+		expect(shadow.feedAudio).toHaveBeenCalledWith(FRAME.toString('base64'));
+	});
+
+	it('an absent guard is a no-op', () => {
+		const { router, vad, transport, stt, shadow } = routerWithFeeds();
+		router.handleFromClient(FRAME, 'websocket');
+		expect(vad.process).toHaveBeenCalledWith(FRAME);
+		expect(transport.sendAudio).toHaveBeenCalledWith(FRAME.toString('base64'));
+		expect(stt.feedAudio).toHaveBeenCalledWith(FRAME.toString('base64'));
+		expect(shadow.feedAudio).toHaveBeenCalledWith(FRAME.toString('base64'));
+	});
+
+	it('check() receives the client audio input rate (8000)', () => {
+		const echoGuard = guard(false);
+		const transport = mockTransport(8000, 'pcmu');
+		const { router } = makeRouter({ transport, clientAudioInputRate: 8000, echoGuard });
+		router.handleFromClient(FRAME, 'websocket');
+		expect(echoGuard.check).toHaveBeenCalledWith(FRAME, 8000);
+		expect(transport.sendAudio).toHaveBeenCalledWith(encodePcmToMulaw(FRAME).toString('base64'));
 	});
 });
 
