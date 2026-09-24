@@ -53,7 +53,11 @@ import { BackgroundNotificationQueue } from './background-notification-queue.js'
 import { ClientMessageRouter } from './client-message-router.js';
 import { ClientVadDetector, pcmChunksContainSpeech } from './client-vad-detector.js';
 import type { VadTerminalDescriptor } from './client-vad-semantics.js';
-import { DEFAULT_REPLAY_MAX_AGE_MS, DEFAULT_RESPONSE_WATCHDOG_MS } from './constants.js';
+import {
+	DEFAULT_RECONNECT_DEADLINE_MS,
+	DEFAULT_REPLAY_MAX_AGE_MS,
+	DEFAULT_RESPONSE_WATCHDOG_MS,
+} from './constants.js';
 import { ConversationContext } from './conversation-context.js';
 import { ConversationHistoryWriter } from './conversation-history-writer.js';
 import { DictationController } from './dictation-controller.js';
@@ -464,6 +468,12 @@ export interface VoiceSessionConfig {
  * ```
  */
 export class VoiceSession {
+	/** Max wait for one reconnect attempt before giving up and closing the
+	 *  session with `reconnect_failed`. Without this deadline, a reconnect whose
+	 *  dial or setup never settles (an ECONNRESET on the in-flight WebSocket dial)
+	 *  leaves the session in RECONNECTING forever. */
+	static readonly RECONNECT_DEADLINE_MS = DEFAULT_RECONNECT_DEADLINE_MS;
+
 	readonly eventBus: EventBus;
 	readonly sessionManager: SessionManager;
 	readonly conversationContext: ConversationContext;
@@ -2160,22 +2170,41 @@ export class VoiceSession {
 		await this.clientTransport.start();
 		this.log('Connecting to LLM transport...');
 		this.sessionManager.transitionTo('CONNECTING');
-		if (this.config.transport) {
-			if (this.isTextMode) {
-				await this.transport.updateSession({ responseModality: 'text' });
+		try {
+			if (this.config.transport) {
+				if (this.isTextMode) {
+					await this.transport.updateSession({ responseModality: 'text' });
+				}
+				await this.transport.connect();
+			} else {
+				await this.transport.connect({
+					auth: { type: 'api_key', apiKey: this.config.apiKey },
+					model: this.config.geminiModel ?? DEFAULT_GEMINI_LIVE_MODEL,
+					...(this.resolvedRealtimeInputConfig
+						? {
+								realtimeInputConfig: this.resolvedRealtimeInputConfig as Record<string, unknown>,
+							}
+						: {}),
+					...(this.isTextMode ? { responseModality: 'text' as const } : {}),
+				});
 			}
-			await this.transport.connect();
-		} else {
-			await this.transport.connect({
-				auth: { type: 'api_key', apiKey: this.config.apiKey },
-				model: this.config.geminiModel ?? DEFAULT_GEMINI_LIVE_MODEL,
-				...(this.resolvedRealtimeInputConfig
-					? {
-							realtimeInputConfig: this.resolvedRealtimeInputConfig as Record<string, unknown>,
-						}
-					: {}),
-				...(this.isTextMode ? { responseModality: 'text' as const } : {}),
-			});
+		} catch (error) {
+			// A failed initial dial must not wedge the session in CONNECTING. The
+			// providers, runtime and client listener started above are already
+			// live, so run the full close() teardown, not a bare state change.
+			if (this.sessionManager.state === 'CONNECTING') {
+				this.log(
+					`LLM transport connect failed: ${error instanceof Error ? error.message : String(error)} — closing session`,
+				);
+				try {
+					await this.close('connect_failed');
+				} catch (closeError) {
+					this.log(
+						`close('connect_failed') failed: ${closeError instanceof Error ? closeError.message : String(closeError)}`,
+					);
+				}
+			}
+			throw error;
 		}
 		// (Resume model prefill happens in handleSetupComplete, before the ACTIVE transition /
 		// greeting — see the transport.replayHistory?.() call there.)
@@ -2358,6 +2387,15 @@ export class VoiceSession {
 		//    memoized close promise, so if a failure path (reconnect/transfer) already
 		//    claimed close with a still-pending drain, we await THAT before teardown /
 		//    eventBus.clear() rather than racing it.
+		//    The reconnector is disposed synchronously BEFORE that await: the state
+		//    stays ACTIVE/RECONNECTING while async finalizers run, so a pending
+		//    backoff dial or a transport close arriving mid-finalization would
+		//    otherwise start a reconnect on a session that is closing.
+		try {
+			this.reconnector.dispose();
+		} catch (err) {
+			this.log(`close: reconnector.dispose threw: ${String(err)}`);
+		}
 		await this.sessionManager.closeWithReason(reason);
 
 		// 2. Fallible resource teardown, each isolated so one failure doesn't abort
@@ -2367,11 +2405,10 @@ export class VoiceSession {
 		// survive session close. Idempotent.
 		await this.safeTeardown('dictation.stopWhisper', () => this.dictation.stopWhisper());
 		await this.safeTeardown('ttsGate.clearTimers', () => this.ttsPipeline?.gate.clearTimers());
-		await this.safeTeardown('disarmResponseWatchdog', () =>
-			this.reconnector.disarmResponseWatchdog(),
-		);
+		// Cancels a pending backoff dial and an in-flight reconnect (aborting the
+		// transport incumbent and the attempt deadline), the response watchdog and a
+		// held recovery.
 		await this.safeTeardown('greetingGate.dispose', () => this.greeting.dispose());
-		await this.safeTeardown('cancelHeldRecovery', () => this.reconnector.cancelHeldRecovery());
 		// close() bypasses finalizeTurn — tear down the native gate directly so no
 		// native playback timer outlives the session.
 		if (this.nativePlaybackGatingActive) {

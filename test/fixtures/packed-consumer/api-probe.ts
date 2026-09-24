@@ -18,7 +18,7 @@ import {
 	ToolExecutor,
 	type TranscriptSink,
 	type UpstreamCounters,
-	type VoiceSession,
+	VoiceSession,
 	type VoiceSessionConfig,
 } from 'bodhi-realtime-agent';
 
@@ -61,3 +61,5 @@ const executor = new ToolExecutor(
 	'main',
 	(message: Record<string, unknown>): void => void message,
 );
+// The public per-attempt reconnect deadline is a static on VoiceSession.
+const n: number = VoiceSession.RECONNECT_DEADLINE_MS;
