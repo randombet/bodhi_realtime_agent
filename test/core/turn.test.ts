@@ -19,6 +19,15 @@ describe('Turn', () => {
 		expect(t.finalize()).toBe(false);
 	});
 
+	it('markStartPublished() returns true once', () => {
+		const t = new Turn('turn_1', 'main');
+		expect(t.markStartPublished()).toBe(true);
+		expect(t.markStartPublished()).toBe(false);
+		expect(t.markStartPublished()).toBe(false);
+		// A flag of its own: it does not touch the terminal transition.
+		expect(t.isFinalized).toBe(false);
+	});
+
 	it('bindServerTurnId() accumulates; ownsServerTurn() reflects every bound id', () => {
 		const t = new Turn('turn_1', 'main');
 		t.bindServerTurnId(3);

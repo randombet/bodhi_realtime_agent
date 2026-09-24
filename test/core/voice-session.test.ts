@@ -8,6 +8,7 @@ import { DirectRtcClientChannel } from '../../src/transport/direct-rtc-client-ch
 import { DEFAULT_GEMINI_REALTIME_INPUT_CONFIG } from '../../src/transport/gemini-live-transport.js';
 import { LazyRtcAudioEngine } from '../../src/transport/lazy-rtc-audio-engine.js';
 import type { MainAgent } from '../../src/types/agent.js';
+import type { EventPayloadMap } from '../../src/types/events.js';
 import type { RtcAudioEngine, RtcAudioEngineOptions } from '../../src/types/rtc-engine.js';
 import type {
 	AudioFormatSpec,
@@ -1472,6 +1473,167 @@ describe('VoiceSession', () => {
 
 			await session.close();
 			expect(endCount).toBe(1);
+		});
+
+		const MODEL_AUDIO = {
+			serverContent: { modelTurn: { parts: [{ inlineData: { data: 'AAAA' } }] } },
+		};
+
+		it('turn.start carries `transportGeneration` and `attemptEpoch` from the Gemini transport and `undefined` from a mock transport', async () => {
+			session = new VoiceSession({
+				sessionId: 'sess_ts_gemini',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				model: mockModel,
+				clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			});
+			const starts: EventPayloadMap['turn.start'][] = [];
+			session.eventBus.subscribe('turn.start', (e) => starts.push(e));
+			// A consumer handler typed on only the field it reads must stay assignable.
+			const consumerGenerations: Array<number | undefined> = [];
+			session.eventBus.subscribe('turn.start', (e: { transportGeneration?: number }) => {
+				consumerGenerations.push(e.transportGeneration);
+			});
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+			const gemini = (session as unknown as { transport: LLMTransport }).transport;
+			const { _getMessageHandler } = await import('@google/genai');
+
+			_getMessageHandler()?.(MODEL_AUDIO);
+			_getMessageHandler()?.({ serverContent: { turnComplete: true } });
+			// Strand the incumbent (the dial counter advances without a setup) and
+			// redial: the two counters now differ, so a swapped field would show.
+			await gemini.abortIncumbent?.();
+			await gemini.connect();
+			_getMessageHandler()?.(MODEL_AUDIO);
+
+			expect(starts).toEqual([
+				{ sessionId: 'sess_ts_gemini', turnId: 'turn_1', transportGeneration: 1, attemptEpoch: 1 },
+				{ sessionId: 'sess_ts_gemini', turnId: 'turn_2', transportGeneration: 2, attemptEpoch: 3 },
+			]);
+			expect(consumerGenerations).toEqual([1, 2]);
+			expect(gemini.currentTransportGeneration).toBe(2);
+			expect(gemini.currentDialGen).toBe(3);
+			await session.close();
+
+			const transport = createMutableServerTurnTransport();
+			session = new VoiceSession({
+				sessionId: 'sess_ts_mock',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				model: mockModel,
+				transport,
+				clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			});
+			const mockStarts: EventPayloadMap['turn.start'][] = [];
+			session.eventBus.subscribe('turn.start', (e) => mockStarts.push(e));
+			await session.start();
+			transport.onModelTurnStart?.();
+			// A second model start inside the same Turn publishes nothing.
+			transport.onModelTurnStart?.();
+			expect(mockStarts).toEqual([
+				{
+					sessionId: 'sess_ts_mock',
+					turnId: 'turn_1',
+					transportGeneration: undefined,
+					attemptEpoch: undefined,
+				},
+			]);
+		});
+
+		it('audio → turnComplete → late toolCall publishes exactly one `turn.start` and one `turn.end`', async () => {
+			session = new VoiceSession({
+				sessionId: 'sess_ts_tail',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createToolAgent()],
+				initialAgent: 'tool-agent',
+				model: mockModel,
+				clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			});
+			const starts: string[] = [];
+			const ends: string[] = [];
+			session.eventBus.subscribe('turn.start', (e) => starts.push(e.turnId));
+			session.eventBus.subscribe('turn.end', (e) => ends.push(e.turnId));
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = _getMessageHandler();
+
+			fire?.(MODEL_AUDIO);
+			fire?.({ serverContent: { turnComplete: true } });
+			fire?.({
+				toolCall: { functionCalls: [{ id: 'fc_late', name: 'get_weather', args: { city: 'SF' } }] },
+			});
+			await new Promise((r) => setTimeout(r, 50));
+			// Closing finalizes any turn the tail would have opened.
+			await session.close();
+
+			expect(starts).toEqual(['turn_1']);
+			expect(ends).toEqual(['turn_1']);
+		});
+
+		it('turn.start precedes response.started for the same turnId', async () => {
+			session = new VoiceSession({
+				sessionId: 'sess_ts_order',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				model: mockModel,
+				clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			});
+			const order: string[] = [];
+			session.eventBus.subscribe('turn.start', (e) => order.push(`turn.start:${e.turnId}`));
+			session.eventBus.subscribe('response.started', (e) =>
+				order.push(`response.started:${e.turnId}`),
+			);
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+			const { _getMessageHandler } = await import('@google/genai');
+
+			_getMessageHandler()?.(MODEL_AUDIO);
+
+			expect(order).toEqual(['turn.start:turn_1', 'response.started:turn_1']);
+		});
+
+		it('generation.start/generation.end chain over handlers pre-attached to an injected transport', async () => {
+			const transport = createMutableServerTurnTransport();
+			const preStart = vi.fn();
+			const preEnd = vi.fn();
+			transport.onGenerationStart = preStart;
+			transport.onGenerationEnd = preEnd;
+			session = new VoiceSession({
+				sessionId: 'sess_gen_chain',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				model: mockModel,
+				transport,
+				clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			});
+			const published: string[] = [];
+			session.eventBus.subscribe('generation.start', (e) =>
+				published.push(`start:${e.sessionId}:${e.generationId}`),
+			);
+			session.eventBus.subscribe('generation.end', (e) =>
+				published.push(`end:${e.sessionId}:${e.generationId}:${e.reason}`),
+			);
+
+			transport.onGenerationStart?.('gen_0');
+			transport.onGenerationEnd?.('gen_0', 'interrupted');
+
+			expect(preStart).toHaveBeenCalledWith('gen_0');
+			expect(preEnd).toHaveBeenCalledWith('gen_0', 'interrupted');
+			expect(published).toEqual([
+				'start:sess_gen_chain:gen_0',
+				'end:sess_gen_chain:gen_0:interrupted',
+			]);
 		});
 	});
 
