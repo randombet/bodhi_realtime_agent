@@ -7,8 +7,9 @@
  * inside a `"type": "commonjs"` package with `--module Node16` (`index.d.cts`). It is never
  * executed. `tsconfig.test.json` excludes it so the workspace typecheck never resolves the
  * package name. A change that adds public API appends its names here, so every one of them
- * is compiled from the published declarations. Until all names below exist, run the script
- * with `--skip-declarations`.
+ * is compiled from the published declarations. `prepublishOnly` and the release workflow
+ * run the full script, so a name missing from the declarations fails the release;
+ * `--skip-declarations` omits this compile for local runs only.
  */
 import {
 	type BackgroundNotificationQueue,
@@ -32,12 +33,15 @@ import {
 	type IEventBus,
 	type LLMTransport,
 	type LiveUsageMetadata,
+	type OpenAIRealtimeConfig,
 	RECOVERY_CAPABILITIES,
 	type RecoverUpstreamArgs,
 	type RecoverUpstreamResult,
 	type RecoveryCapabilities,
 	type SendOrQueueOptions,
 	type SessionManager,
+	type SessionUpdate,
+	type SubagentConfig,
 	ToolExecutor,
 	type TranscriptSink,
 	type TransportDiagnostics,
@@ -189,3 +193,12 @@ const envelopeLag: { corr: number; lagMs: number } = bestEnvelopeLag(
 declare const batchStt: GeminiBatchSTTProvider;
 batchStt.setContextHint(() => 'KDA, delta rule');
 const batchSttPrompt: string = batchStt.buildPrompt();
+// A custom transport may apply a session update synchronously, and a subagent config still
+// accepts the deprecated model name.
+const syncUpdateTransport: Pick<LLMTransport, 'updateSession'> = {
+	updateSession: (update: SessionUpdate): void => void update,
+};
+const legacySubagent: SubagentConfig = { name: 'x', instructions: 'x', tools: {}, model: 'x' };
+// OpenAI Realtime noise reduction accepts any object and forwards it unchanged.
+const legacyNoiseReduction: Record<string, unknown> = { type: 'far_field' };
+const openaiConfig: OpenAIRealtimeConfig = { apiKey: 'x', noiseReduction: legacyNoiseReduction };
