@@ -24,12 +24,19 @@ export class ToolExecutor {
 	private tools = new Map<string, ToolDefinition>();
 	private pending = new Map<string, PendingExecution>();
 
+	/**
+	 * @param sendJsonToClient Delivers `ToolContext.sendJsonToClient` frames to the
+	 *   client. Implement it as `(message: AnyServerToClientMessage) => void` or as
+	 *   `(message: Record<string, unknown>) => void`; both shapes are accepted.
+	 */
 	constructor(
 		private hooks: HooksManager,
 		private eventBus: IEventBus,
 		private sessionId: string,
 		private agentName: string,
-		private sendJsonToClient?: (message: AnyServerToClientMessage) => void,
+		private sendJsonToClient?: (
+			message: AnyServerToClientMessage & Record<string, unknown>,
+		) => void,
 		private setDirective?: (key: string, value: string | null, scope?: 'session' | 'agent') => void,
 	) {}
 
@@ -93,7 +100,11 @@ export class ToolExecutor {
 			agentName: this.agentName,
 			sessionId: this.sessionId,
 			abortSignal: controller.signal,
-			sendJsonToClient: this.sendJsonToClient,
+			// The one cast between the host-facing ToolContext method and the
+			// callback: frames are passed through verbatim, and the method's own
+			// type has already rejected malformed core frames. Application frames
+			// reach a protocol-typed callback at runtime unchanged.
+			sendJsonToClient: this.sendJsonToClient as ToolContext['sendJsonToClient'],
 			setDirective: this.setDirective,
 		};
 

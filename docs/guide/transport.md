@@ -58,6 +58,34 @@ For server-owned sockets, expose this capability with
 `SessionClientSender.supportsPlaybackStateProtocol` and implement
 `sendJsonAfterAudio`. See [Playback Gate](/guide/playback-gate).
 
+### Custom frames from your app
+
+`VoiceSession.sendJsonToClient`, `ToolContext.sendJsonToClient` and
+`ClientTransport.sendJsonToClient` send a JSON text frame to the connected
+client. Besides the core frames and any frames registered on
+`ClientProtocolServerExtensions`, they accept an **application frame**: any JSON
+object whose `type`, if it has one, is **not** a core frame type. The frame is
+serialized verbatim. Pass the object literal directly; no frame type needs to
+be imported.
+
+```ts
+session.sendJsonToClient({ type: 'session_end' });           // app frame
+session.sendJsonToClient({ type: 'agent.state', seq: 1 });   // app frame
+context.sendJsonToClient?.({ type: 'tool.progress', percent: 50 }); // inside a tool
+
+session.sendJsonToClient({ type: 'audio.done', playbackId: 7 }); // core frame, well-formed
+// session.sendJsonToClient({ type: 'audio.done' });          // compile error: missing playbackId
+// session.sendJsonToClient({ type: 'turn.end', turnId: 5 }); // compile error: turnId is a string
+```
+
+The rule: a frame that reuses a core `type` must match that core frame's shape,
+so a misspelled or incomplete core frame still fails to compile. Pick your own
+`type` names for application frames (a prefix such as `app.` avoids future
+collisions). The lower-level `IClientChannel.sendJsonToClient` and
+`SessionClientSender.sendJson` contracts stay strict: a server-owned sender
+still receives only core and registered frames in its type, while application
+frames reach it at runtime unchanged.
+
 See also:
 
 - [VoiceSession](/guide/voice-session) — `clientMedia`, `clientSender`, and session wiring
