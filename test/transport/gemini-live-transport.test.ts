@@ -1151,6 +1151,28 @@ describe('GeminiLiveTransport', () => {
 			);
 		});
 
+		it('clearResumption() leaves the connection untouched and the next dial omits `sessionResumption.handle`', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', sessionResumption: { handle: 'h_seed' } },
+				{},
+			);
+			await transport.connect();
+			const cbs = capturedConnectConfig.callbacks as Cbs;
+			cbs.onmessage({ sessionResumptionUpdate: { newHandle: 'h_server', resumable: true } });
+			const genBefore = transport.currentDialGen;
+
+			transport.clearResumption();
+			expect(transport.isConnected).toBe(true);
+			expect(mockSession.close).not.toHaveBeenCalled();
+			expect(transport.currentDialGen).toBe(genBefore);
+
+			await transport.disconnect();
+			await transport.connect();
+			expect((capturedConnectConfig.config as Record<string, unknown>).sessionResumption).toEqual(
+				{},
+			);
+		});
+
 		it('abortIncumbent resolves `forced` when close throws', async () => {
 			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
 			await transport.connect();

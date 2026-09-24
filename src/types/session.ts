@@ -11,6 +11,12 @@ import type { ConversationItem } from './conversation.js';
  *                         CLOSED
  *
  * Any state can transition to CLOSED on fatal error.
+ *
+ * `UPSTREAM_LOST` is reachable only under `upstreamLossPolicy: 'hold'`: the
+ * provider connection is gone (a failed first dial, or automatic recovery
+ * that ended) but the session is not finalized and its client listener stays
+ * up. It is entered from CONNECTING, ACTIVE or RECONNECTING and left for
+ * RECONNECTING (a redial) or CLOSED.
  */
 export type SessionState =
 	| 'CREATED'
@@ -18,6 +24,7 @@ export type SessionState =
 	| 'ACTIVE'
 	| 'RECONNECTING'
 	| 'TRANSFERRING'
+	| 'UPSTREAM_LOST'
 	| 'CLOSED';
 
 /**

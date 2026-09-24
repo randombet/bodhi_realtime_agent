@@ -2680,6 +2680,244 @@ describe('VoiceSession', () => {
 			});
 			await new Promise<void>((resolve) => probe.close(() => resolve()));
 		});
+
+		describe('upstreamLossPolicy on a failed first dial', () => {
+			/** The next dial's socket dies before setupComplete while the SDK's
+			 *  resolve-only connect promise never settles. */
+			async function failNextDial(): Promise<void> {
+				const { GoogleGenAI } = await import('@google/genai');
+				(GoogleGenAI as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => ({
+					live: {
+						connect: vi.fn((params: Record<string, unknown>) => {
+							const cbs = params.callbacks as Record<string, (...args: unknown[]) => void>;
+							setTimeout(() => cbs.onclose?.({ code: 1006, reason: 'ENOTFOUND' }), 5);
+							return new Promise(() => {});
+						}),
+					},
+				}));
+			}
+
+			function stubStt() {
+				return {
+					configure: vi.fn(),
+					start: vi.fn(async () => {}),
+					stop: vi.fn(async () => {}),
+					feedAudio: vi.fn(),
+					commit: vi.fn(),
+					handleInterrupted: vi.fn(),
+					handleTurnComplete: vi.fn(),
+					onTranscript: undefined,
+					onPartialTranscript: undefined,
+				} satisfies STTProvider;
+			}
+
+			it("a failed first dial under 'hold' parks in UPSTREAM_LOST with the client listener still up", async () => {
+				const port = 9927;
+				const onSessionEnd = vi.fn();
+				const stt = stubStt();
+				session = new VoiceSession({
+					sessionId: 'sess_dial_fails_hold',
+					userId: 'user_1',
+					apiKey: 'test-key',
+					agents: [createEchoAgent()],
+					initialAgent: 'echo',
+					port,
+					model: mockModel,
+					sttProvider: stt,
+					upstreamLossPolicy: 'hold',
+					hooks: { onSessionEnd },
+				});
+				const upstreamLost = vi.fn();
+				const closed = vi.fn();
+				session.eventBus.subscribe('session.upstreamLost', upstreamLost);
+				session.eventBus.subscribe('session.close', closed);
+				await failNextDial();
+
+				// start() still rejects, but nothing is finalized or torn down.
+				await expect(session.start()).rejects.toThrow('closed before setupComplete');
+
+				expect(session.sessionManager.state).toBe('UPSTREAM_LOST');
+				expect(upstreamLost).toHaveBeenCalledTimes(1);
+				expect(upstreamLost).toHaveBeenCalledWith({
+					sessionId: 'sess_dial_fails_hold',
+					reason: 'connect-failed',
+					detail: expect.stringContaining('closed before setupComplete'),
+				});
+				expect(onSessionEnd).not.toHaveBeenCalled();
+				expect(closed).not.toHaveBeenCalled();
+				// Parked means disconnected: external STT stops, as during a reconnect.
+				expect(stt.stop).toHaveBeenCalledTimes(1);
+
+				// The client listener is still up: a client attaches.
+				const { default: WebSocket } = await import('ws');
+				const ws = new WebSocket(`ws://localhost:${port}`);
+				await new Promise<void>((resolve, reject) => {
+					ws.once('open', () => resolve());
+					ws.once('error', reject);
+				});
+				ws.close();
+				await new Promise<void>((resolve) => ws.once('close', () => resolve()));
+
+				// close() still finalizes the parked session exactly once.
+				await session.close();
+				session = null;
+				expect(onSessionEnd).toHaveBeenCalledTimes(1);
+				expect(closed).toHaveBeenCalledTimes(1);
+				expect(stt.stop).toHaveBeenCalledTimes(2); // the park, then close()'s teardown
+			});
+
+			it("a failed first dial under 'close' keeps the connect_failed teardown", async () => {
+				const port = 9928;
+				const onSessionEnd = vi.fn();
+				const stt = stubStt();
+				session = new VoiceSession({
+					sessionId: 'sess_dial_fails_close',
+					userId: 'user_1',
+					apiKey: 'test-key',
+					agents: [createEchoAgent()],
+					initialAgent: 'echo',
+					port,
+					model: mockModel,
+					sttProvider: stt,
+					upstreamLossPolicy: 'close',
+					hooks: { onSessionEnd },
+				});
+				const upstreamLost = vi.fn();
+				session.eventBus.subscribe('session.upstreamLost', upstreamLost);
+				await failNextDial();
+
+				await expect(session.start()).rejects.toThrow('closed before setupComplete');
+
+				expect(session.sessionManager.state).toBe('CLOSED');
+				expect(onSessionEnd).toHaveBeenCalledWith(
+					expect.objectContaining({ sessionId: 'sess_dial_fails_close', reason: 'connect_failed' }),
+				);
+				expect(upstreamLost).not.toHaveBeenCalled();
+				expect(stt.stop).toHaveBeenCalledTimes(1);
+
+				// The client listener was stopped: the port can be bound again.
+				const { createServer } = await import('node:net');
+				const probe = createServer();
+				await new Promise<void>((resolve, reject) => {
+					probe.once('error', reject);
+					probe.listen(port, resolve);
+				});
+				await new Promise<void>((resolve) => probe.close(() => resolve()));
+			});
+
+			it("orchestrationMode 'actor' with upstreamLossPolicy 'hold' throws ValidationError at construction", () => {
+				const config: VoiceSessionConfig = {
+					sessionId: 'sess_actor_hold',
+					userId: 'user_1',
+					apiKey: 'test-key',
+					agents: [createEchoAgent()],
+					initialAgent: 'echo',
+					port: 9929,
+					model: mockModel,
+					orchestrationMode: 'actor',
+				};
+				expect(() => new VoiceSession({ ...config, upstreamLossPolicy: 'hold' })).toThrow(
+					ValidationError,
+				);
+				// The default policy stays available in actor mode.
+				session = new VoiceSession({ ...config, upstreamLossPolicy: 'close' });
+				expect(session.sessionManager.state).toBe('CREATED');
+			});
+		});
+
+		// CONNECTING → RECONNECTING is legal only for a host recovery that
+		// replaces the pending first dial. A resumption handle is on hand in each
+		// case, so only the reconnector's state guards keep these callbacks from
+		// starting an automatic reconnect.
+		describe('transport callbacks during the first dial', () => {
+			function hostedSession(sessionId: string, upstreamLossPolicy?: 'close' | 'hold') {
+				const s = new VoiceSession({
+					sessionId,
+					userId: 'user_1',
+					apiKey: 'test-key',
+					agents: [createEchoAgent()],
+					initialAgent: 'echo',
+					clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+					model: mockModel,
+					...(upstreamLossPolicy ? { upstreamLossPolicy } : {}),
+				});
+				s.sessionManager.updateResumptionHandle('handle_first_dial');
+				const toStates: string[] = [];
+				s.eventBus.subscribe('session.stateChange', (p) => toStates.push(p.toState));
+				return { s, toStates };
+			}
+
+			/** Install the next dial's fake SDK; `script` drives its callbacks. */
+			async function scriptNextDial(
+				script: (cbs: Record<string, (...args: unknown[]) => void>) => void,
+				settle: 'resolve' | 'never' = 'resolve',
+			): Promise<ReturnType<typeof vi.fn>> {
+				const connect = vi.fn((params: Record<string, unknown>) => {
+					script(params.callbacks as Record<string, (...args: unknown[]) => void>);
+					if (settle === 'never') return new Promise(() => {});
+					return Promise.resolve({
+						sendRealtimeInput: vi.fn(),
+						sendToolResponse: vi.fn(),
+						sendClientContent: vi.fn(),
+						close: vi.fn(),
+					});
+				});
+				const { GoogleGenAI } = await import('@google/genai');
+				(GoogleGenAI as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => ({
+					live: { connect },
+				}));
+				return connect;
+			}
+
+			it('a GoAway delivered while CONNECTING does not enter RECONNECTING, and setup still activates the session', async () => {
+				const { s, toStates } = hostedSession('sess_goaway_connecting');
+				session = s;
+				const goAwayStates: string[] = [];
+				s.eventBus.subscribe('session.goaway', () => goAwayStates.push(s.sessionManager.state));
+				const connect = await scriptNextDial((cbs) => {
+					setTimeout(() => cbs.onmessage?.({ goAway: { timeLeft: '30s' } }), 1);
+					setTimeout(() => cbs.onmessage?.({ setupComplete: { sessionId: 'gs_1' } }), 20);
+				});
+
+				await s.start();
+				await new Promise((r) => setTimeout(r, 50));
+
+				expect(goAwayStates).toEqual(['CONNECTING']);
+				expect(toStates).toEqual(['CONNECTING', 'ACTIVE']);
+				expect(connect).toHaveBeenCalledTimes(1); // no reconnect dial
+			});
+
+			it.each([
+				['close', 'CLOSED'],
+				['hold', 'UPSTREAM_LOST'],
+			] as const)(
+				'a transport close delivered while CONNECTING does not enter RECONNECTING; start() handles the failed dial (policy %s)',
+				async (policy, finalState) => {
+					const { s, toStates } = hostedSession(`sess_close_connecting_${policy}`, policy);
+					session = s;
+					const upstreamLost = vi.fn();
+					s.eventBus.subscribe('session.upstreamLost', upstreamLost);
+					const connect = await scriptNextDial((cbs) => {
+						setTimeout(() => cbs.onclose?.({ code: 1006, reason: 'ENOTFOUND' }), 5);
+					}, 'never');
+
+					await expect(s.start()).rejects.toThrow('closed before setupComplete');
+					// Past the first automatic backoff (1000 ms): nothing redials.
+					await new Promise((r) => setTimeout(r, 1200));
+
+					expect(toStates).toEqual(['CONNECTING', finalState]);
+					expect(connect).toHaveBeenCalledTimes(1);
+					if (policy === 'hold') {
+						expect(upstreamLost).toHaveBeenCalledTimes(1);
+						expect(upstreamLost).toHaveBeenCalledWith(
+							expect.objectContaining({ reason: 'connect-failed' }),
+						);
+					} else {
+						expect(upstreamLost).not.toHaveBeenCalled();
+					}
+				},
+			);
+		});
 	});
 
 	// Background tool completion timing vs Gemini turn boundaries: verify with real server + web client (E2E).

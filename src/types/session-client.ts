@@ -29,6 +29,12 @@ export interface IClientChannel {
 	sendJsonToClient(message: AnyServerToClientMessage): void;
 	startBuffering(): void;
 	stopBuffering(): Buffer[];
+	/** Leave buffering mode and DROP the pending frames: nothing is returned
+	 *  and nothing is forwarded, unlike `stopBuffering()`, which hands them on
+	 *  (the owned socket returns buffered microphone frames for the reconnect
+	 *  drain; hosted channels flush buffered assistant audio to the client).
+	 *  Optional; a caller falls back to `stopBuffering()` when it is absent. */
+	discardBuffered?(): void;
 	/** Send JSON in delivery order after the turn's audio — playback-state
 	 *  protocol. Optional; absent ⇒ the channel does not participate. */
 	sendJsonAfterAudio?(message: AnyServerToClientMessage): void;

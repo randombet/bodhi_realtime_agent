@@ -6,21 +6,50 @@ import {
 
 describe('decideOnWatchdogFire (H4)', () => {
 	it('live user speech defers (R7a) — even when suppression is also armed', () => {
-		expect(decideOnWatchdogFire({ speechActive: true, greetingSuppressionArmed: true })).toBe(
-			'defer-speech',
-		);
+		expect(
+			decideOnWatchdogFire({
+				speechActive: true,
+				greetingSuppressionArmed: true,
+				syntheticHoldActive: false,
+			}),
+		).toBe('defer-speech');
 	});
 
 	it('full-greeting suppression holds the recovery', () => {
-		expect(decideOnWatchdogFire({ speechActive: false, greetingSuppressionArmed: true })).toBe(
-			'hold-gate',
-		);
+		expect(
+			decideOnWatchdogFire({
+				speechActive: false,
+				greetingSuppressionArmed: true,
+				syntheticHoldActive: false,
+			}),
+		).toBe('hold-gate');
+	});
+
+	it('an active synthetic-output hold holds the recovery; live speech still defers first', () => {
+		expect(
+			decideOnWatchdogFire({
+				speechActive: false,
+				greetingSuppressionArmed: false,
+				syntheticHoldActive: true,
+			}),
+		).toBe('hold-gate');
+		expect(
+			decideOnWatchdogFire({
+				speechActive: true,
+				greetingSuppressionArmed: false,
+				syntheticHoldActive: true,
+			}),
+		).toBe('defer-speech');
 	});
 
 	it('otherwise recovers (grace windows are NOT a hold input — callers pass suppression only)', () => {
-		expect(decideOnWatchdogFire({ speechActive: false, greetingSuppressionArmed: false })).toBe(
-			'recover',
-		);
+		expect(
+			decideOnWatchdogFire({
+				speechActive: false,
+				greetingSuppressionArmed: false,
+				syntheticHoldActive: false,
+			}),
+		).toBe('recover');
 	});
 });
 
