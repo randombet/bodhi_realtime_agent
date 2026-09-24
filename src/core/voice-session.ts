@@ -45,7 +45,12 @@ import type { IClientChannel } from '../types/session-client.js';
 import type { SessionClientSender } from '../types/session-client.js';
 import type { SessionEndReason } from '../types/session.js';
 import type { ToolDefinition } from '../types/tool.js';
-import type { LLMTransport, LLMTransportError, STTProvider } from '../types/transport.js';
+import type {
+	ConnectionLifecycleEvent,
+	LLMTransport,
+	LLMTransportError,
+	STTProvider,
+} from '../types/transport.js';
 import type { TTSProvider } from '../types/tts.js';
 import type { ArtifactRef, ArtifactStore, SaveArtifactParams } from '../types/workspace.js';
 import { AudioRouter } from './audio-router.js';
@@ -224,6 +229,14 @@ export interface VoiceSessionConfig {
 	subagentConfigs?: Record<string, SubagentConfig>;
 	/** Lifecycle hooks for observability. */
 	hooks?: FrameworkHooks;
+	/** Connection-lifecycle facts: attempt / setup-ok / setup-failed /
+	 *  attempt-close / generation-close, correlated by `connectAttemptId`.
+	 *  `handleSupplied` on the attempt is what lets a consumer track resumed
+	 *  lineages without inferring them from log lines. Fires only on transports
+	 *  that report lifecycle (the Gemini Live transport); on a transport that
+	 *  does not declare `onConnectionLifecycle`, a warning is logged at
+	 *  construction. */
+	onConnectionLifecycle?: (event: ConnectionLifecycleEvent) => void;
 	/** Optional diagnostic logger. Defaults to console.log. */
 	log?: (message: string) => void;
 	/**
@@ -1901,6 +1914,32 @@ export class VoiceSession {
 		this.transport.onResumptionUpdate = (handle, resumable) =>
 			this.reconnector.handleResumptionUpdate(handle, resumable);
 		this.transport.onGroundingMetadata = (metadata) => this.handleGroundingMetadata(metadata);
+		this.wireDiagnosticsCallbacks();
+	}
+
+	/** Wire the config's connection-lifecycle callback, only when configured (an
+	 *  unconfigured one leaves the transport's hook untouched), chained over any
+	 *  handler a pre-configured injected transport already attached. The
+	 *  transport isolates each observer from its dispatch and connection state
+	 *  machine. */
+	private wireDiagnosticsCallbacks(): void {
+		const { onConnectionLifecycle } = this.config;
+		if (!onConnectionLifecycle) return;
+		// Read before assigning below: assignment would create the member.
+		if (!('onConnectionLifecycle' in this.transport)) {
+			this.log(
+				'[WARN] onConnectionLifecycle configured, but the transport does not declare onConnectionLifecycle (e.g. OpenAI, Qwen); it is not expected to fire.',
+			);
+		}
+		const prevLifecycle = this.transport.onConnectionLifecycle;
+		this.transport.onConnectionLifecycle = (event) => {
+			try {
+				prevLifecycle?.(event);
+			} catch (e) {
+				this.log(`pre-attached onConnectionLifecycle threw: ${(e as Error).message}`);
+			}
+			onConnectionLifecycle(event);
+		};
 	}
 
 	/** Wire EventBus subscriptions: GUI event → client forwarding, STT lifecycle
