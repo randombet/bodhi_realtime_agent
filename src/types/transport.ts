@@ -616,8 +616,20 @@ export interface LLMTransport {
 	// --- Content injection (greetings, directives, text input — NOT replay) ---
 	sendContent(turns: ContentTurn[], turnComplete?: boolean): void;
 
+	/** Send live, generation-triggering text through the provider's realtime
+	 *  input. Returns `true` when the send was dispatched or accepted into a
+	 *  send buffer (flushed best effort) and `false` when it was not (no text,
+	 *  not connected, or a send that failed). Never throws. Optional: a
+	 *  transport without it takes live text through `sendContent(turns, true)`. */
+	sendLiveText?(turns: ContentTurn[]): boolean;
+
 	// --- File/image injection ---
 	sendFile(base64Data: string, mimeType: string): void;
+
+	/** Send a file of any MIME type inline in the conversation content, without
+	 *  completing the turn (documents that `sendFile`'s realtime media path
+	 *  cannot carry). Optional: without it, such files go to `sendFile`. */
+	sendInlineFile?(base64Data: string, mimeType: string): void;
 
 	// --- Tool interaction ---
 	sendToolResult(result: TransportToolResult): void;

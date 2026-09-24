@@ -8,7 +8,11 @@ import {
 	resolveGeminiRealtimeInputConfig,
 } from '../../src/transport/gemini-live-transport.js';
 import type { ToolDefinition } from '../../src/types/tool.js';
-import type { LLMTransport, RealtimeLLMUsageEvent } from '../../src/types/transport.js';
+import type {
+	ContentTurn,
+	LLMTransport,
+	RealtimeLLMUsageEvent,
+} from '../../src/types/transport.js';
 
 // Mock @google/genai
 let capturedConnectConfig: Record<string, unknown> = {};
@@ -447,6 +451,32 @@ describe('GeminiLiveTransport', () => {
 			expect(mockSession.sendToolResponse).toHaveBeenCalledWith({
 				functionResponses: [{ id: 'fc_1', name: 'search', response: { results: [] } }],
 			});
+		});
+
+		it('sanitizes each response for the protobuf Struct wire type', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			transport.sendToolResponse([
+				{
+					id: 'fc_1',
+					name: 'search',
+					response: { skip: undefined, count: 10n, ratio: Number.NaN },
+				},
+				{ id: 'fc_2', name: 'noop' },
+			]);
+
+			expect(mockSession.sendToolResponse).toHaveBeenCalledWith({
+				functionResponses: [
+					{ id: 'fc_1', name: 'search', response: { count: '10', ratio: 'NaN' } },
+					{ id: 'fc_2', name: 'noop' },
+				],
+			});
+			const sent = mockSession.sendToolResponse.mock.calls[0]?.[0] as {
+				functionResponses: Array<{ response?: Record<string, unknown> }>;
+			};
+			expect(sent.functionResponses[0]?.response).not.toHaveProperty('skip');
+			expect(sent.functionResponses[1]).not.toHaveProperty('response');
 		});
 	});
 
@@ -1579,22 +1609,42 @@ describe('GeminiLiveTransport', () => {
 			expect(mockSession.sendClientContent).toHaveBeenCalledTimes(2);
 		});
 
-		it('sendFile slots by kind: image->video, audio/*->audio, other->video until realtime routing', async () => {
+		it('sendFile slots by kind: image->video, audio/*->audio, other->unsupportedMime', async () => {
 			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
 			await transport.connect();
+			const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 			transport.sendFile(B64, 'image/jpeg');
 			transport.sendFile(B64, 'audio/wav');
 			transport.sendFile(B64, 'application/pdf');
+			warnSpy.mockRestore();
 
 			const d = transport.getDiagnostics().upstream;
 			expect(d.audio.queued).toBe(1);
 			expect(d.audio.queuedRawBytes).toBe(90);
-			// Every MIME type is still sent inline, so the pdf is a queued video-slot
-			// send, not an unsupportedMime skip.
+			// The pdf is attempted on the video slot but has no realtime slot: it is
+			// skipped as unsupportedMime, never queued.
+			expect(d.video.attempted).toBe(2);
+			expect(d.video.queued).toBe(1);
+			expect(d.video.unsupportedMime).toBe(1);
+			expect(d.video.lastSkippedAt).not.toBeNull();
+			expect(mockSession.sendRealtimeInput).toHaveBeenCalledTimes(2);
+			expect(mockSession.sendClientContent).not.toHaveBeenCalled();
+		});
+
+		it('sendInlineFile slots by kind and sends every type inline: no unsupportedMime', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			transport.sendInlineFile(B64, 'image/jpeg');
+			transport.sendInlineFile(B64, 'audio/wav');
+			transport.sendInlineFile(B64, 'application/pdf');
+
+			const d = transport.getDiagnostics().upstream;
+			expect(d.audio.queued).toBe(1);
 			expect(d.video.attempted).toBe(2);
 			expect(d.video.queued).toBe(2);
 			expect(d.video.unsupportedMime).toBe(0);
 			expect(mockSession.sendClientContent).toHaveBeenCalledTimes(3);
+			expect(mockSession.sendRealtimeInput).not.toHaveBeenCalled();
 		});
 
 		it('a throwing send counts threw, rethrows, and never counts queued', async () => {
@@ -2275,22 +2325,221 @@ describe('GeminiLiveTransport', () => {
 		});
 	});
 
+	describe('sendLiveText', () => {
+		async function connectWindingDown() {
+			const model = 'gemini-3.1-flash-live-preview';
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key', model }, {});
+			await transport.connect({
+				auth: { type: 'api_key', apiKey: 'test-key' },
+				model,
+				responseModality: 'text',
+			});
+			transport.onTextOutput = () => {};
+			transport.onTextDone = () => {};
+			transport.onTurnComplete = () => {};
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			// An early-completed text-mode turn opens the wind-down window.
+			cbs.onmessage({ serverContent: { outputTranscription: { text: 'Hi.' } } });
+			cbs.onmessage({ serverContent: { generationComplete: true } });
+			mockSession.sendRealtimeInput.mockClear();
+			return { transport, cbs };
+		}
+
+		it('concatenates multi-turn text with role prefixes on the default model and returns true', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			const sent = transport.sendLiveText([
+				{ role: 'user', text: 'hello' },
+				{ role: 'assistant', text: 'hi there' },
+			]);
+
+			expect(sent).toBe(true);
+			expect(mockSession.sendRealtimeInput).toHaveBeenCalledWith({
+				text: 'user: hello\nmodel: hi there',
+			});
+			expect(mockSession.sendClientContent).not.toHaveBeenCalled();
+		});
+
+		it('sends a single turn without a role prefix', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			expect(transport.sendLiveText([{ role: 'user', text: 'hello' }])).toBe(true);
+
+			expect(mockSession.sendRealtimeInput).toHaveBeenCalledWith({ text: 'hello' });
+		});
+
+		it('skips empty text and returns false', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			expect(transport.sendLiveText([{ role: 'user', text: '' }])).toBe(false);
+			expect(transport.sendLiveText([])).toBe(false);
+
+			expect(mockSession.sendRealtimeInput).not.toHaveBeenCalled();
+			expect(transport.getDiagnostics().upstream.text.skippedEmpty).toBe(2);
+		});
+
+		it('returns false when there is no session', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+
+			expect(transport.sendLiveText([{ role: 'user', text: 'hello' }])).toBe(false);
+
+			expect(mockSession.sendRealtimeInput).not.toHaveBeenCalled();
+		});
+
+		it('buffered during wind-down returns true and is flushed on turnComplete', async () => {
+			const { transport, cbs } = await connectWindingDown();
+
+			expect(transport.sendLiveText([{ role: 'user', text: 'next' }])).toBe(true);
+			expect(mockSession.sendRealtimeInput).not.toHaveBeenCalled();
+
+			cbs.onmessage({ serverContent: { turnComplete: true } });
+			expect(mockSession.sendRealtimeInput).toHaveBeenCalledWith({ text: 'next' });
+		});
+
+		describe('buffered sends re-enter a guard installed on the instance', () => {
+			// Wrap the instance methods the way DictationController does: outside
+			// agent mode live text returns false and response-triggering content
+			// is held back.
+			function installGuard(transport: GeminiLiveTransport) {
+				const guard = { agentMode: true };
+				const rawSendLiveText = transport.sendLiveText.bind(transport);
+				const rawSendContent = transport.sendContent.bind(transport);
+				transport.sendLiveText = (turns: ContentTurn[]) =>
+					guard.agentMode ? rawSendLiveText(turns) : false;
+				transport.sendContent = (turns: ContentTurn[], turnComplete?: boolean) => {
+					if (turnComplete === true && !guard.agentMode) return;
+					rawSendContent(turns, turnComplete);
+				};
+				return guard;
+			}
+
+			it('drops both buffered sends when the guard is off at flush', async () => {
+				const { transport, cbs } = await connectWindingDown();
+				const guard = installGuard(transport);
+
+				expect(transport.sendLiveText([{ role: 'user', text: 'live' }])).toBe(true);
+				transport.sendContent([{ role: 'user', text: 'content' }], true);
+				guard.agentMode = false;
+				cbs.onmessage({ serverContent: { turnComplete: true } });
+
+				expect(mockSession.sendRealtimeInput).not.toHaveBeenCalled();
+				expect(mockSession.sendClientContent).not.toHaveBeenCalled();
+			});
+
+			it('delivers both buffered sends when the guard is on at flush', async () => {
+				const { transport, cbs } = await connectWindingDown();
+				installGuard(transport);
+
+				expect(transport.sendLiveText([{ role: 'user', text: 'live' }])).toBe(true);
+				transport.sendContent([{ role: 'user', text: 'content' }], true);
+				expect(mockSession.sendRealtimeInput).not.toHaveBeenCalled();
+				cbs.onmessage({ serverContent: { turnComplete: true } });
+
+				expect(mockSession.sendRealtimeInput).toHaveBeenCalledTimes(2);
+				expect(mockSession.sendRealtimeInput).toHaveBeenNthCalledWith(1, { text: 'live' });
+				expect(mockSession.sendRealtimeInput).toHaveBeenNthCalledWith(2, { text: 'content' });
+			});
+		});
+
+		it('a dispatch that throws returns false rather than throwing', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			mockSession.sendRealtimeInput.mockImplementationOnce(() => {
+				throw new Error('socket write failed');
+			});
+
+			expect(transport.sendLiveText([{ role: 'user', text: 'hello' }])).toBe(false);
+
+			expect(transport.getDiagnostics().upstream.text.threw).toBe(1);
+			expect(warnSpy).toHaveBeenCalled();
+			warnSpy.mockRestore();
+		});
+	});
+
 	describe('sendFile', () => {
-		it('wraps in inlineData format', async () => {
+		it('routes image/* to sendRealtimeInput({video})', async () => {
 			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
 			await transport.connect();
 
 			transport.sendFile('base64imgdata', 'image/png');
 
+			expect(mockSession.sendRealtimeInput).toHaveBeenCalledWith({
+				video: { data: 'base64imgdata', mimeType: 'image/png' },
+			});
+			expect(mockSession.sendClientContent).not.toHaveBeenCalled();
+		});
+
+		it('routes audio/* to sendRealtimeInput({audio})', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			transport.sendFile('base64audiodata', 'audio/mp3');
+
+			expect(mockSession.sendRealtimeInput).toHaveBeenCalledWith({
+				audio: { data: 'base64audiodata', mimeType: 'audio/mp3' },
+			});
+			expect(mockSession.sendClientContent).not.toHaveBeenCalled();
+		});
+
+		it('warns, sends nothing and counts one unsupportedMime for other types', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+			transport.sendFile('base64pdfdata', 'application/pdf');
+
+			expect(mockSession.sendRealtimeInput).not.toHaveBeenCalled();
+			expect(mockSession.sendClientContent).not.toHaveBeenCalled();
+			expect(warnSpy).toHaveBeenCalledWith(
+				expect.stringContaining('unsupported mimeType "application/pdf"'),
+			);
+			expect(transport.getDiagnostics().upstream.video.unsupportedMime).toBe(1);
+			warnSpy.mockRestore();
+		});
+	});
+
+	describe('sendInlineFile', () => {
+		it('sends clientContent inlineData with turnComplete false', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			transport.sendInlineFile('base64pdfdata', 'application/pdf');
+
 			expect(mockSession.sendClientContent).toHaveBeenCalledWith({
 				turns: [
 					{
 						role: 'user',
-						parts: [{ inlineData: { data: 'base64imgdata', mimeType: 'image/png' } }],
+						parts: [{ inlineData: { data: 'base64pdfdata', mimeType: 'application/pdf' } }],
 					},
 				],
 				turnComplete: false,
 			});
+			expect(mockSession.sendRealtimeInput).not.toHaveBeenCalled();
+		});
+
+		it('a file without mimeType does not throw and is sent inline as received, on the video slot', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			// A client file_upload frame is unchecked input, so the mimeType can be missing.
+			const sendUntyped = transport.sendInlineFile.bind(transport) as (
+				base64Data: string,
+				mimeType: string | undefined,
+			) => void;
+			expect(() => sendUntyped('YWJj', undefined)).not.toThrow();
+
+			expect(mockSession.sendClientContent).toHaveBeenCalledWith({
+				turns: [{ role: 'user', parts: [{ inlineData: { data: 'YWJj', mimeType: undefined } }] }],
+				turnComplete: false,
+			});
+			const d = transport.getDiagnostics().upstream;
+			expect(d.video.queued).toBe(1);
+			expect(d.audio.attempted).toBe(0);
+			expect(mockSession.sendRealtimeInput).not.toHaveBeenCalled();
 		});
 	});
 
@@ -2325,6 +2574,63 @@ describe('GeminiLiveTransport', () => {
 			expect(mockSession.sendToolResponse).toHaveBeenCalledWith({
 				functionResponses: [{ id: 'fc_2', name: 'ask_openclaw', response: { result: 'done' } }],
 			});
+		});
+
+		it('sanitizes nested undefined, bigint and non-finite numbers recursively', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			transport.sendToolResult({
+				id: 'fc_3',
+				name: 'search',
+				result: {
+					a: undefined,
+					b: { n: 10n, x: Number.POSITIVE_INFINITY, arr: [Number.NaN, undefined] },
+				},
+				scheduling: 'when_idle',
+			});
+
+			const sent = mockSession.sendToolResponse.mock.calls[0]?.[0] as {
+				functionResponses: Array<{ response: Record<string, unknown> }>;
+			};
+			const response = sent.functionResponses[0]?.response;
+			expect(response).toEqual({ b: { n: '10', x: 'Infinity', arr: ['NaN', null] } });
+			expect(response).not.toHaveProperty('a');
+		});
+
+		it('a tool result containing a Date reaches sendToolResponse as the ISO string, and nested values keep the existing sanitizer rules', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			const when = new Date('2026-09-23T12:34:56.789Z');
+			transport.sendToolResult({
+				id: 'fc_4',
+				name: 'schedule',
+				result: {
+					when,
+					slots: [when, undefined],
+					custom: {
+						toJSON: () => ({ at: when, skip: undefined, count: 10n, ratio: Number.NaN }),
+					},
+					hidden: { toJSON: () => undefined },
+				},
+				scheduling: 'when_idle',
+			});
+			transport.sendToolResult({ id: 'fc_5', name: 'now', result: when, scheduling: 'when_idle' });
+
+			const iso = '2026-09-23T12:34:56.789Z';
+			const calls = mockSession.sendToolResponse.mock.calls as Array<
+				[{ functionResponses: Array<{ response: Record<string, unknown> }> }]
+			>;
+			const response = calls[0]?.[0].functionResponses[0]?.response;
+			expect(response).toEqual({
+				when: iso,
+				slots: [iso, null],
+				custom: { at: iso, count: '10', ratio: 'NaN' },
+			});
+			expect(response?.custom).not.toHaveProperty('skip');
+			expect(response).not.toHaveProperty('hidden');
+			expect(calls[1]?.[0].functionResponses[0]?.response).toEqual({ result: iso });
 		});
 	});
 
@@ -2389,6 +2695,47 @@ describe('GeminiLiveTransport', () => {
 			const replayPayload = mockSession.sendClientContent.mock.calls[0][0];
 			expect(JSON.stringify(replayPayload)).not.toContain('functionCall');
 			expect(JSON.stringify(replayPayload)).not.toContain('functionResponse');
+		});
+
+		it('replays text and files in history order in one quiet batch, every file inline', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			mockSession.sendClientContent.mockClear();
+
+			await transport.transferSession(
+				{ instructions: 'New agent', tools: [] },
+				{
+					conversationHistory: [
+						{ type: 'text', role: 'user', text: 'look at this image' },
+						{ type: 'file', role: 'user', base64Data: 'cG5n', mimeType: 'image/png' },
+						{ type: 'text', role: 'assistant', text: 'a cat' },
+						{ type: 'file', role: 'user', base64Data: 'd2F2', mimeType: 'audio/wav' },
+						{ type: 'text', role: 'user', text: 'and this document' },
+						{ type: 'file', role: 'user', base64Data: 'cGRm', mimeType: 'application/pdf' },
+					],
+				},
+			);
+
+			// Image, audio and document alike stay inline in their positions, so
+			// replay never goes through the realtime media slots.
+			expect(mockSession.sendClientContent).toHaveBeenCalledTimes(1);
+			expect(mockSession.sendClientContent).toHaveBeenCalledWith({
+				turns: [
+					{ role: 'user', parts: [{ text: 'look at this image' }] },
+					{ role: 'user', parts: [{ inlineData: { data: 'cG5n', mimeType: 'image/png' } }] },
+					{ role: 'model', parts: [{ text: 'a cat' }] },
+					{ role: 'user', parts: [{ inlineData: { data: 'd2F2', mimeType: 'audio/wav' } }] },
+					{ role: 'user', parts: [{ text: 'and this document' }] },
+					{ role: 'user', parts: [{ inlineData: { data: 'cGRm', mimeType: 'application/pdf' } }] },
+				],
+				turnComplete: false,
+			});
+			expect(mockSession.sendRealtimeInput).not.toHaveBeenCalled();
+			const d = transport.getDiagnostics().upstream;
+			expect(d.text.queued).toBe(1);
+			expect(d.video.queued).toBe(0);
+			expect(d.audio.queued).toBe(0);
+			expect(d.video.unsupportedMime).toBe(0);
 		});
 
 		it('skips transfer history replay when resuming an existing Gemini session', async () => {
