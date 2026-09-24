@@ -153,3 +153,8 @@ declare const standaloneManager: SessionManager;
 standaloneManager.reset();
 const dedupOptions: SendOrQueueOptions = { priority: 'normal', toolCallId: 'call_1' };
 notificationQueue.sendOrQueue([{ role: 'user', parts: [{ text: 'done' }] }], true, dedupOptions);
+// Shadow transcription reports where it disagrees with the model's own hearing, and can be set
+// to correct the answer.
+config.onTranscriptionDivergence = (liveText: string, shadowText: string, turnId?: number): void =>
+	void [liveText, shadowText, turnId];
+config.divergenceCorrection = true;
