@@ -17,24 +17,15 @@ import {
 } from 'werift';
 import { resamplePcm } from '../audio/resample.js';
 import type { IceServerEntry } from '../types/client-media.js';
+import type { RtcAudioEngine, RtcAudioEngineOptions } from '../types/rtc-engine.js';
 import type { RtcClientSignalingMessage } from '../types/rtc-signaling.js';
 
 const OPUS_PCM_HZ = 48_000;
 const OPUS_FRAME_SAMPLES = 960; // 20 ms @ 48 kHz mono
 const OPUS_FRAME_BYTES = OPUS_FRAME_SAMPLES * 2;
 
-export interface WeriftOpusRtcEngineOptions {
-	readonly iceServers: readonly IceServerEntry[] | undefined;
-	readonly inputPcmSampleRate: number;
-	readonly outputPcmSampleRate: number;
-	readonly onInboundPcm: (pcm: Buffer) => void;
-	readonly emitServerJson: (
-		msg: import('../types/client-protocol.js').CoreServerToClientMessage,
-	) => void;
-	readonly onLog?: (message: string) => void;
-	/** Fired once when outbound Opus RTP is wired (flush any pre-negotiation assistant PCM). */
-	readonly onMediaReady?: () => void;
-}
+/** The engine-neutral options; the werift engine adds nothing of its own. */
+export type WeriftOpusRtcEngineOptions = RtcAudioEngineOptions;
 
 function mapIceServers(
 	entries: readonly IceServerEntry[] | undefined,
@@ -57,7 +48,7 @@ function randomU32(): number {
 	return Math.floor(Math.random() * 0xffff_ffff);
 }
 
-export class WeriftOpusRtcEngine {
+export class WeriftOpusRtcEngine implements RtcAudioEngine {
 	private readonly opts: WeriftOpusRtcEngineOptions;
 	private readonly decoder = new Decoder({ channels: 1, sample_rate: 48_000 });
 	private readonly encoder = new Encoder({ channels: 1, sample_rate: 48_000, application: 'voip' });
