@@ -6,6 +6,7 @@ import {
 	type UsageMetadata,
 } from '@google/genai';
 import { DEFAULT_CONNECT_TIMEOUT_MS, DEFAULT_RECONNECT_TIMEOUT_MS } from '../core/constants.js';
+import { ValidationError } from '../core/errors.js';
 import type { ToolDefinition } from '../types/tool.js';
 import type {
 	AudioFormatSpec,
@@ -96,9 +97,32 @@ function sanitizeResolved(value: unknown): unknown {
 
 export type GeminiRealtimeInputConfig = RealtimeInputConfig | Record<string, unknown>;
 
+/** Session-wide media token cost for image/video input (`LOW` = 64 tokens per frame). */
+export type GeminiMediaResolution =
+	| 'MEDIA_RESOLUTION_LOW'
+	| 'MEDIA_RESOLUTION_MEDIUM'
+	| 'MEDIA_RESOLUTION_HIGH';
+
+/** Gemini automatic activity detection (server VAD) settings, sent as
+ *  `realtimeInputConfig.automaticActivityDetection` exactly as given. */
+export interface GeminiVadConfig {
+	disabled?: boolean;
+	startOfSpeechSensitivity?: string;
+	endOfSpeechSensitivity?: string;
+	prefixPaddingMs?: number;
+	silenceDurationMs?: number;
+}
+
+/** Context-window compression thresholds, in tokens. Each one left unset is
+ *  omitted from the setup message, so the server's default applies (trigger at
+ *  80% of the model limit, target half of it); `{}` enables compression with
+ *  both defaults. */
+export type GeminiCompressionConfig = { triggerTokens?: number; targetTokens?: number };
+
 /**
- * Framework default applied by VoiceSession when no realtimeInputConfig is
- * provided. Tuned to feel less eager than Gemini's stock VAD
+ * Framework default applied by VoiceSession when neither realtimeInputConfig
+ * nor vadConfig is provided (`realtimeInputConfig: false` opts out of it).
+ * Tuned to feel less eager than Gemini's stock VAD
  * (silenceDurationMs=100); matches the values used in the
  * interviewer/direct-rtc demos so most apps can omit the field entirely.
  *
@@ -119,11 +143,13 @@ export const DEFAULT_GEMINI_LIVE_MODEL = 'gemini-3.1-flash-live-preview';
  * Deep-merges a user-supplied realtimeInputConfig over
  * DEFAULT_GEMINI_REALTIME_INPUT_CONFIG. Merge depth is exactly one level into
  * automaticActivityDetection — user fields win, missing fields fall back to
- * the default. If user is undefined, returns the default unchanged.
+ * the default. If user is undefined, returns the default unchanged; if user is
+ * `false` (the opt-out), returns undefined so no realtimeInputConfig is sent.
  */
 export function resolveGeminiRealtimeInputConfig(
-	user: GeminiRealtimeInputConfig | undefined,
-): GeminiRealtimeInputConfig {
+	user: GeminiRealtimeInputConfig | false | undefined,
+): GeminiRealtimeInputConfig | undefined {
+	if (user === false) return undefined;
 	if (!user) return DEFAULT_GEMINI_REALTIME_INPUT_CONFIG;
 	const defaultAad = (DEFAULT_GEMINI_REALTIME_INPUT_CONFIG as Record<string, unknown>)
 		.automaticActivityDetection as Record<string, unknown> | undefined;
@@ -167,14 +193,26 @@ export interface GeminiTransportConfig {
 	resumptionHandle?: string;
 	/** Voice configuration for Gemini's speech synthesis. */
 	speechConfig?: { voiceName?: string };
-	/** Context window compression settings (trigger and target token counts). */
-	compressionConfig?: { triggerTokens: number; targetTokens: number };
+	/** Context-window compression. Thresholds are sent as strings (the API types
+	 *  them as int64); an unset one is omitted so the server default applies,
+	 *  and `{}` enables compression with both defaults. */
+	compressionConfig?: GeminiCompressionConfig;
+	/** Session-wide media token cost for image/video input. Applies to every
+	 *  realtime-input image this transport sends; realtime input has no
+	 *  per-send override. Omitted → server default. */
+	mediaResolution?: GeminiMediaResolution;
 	/** Enable Gemini's built-in Google Search grounding. */
 	googleSearch?: boolean;
 	/** Enable server-side transcription of user audio input (default: true). */
 	inputAudioTranscription?: boolean;
-	/** Gemini Live realtime input behavior, including server-side VAD tuning. */
-	realtimeInputConfig?: GeminiRealtimeInputConfig;
+	/** Gemini Live realtime input behavior, including server-side VAD tuning,
+	 *  sent as given. `false` sends no `realtimeInputConfig` at all, so the
+	 *  server's own defaults apply. Mutually exclusive with `vadConfig`. */
+	realtimeInputConfig?: GeminiRealtimeInputConfig | false;
+	/** Shorthand for `realtimeInputConfig: { automaticActivityDetection: vadConfig }`,
+	 *  sent verbatim with nothing merged in. Supplying it together with
+	 *  `realtimeInputConfig` (including `false`) throws a `ValidationError`. */
+	vadConfig?: GeminiVadConfig;
 	/** Timeout in ms for connect() to receive setupComplete (default: 30000). */
 	connectTimeoutMs?: number;
 	/** Force-kill delay in ms for `reconnect()` (default: 45000): when it expires
@@ -493,6 +531,12 @@ export class GeminiLiveTransport implements LLMTransport {
 	onConnectionLifecycle?: (event: ConnectionLifecycleEvent) => void = undefined;
 
 	constructor(config: GeminiTransportConfig, callbacks: GeminiTransportCallbacks) {
+		if (config.realtimeInputConfig !== undefined && config.vadConfig !== undefined) {
+			throw new ValidationError(
+				'GeminiLiveTransport: realtimeInputConfig and vadConfig are mutually exclusive. ' +
+					'vadConfig is shorthand for realtimeInputConfig: { automaticActivityDetection: vadConfig }; set only one.',
+			);
+		}
 		this.ai = new GoogleGenAI({ apiKey: config.apiKey });
 		this.config = config;
 		this.callbacks = callbacks;
@@ -563,8 +607,12 @@ export class GeminiLiveTransport implements LLMTransport {
 			connectConfig.inputAudioTranscription = {};
 		}
 
+		// `false` is the opt-out: no key at all. An object wins over the vadConfig
+		// alias (the constructor rejects both being supplied).
 		if (this.config.realtimeInputConfig) {
 			connectConfig.realtimeInputConfig = this.config.realtimeInputConfig;
+		} else if (this.config.realtimeInputConfig === undefined && this.config.vadConfig) {
+			connectConfig.realtimeInputConfig = { automaticActivityDetection: this.config.vadConfig };
 		}
 
 		if (this.config.systemInstruction) {
@@ -604,10 +652,19 @@ export class GeminiLiveTransport implements LLMTransport {
 		}
 
 		if (this.config.compressionConfig) {
-			connectConfig.contextWindowCompression = {
-				triggerTokens: this.config.compressionConfig.triggerTokens,
-				slidingWindow: { targetTokens: this.config.compressionConfig.targetTokens },
+			// The API types both thresholds as int64-over-JSON, i.e. strings, and
+			// omission means the server default. Sending `undefined` would not be omission.
+			const { triggerTokens, targetTokens } = this.config.compressionConfig;
+			const compression: { triggerTokens?: string; slidingWindow: { targetTokens?: string } } = {
+				slidingWindow: {},
 			};
+			if (triggerTokens !== undefined) compression.triggerTokens = String(triggerTokens);
+			if (targetTokens !== undefined) compression.slidingWindow.targetTokens = String(targetTokens);
+			connectConfig.contextWindowCompression = compression;
+		}
+
+		if (this.config.mediaResolution) {
+			connectConfig.mediaResolution = this.config.mediaResolution;
 		}
 
 		// The deadline covers the dial itself, not just the setupComplete wait: the
@@ -1253,10 +1310,8 @@ export class GeminiLiveTransport implements LLMTransport {
 				this.config.googleSearch = config.providerOptions.googleSearch;
 			}
 			if (config.providerOptions.compressionConfig) {
-				this.config.compressionConfig = config.providerOptions.compressionConfig as {
-					triggerTokens: number;
-					targetTokens: number;
-				};
+				this.config.compressionConfig = config.providerOptions
+					.compressionConfig as GeminiCompressionConfig;
 			}
 		}
 	}
@@ -1319,10 +1374,8 @@ export class GeminiLiveTransport implements LLMTransport {
 				this.config.googleSearch = config.providerOptions.googleSearch;
 			}
 			if (config.providerOptions.compressionConfig) {
-				this.config.compressionConfig = config.providerOptions.compressionConfig as {
-					triggerTokens: number;
-					targetTokens: number;
-				};
+				this.config.compressionConfig = config.providerOptions
+					.compressionConfig as GeminiCompressionConfig;
 			}
 		}
 		if (config.responseModality !== undefined) {

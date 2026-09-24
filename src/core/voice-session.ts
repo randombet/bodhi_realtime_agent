@@ -23,8 +23,11 @@ import { ClientTransport } from '../transport/client-transport.js';
 import { DirectRtcClientChannel } from '../transport/direct-rtc-client-channel.js';
 import {
 	DEFAULT_GEMINI_LIVE_MODEL,
+	type GeminiCompressionConfig,
 	GeminiLiveTransport,
+	type GeminiMediaResolution,
 	type GeminiRealtimeInputConfig,
+	type GeminiVadConfig,
 	resolveGeminiRealtimeInputConfig,
 } from '../transport/gemini-live-transport.js';
 import type { MainAgent, SubagentConfig } from '../types/agent.js';
@@ -70,6 +73,7 @@ import { ConversationContext } from './conversation-context.js';
 import { ConversationHistoryWriter } from './conversation-history-writer.js';
 import { DictationController } from './dictation-controller.js';
 import { DirectiveManager } from './directive-manager.js';
+import { ValidationError } from './errors.js';
 import { EventBus } from './event-bus.js';
 import { GreetingController } from './greeting-controller.js';
 import { HooksManager } from './hooks.js';
@@ -360,22 +364,40 @@ export interface VoiceSessionConfig {
 	model: LanguageModelV1;
 	/** Voice configuration for Gemini's speech output. */
 	speechConfig?: { voiceName?: string };
-	/** Context window compression thresholds. */
-	compressionConfig?: { triggerTokens: number; targetTokens: number };
+	/** Context-window compression (Gemini only). Thresholds are in tokens; an
+	 *  unset one is omitted so the server default applies (trigger at 80% of the
+	 *  model limit, target half of it), and `{}` enables compression with both
+	 *  defaults. */
+	compressionConfig?: GeminiCompressionConfig;
 	/** Enable server-side transcription of user audio input (default: true).
 	 *  Has no effect when sttProvider is set (built-in is disabled automatically).
 	 *  Use false to disable all input transcription for privacy or cost control. */
 	inputAudioTranscription?: boolean;
 	/**
 	 * Gemini Live realtime input/VAD tuning. Applied only on the built-in
-	 * Gemini transport path. When omitted, the framework applies
-	 * `DEFAULT_GEMINI_REALTIME_INPUT_CONFIG` (END_SENSITIVITY_HIGH,
-	 * silenceDurationMs=500). User-supplied fields deep-merge over the default
-	 * at the `automaticActivityDetection` level. Has no effect when an external
-	 * transport is injected via `config.transport` — that transport owns its
-	 * own VAD config.
+	 * Gemini transport path. When omitted (and `vadConfig` is not set), the
+	 * framework applies `DEFAULT_GEMINI_REALTIME_INPUT_CONFIG`
+	 * (END_SENSITIVITY_HIGH, silenceDurationMs=500). User-supplied fields
+	 * deep-merge over the default at the `automaticActivityDetection` level.
+	 * `false` opts out of the default: no `realtimeInputConfig` is sent at all,
+	 * so the server's own VAD settings apply. Mutually exclusive with
+	 * `vadConfig`. Has no effect when an external transport is injected via
+	 * `config.transport` — that transport owns its own VAD config.
 	 */
-	realtimeInputConfig?: GeminiRealtimeInputConfig;
+	realtimeInputConfig?: GeminiRealtimeInputConfig | false;
+	/**
+	 * Gemini automatic-VAD tuning, sent verbatim as
+	 * `realtimeInputConfig.automaticActivityDetection` with no framework
+	 * default merged in (built-in Gemini path only). Supplying it together with
+	 * `realtimeInputConfig` (including `false`) throws a `ValidationError` at
+	 * construction.
+	 */
+	vadConfig?: GeminiVadConfig;
+	/** Session-wide media token cost for image/video input (Gemini only;
+	 *  `MEDIA_RESOLUTION_LOW` = 64 tokens per frame). Applies to every
+	 *  realtime-input image on the session; realtime input has no per-send
+	 *  override. Omitted → server default. */
+	mediaResolution?: GeminiMediaResolution;
 	/** External STT provider for user input transcription.
 	 *  When set, transport built-in transcription is automatically disabled.
 	 *  When omitted, the transport's built-in transcription is used. */
@@ -478,7 +500,8 @@ export interface VoiceSessionConfig {
 	 *  the Agent Composer CLI). When `ttsProvider` is set, text mode is implied regardless of
 	 *  this field. Requires a transport advertising `textResponseModality`. */
 	responseModality?: 'audio' | 'text';
-	/** Pre-constructed LLM transport. If provided, apiKey/geminiModel/speechConfig/compressionConfig are ignored. */
+	/** Pre-constructed LLM transport. If provided, apiKey/geminiModel/speechConfig/compressionConfig/
+	 *  mediaResolution/realtimeInputConfig/vadConfig are ignored. */
 	transport?: LLMTransport;
 	/** Orchestration engine for tool routing/subagent lifecycle (default: legacy). */
 	orchestrationMode?: 'legacy' | 'actor';
@@ -577,7 +600,8 @@ export class VoiceSession {
 	private runtimeToolRegistry?: Map<string, ToolRoutingInfo>;
 	private subagentConfigs: Record<string, SubagentConfig>;
 	private persistentSubagents = new PersistentSubagentManager();
-	/** Resolved Gemini VAD config for the built-in transport path. Undefined when `config.transport` is injected. */
+	/** Resolved Gemini VAD config for the built-in transport path. Undefined when `config.transport` is
+	 *  injected, with `realtimeInputConfig: false`, and with `vadConfig` (the transport sends that verbatim). */
 	private resolvedRealtimeInputConfig?: GeminiRealtimeInputConfig;
 	private behaviorManager?: BehaviorManager;
 	private memoryDistiller?: MemoryDistiller;
@@ -1057,9 +1081,18 @@ export class VoiceSession {
 			});
 		} else {
 			// Construct GeminiLiveTransport from config (backward compatibility)
-			this.resolvedRealtimeInputConfig = resolveGeminiRealtimeInputConfig(
-				config.realtimeInputConfig,
-			);
+			if (config.realtimeInputConfig !== undefined && config.vadConfig !== undefined) {
+				throw new ValidationError(
+					'VoiceSession: realtimeInputConfig and vadConfig are mutually exclusive. ' +
+						'vadConfig is shorthand for realtimeInputConfig: { automaticActivityDetection: vadConfig }; set only one.',
+				);
+			}
+			// vadConfig goes to the transport as given; only without it does the
+			// realtimeInputConfig resolution (default, deep-merge or opt-out) apply.
+			this.resolvedRealtimeInputConfig =
+				config.vadConfig === undefined
+					? resolveGeminiRealtimeInputConfig(config.realtimeInputConfig)
+					: undefined;
 			this.transport = new GeminiLiveTransport(
 				{
 					apiKey: config.apiKey,
@@ -1069,8 +1102,10 @@ export class VoiceSession {
 					googleSearch: initialForLive?.googleSearch,
 					speechConfig: config.speechConfig,
 					compressionConfig: config.compressionConfig,
+					mediaResolution: config.mediaResolution,
 					inputAudioTranscription: inputTranscription,
 					realtimeInputConfig: this.resolvedRealtimeInputConfig,
+					vadConfig: config.vadConfig,
 				},
 				{},
 			);
