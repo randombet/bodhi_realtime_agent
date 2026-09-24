@@ -73,6 +73,12 @@ export type {
 } from './session-client.js';
 
 export type {
+	AssistantOutputInterceptor,
+	AudioInputObserver,
+	AudioOutputObserver,
+} from './session-seams.js';
+
+export type {
 	PendingToolCall,
 	ResumptionState,
 	ResumptionUpdate,
