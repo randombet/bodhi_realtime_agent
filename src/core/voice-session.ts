@@ -1549,6 +1549,9 @@ export class VoiceSession {
 			getSessionActive: () => this.sessionManager.isActive,
 			conversationContext: this.conversationContext,
 			sendFile: (base64, mimeType) => this.transport.sendFile(base64, mimeType),
+			sendInlineFile: this.transport.sendInlineFile
+				? (base64, mimeType) => this.transport.sendInlineFile?.(base64, mimeType)
+				: undefined,
 			getArbiter: () => this.completionArbiter,
 			getLiveGate: () => this.liveGate(),
 			getPlaybackStateProtocolActive: () => this.playbackStateProtocolActive,

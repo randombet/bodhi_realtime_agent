@@ -44,14 +44,54 @@ function warnLegacyResumptionHandleOnce(): void {
 	);
 }
 
-function toFunctionResponsePayload(value: unknown): Record<string, unknown> {
-	if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
-		return value as Record<string, unknown>;
+/**
+ * Recursively sanitize a tool result so it conforms to `google.protobuf.Struct`,
+ * which only holds null, boolean, number, string, array and object. An object
+ * with a callable `toJSON` is replaced by what it returns, as `JSON.stringify`
+ * does (a `Date` becomes its ISO string). Object fields that are `undefined` are
+ * dropped (array slots become `null`), non-finite numbers, bigints and other
+ * non-JSON values become strings, and a non-object result is wrapped as
+ * `{ result }`.
+ */
+function sanitizeForStruct(value: unknown): Record<string, unknown> {
+	const sanitized = sanitizeValue(value, '');
+	if (typeof sanitized === 'object' && sanitized !== null && !Array.isArray(sanitized)) {
+		return sanitized as Record<string, unknown>;
 	}
-	if (value === undefined) {
-		return { result: null };
+	return { result: sanitized };
+}
+
+/** Apply an object's callable `toJSON` once, with its property key, as `JSON.stringify` does. */
+function applyToJSON(value: unknown, key: string): unknown {
+	if (typeof value === 'object' && value !== null) {
+		const toJSON = (value as { toJSON?: unknown }).toJSON;
+		if (typeof toJSON === 'function') return toJSON.call(value, key);
 	}
-	return { result: value };
+	return value;
+}
+
+function sanitizeValue(value: unknown, key: string): unknown {
+	return sanitizeResolved(applyToJSON(value, key));
+}
+
+/** Sanitize a value whose own `toJSON` (if any) has already been applied. */
+function sanitizeResolved(value: unknown): unknown {
+	if (value === undefined || value === null) return null;
+	if (typeof value === 'boolean' || typeof value === 'string') return value;
+	if (typeof value === 'number') {
+		if (!Number.isFinite(value)) return String(value);
+		return value;
+	}
+	if (Array.isArray(value)) return value.map((v, i) => sanitizeValue(v, String(i)));
+	if (typeof value === 'object') {
+		const out: Record<string, unknown> = {};
+		for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+			const resolved = applyToJSON(v, k);
+			if (resolved !== undefined) out[k] = sanitizeResolved(resolved);
+		}
+		return out;
+	}
+	return String(value);
 }
 
 export type GeminiRealtimeInputConfig = RealtimeInputConfig | Record<string, unknown>;
@@ -877,7 +917,11 @@ export class GeminiLiveTransport implements LLMTransport {
 	): void {
 		if (!this.session) return;
 		if (this.bufferIfWindingDown(() => this.sendToolResponse(responses, scheduling))) return;
-		this.session.sendToolResponse({ functionResponses: responses });
+		this.session.sendToolResponse({
+			functionResponses: responses.map((r) =>
+				r.response === undefined ? r : { ...r, response: sanitizeForStruct(r.response) },
+			),
+		});
 	}
 
 	/**
@@ -961,14 +1005,104 @@ export class GeminiLiveTransport implements LLMTransport {
 		);
 	}
 
-	/** Send a file/image to Gemini as inline data.
+	/** Send live text as realtime input (`sendRealtimeInput({ text })`) on every
+	 *  model, unlike `sendContent`, whose realtime path depends on the model name.
+	 *  Several turns are joined with newlines, each prefixed with its role
+	 *  (`assistant` becomes `model`) so the model can tell them apart; a single
+	 *  turn is sent as is. Turns with no text are skipped, and there is no
+	 *  `turnComplete`: server activity detection decides the turn boundary.
+	 *
+	 *  Returns `true` when the send was dispatched or accepted into the
+	 *  wind-down buffer (flushed best effort, like the other buffered sends),
+	 *  and `false` when there is no text, no session, or the send threw. Never
+	 *  throws. */
+	sendLiveText(turns: ContentTurn[]): boolean {
+		const text = turns
+			.map((t) => {
+				const role = t.role === 'assistant' ? 'model' : t.role;
+				if (!t.text) return '';
+				return turns.length > 1 ? `${role}: ${t.text}` : t.text;
+			})
+			.filter(Boolean)
+			.join('\n');
+		// Realtime text can start a generation, so it is buffered during the
+		// wind-down window like the other text sends. The flush goes back through
+		// the instance method, so a wrapper installed on it (the dictation guard)
+		// checks the send again at flush, as it does for buffered sendContent.
+		if (text && this.session && this.bufferIfWindingDown(() => this.sendLiveText(turns)))
+			return true;
+		return this.sendRealtimeText(text);
+	}
+
+	/** Dispatch realtime text now; `sendLiveText` handles wind-down buffering. */
+	private sendRealtimeText(text: string): boolean {
+		const bytes = Buffer.byteLength(text, 'utf8');
+		let sent = false;
+		try {
+			this.sendTextTracked(bytes, bytes, text.length === 0, (session) => {
+				session.sendRealtimeInput({ text });
+				sent = true;
+			});
+		} catch (err) {
+			console.warn('[GeminiLiveTransport] sendLiveText: realtime text send failed:', err);
+			return false;
+		}
+		return sent;
+	}
+
+	/** Send an image or audio file as realtime input.
+	 *
+	 *  Gemini Live's realtime input has separate slots per media kind, not a
+	 *  generic one (the SDK's `media` field maps to the deprecated
+	 *  `media_chunks` wire format, which Gemini 3.1 rejects with close code
+	 *  1007):
+	 *
+	 *    image/* → `video` (an image is a single-frame video)
+	 *    audio/* → `audio` (the slot `sendAudio` uses)
+	 *    other   → a warning, nothing sent, counted as `unsupportedMime`
+	 *
+	 *  Use `sendInlineFile` for other file types (documents), which go inline
+	 *  in client content instead. */
+	sendFile(base64Data: string, mimeType: string): void {
+		const slot = mimeType.startsWith('audio/') ? this.upstream.audio : this.upstream.video;
+		const raw = Buffer.byteLength(base64Data, 'base64');
+		this.noteAttempt(slot, raw, base64Data.length);
+		const session = this.session;
+		if (!session) {
+			this.noteSkip(slot, () => slot.skippedNoSession++);
+			return;
+		}
+		if (mimeType.startsWith('image/')) {
+			this.sendTracked(slot, raw, base64Data.length, () =>
+				session.sendRealtimeInput({ video: { data: base64Data, mimeType } }),
+			);
+			return;
+		}
+		if (mimeType.startsWith('audio/')) {
+			this.sendTracked(slot, raw, base64Data.length, () =>
+				session.sendRealtimeInput({ audio: { data: base64Data, mimeType } }),
+			);
+			return;
+		}
+		const video = this.upstream.video;
+		this.noteSkip(video, () => video.unsupportedMime++);
+		console.warn(
+			`[GeminiLiveTransport] sendFile: unsupported mimeType "${mimeType}" — Gemini Live realtime input only supports image/* and audio/*. Use sendInlineFile for other file types.`,
+		);
+	}
+
+	/** Send a file as inline data in client content (`turnComplete: false`),
+	 *  for any MIME type, documents included.
 	 *
 	 *  Counted by media kind: `audio/*` on the audio slot, everything else on the
-	 *  video slot (images are single-frame video). Every MIME type is still sent
-	 *  inline here, so none counts as `unsupportedMime`. */
-	sendFile(base64Data: string, mimeType: string): void {
-		if (this.session && this.bufferIfWindingDown(() => this.sendFile(base64Data, mimeType))) return;
-		const slot = mimeType.startsWith('audio/') ? this.upstream.audio : this.upstream.video;
+	 *  video slot. Every MIME type is sent inline here, so none counts as
+	 *  `unsupportedMime`. A client upload frame is unchecked input, so a missing
+	 *  `mimeType` counts on the video slot and the data is sent as received. */
+	sendInlineFile(base64Data: string, mimeType: string): void {
+		if (this.session && this.bufferIfWindingDown(() => this.sendInlineFile(base64Data, mimeType)))
+			return;
+		const isAudio = typeof mimeType === 'string' && mimeType.startsWith('audio/');
+		const slot = isAudio ? this.upstream.audio : this.upstream.video;
 		const raw = Buffer.byteLength(base64Data, 'base64');
 		this.noteAttempt(slot, raw, base64Data.length);
 		const session = this.session;
@@ -995,7 +1129,7 @@ export class GeminiLiveTransport implements LLMTransport {
 				{
 					id: result.id,
 					name: result.name,
-					response: toFunctionResponsePayload(result.result),
+					response: sanitizeForStruct(result.result),
 				},
 			],
 		});
@@ -1030,7 +1164,7 @@ export class GeminiLiveTransport implements LLMTransport {
 	 *  clean and post-barge-in states (raw PCM, no input transcription emitted —
 	 *  see design-retained-user-content-recovery.md). */
 	replayUserTurn(turn: RetainedUserTurn): boolean {
-		// Same winding-down discipline as sendContent/sendFile: a replay must not
+		// Same winding-down discipline as sendContent/sendInlineFile: a replay must not
 		// race a session draining toward close.
 		if (this.session && this.bufferIfWindingDown(() => this.replayUserTurn(turn))) return true;
 		// Recovery audio is upstream traffic like any other: counted on the audio

@@ -106,6 +106,59 @@ describe('ClientMessageRouter', () => {
 		expect(addUserMessage).toHaveBeenCalledWith('[Uploaded file: pic.png]');
 	});
 
+	it('routes audio uploads to sendFile', () => {
+		const sendInlineFile = vi.fn();
+		const { router, sendFile } = makeRouter({ sendInlineFile });
+		router.dispatch({
+			type: 'file_upload',
+			data: { base64: 'abc', mimeType: 'audio/wav', fileName: 'memo.wav' },
+		});
+		expect(sendFile).toHaveBeenCalledWith('abc', 'audio/wav');
+		expect(sendInlineFile).not.toHaveBeenCalled();
+	});
+
+	it('routes non-media uploads to sendInlineFile and still records the upload', () => {
+		const sendInlineFile = vi.fn();
+		const { router, sendFile, addUserMessage } = makeRouter({ sendInlineFile });
+		router.dispatch({
+			type: 'file_upload',
+			data: { base64: 'abc', mimeType: 'application/pdf', fileName: 'doc.pdf' },
+		});
+		expect(sendInlineFile).toHaveBeenCalledWith('abc', 'application/pdf');
+		expect(sendFile).not.toHaveBeenCalled();
+		expect(addUserMessage).toHaveBeenCalledWith('[Uploaded file: doc.pdf]');
+	});
+
+	it('routes non-media uploads to sendFile when sendInlineFile is not wired', () => {
+		const { router, sendFile } = makeRouter();
+		router.dispatch({
+			type: 'file_upload',
+			data: { base64: 'abc', mimeType: 'application/pdf', fileName: 'doc.pdf' },
+		});
+		expect(sendFile).toHaveBeenCalledWith('abc', 'application/pdf');
+	});
+
+	it('a file_upload without mimeType is routed through the non-media path and does not throw', () => {
+		const store = vi.fn();
+		const sendInlineFile = vi.fn();
+		const wired = makeRouter({ sendInlineFile, getArtifactRegistry: () => ({ store }) });
+		expect(() =>
+			wired.router.dispatch({ type: 'file_upload', data: { base64: 'abc', fileName: 'blob' } }),
+		).not.toThrow();
+		expect(sendInlineFile).toHaveBeenCalledWith('abc', undefined);
+		expect(wired.sendFile).not.toHaveBeenCalled();
+		expect(wired.addUserMessage).toHaveBeenCalledWith('[Uploaded file: blob]');
+		expect(store).not.toHaveBeenCalled();
+
+		const unwired = makeRouter({ getArtifactRegistry: () => ({ store }) });
+		expect(() =>
+			unwired.router.dispatch({ type: 'file_upload', data: { base64: 'abc' } }),
+		).not.toThrow();
+		expect(unwired.sendFile).toHaveBeenCalledWith('abc', undefined);
+		expect(unwired.addUserMessage).toHaveBeenCalledWith('[Uploaded file: file]');
+		expect(store).not.toHaveBeenCalled();
+	});
+
 	it('stores image uploads in the artifact registry when present', () => {
 		const store = vi.fn();
 		const { router } = makeRouter({ getArtifactRegistry: () => ({ store }) });

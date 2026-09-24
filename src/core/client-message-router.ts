@@ -71,8 +71,11 @@ export interface ClientMessageRouterDeps {
 	/** True while the session is active (gates `file_upload`). */
 	getSessionActive(): boolean;
 	conversationContext: ConversationContext;
-	/** Forward an uploaded file to the LLM transport as inline data. */
+	/** Forward an uploaded image or audio file to the LLM transport (`transport.sendFile`). */
 	sendFile(base64: string, mimeType: string): void;
+	/** Forward any other uploaded file (documents) inline in the conversation
+	 *  content. When absent, those uploads go to `sendFile` too. */
+	sendInlineFile?: (base64: string, mimeType: string) => void;
 	/** Defer arbiter consulted by `playback.ended`. */
 	getArbiter(): PlaybackDeferArbiter;
 	/** The live playback-completion gate (external-TTS or native), else `null`. */
@@ -180,15 +183,26 @@ export class ClientMessageRouter {
 	private handleFileUpload(base64: string, mimeType: string, fileName?: string): void {
 		if (!this.deps.getSessionActive()) return;
 
-		// Send image/document to the LLM as inline data
-		this.deps.sendFile(base64, mimeType);
+		// Images and audio go to the LLM as realtime media; other files
+		// (documents) have no realtime slot and go inline in the conversation.
+		// The frame is unchecked client input, so a missing mimeType is treated
+		// as non-media and forwarded as received rather than throwing here.
+		const hasMime = typeof mimeType === 'string';
+		const isImage = hasMime && mimeType.startsWith('image/');
+		if (isImage || (hasMime && mimeType.startsWith('audio/'))) {
+			this.deps.sendFile(base64, mimeType);
+		} else if (this.deps.sendInlineFile) {
+			this.deps.sendInlineFile(base64, mimeType);
+		} else {
+			this.deps.sendFile(base64, mimeType);
+		}
 
 		// Record in conversation context
 		this.deps.conversationContext.addUserMessage(`[Uploaded file: ${fileName ?? 'file'}]`);
 
 		// Store in artifact registry for cross-tool access (supported binary image types only).
 		const registry = this.deps.getArtifactRegistry();
-		if (registry && mimeType.startsWith('image/')) {
+		if (registry && isImage) {
 			try {
 				registry.store(base64, mimeType, fileName ?? `upload_${Date.now()}`, 'uploaded', fileName);
 			} catch (err) {
