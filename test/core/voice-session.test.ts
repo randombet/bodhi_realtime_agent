@@ -2725,6 +2725,10 @@ describe('VoiceSession', () => {
 					model: mockModel,
 					sttProvider: stt,
 					upstreamLossPolicy: 'hold',
+					// The host owns recovery, so the client attach below only configures
+					// the client and the session stays parked (an unsuppressed attach
+					// would redial it).
+					suppressClientAutoActions: () => true,
 					hooks: { onSessionEnd },
 				});
 				const upstreamLost = vi.fn();
