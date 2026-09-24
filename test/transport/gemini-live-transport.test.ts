@@ -4,6 +4,7 @@ import {
 	DEFAULT_GEMINI_LIVE_MODEL,
 	DEFAULT_GEMINI_REALTIME_INPUT_CONFIG,
 	GeminiLiveTransport,
+	type LiveUsageMetadata,
 	resolveGeminiRealtimeInputConfig,
 } from '../../src/transport/gemini-live-transport.js';
 import type { ToolDefinition } from '../../src/types/tool.js';
@@ -1265,10 +1266,482 @@ describe('GeminiLiveTransport', () => {
 			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
 			const read: number[] = [];
 			transport.onConnectionLifecycle = (e) => {
-				if (e.kind === 'setup-ok') read.push(transport.currentTransportGeneration);
+				if (e.kind === 'setup-ok') {
+					read.push(
+						transport.currentTransportGeneration,
+						transport.getDiagnostics().transportGeneration,
+					);
+				}
 			};
 			await transport.connect();
-			expect(read).toEqual([1]);
+			expect(read).toEqual([1, 1]);
+		});
+	});
+
+	describe('usage metadata', () => {
+		async function connectWith(onUsageMetadata: ReturnType<typeof vi.fn>) {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, { onUsageMetadata });
+			await transport.connect();
+			return capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+		}
+		const USAGE = { promptTokenCount: 4096, totalTokenCount: 4200 };
+
+		it('dispatches usage metadata on its own', async () => {
+			const onUsageMetadata = vi.fn();
+			const cbs = await connectWith(onUsageMetadata);
+			cbs.onmessage({ usageMetadata: USAGE });
+			expect(onUsageMetadata).toHaveBeenCalledWith(USAGE);
+		});
+
+		// The reason usage is read before the dispatch branches: every branch below
+		// returns, so a branch of its own would miss the common co-occurring cases.
+		it('dispatches usage metadata riding along with serverContent', async () => {
+			const onUsageMetadata = vi.fn();
+			const onAudioOutput = vi.fn();
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key' },
+				{ onUsageMetadata, onAudioOutput },
+			);
+			await transport.connect();
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({
+				usageMetadata: USAGE,
+				serverContent: { modelTurn: { parts: [{ inlineData: { data: 'audio_b64' } }] } },
+			});
+			expect(onUsageMetadata).toHaveBeenCalledWith(USAGE);
+			expect(onAudioOutput).toHaveBeenCalledWith('audio_b64');
+		});
+
+		it('dispatches usage metadata riding along with a tool call', async () => {
+			const onUsageMetadata = vi.fn();
+			const onToolCall = vi.fn();
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key' },
+				{ onUsageMetadata, onToolCall },
+			);
+			await transport.connect();
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({
+				usageMetadata: USAGE,
+				toolCall: { functionCalls: [{ id: 'fc_1', name: 'search', args: { query: 'x' } }] },
+			});
+			expect(onUsageMetadata).toHaveBeenCalledWith(USAGE);
+			expect(onToolCall).toHaveBeenCalled();
+		});
+
+		it('dispatches usage metadata riding along with goAway', async () => {
+			const onUsageMetadata = vi.fn();
+			const onGoAway = vi.fn();
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key' },
+				{ onUsageMetadata, onGoAway },
+			);
+			await transport.connect();
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({ usageMetadata: USAGE, goAway: { timeLeft: '50s' } });
+			expect(onUsageMetadata).toHaveBeenCalledWith(USAGE);
+			expect(onGoAway).toHaveBeenCalledWith('50s');
+		});
+
+		it('carries the per-modality breakdown through unchanged', async () => {
+			const onUsageMetadata = vi.fn();
+			const cbs = await connectWith(onUsageMetadata);
+			const detailed = {
+				promptTokenCount: 9000,
+				promptTokensDetails: [
+					{ modality: 'AUDIO', tokenCount: 7000 },
+					{ modality: 'TEXT', tokenCount: 2000 },
+				],
+			};
+			cbs.onmessage({ usageMetadata: detailed });
+			expect(onUsageMetadata).toHaveBeenCalledWith(detailed);
+		});
+
+		it('does not fire when the message carries no usage', async () => {
+			const onUsageMetadata = vi.fn();
+			const cbs = await connectWith(onUsageMetadata);
+			cbs.onmessage({ serverContent: { turnComplete: true } });
+			expect(onUsageMetadata).not.toHaveBeenCalled();
+		});
+
+		// VoiceSession constructs the transport with an EMPTY callbacks object and
+		// wires property callbacks afterwards, so a constructor-only callback would
+		// be unreachable from the library's main consumer.
+		it('dispatches to the property callback, which is how VoiceSession wires events', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			const seen: LiveUsageMetadata[] = [];
+			transport.onUsageMetadata = (u) => seen.push(u);
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({ usageMetadata: USAGE });
+
+			expect(seen).toEqual([USAGE]);
+		});
+
+		it('carries fields beyond the common two — cache and tool-use counts included', async () => {
+			const onUsageMetadata = vi.fn();
+			const cbs = await connectWith(onUsageMetadata);
+			const full = {
+				promptTokenCount: 1000,
+				cachedContentTokenCount: 400,
+				toolUsePromptTokenCount: 50,
+				thoughtsTokenCount: 25,
+				totalTokenCount: 1500,
+			};
+			cbs.onmessage({ usageMetadata: full });
+			expect(onUsageMetadata).toHaveBeenCalledWith(full);
+		});
+
+		it('a throwing observer does not suppress the co-occurring turn', async () => {
+			const onAudioOutput = vi.fn();
+			const onGoAway = vi.fn();
+			const onUsageMetadata = vi.fn(() => {
+				throw new Error('metrics failed');
+			});
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key' },
+				{ onAudioOutput, onGoAway, onUsageMetadata },
+			);
+			await transport.connect();
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+
+			// ONE message carrying usage AND the payload it rides with.
+			cbs.onmessage({
+				usageMetadata: USAGE,
+				serverContent: { modelTurn: { parts: [{ inlineData: { data: 'AUDIO' } }] } },
+			});
+			cbs.onmessage({ usageMetadata: USAGE, goAway: { timeLeft: '30s' } });
+
+			expect(onUsageMetadata).toHaveBeenCalledTimes(2);
+			expect(onAudioOutput).toHaveBeenCalledWith('AUDIO');
+			expect(onGoAway).toHaveBeenCalledWith('30s');
+		});
+
+		it('a throwing property-form observer is isolated too', async () => {
+			const onAudioOutput = vi.fn();
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, { onAudioOutput });
+			await transport.connect();
+			transport.onUsageMetadata = () => {
+				throw new Error('metrics failed');
+			};
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+
+			cbs.onmessage({
+				usageMetadata: USAGE,
+				serverContent: { modelTurn: { parts: [{ inlineData: { data: 'AUDIO' } }] } },
+			});
+
+			expect(onAudioOutput).toHaveBeenCalledWith('AUDIO');
+		});
+
+		it('a throwing `onRealtimeLLMUsage` observer does not suppress audio on the same message', async () => {
+			const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			const onAudioOutput = vi.fn();
+			transport.onAudioOutput = onAudioOutput;
+			transport.onRealtimeLLMUsage = () => {
+				throw new Error('observer failed');
+			};
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+
+			expect(() =>
+				cbs.onmessage({
+					usageMetadata: { promptTokenCount: 7, responseTokenCount: 1, totalTokenCount: 8 },
+					serverContent: { modelTurn: { parts: [{ inlineData: { data: 'AA==' } }] } },
+				}),
+			).not.toThrow();
+			expect(onAudioOutput).toHaveBeenCalledTimes(1);
+			expect(onAudioOutput).toHaveBeenCalledWith('AA==');
+			expect(warn).toHaveBeenCalledWith(
+				expect.stringContaining('onRealtimeLLMUsage observer threw'),
+				expect.any(Error),
+			);
+			warn.mockRestore();
+		});
+
+		it('a throwing observer on `turnComplete` still fires `onTurnComplete` and closes the server turn', async () => {
+			const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			const onTurnComplete = vi.fn();
+			const onModelTurnStart = vi.fn();
+			transport.onTurnComplete = onTurnComplete;
+			transport.onModelTurnStart = onModelTurnStart;
+			const phases: string[] = [];
+			transport.onRealtimeLLMUsage = (u) => {
+				phases.push(u.phase);
+				throw new Error('observer failed');
+			};
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+
+			cbs.onmessage({
+				usageMetadata: USAGE,
+				serverContent: { modelTurn: { parts: [{ inlineData: { data: 'AA==' } }] } },
+			});
+			expect(transport.getActiveServerTurnId()).toBe(1);
+
+			// The cached usage's final event throws inside the turnComplete branch.
+			expect(() => cbs.onmessage({ serverContent: { turnComplete: true } })).not.toThrow();
+			expect(phases).toEqual(['update', 'final']);
+			expect(onTurnComplete).toHaveBeenCalledTimes(1);
+			expect(onTurnComplete).toHaveBeenCalledWith(1);
+			expect(transport.getActiveServerTurnId()).toBeUndefined();
+
+			// The turn really closed: the next model output opens server turn 2.
+			cbs.onmessage({
+				serverContent: { modelTurn: { parts: [{ inlineData: { data: 'AA==' } }] } },
+			});
+			expect(onModelTurnStart).toHaveBeenCalledTimes(2);
+			expect(transport.getActiveServerTurnId()).toBe(2);
+			// The cached usage was consumed: no stale final on the next turnComplete.
+			cbs.onmessage({ serverContent: { turnComplete: true } });
+			expect(phases).toEqual(['update', 'final']);
+			expect(warn).toHaveBeenCalledTimes(2);
+			warn.mockRestore();
+		});
+
+		it('raw and normalized usage both fire for one message', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			const raw: LiveUsageMetadata[] = [];
+			const normalized: RealtimeLLMUsageEvent[] = [];
+			transport.onUsageMetadata = (u) => raw.push(u);
+			transport.onRealtimeLLMUsage = (u) => normalized.push(u);
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+
+			const usage = { promptTokenCount: 4096, responseTokenCount: 104, totalTokenCount: 4200 };
+			cbs.onmessage({ usageMetadata: usage });
+
+			expect(raw).toEqual([usage]);
+			expect(normalized).toHaveLength(1);
+			expect(normalized[0]).toMatchObject({
+				provider: 'gemini_live',
+				phase: 'update',
+				inputTokens: 4096,
+				outputTokens: 104,
+				totalTokens: 4200,
+				providerRaw: usage,
+			});
+		});
+	});
+
+	describe('upstream diagnostics', () => {
+		const B64 = 'AAAA'.repeat(30); // 120 b64 chars -> 90 raw bytes
+
+		it('counts a queued audio send with split raw/wire byte accounting', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			transport.sendAudio(B64);
+
+			const a = transport.getDiagnostics().upstream.audio;
+			expect(a.attempted).toBe(1);
+			expect(a.queued).toBe(1);
+			expect(a.attemptedRawBytes).toBe(90);
+			expect(a.attemptedWireBytesEstimate).toBe(120);
+			expect(a.queuedRawBytes).toBe(90);
+			expect(a.lastQueuedAt).not.toBeNull();
+			expect(a.lastThrewAt).toBeNull();
+		});
+
+		it('a send with no session is attempted+skipped, never queued', () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			transport.sendAudio(B64); // never connected
+
+			const a = transport.getDiagnostics().upstream.audio;
+			expect(a.attempted).toBe(1);
+			expect(a.skippedNoSession).toBe(1);
+			expect(a.queued).toBe(0);
+			expect(a.lastSkippedAt).not.toBeNull();
+		});
+
+		it('both text APIs land in the text slot; empty text is skippedEmpty', async () => {
+			// A live model, so generation-triggering sendContent takes the realtime
+			// text path, where empty text is not sent.
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', model: 'gemini-3.1-flash-live-preview' },
+				{},
+			);
+			await transport.connect();
+			transport.sendContent([{ role: 'user', text: 'hello' }]);
+			transport.sendClientContent([{ role: 'user', parts: [{ text: 'world' }] }]);
+			transport.sendContent([{ role: 'user', text: 'quiet' }], false); // clientContent path
+			transport.sendContent([{ role: 'user', text: '' }]);
+
+			const t = transport.getDiagnostics().upstream.text;
+			expect(t.attempted).toBe(4);
+			expect(t.queued).toBe(3);
+			expect(t.skippedEmpty).toBe(1);
+			// UTF-8 bytes for text: 'hello' + 'world' + 'quiet'
+			expect(t.queuedRawBytes).toBe(15);
+			expect(mockSession.sendRealtimeInput).toHaveBeenCalledTimes(1);
+			expect(mockSession.sendClientContent).toHaveBeenCalledTimes(2);
+		});
+
+		it('sendFile slots by kind: image->video, audio/*->audio, other->video until realtime routing', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			transport.sendFile(B64, 'image/jpeg');
+			transport.sendFile(B64, 'audio/wav');
+			transport.sendFile(B64, 'application/pdf');
+
+			const d = transport.getDiagnostics().upstream;
+			expect(d.audio.queued).toBe(1);
+			expect(d.audio.queuedRawBytes).toBe(90);
+			// Every MIME type is still sent inline, so the pdf is a queued video-slot
+			// send, not an unsupportedMime skip.
+			expect(d.video.attempted).toBe(2);
+			expect(d.video.queued).toBe(2);
+			expect(d.video.unsupportedMime).toBe(0);
+			expect(mockSession.sendClientContent).toHaveBeenCalledTimes(3);
+		});
+
+		it('a throwing send counts threw, rethrows, and never counts queued', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			mockSession.sendRealtimeInput.mockImplementationOnce(() => {
+				throw new Error('socket write failed');
+			});
+
+			expect(() => transport.sendAudio(B64)).toThrow('socket write failed');
+			const a = transport.getDiagnostics().upstream.audio;
+			expect(a.attempted).toBe(1);
+			expect(a.threw).toBe(1);
+			expect(a.queued).toBe(0);
+			expect(a.lastThrewAt).not.toBeNull();
+		});
+
+		it('counters reset on a new generation — a new socket starts at zero', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			transport.sendAudio(B64);
+			expect(transport.getDiagnostics().transportGeneration).toBe(1);
+			expect(transport.getDiagnostics().upstream.audio.queued).toBe(1);
+
+			// A new connection's setupComplete is the generation boundary.
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({ setupComplete: { sessionId: 'sid_2' } });
+
+			const d = transport.getDiagnostics();
+			expect(d.transportGeneration).toBe(2);
+			expect(transport.currentTransportGeneration).toBe(2);
+			expect(d.upstream.audio.queued).toBe(0);
+			expect(d.upstream.audio.lastQueuedAt).toBeNull();
+		});
+
+		it('reconnect replay traffic hits the counters: one text-slot send for the whole batch', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			await transport.reconnect({
+				resumptionHandle: undefined,
+				conversationHistory: [
+					{ type: 'text', role: 'user', text: 'earlier question' },
+					{ type: 'text', role: 'assistant', text: 'earlier answer' },
+					{ type: 'tool_call', id: 'tc_1', name: 'search', args: { query: 'x' } },
+				],
+			});
+
+			// Counters reset at the reconnect's setup, so what remains IS the replay:
+			// three items, one quiet clientContent batch, one text-slot send.
+			const d = transport.getDiagnostics().upstream;
+			expect(d.text.attempted).toBe(1);
+			expect(d.text.queued).toBe(1);
+			const toolCallText = '[Previous tool call: search({"query":"x"})]';
+			expect(d.text.queuedRawBytes).toBe(16 + 14 + toolCallText.length);
+			expect(d.text.queuedWireBytesEstimate).toBe(d.text.queuedRawBytes);
+			expect(d.audio.attempted).toBe(0);
+			expect(d.video.attempted).toBe(0);
+			expect(mockSession.sendRealtimeInput).not.toHaveBeenCalled();
+			expect(mockSession.sendClientContent).toHaveBeenCalledTimes(1);
+		});
+
+		it('a text + png + pdf replay stays one inline text-slot batch: no realtime send', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			await transport.reconnect({
+				resumptionHandle: undefined,
+				conversationHistory: [
+					{ type: 'text', role: 'user', text: 'hello' },
+					{ type: 'file', role: 'user', base64Data: B64, mimeType: 'image/png' },
+					{ type: 'file', role: 'user', base64Data: B64, mimeType: 'application/pdf' },
+				],
+			});
+
+			// History files are not routed through sendFile: the image and the pdf
+			// ride inline in the same clientContent batch as the text, so only the
+			// text slot moves. Inline data counts decoded bytes raw and base64
+			// characters on the wire, so the two byte totals differ here.
+			const d = transport.getDiagnostics().upstream;
+			expect(d.text.attempted).toBe(1);
+			expect(d.text.queued).toBe(1);
+			expect(d.text.queuedRawBytes).toBe(5 + 90 + 90);
+			expect(d.text.queuedWireBytesEstimate).toBe(5 + 120 + 120);
+			expect(d.audio.attempted).toBe(0);
+			expect(d.video.attempted).toBe(0);
+			expect(mockSession.sendRealtimeInput).not.toHaveBeenCalled();
+			expect(mockSession.sendClientContent).toHaveBeenCalledTimes(1);
+			const batch = mockSession.sendClientContent.mock.calls[0]?.[0] as { turns: unknown[] };
+			expect(batch.turns).toHaveLength(3);
+		});
+
+		it('a retained-turn replay counts on the audio slot', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			const turn = {
+				pcm: Buffer.alloc(640, 5),
+				sampleRateHz: 16000,
+				utteranceId: 1,
+				sealedAtMs: 0,
+			};
+
+			expect(transport.replayUserTurn(turn)).toBe(false); // not connected
+			let a = transport.getDiagnostics().upstream.audio;
+			expect(a.attempted).toBe(1);
+			expect(a.skippedNoSession).toBe(1);
+			expect(a.queued).toBe(0);
+
+			await transport.connect(); // setup resets the counters
+			expect(transport.replayUserTurn(turn)).toBe(true);
+			a = transport.getDiagnostics().upstream.audio;
+			expect(a.attempted).toBe(1);
+			expect(a.queued).toBe(1);
+			expect(a.queuedRawBytes).toBe(640);
+			expect(a.queuedWireBytesEstimate).toBe(turn.pcm.toString('base64').length);
+			expect(transport.getDiagnostics().upstream.text.attempted).toBe(0);
+		});
+
+		it('a send buffered during the wind-down window counts when the deferred send runs', async () => {
+			const model = 'gemini-3.1-flash-live-preview';
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key', model }, {});
+			await transport.connect({
+				auth: { type: 'api_key', apiKey: 'test-key' },
+				model,
+				responseModality: 'text',
+			});
+			transport.onTextOutput = () => {};
+			transport.onTextDone = () => {};
+			transport.onTurnComplete = () => {};
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({ serverContent: { outputTranscription: { text: 'Hi.' } } });
+			cbs.onmessage({ serverContent: { generationComplete: true } });
+
+			transport.sendClientContent([{ role: 'user', parts: [{ text: 'directive' }] }], true);
+			expect(transport.getDiagnostics().upstream.text.attempted).toBe(0);
+
+			cbs.onmessage({ serverContent: { turnComplete: true } }); // flushes the buffer
+			const t = transport.getDiagnostics().upstream.text;
+			expect(t.attempted).toBe(1);
+			expect(t.queued).toBe(1);
+			expect(t.queuedRawBytes).toBe(9);
+		});
+
+		it('getDiagnostics returns a snapshot, not a live reference', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			const snap = transport.getDiagnostics();
+			transport.sendAudio(B64);
+			expect(snap.upstream.audio.attempted).toBe(0);
+			expect(transport.getDiagnostics().upstream.audio.attempted).toBe(1);
 		});
 	});
 

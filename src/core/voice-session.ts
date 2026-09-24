@@ -50,6 +50,8 @@ import type {
 	LLMTransport,
 	LLMTransportError,
 	STTProvider,
+	TransportUsageMetadata,
+	UpstreamCounters,
 } from '../types/transport.js';
 import type { TTSProvider } from '../types/tts.js';
 import type { ArtifactRef, ArtifactStore, SaveArtifactParams } from '../types/workspace.js';
@@ -211,6 +213,19 @@ export function clampGraceMs(raw: number | undefined): number | undefined {
 	return raw;
 }
 
+/** Shape returned by {@link VoiceSession.getDiagnostics}. */
+export interface VoiceSessionDiagnostics {
+	/** Upstream send counters of the current transport generation; `null` on a
+	 *  transport that does not report diagnostics. */
+	upstream: UpstreamCounters | null;
+	/** Increments on each connection that completes setup; `null` on a
+	 *  transport that does not report diagnostics. */
+	transportGeneration: number | null;
+	/** Client audio frames suppressed as echo, monotonic per session; 0 when no
+	 *  echo suppression is active. */
+	echoSuppressed: number;
+}
+
 /**
  * Configuration for creating a VoiceSession.
  */
@@ -234,9 +249,15 @@ export interface VoiceSessionConfig {
 	 *  `handleSupplied` on the attempt is what lets a consumer track resumed
 	 *  lineages without inferring them from log lines. Fires only on transports
 	 *  that report lifecycle (the Gemini Live transport); on a transport that
-	 *  does not declare `onConnectionLifecycle`, a warning is logged at
+	 *  declares neither this nor `onUsageMetadata`, a warning is logged at
 	 *  construction. */
 	onConnectionLifecycle?: (event: ConnectionLifecycleEvent) => void;
+	/** Server-reported token accounting, the provider's raw payload, once per
+	 *  message that carries it. `promptTokenCount` is the standing prompt size —
+	 *  the signal for context growth. Fires alongside (not instead of) the
+	 *  normalized `hooks.onRealtimeLLMUsage` / `realtime.usage`, and only on
+	 *  transports that report it (the Gemini Live transport). */
+	onUsageMetadata?: (usage: TransportUsageMetadata) => void;
 	/** Optional diagnostic logger. Defaults to console.log. */
 	log?: (message: string) => void;
 	/**
@@ -1917,29 +1938,46 @@ export class VoiceSession {
 		this.wireDiagnosticsCallbacks();
 	}
 
-	/** Wire the config's connection-lifecycle callback, only when configured (an
+	/** Wire the config's raw diagnostics callbacks, only those configured (an
 	 *  unconfigured one leaves the transport's hook untouched), chained over any
 	 *  handler a pre-configured injected transport already attached. The
 	 *  transport isolates each observer from its dispatch and connection state
 	 *  machine. */
 	private wireDiagnosticsCallbacks(): void {
-		const { onConnectionLifecycle } = this.config;
-		if (!onConnectionLifecycle) return;
-		// Read before assigning below: assignment would create the member.
-		if (!('onConnectionLifecycle' in this.transport)) {
+		const { onConnectionLifecycle, onUsageMetadata } = this.config;
+		const configured = [
+			...(onConnectionLifecycle ? ['onConnectionLifecycle'] : []),
+			...(onUsageMetadata ? ['onUsageMetadata'] : []),
+		];
+		if (configured.length === 0) return;
+		// Read before assigning below: assignment would create the members.
+		if (!('onConnectionLifecycle' in this.transport) && !('onUsageMetadata' in this.transport)) {
 			this.log(
-				'[WARN] onConnectionLifecycle configured, but the transport does not declare onConnectionLifecycle (e.g. OpenAI, Qwen); it is not expected to fire.',
+				`[WARN] ${configured.join(' and ')} configured, but the transport declares neither onConnectionLifecycle nor onUsageMetadata (e.g. OpenAI, Qwen); ${configured.length > 1 ? 'they are' : 'it is'} not expected to fire.`,
 			);
 		}
-		const prevLifecycle = this.transport.onConnectionLifecycle;
-		this.transport.onConnectionLifecycle = (event) => {
-			try {
-				prevLifecycle?.(event);
-			} catch (e) {
-				this.log(`pre-attached onConnectionLifecycle threw: ${(e as Error).message}`);
-			}
-			onConnectionLifecycle(event);
-		};
+		if (onConnectionLifecycle) {
+			const prevLifecycle = this.transport.onConnectionLifecycle;
+			this.transport.onConnectionLifecycle = (event) => {
+				try {
+					prevLifecycle?.(event);
+				} catch (e) {
+					this.log(`pre-attached onConnectionLifecycle threw: ${(e as Error).message}`);
+				}
+				onConnectionLifecycle(event);
+			};
+		}
+		if (onUsageMetadata) {
+			const prevUsage = this.transport.onUsageMetadata;
+			this.transport.onUsageMetadata = (usage) => {
+				try {
+					prevUsage?.(usage);
+				} catch (e) {
+					this.log(`pre-attached onUsageMetadata threw: ${(e as Error).message}`);
+				}
+				onUsageMetadata(usage);
+			};
+		}
 	}
 
 	/** Wire EventBus subscriptions: GUI event → client forwarding, STT lifecycle
@@ -2031,13 +2069,14 @@ export class VoiceSession {
 					agentName = this.agentRouter.activeAgent.name;
 				}
 			}
-			if (this.hooks.onRealtimeLLMUsage) {
-				this.hooks.onRealtimeLLMUsage({
+			// Isolated: a throwing hook must not stop the `realtime.usage` publish below.
+			this.safeEmitHook('onRealtimeLLMUsage', () =>
+				this.hooks.onRealtimeLLMUsage?.({
 					sessionId: this.config.sessionId,
 					agentName,
 					usage,
-				});
-			}
+				}),
+			);
 			const seqKey = `${turnId ?? 'no_turn'}:${source}`;
 			const sequence = this.turns.nextUsageSequence(seqKey);
 			const ratio = computeCacheHitRatio(usage, source);
@@ -3458,6 +3497,23 @@ export class VoiceSession {
 	/** Session ID for logging and multi-user association. */
 	getSessionId(): string {
 		return this.config.sessionId;
+	}
+
+	/**
+	 * Point-in-time send-path diagnostics; safe to sample on any tick.
+	 *
+	 * `upstream`/`transportGeneration` are null on transports that do not report
+	 * diagnostics (injected fakes, OpenAI, Qwen) — null means unobserved, never
+	 * zero. `echoSuppressed` is session-owned (suppressed frames never reach the
+	 * transport counters); this session suppresses no echo frames, so it is 0.
+	 */
+	getDiagnostics(): VoiceSessionDiagnostics {
+		const t = this.transport.getDiagnostics?.();
+		return {
+			upstream: t?.upstream ?? null,
+			transportGeneration: t?.transportGeneration ?? null,
+			echoSuppressed: 0,
+		};
 	}
 
 	// --- Error handling ---

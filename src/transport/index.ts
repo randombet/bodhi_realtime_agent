@@ -20,7 +20,11 @@ export type { HumeTTSConfig } from './hume-tts-provider.js';
 export { GeminiBatchSTTProvider } from './gemini-batch-stt-provider.js';
 export type { GeminiBatchSTTConfig } from './gemini-batch-stt-provider.js';
 export { GeminiLiveTransport } from './gemini-live-transport.js';
-export type { GeminiTransportCallbacks, GeminiTransportConfig } from './gemini-live-transport.js';
+export type {
+	GeminiTransportCallbacks,
+	GeminiTransportConfig,
+	LiveUsageMetadata,
+} from './gemini-live-transport.js';
 export type { LLMTransport } from '../types/transport.js';
 export { MultiClientTransport } from './multi-client-transport.js';
 export type { ConnectionContext, MultiClientTransportCallbacks } from './multi-client-transport.js';

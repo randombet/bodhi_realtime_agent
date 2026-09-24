@@ -414,6 +414,33 @@ export interface RealtimeLLMUsageEvent {
 	serverTurnWindingDown?: boolean;
 }
 
+/** Per-slot upstream send accounting. Counts and bytes are split
+ *  attempted-vs-queued so dropped work is visible, not averaged away:
+ *  `queued` increments only after the SDK send returned without throwing.
+ *  Wire estimates count payload encoding only (base64/UTF-8), no envelope. */
+export interface UpstreamSlotCounters {
+	attempted: number;
+	queued: number;
+	skippedNoSession: number;
+	threw: number;
+	attemptedRawBytes: number;
+	queuedRawBytes: number;
+	attemptedWireBytesEstimate: number;
+	queuedWireBytesEstimate: number;
+	lastAttemptedAt: number | null;
+	lastQueuedAt: number | null;
+	lastSkippedAt: number | null;
+	lastThrewAt: number | null;
+}
+
+/** Upstream (agent→provider) send counters, one slot per realtime-input kind.
+ *  Reset when a new connection completes setup — a new socket starts at zero. */
+export interface UpstreamCounters {
+	audio: UpstreamSlotCounters;
+	video: UpstreamSlotCounters & { unsupportedMime: number };
+	text: UpstreamSlotCounters & { skippedEmpty: number };
+}
+
 /** Connection-lifecycle facts, one event per observable transition.
  *
  * Variants are split rather than made optional because `transportGeneration`
@@ -434,6 +461,26 @@ export type ConnectionLifecycleEvent =
 			code?: number;
 			reason?: string;
 	  };
+
+/** Point-in-time transport diagnostics; safe to sample on any tick. */
+export interface TransportDiagnostics {
+	upstream: UpstreamCounters;
+	/** Increments on each connection that completes setup. */
+	transportGeneration: number;
+}
+
+/** Provider-reported token accounting, in the fields every provider shares.
+ *
+ * `promptTokenCount` is the standing prompt size — what to watch for context
+ * growth. `totalTokenCount` adds response tokens and does not describe it.
+ * Providers send more; the object passes through whole, so cast to the
+ * provider's own type (e.g. Gemini's `LiveUsageMetadata`) to read the rest.
+ * The raw counterpart of the normalized `RealtimeLLMUsageEvent`: a transport
+ * reporting both fires both from the same server message. */
+export interface TransportUsageMetadata {
+	promptTokenCount?: number;
+	totalTokenCount?: number;
+}
 
 /**
  * Provider-agnostic interface for realtime LLM transports.
@@ -682,11 +729,18 @@ export interface LLMTransport {
 
 	/** Optional: fires when the provider reports token or duration usage for billing/observability. */
 	onRealtimeLLMUsage?: (usage: RealtimeLLMUsageEvent) => void;
+	/** Optional: the provider's raw usage payload, once per server message that
+	 *  carries it (including messages that also carry audio, a tool call or
+	 *  goAway). Declared by GeminiLiveTransport only. */
+	onUsageMetadata?: (usage: TransportUsageMetadata) => void;
 
 	// --- Optional diagnostics (only on supporting transports; GeminiLiveTransport) ---
 	/** Connection-lifecycle facts (attempt / setup / close), correlated by
 	 *  `connectAttemptId`. */
 	onConnectionLifecycle?: (event: ConnectionLifecycleEvent) => void;
+	/** Snapshot of the upstream send counters and the current transport
+	 *  generation. Absent on transports that do not count sends. */
+	getDiagnostics?(): TransportDiagnostics;
 
 	// --- Reasoning lifecycle (reasoning-capable models only) ---
 	/** Fires when the model begins emitting its hidden reasoning trace

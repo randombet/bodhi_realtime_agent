@@ -15,11 +15,16 @@ import {
 	type ConnectionLifecycleEvent,
 	type HooksManager,
 	type IEventBus,
+	type LiveUsageMetadata,
 	ToolExecutor,
 	type TranscriptSink,
+	type TransportDiagnostics,
+	type TransportUsageMetadata,
 	type UpstreamCounters,
+	type UpstreamSlotCounters,
 	VoiceSession,
 	type VoiceSessionConfig,
+	type VoiceSessionDiagnostics,
 } from 'bodhi-realtime-agent';
 
 declare const session: VoiceSession;
@@ -63,7 +68,15 @@ const executor = new ToolExecutor(
 );
 // The public per-attempt reconnect deadline is a static on VoiceSession.
 const n: number = VoiceSession.RECONNECT_DEADLINE_MS;
-// The connection-lifecycle event type resolves from the root and narrows by kind.
+// The diagnostics, connection-lifecycle and raw-usage types resolve from the root.
+const diagnostics: VoiceSessionDiagnostics = session.getDiagnostics();
+const upstream: UpstreamCounters | null = diagnostics.upstream;
+const audioSlot: UpstreamSlotCounters | undefined = upstream?.audio;
+declare const transportDiagnostics: TransportDiagnostics;
+const generation: number = transportDiagnostics.transportGeneration;
 config.onConnectionLifecycle = (event: ConnectionLifecycleEvent): void => {
 	if (event.kind === 'generation-close') void event.transportGeneration;
+};
+config.onUsageMetadata = (usage: TransportUsageMetadata): void => {
+	void (usage as LiveUsageMetadata).cachedContentTokenCount;
 };
