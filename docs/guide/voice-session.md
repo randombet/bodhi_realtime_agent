@@ -65,7 +65,7 @@ Hume custom setup exposes voice name, voice ID, `HUME_AI` vs `CUSTOM_VOICE`, Oct
 When you use **`clientSender`**, you must also choose how **media** is carried:
 
 - **`clientMedia: { kind: 'websocket' }`** (default) — PCM mic up and assistant PCM down on the **same WebSocket** as JSON (binary frames).
-- **`clientMedia: { kind: 'direct_rtc', rtcAudio?: 'none' | 'werift_opus', … }`** — JSON (including `session.config`, transcripts, and **`rtc.offer` / `rtc.answer` / `rtc.ice_candidate`**) stays on the WebSocket; with **`rtcAudio: 'werift_opus'`**, mic and assistant audio use **Opus RTP** on a WebRTC peer connection owned inside the framework channel. This does **not** replace the **`LLMTransport`** socket to Gemini/OpenAI.
+- **`clientMedia: { kind: 'direct_rtc', rtcAudio?: 'none' | 'werift_opus', … }`** — JSON (including `session.config`, transcripts, and **`rtc.offer` / `rtc.answer` / `rtc.ice_candidate`**) stays on the WebSocket; with **`rtcAudio: 'werift_opus'`**, mic and assistant audio use **Opus RTP** on a WebRTC peer connection owned inside the framework channel; the framework loads the engine on first use. This does **not** replace the **`LLMTransport`** socket to Gemini/OpenAI.
 
 `direct_rtc` **requires** `clientSender` (the factory throws if it is missing).
 
@@ -119,6 +119,8 @@ const session = new VoiceSession({
 ```
 
 The framework wires PCM rates and inbound PCM delivery when `rtcAudio === 'werift_opus'`; your server still implements **`clientSender`** and relays JSON frames unchanged.
+
+The root `bodhi-realtime-agent` entry has no native dependencies, so it bundles (for example with esbuild) without `.node` loaders. The werift + `@evan/opus` engine ships inside the package as an internal module, not as a public entry point, and a `werift_opus` session loads it on the first `rtc.offer`; no configuration change is needed. Only the package's own files can load that module, so `werift_opus` needs `bodhi-realtime-agent` loaded from its installed package: an app bundle that inlines the root entry cannot reach the engine and reports the load failure. If the load fails, the session logs a line naming the internal engine entry and sends the client one `rtc.error` frame.
 
 ## Playback gate
 

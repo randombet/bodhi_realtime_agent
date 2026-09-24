@@ -47,6 +47,12 @@
       }
     }
   },
+  "imports": {
+    "#direct-rtc": {
+      "import": "./dist/direct-rtc/index.js",
+      "require": "./dist/direct-rtc/index.cjs"
+    }
+  },
   "peerDependencies": {
     "@opentelemetry/api": ">=1.9.0"
   },

@@ -4,6 +4,17 @@ import { createClientChannel } from '../../src/transport/client-channel-factory.
 import { ClientTransport } from '../../src/transport/client-transport.js';
 import { DirectRtcClientChannel } from '../../src/transport/direct-rtc-client-channel.js';
 
+/** Counts evaluations of the native RTC modules anywhere in this file's import graph. */
+const nativeLoads = vi.hoisted(() => ({ werift: 0, opus: 0 }));
+vi.mock('werift', () => {
+	nativeLoads.werift++;
+	return {};
+});
+vi.mock('@evan/opus', () => {
+	nativeLoads.opus++;
+	return {};
+});
+
 describe('createClientChannel', () => {
 	it('throws TransportError for direct_rtc without clientSender', () => {
 		expect(() =>
@@ -87,6 +98,18 @@ describe('createClientChannel', () => {
 			callbacks: {},
 		});
 		expect(rtcOpus.supportsPlaybackStateProtocol).toBe(false);
+		// The engine loads on the first rtc.offer: construction evaluates neither native module.
+		expect(nativeLoads).toEqual({ werift: 0, opus: 0 });
+	});
+
+	it('throws TransportError for werift_opus without directRtcMedia', () => {
+		expect(() =>
+			createClientChannel({
+				profile: { kind: 'direct_rtc', rtcAudio: 'werift_opus' },
+				clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+				callbacks: {},
+			}),
+		).toThrow(TransportError);
 	});
 
 	it('routes sendAudioToClient through SessionClientSender when websocket + clientSender', () => {
