@@ -1181,6 +1181,15 @@ export class VoiceSession {
 		}
 
 		this.subagentConfigs = config.subagentConfigs ?? {};
+		// The deprecated model name is accepted but never selects a model:
+		// reasoningModel wins, otherwise the session default runs.
+		for (const [toolName, subagent] of Object.entries(this.subagentConfigs)) {
+			if (subagent.model !== undefined && subagent.reasoningModel === undefined) {
+				this.log(
+					`[WARN] subagent "${subagent.name}" (tool "${toolName}") sets the deprecated SubagentConfig.model ("${subagent.model}"), which is ignored: it runs on the session model. Set reasoningModel to choose its model.`,
+				);
+			}
+		}
 
 		this.responseWatchdogMs = config.responseWatchdogMs ?? DEFAULT_RESPONSE_WATCHDOG_MS;
 		this.normalizeDrainedInbound = config.normalizeDrainedInboundAudio !== false;

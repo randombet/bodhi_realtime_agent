@@ -15,6 +15,7 @@ import type {
 	AudioFormatSpec,
 	LLMTransport,
 	STTProvider,
+	SessionUpdate,
 	TransportCapabilities,
 } from '../../src/types/transport.js';
 
@@ -3934,5 +3935,71 @@ describe('VoiceSession direct_rtc with werift_opus', () => {
 		expect(handleFromClient).toHaveBeenCalledWith(frame, 'rtc');
 		expect(sendAudio).toHaveBeenCalledOnce();
 		expect(sendAudio).toHaveBeenCalledWith(frame.toString('base64'));
+	});
+});
+
+describe('VoiceSession with a synchronous updateSession and the deprecated subagent model', () => {
+	let session: VoiceSession | null = null;
+
+	afterEach(async () => {
+		if (session) {
+			await session.close();
+			session = null;
+		}
+	});
+
+	it('calls a synchronous updateSession at construction and awaits it on updateInstructions', async () => {
+		const updateSession = vi.fn((_config: SessionUpdate): void => {});
+		session = new VoiceSession({
+			sessionId: 'sess_sync_update',
+			userId: 'user_1',
+			apiKey: 'test-key',
+			agents: [createEchoAgent()],
+			initialAgent: 'echo',
+			port: 9979,
+			model: mockModel,
+			transport: { ...createMutableServerTurnTransport(), updateSession },
+		});
+
+		expect(updateSession).toHaveBeenCalledWith(
+			expect.objectContaining({ instructions: 'You are an echo agent' }),
+		);
+
+		await session.updateInstructions('Be brief');
+		expect(updateSession).toHaveBeenLastCalledWith({ instructions: 'Be brief' });
+	});
+
+	it('logs one deprecation warning per subagent that sets model without reasoningModel', () => {
+		const lines: string[] = [];
+		session = new VoiceSession({
+			sessionId: 'sess_subagent_model',
+			userId: 'user_1',
+			apiKey: 'test-key',
+			agents: [createEchoAgent()],
+			initialAgent: 'echo',
+			port: 9980,
+			model: mockModel,
+			log: (line) => lines.push(line),
+			subagentConfigs: {
+				deep_research: {
+					name: 'researcher',
+					instructions: 'Research',
+					tools: {},
+					model: 'legacy-model-name',
+				},
+				lookup: {
+					name: 'looker',
+					instructions: 'Look up',
+					tools: {},
+					model: 'legacy-model-name',
+					reasoningModel: mockModel,
+				},
+				summarize: { name: 'summarizer', instructions: 'Summarize', tools: {} },
+			},
+		});
+
+		const warnings = lines.filter((line) => line.includes('SubagentConfig.model'));
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain('subagent "researcher"');
 	});
 });

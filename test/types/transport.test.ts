@@ -144,6 +144,48 @@ describe('LLMTransport type definitions', () => {
 		expect(stub.audioFormat.outputSampleRate).toBe(24000);
 	});
 
+	it('accepts a synchronous updateSession, and awaiting it resolves', async () => {
+		const applied: SessionUpdate[] = [];
+		const syncTransport: LLMTransport = {
+			capabilities: {
+				messageTruncation: false,
+				turnDetection: true,
+				userTranscription: true,
+				inPlaceSessionUpdate: true,
+				sessionResumption: false,
+				contextCompression: false,
+				groundingMetadata: false,
+			},
+			audioFormat: {
+				inputSampleRate: 16000,
+				outputSampleRate: 24000,
+				channels: 1,
+				bitDepth: 16,
+				encoding: 'pcm',
+			},
+			isConnected: false,
+			connect: vi.fn(),
+			disconnect: vi.fn(),
+			reconnect: vi.fn(),
+			sendAudio: vi.fn(),
+			commitAudio: vi.fn(),
+			clearAudio: vi.fn(),
+			updateSession: (config: SessionUpdate): void => {
+				applied.push(config);
+			},
+			transferSession: vi.fn(),
+			sendContent: vi.fn(),
+			sendFile: vi.fn(),
+			sendToolResult: vi.fn(),
+			triggerGeneration: vi.fn(),
+		};
+
+		const result = await syncTransport.updateSession({});
+
+		expect(result).toBeUndefined();
+		expect(applied).toEqual([{}]);
+	});
+
 	it('the live-text and inline-file members are optional', () => {
 		// A transport shaped before these members existed still satisfies the
 		// interface; one that has them must use the declared signatures.

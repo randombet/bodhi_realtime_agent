@@ -280,6 +280,21 @@ turn's E2E correctly includes the tool execution time. `onTurnLatency` fires on
 the tracker's drain tick, asynchronously ≈ one macrotask after the turn
 finalizes.
 
+::: warning Upgrading from a build that timed the response instead
+Some earlier builds measured `totalE2EMs` from the first assistant audio to the
+provider's turn completion, that is, how long the answer took to produce, and
+kept the field name so it could later carry the full stop-to-first-audio
+measurement. Here it carries that measurement, under the same name. If you
+store, print or alert on the value:
+
+- it is the user's wait from the end of their speech to the first assistant
+  audio, not the duration of the answer;
+- `onTurnLatency` fires only for turns with a user-speech anchor: a greeting or
+  a text-injected turn produces audio but no sample, where the older
+  measurement reported one;
+- an interrupted turn that produced audio still reports its sample.
+:::
+
 ## Anatomy of a barge-in
 
 Barge-in metrics anchor on **detection → cancel actuation**, *not* on speech

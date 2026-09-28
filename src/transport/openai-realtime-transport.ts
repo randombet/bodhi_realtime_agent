@@ -126,8 +126,10 @@ export interface OpenAIRealtimeConfig {
 	 *  this mode). When omitted, the framework's defaults are merged in
 	 *  type-aware fashion — see `resolveTurnDetectionConfig`. */
 	turnDetection?: Record<string, unknown> | null;
-	/** Input-audio noise reduction. Defaults to `far_field`; set `null` to disable. */
-	noiseReduction?: OpenAIRealtimeNoiseReductionConfig | null;
+	/** Input-audio noise reduction, sent as `noise_reduction` in `session.update`.
+	 *  Defaults to `{ type: 'far_field' }`; set `null` to disable. Any other object
+	 *  is forwarded unchanged, so fields this type does not name still reach the API. */
+	noiseReduction?: OpenAIRealtimeNoiseReductionConfig | Record<string, unknown> | null;
 	/** Reasoning effort + optional summary verbosity. Only honoured when the
 	 *  active model supports reasoning (gated via the FEATURES table). Dropped
 	 *  with a warn — or thrown under `strict: true` — on older models. */
@@ -495,7 +497,10 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		};
 	}
 
-	private resolveNoiseReductionConfig(): OpenAIRealtimeNoiseReductionConfig | null {
+	private resolveNoiseReductionConfig():
+		| OpenAIRealtimeNoiseReductionConfig
+		| Record<string, unknown>
+		| null {
 		return this.config.noiseReduction === undefined
 			? DEFAULT_NOISE_REDUCTION
 			: this.config.noiseReduction;
@@ -1500,7 +1505,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 						: {}),
 					// biome-ignore lint/suspicious/noExplicitAny: SDK type is a strict union; wire is the canonical shape
 					turn_detection: this.resolveTurnDetectionConfig().wire as any,
-					// biome-ignore lint/suspicious/noExplicitAny: noise_reduction:null is a valid opt-out, SDK type can lag runtime
+					// biome-ignore lint/suspicious/noExplicitAny: noise_reduction:null is a valid opt-out and caller objects pass through as-is; SDK type can lag runtime
 					noise_reduction: this.resolveNoiseReductionConfig() as any,
 				},
 				...(!this._textMode

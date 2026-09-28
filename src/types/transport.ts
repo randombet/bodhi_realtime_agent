@@ -611,8 +611,10 @@ export interface LLMTransport {
 	 *  and resolves immediately. The merged config is sent in the single
 	 *  `session.update` issued at connect time.
 	 *  Post-connect: serialized via the transport's internal FIFO queue; each
-	 *  call produces one wire `session.update` and awaits its ack. */
-	updateSession(config: SessionUpdate): Promise<void>;
+	 *  call produces one wire `session.update` and awaits its ack.
+	 *  A custom transport may instead apply the update synchronously and
+	 *  return `void`. */
+	updateSession(config: SessionUpdate): void | Promise<void>;
 
 	// --- Agent transfer (transport decides: in-place vs reconnect) ---
 	transferSession(config: SessionUpdate, state?: ReconnectState): Promise<void>;
