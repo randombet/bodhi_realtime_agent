@@ -1,6 +1,6 @@
 {
   "name": "bodhi-realtime-agent",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": false,
   "description": "TypeScript framework for real-time voice agent applications using Google Gemini Live API",
   "homepage": "https://github.com/randombet/bodhi_realtime_agent#readme",
@@ -81,7 +81,9 @@
     "docs:dev": "vitepress dev docs",
     "docs:build": "pnpm ensure:client-protocol && typedoc && vitepress build docs",
     "docs:preview": "vitepress preview docs",
-    "prepare": "git config core.hooksPath .githooks && tsc -p clients/client-protocol/tsconfig.json && tsc -p clients/web-voice/tsconfig.json"
+    "verify:pack": "node scripts/verify-pack.mjs",
+    "prepare": "(git rev-parse --git-dir >/dev/null 2>&1 && git config core.hooksPath .githooks) || true; tsc -p clients/client-protocol/tsconfig.json && tsc -p clients/web-voice/tsconfig.json",
+    "prepublishOnly": "pnpm build && pnpm test && pnpm verify:pack"
   },
   "engines": {
     "node": ">=22.0.0"
@@ -115,6 +117,7 @@
     "dayjs": "^1.11.20",
     "debug": "^4.4.3",
     "dotenv": "^16.4.5",
+    "esbuild": "^0.28.2",
     "mermaid": "^11.12.2",
     "tsup": "^8.4.0",
     "tsx": "^4.8.1",
