@@ -23,6 +23,10 @@ import {
 	type ClientTransportCallbacks,
 	type ClientTransportOptions,
 	type ConnectionLifecycleEvent,
+	type EchoCheckResult,
+	type EchoEnvEntry,
+	EchoGuard,
+	type EchoGuardConfig,
 	type HooksManager,
 	type IEventBus,
 	type LLMTransport,
@@ -42,6 +46,8 @@ import {
 	VoiceSession,
 	type VoiceSessionConfig,
 	type VoiceSessionDiagnostics,
+	bestEnvelopeLag,
+	envelopePearson,
 } from 'bodhi-realtime-agent';
 
 declare const session: VoiceSession;
@@ -158,3 +164,22 @@ notificationQueue.sendOrQueue([{ role: 'user', parts: [{ text: 'done' }] }], tru
 config.onTranscriptionDivergence = (liveText: string, shadowText: string, turnId?: number): void =>
 	void [liveText, shadowText, turnId];
 config.divergenceCorrection = true;
+// Echo suppression: the guard and its envelope helpers are root values, and a session enables
+// the guard through its config.
+const echoConfig: EchoGuardConfig = { enabled: true, corrThreshold: 0.75 };
+config.echoGuard = echoConfig;
+const echoGuard = new EchoGuard(echoConfig);
+declare const micPcm: Parameters<EchoGuard['check']>[0];
+echoGuard.feedReference(micPcm, 24000);
+const echoCheck: EchoCheckResult = echoGuard.check(micPcm, 16000);
+const echoSuppressedWindows: number = echoGuard.suppressedCount;
+const echoEntry: EchoEnvEntry = { rms: 0.5, at: 0 };
+const envelopeCorr: number = envelopePearson([echoEntry.rms], [echoEntry.rms]);
+const envelopeLag: { corr: number; lagMs: number } = bestEnvelopeLag(
+	[echoEntry.rms],
+	[echoEntry],
+	0,
+	12,
+	1500,
+	20,
+);

@@ -4,6 +4,9 @@ import type {
 	ClientTransportCallbacks,
 	ClientTransportOptions,
 	ConnectionLifecycleEvent,
+	EchoCheckResult,
+	EchoEnvEntry,
+	EchoGuardConfig,
 	LiveUsageMetadata,
 	TransportDiagnostics,
 	TransportUsageMetadata,
@@ -114,5 +117,18 @@ describe('module smoke test', () => {
 			'function',
 			'function',
 		]);
+	});
+
+	it('root-exports EchoGuard, its envelope helpers and its config and result types', async () => {
+		const mod = await import('../src/index.js');
+		expect(typeof mod.EchoGuard).toBe('function');
+		expect(typeof mod.envelopePearson).toBe('function');
+		expect(typeof mod.bestEnvelopeLag).toBe('function');
+
+		// Type-level: fails typecheck:tests if any name stops resolving from the root.
+		const config: EchoGuardConfig = { enabled: true };
+		const entry: EchoEnvEntry = { rms: 0.5, at: 0 };
+		const result: EchoCheckResult = { suppress: false, corr: 0, lagMs: -1 };
+		expect([config.enabled, entry.rms, result.suppress]).toEqual([true, 0.5, false]);
 	});
 });
