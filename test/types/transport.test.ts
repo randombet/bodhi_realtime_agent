@@ -144,6 +144,52 @@ describe('LLMTransport type definitions', () => {
 		expect(stub.audioFormat.outputSampleRate).toBe(24000);
 	});
 
+	it('the live-text and inline-file members are optional', () => {
+		// A transport shaped before these members existed still satisfies the
+		// interface; one that has them must use the declared signatures.
+		const withoutThem: LLMTransport = {
+			capabilities: {
+				messageTruncation: false,
+				turnDetection: true,
+				userTranscription: true,
+				inPlaceSessionUpdate: false,
+				sessionResumption: false,
+				contextCompression: false,
+				groundingMetadata: false,
+			},
+			audioFormat: {
+				inputSampleRate: 16000,
+				outputSampleRate: 24000,
+				channels: 1,
+				bitDepth: 16,
+				encoding: 'pcm',
+			},
+			isConnected: false,
+			connect: vi.fn(),
+			disconnect: vi.fn(),
+			reconnect: vi.fn(),
+			sendAudio: vi.fn(),
+			commitAudio: vi.fn(),
+			clearAudio: vi.fn(),
+			updateSession: vi.fn(async () => {}),
+			transferSession: vi.fn(),
+			sendContent: vi.fn(),
+			sendFile: vi.fn(),
+			sendToolResult: vi.fn(),
+			triggerGeneration: vi.fn(),
+		};
+		const withThem: LLMTransport = {
+			...withoutThem,
+			sendLiveText: (turns: ContentTurn[]) => turns.length > 0,
+			sendInlineFile: (_base64Data: string, _mimeType: string) => {},
+		};
+
+		expect(withoutThem.sendLiveText).toBeUndefined();
+		expect(withoutThem.sendInlineFile).toBeUndefined();
+		expect(typeof withThem.sendLiveText).toBe('function');
+		expect(typeof withThem.sendInlineFile).toBe('function');
+	});
+
 	it('LLMTransportConfig supports all auth types', () => {
 		const apiKeyConfig: LLMTransportConfig = {
 			auth: { type: 'api_key', apiKey: 'test' },

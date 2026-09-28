@@ -863,6 +863,37 @@ describe('VoiceSession', () => {
 		await new Promise<void>((r) => ws.on('close', r));
 	});
 
+	it('routes a document upload to the transport sendInlineFile and an image to sendFile', async () => {
+		const transport = Object.assign(createMutableServerTurnTransport(), {
+			sendInlineFile: vi.fn(),
+		});
+		session = new VoiceSession({
+			sessionId: 'sess_upload',
+			userId: 'user_1',
+			apiKey: 'test-key',
+			agents: [createEchoAgent()],
+			initialAgent: 'echo',
+			model: mockModel,
+			transport,
+			clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+		});
+		await session.start();
+
+		session.feedJsonFromClient({
+			type: 'file_upload',
+			data: { base64: 'cGRm', mimeType: 'application/pdf', fileName: 'doc.pdf' },
+		});
+		session.feedJsonFromClient({
+			type: 'file_upload',
+			data: { base64: 'cG5n', mimeType: 'image/png', fileName: 'pic.png' },
+		});
+
+		expect(transport.sendInlineFile).toHaveBeenCalledTimes(1);
+		expect(transport.sendInlineFile).toHaveBeenCalledWith('cGRm', 'application/pdf');
+		expect(transport.sendFile).toHaveBeenCalledTimes(1);
+		expect(transport.sendFile).toHaveBeenCalledWith('cG5n', 'image/png');
+	});
+
 	it('publishes turn events on EventBus', async () => {
 		session = new VoiceSession({
 			sessionId: 'sess_1',
