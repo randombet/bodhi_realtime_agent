@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
+import { ValidationError } from '../../src/core/errors.js';
 import {
 	DEFAULT_GEMINI_LIVE_MODEL,
 	DEFAULT_GEMINI_REALTIME_INPUT_CONFIG,
@@ -399,6 +400,188 @@ describe('GeminiLiveTransport', () => {
 			expect(transport.isConnected).toBe(false);
 			// The property-form onClose still observes the setup-failure close.
 			expect(onCloseSpy).toHaveBeenCalledWith(1006, 'abnormal');
+		});
+	});
+
+	describe('context window compression', () => {
+		function cwc() {
+			return (capturedConnectConfig.config as Record<string, unknown>).contextWindowCompression as
+				| { triggerTokens?: string; slidingWindow?: { targetTokens?: string } }
+				| undefined;
+		}
+
+		it('is absent entirely when no compressionConfig is supplied', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			expect(cwc()).toBeUndefined();
+		});
+
+		it('sends both thresholds as strings — the API types them as int64-over-JSON', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', compressionConfig: { triggerTokens: 32000, targetTokens: 16000 } },
+				{},
+			);
+			await transport.connect();
+			expect(cwc()).toEqual({ triggerTokens: '32000', slidingWindow: { targetTokens: '16000' } });
+		});
+
+		// An empty object is the documented way to take the server's own tuning
+		// (trigger 80% of the model limit, target half) instead of inventing one.
+		it('enables compression with server defaults when no thresholds are given', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key', compressionConfig: {} }, {});
+			await transport.connect();
+			const c = cwc();
+			expect(c).toBeDefined();
+			expect(c).toEqual({ slidingWindow: {} });
+			// Omission must be real absence: an explicit undefined would serialize
+			// as a null threshold and defeat the server default.
+			expect(Object.hasOwn(c as object, 'triggerTokens')).toBe(false);
+			expect(Object.hasOwn((c as { slidingWindow: object }).slidingWindow, 'targetTokens')).toBe(
+				false,
+			);
+		});
+
+		it('omits only the threshold that was not supplied', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', compressionConfig: { triggerTokens: 20000 } },
+				{},
+			);
+			await transport.connect();
+			expect(cwc()).toEqual({ triggerTokens: '20000', slidingWindow: {} });
+		});
+	});
+
+	describe('media resolution', () => {
+		it('passes mediaResolution through to the connect config', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', mediaResolution: 'MEDIA_RESOLUTION_LOW' },
+				{},
+			);
+			await transport.connect();
+			const cfg = capturedConnectConfig.config as Record<string, unknown>;
+			expect(cfg.mediaResolution).toBe('MEDIA_RESOLUTION_LOW');
+		});
+
+		it('omits mediaResolution entirely when not configured — server default applies', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			const cfg = capturedConnectConfig.config as Record<string, unknown>;
+			expect(Object.hasOwn(cfg, 'mediaResolution')).toBe(false);
+		});
+	});
+
+	describe('realtimeInputConfig: false', () => {
+		function sentRealtimeInputConfig(): boolean {
+			return Object.hasOwn(capturedConnectConfig.config as object, 'realtimeInputConfig');
+		}
+
+		it('emits no realtimeInputConfig key at all', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', realtimeInputConfig: false },
+				{},
+			);
+			await transport.connect();
+			expect(sentRealtimeInputConfig()).toBe(false);
+		});
+
+		it('stays absent when reconnect() dials again from the retained config', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', realtimeInputConfig: false },
+				{},
+			);
+			await transport.connect();
+			capturedConnectConfig = {};
+			await transport.reconnect();
+			expect(capturedConnectConfig.config).toBeDefined();
+			expect(sentRealtimeInputConfig()).toBe(false);
+		});
+
+		it('stays absent when transferSession() dials again from the retained config', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', realtimeInputConfig: false },
+				{},
+			);
+			await transport.connect();
+			capturedConnectConfig = {};
+			await transport.transferSession({ instructions: 'Next agent' });
+			expect(capturedConnectConfig.config).toBeDefined();
+			expect(sentRealtimeInputConfig()).toBe(false);
+		});
+	});
+
+	describe('vadConfig', () => {
+		function sentRealtimeInputConfig(): unknown {
+			return (capturedConnectConfig.config as Record<string, unknown>).realtimeInputConfig;
+		}
+
+		it('maps verbatim to automaticActivityDetection with no framework defaults merged', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', vadConfig: { silenceDurationMs: 200 } },
+				{},
+			);
+			await transport.connect();
+			expect(sentRealtimeInputConfig()).toEqual({
+				automaticActivityDetection: { silenceDurationMs: 200 },
+			});
+			const aad = (sentRealtimeInputConfig() as { automaticActivityDetection: object })
+				.automaticActivityDetection;
+			expect(Object.hasOwn(aad, 'endOfSpeechSensitivity')).toBe(false);
+		});
+
+		it('sends an empty automaticActivityDetection for an empty vadConfig', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key', vadConfig: {} }, {});
+			await transport.connect();
+			expect(sentRealtimeInputConfig()).toEqual({ automaticActivityDetection: {} });
+		});
+
+		it('passes disabled: true through', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', vadConfig: { disabled: true } },
+				{},
+			);
+			await transport.connect();
+			expect(sentRealtimeInputConfig()).toEqual({
+				automaticActivityDetection: { disabled: true },
+			});
+		});
+
+		it('keeps zero-valued durations on the wire', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', vadConfig: { silenceDurationMs: 0, prefixPaddingMs: 0 } },
+				{},
+			);
+			await transport.connect();
+			expect(sentRealtimeInputConfig()).toEqual({
+				automaticActivityDetection: { silenceDurationMs: 0, prefixPaddingMs: 0 },
+			});
+		});
+
+		it('throws ValidationError when realtimeInputConfig is also supplied', () => {
+			expect(
+				() =>
+					new GeminiLiveTransport(
+						{
+							apiKey: 'test-key',
+							realtimeInputConfig: { automaticActivityDetection: { silenceDurationMs: 500 } },
+							vadConfig: { silenceDurationMs: 200 },
+						},
+						{},
+					),
+			).toThrow(ValidationError);
+		});
+
+		it('throws ValidationError when realtimeInputConfig: false is also supplied', () => {
+			expect(
+				() =>
+					new GeminiLiveTransport(
+						{
+							apiKey: 'test-key',
+							realtimeInputConfig: false,
+							vadConfig: { silenceDurationMs: 200 },
+						},
+						{},
+					),
+			).toThrow(ValidationError);
 		});
 	});
 
@@ -3318,6 +3501,10 @@ describe('resolveGeminiRealtimeInputConfig', () => {
 			(result as { automaticActivityDetection: { endOfSpeechSensitivity: string } })
 				.automaticActivityDetection.endOfSpeechSensitivity,
 		).toBe('END_SENSITIVITY_HIGH');
+	});
+
+	it('returns undefined for false — the opt-out applies no default', () => {
+		expect(resolveGeminiRealtimeInputConfig(false)).toBeUndefined();
 	});
 
 	it('deep-merges partial automaticActivityDetection — user fields win, defaults fill in', () => {

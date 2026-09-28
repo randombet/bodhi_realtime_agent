@@ -124,3 +124,5 @@ const closeReasons: readonly [string, string, string] = [
 	CLOSE_REASON_SUPERSEDED_BY_TAKEOVER,
 	CLOSE_REASON_VERIFIER_PREEMPTED,
 ];
+// Gemini server-VAD settings sent verbatim as realtimeInputConfig.automaticActivityDetection.
+config.vadConfig = { silenceDurationMs: 200, prefixPaddingMs: 0 };
