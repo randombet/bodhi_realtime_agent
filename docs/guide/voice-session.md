@@ -423,6 +423,51 @@ mode, or on another transport, `recoverUpstream`, `reconnectBoundary` and
 counters. In actor mode `recoverUpstream()` throws and `parkUpstream()`
 rejects with a `SessionError`.
 
+## Resetting the conversation context
+
+`resetConversationContext(reason)` starts the in-memory conversation over
+without closing the session, for example when a long-lived session moves on
+to an unrelated task. It returns `{ cleared }`, the number of items it
+dropped. It publishes no event; `reason` appears only in the log.
+
+```ts
+const { cleared } = session.resetConversationContext('new task');
+```
+
+The reset runs these steps synchronously, in this order:
+
+1. Buffered user and assistant transcripts are flushed into the context.
+2. Every user message still waiting for an external STT transcript is sealed
+   with the text it already holds. A reset cannot wait for the authoritative
+   transcript.
+3. The history writer persists the items it has not written yet, once. The
+   write joins the writer's ordered queue ahead of anything written later.
+4. The items, the checkpoint and the pending message ids are cleared, and the
+   retained user audio and the reconnect replay state are dropped.
+
+Afterwards the history stores hold everything from before the reset, and none
+of it is written again. Later history flushes, the next memory extraction, the
+close report's `items`, the post-session snapshot and the context replayed on a
+reconnect or transfer see only items added after the reset. A reset finalizes
+nothing: the session keeps its state, and `session.close`, the close report and
+the post-session pipeline still run once, when the session closes.
+
+With `memory` configured, a memory extraction still running during the reset
+can mark items added after the reset as processed when it completes. The memory
+distiller and the history writer share one checkpoint, so that extraction moves
+the checkpoint past every item added between the reset and its completion. The
+distiller skips those items, and the history writer never appends them to the
+history stores: they appear only in the close report's `items`. Items added
+after the extraction completes are written as usual. The session logs a warning
+on every reset while `memory` is set.
+
+`session.sessionManager.reset()` does not reopen a closed session. On the
+session's own manager it throws a `SessionError` once a close has been claimed
+or the state is `CLOSED`, because the history report and the post-session
+pipeline have already run. Use `recoverUpstream()` under
+`upstreamLossPolicy: 'hold'` to redial without closing, or construct a new
+`VoiceSession`.
+
 ## Related
 
 - [Agents](/guide/agents)

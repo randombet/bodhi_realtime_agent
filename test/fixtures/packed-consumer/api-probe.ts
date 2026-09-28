@@ -31,6 +31,8 @@ import {
 	type RecoverUpstreamArgs,
 	type RecoverUpstreamResult,
 	type RecoveryCapabilities,
+	type SendOrQueueOptions,
+	type SessionManager,
 	ToolExecutor,
 	type TranscriptSink,
 	type TransportDiagnostics,
@@ -145,3 +147,9 @@ declare const notificationQueue: BackgroundNotificationQueue;
 notificationQueue.setHeld(true);
 // The real-client detach edge is a host hook, beside the attach hook above.
 config.onClientDisconnected;
+// A standalone SessionManager can be reset after a close, and a background notification can
+// name the tool call it reports so a duplicate for the same call is dropped.
+declare const standaloneManager: SessionManager;
+standaloneManager.reset();
+const dedupOptions: SendOrQueueOptions = { priority: 'normal', toolCallId: 'call_1' };
+notificationQueue.sendOrQueue([{ role: 'user', parts: [{ text: 'done' }] }], true, dedupOptions);

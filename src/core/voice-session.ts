@@ -1067,6 +1067,8 @@ export class VoiceSession {
 			this.eventBus,
 			this.hooks,
 			postSessionPipeline ? { pipeline: postSessionPipeline, drain: drainPostSession } : undefined,
+			// Owned by this session: its reset() refuses once the session is finalized.
+			true,
 		);
 		// Shared close-time finalization for EVERY path to CLOSED (graceful close,
 		// reconnect-fail, transfer-fail). Runs inside closeWithReason before
@@ -4140,6 +4142,48 @@ export class VoiceSession {
 	 */
 	parkUpstream(reason: string): Promise<void> {
 		return this.hostRecovery.parkUpstream(reason);
+	}
+
+	// --- Conversation continuity ---
+
+	/**
+	 * Start the in-memory conversation over without ending the session, and
+	 * return how many items were dropped. Everything up to now is persisted
+	 * first, in this order: buffered transcripts are flushed into the context;
+	 * every pending user message is sealed with the text it already holds (its
+	 * fallback transcript, since a reset cannot wait for an external STT
+	 * result); the history writer persists the unflushed items once; then the
+	 * items, the checkpoint and the pending ids are cleared, and the retained
+	 * user audio and the reconnect replay state are dropped. `reason` is only
+	 * logged; no event is published.
+	 *
+	 * The history stores keep the pre-reset items. Later history flushes, the
+	 * next memory extraction, the close report's items, the post-session
+	 * snapshot and the context replayed on a reconnect or transfer cover only
+	 * items added after the reset. With `memory` configured, an extraction
+	 * still in flight during the reset can mark items added after the reset as
+	 * processed when it completes. The memory distiller and the history writer
+	 * share one checkpoint, so the distiller then skips those items and the
+	 * history writer never appends them to the history stores; only the close
+	 * report's items list them. A warning is logged on every reset while
+	 * `memory` is set.
+	 */
+	resetConversationContext(reason: string): { cleared: number } {
+		if (this.config.memory) {
+			this.log(
+				'[WARN] resetConversationContext: memory is configured; a memory extraction in flight during the reset can mark items added after the reset as processed when it completes. The memory distiller and the history writer share one checkpoint, so those items are then skipped by the distiller and never appended to the history store.',
+			);
+		}
+		this.transcriptManager.flush();
+		for (const timer of this.reservationTimers.values()) clearTimeout(timer);
+		this.reservationTimers.clear();
+		this.transcriptManager.sealPendingInput();
+		this.historyWriter?.flushNow();
+		const cleared = this.conversationContext.clear();
+		this.utteranceRetainer?.clearAll();
+		this.reconnector.resetReplayState();
+		this.log(`Conversation context reset (${reason}): ${cleared} item(s) cleared`);
+		return { cleared };
 	}
 
 	// --- Error handling ---

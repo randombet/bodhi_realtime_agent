@@ -44,6 +44,9 @@ export class SessionManager {
 	private _finalizers: Array<() => void | Promise<void>> = [];
 	/** Memoized close completion, so repeated closeWithReason() calls share one promise. */
 	private _closePromise: Promise<void> | null = null;
+	/** Set once `_closePromise` settles, i.e. after the CLOSED transition and the
+	 *  post-session dispatch (including a drained report) have both finished. */
+	private _closeSettled = false;
 	/** Per-session snapshot builder used at dispatch time (phase 4 of close). */
 	private _snapshotBuilder: PostSessionSnapshotBuilder | null = null;
 
@@ -57,6 +60,10 @@ export class SessionManager {
 		private hooks: HooksManager,
 		/** Optional post-session pipeline. When absent, close behaves exactly as before. */
 		private postSession?: SessionPostProcessing,
+		/** True when a `VoiceSession` owns this manager. `reset()` then refuses once a
+		 *  close has been claimed or the state is CLOSED, because the session's
+		 *  history and post-session work finalize on `session.close`. */
+		private readonly managed = false,
 	) {
 		this.sessionId = config.sessionId;
 		this.userId = config.userId;
@@ -86,6 +93,43 @@ export class SessionManager {
 
 	get resumptionHandle(): string | null {
 		return this._resumptionHandle;
+	}
+
+	/**
+	 * Return to CREATED with no resumption handle and no buffered messages, so a
+	 * closed manager can run another CONNECTING → ACTIVE → CLOSED cycle. The
+	 * close guard is cleared as well, so the next `closeWithReason()` publishes
+	 * its own `session.close`. `startedAtMs` keeps the first activation time,
+	 * and registered finalizers and the snapshot builder stay registered.
+	 *
+	 * Throws `SessionError` while a close is still in flight (from the claim
+	 * until its promise settles, which includes a drained post-session report
+	 * still pending after the CLOSED transition): resetting then would let two
+	 * finalizations overlap. On a manager a `VoiceSession` owns, it also throws
+	 * once a close has been claimed or the state is CLOSED, since that session
+	 * is finalized; use `recoverUpstream()` under `upstreamLossPolicy: 'hold'`
+	 * to redial without closing, or construct a new `VoiceSession`.
+	 */
+	reset(): void {
+		if (this.managed && (this._closing || this._state === 'CLOSED')) {
+			throw new SessionError(
+				"SessionManager.reset: managed session finalized — use recoverUpstream()/upstreamLossPolicy:'hold' or construct a new VoiceSession",
+				{ severity: 'error' },
+			);
+		}
+		if (this._closing && !this._closeSettled) {
+			throw new SessionError(
+				'SessionManager.reset: a close is still in flight; await closeWithReason() before resetting',
+				{ severity: 'error' },
+			);
+		}
+		this._state = 'CREATED';
+		this._resumptionHandle = null;
+		this._bufferedMessages = [];
+		this._closing = false;
+		this._pendingReason = null;
+		this._closePromise = null;
+		this._closeSettled = false;
 	}
 
 	transitionTo(newState: SessionState): void {
@@ -192,15 +236,26 @@ export class SessionManager {
 		this._pendingReason = reason;
 		if (this._finalizers.length === 0) {
 			this.transitionTo('CLOSED');
-			this._closePromise = this.dispatchPostSession(reason);
+			this._closePromise = this.trackCloseSettlement(this.dispatchPostSession(reason));
 			return this._closePromise;
 		}
-		this._closePromise = (async () => {
-			await this.runFinalizers();
-			this.transitionTo('CLOSED');
-			await this.dispatchPostSession(reason);
-		})();
+		this._closePromise = this.trackCloseSettlement(
+			(async () => {
+				await this.runFinalizers();
+				this.transitionTo('CLOSED');
+				await this.dispatchPostSession(reason);
+			})(),
+		);
 		return this._closePromise;
+	}
+
+	/** Record when the claimed close finishes, whichever way it settles. */
+	private trackCloseSettlement(close: Promise<void>): Promise<void> {
+		const settled = (): void => {
+			this._closeSettled = true;
+		};
+		close.then(settled, settled);
+		return close;
 	}
 
 	private async runFinalizers(): Promise<void> {

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
+import { BackgroundNotificationQueue } from '../../src/core/background-notification-queue.js';
 import { ToolCallRouter } from '../../src/core/tool-call-router.js';
 import type { SubagentConfig } from '../../src/types/agent.js';
 import type { ToolDefinition } from '../../src/types/tool.js';
@@ -215,6 +216,64 @@ describe('ToolCallRouter', () => {
 			toolCallId: 'tc_3',
 			toolName: 'record_answer',
 			result: { status: 'recorded' },
+		});
+	});
+
+	describe('background notification deduplication', () => {
+		function createHandoffRouter(handoff: ReturnType<typeof vi.fn>) {
+			const sendContent = vi.fn();
+			const notificationQueue = new BackgroundNotificationQueue(sendContent, vi.fn());
+			const router = new ToolCallRouter({
+				toolExecutor: { handleToolCall: vi.fn(), cancel: vi.fn() } as never,
+				agentRouter: {
+					activeAgent: { name: 'main', tools: [createBackgroundTool('ask_claude', 'working')] },
+					handoff,
+					cancelSubagent: vi.fn(),
+				} as never,
+				conversationContext: { addToolCall: vi.fn(), addToolResult: vi.fn() } as never,
+				notificationQueue,
+				transcriptManager: { flushInput: vi.fn(), saveOutputPrefix: vi.fn() } as never,
+				subagentConfigs: { ask_claude: { name: 'claude', instructions: 'relay', tools: {} } },
+				sendToolResult: vi.fn(),
+				transfer: vi.fn(),
+				reportError: vi.fn(),
+				log: vi.fn(),
+			});
+			return { router, sendContent };
+		}
+
+		it('a duplicate background completion for the same tool call is spoken once', async () => {
+			const handoff = vi.fn().mockResolvedValue({ text: 'report ready' });
+			const { router, sendContent } = createHandoffRouter(handoff);
+
+			router.handleToolCalls([{ id: 'tc_dup', name: 'ask_claude', args: { task: 'x' } }]);
+			router.handleToolCalls([{ id: 'tc_dup', name: 'ask_claude', args: { task: 'x' } }]);
+			await flushMicrotasks();
+
+			expect(handoff).toHaveBeenCalledTimes(2);
+			expect(sendContent).toHaveBeenCalledOnce();
+			expect(sendContent.mock.calls[0][0][0].parts[0].text).toContain(
+				'Background task "ask_claude" completed successfully',
+			);
+
+			router.handleToolCalls([{ id: 'tc_other', name: 'ask_claude', args: { task: 'y' } }]);
+			await flushMicrotasks();
+			expect(sendContent).toHaveBeenCalledTimes(2);
+		});
+
+		it('a duplicate background failure for the same tool call is spoken once', async () => {
+			const handoff = vi.fn().mockRejectedValue(new Error('handoff failed'));
+			const { router, sendContent } = createHandoffRouter(handoff);
+
+			router.handleToolCalls([{ id: 'tc_fail', name: 'ask_claude', args: { task: 'x' } }]);
+			router.handleToolCalls([{ id: 'tc_fail', name: 'ask_claude', args: { task: 'x' } }]);
+			await flushMicrotasks();
+
+			expect(handoff).toHaveBeenCalledTimes(2);
+			expect(sendContent).toHaveBeenCalledOnce();
+			expect(sendContent.mock.calls[0][0][0].parts[0].text).toContain(
+				'Background task "ask_claude" failed',
+			);
 		});
 	});
 });
