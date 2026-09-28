@@ -1268,10 +1268,10 @@ export class VoiceSession {
 		// P4: also allocate the eager turn id here. Chain pattern preserves
 		// any pre-attached handler on injected transports.
 		const prevModelTurnStart = this.transport.onModelTurnStart;
-		this.transport.onModelTurnStart = () => {
+		this.transport.onModelTurnStart = (generationId?: string) => {
 			this._responseEpoch++;
 			try {
-				prevModelTurnStart?.();
+				prevModelTurnStart?.(generationId);
 			} catch (e) {
 				this.log(`pre-attached onModelTurnStart threw: ${(e as Error).message}`);
 			}
@@ -1312,6 +1312,18 @@ export class VoiceSession {
 			const origin =
 				this._pendingResponseOrigin ?? (wasToolContinuation ? 'tool_continuation' : 'user_audio');
 			this._pendingResponseOrigin = null;
+			// Once per framework Turn, on its first model start. Both counters,
+			// because they are different domains: the post-setup generation
+			// (correlates with lifecycle setup-ok) and the dial epoch. Undefined on
+			// transports without the getters.
+			if (modelTurn?.markStartPublished()) {
+				this.eventBus.publish('turn.start', {
+					sessionId: this.config.sessionId,
+					turnId: modelTurn.id,
+					transportGeneration: this.transport.currentTransportGeneration,
+					attemptEpoch: this.transport.currentDialGen,
+				});
+			}
 			this.eventBus.publish('response.started', {
 				sessionId: this.config.sessionId,
 				turnId: this.turns.current?.id ?? 'unknown',
@@ -1913,6 +1925,34 @@ export class VoiceSession {
 		};
 		this.transport.onTurnComplete = (serverTurnId) => this.handleTurnComplete(serverTurnId);
 		this.transport.onInterrupted = (serverTurnId) => this.handleInterrupted(serverTurnId);
+		// The generation pair, chained over handlers a pre-configured injected
+		// transport already attached. Not turn.*: a generation outlives the
+		// provider's turn boundary (see events.ts).
+		const prevGenerationStart = this.transport.onGenerationStart;
+		this.transport.onGenerationStart = (generationId) => {
+			try {
+				prevGenerationStart?.(generationId);
+			} catch (e) {
+				this.log(`pre-attached onGenerationStart threw: ${(e as Error).message}`);
+			}
+			this.eventBus.publish('generation.start', {
+				sessionId: this.config.sessionId,
+				generationId,
+			});
+		};
+		const prevGenerationEnd = this.transport.onGenerationEnd;
+		this.transport.onGenerationEnd = (generationId, reason) => {
+			try {
+				prevGenerationEnd?.(generationId, reason);
+			} catch (e) {
+				this.log(`pre-attached onGenerationEnd threw: ${(e as Error).message}`);
+			}
+			this.eventBus.publish('generation.end', {
+				sessionId: this.config.sessionId,
+				generationId,
+				reason,
+			});
+		};
 		this.transport.onOutputTranscription = (text) => {
 			const turn = this.turns.ensureCurrent();
 			if (!turn) {

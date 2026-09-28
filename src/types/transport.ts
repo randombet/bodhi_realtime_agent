@@ -5,6 +5,16 @@ import type { ToolDefinition } from './tool.js';
  *  following / accuracy. `low` is the documented production default. */
 export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
 
+/** Why a model generation ended (see `LLMTransport.onGenerationEnd`):
+ *  `generationComplete` — the provider said so; `interrupted` — barged in on;
+ *  `superseded` — the model began a new answer without ever sending
+ *  `generationComplete`; `disconnected` — the connection went away with one open. */
+export type GenerationEndReason =
+	| 'generationComplete'
+	| 'interrupted'
+	| 'superseded'
+	| 'disconnected';
+
 /** Static capabilities — orchestrator branches on these, never on provider names. */
 export interface TransportCapabilities {
 	/** Can truncate server-side message at audio playback position (OpenAI: yes, Gemini: no). */
@@ -685,12 +695,22 @@ export interface LLMTransport {
 	onClose?: (code?: number, reason?: string) => void;
 
 	// --- Turn lifecycle callbacks ---
-	/** Fires when the model begins any response (audio, tool call, etc.).
-	 *  Used by VoiceSession to trigger STT provider commit. */
-	onModelTurnStart?: () => void;
+	/** Fires when the model begins a response (audio, text, tool call).
+	 *  Used by VoiceSession to trigger STT provider commit.
+	 *  @param generationId The generation that opened, on transports that model
+	 *  generations (GeminiLiveTransport: once per generation, with the same id
+	 *  as `onGenerationStart`, so a tool call after `turnComplete` that finishes
+	 *  the same answer does not fire it again); `undefined` elsewhere. */
+	onModelTurnStart?: (generationId?: string) => void;
+	/** A model generation opened. Paired with exactly one `onGenerationEnd`.
+	 *  A generation is one answer: it outlives the provider's turn boundary,
+	 *  because a tool call that finishes the answer can arrive after it. */
+	onGenerationStart?: (generationId: string) => void;
+	/** That generation closed, and why. Fires exactly once per start. */
+	onGenerationEnd?: (generationId: string, reason: GenerationEndReason) => void;
 
 	/** Fires once per model response, on the FIRST audio chunk emitted to the
-	 *  client. Distinct from `onModelTurnStart` (which fires on any response part,
+	 *  client. Distinct from `onModelTurnStart` (which fires as a response begins,
 	 *  including tool-only turns) — this marks the moment audio actually begins, the
 	 *  anchor for TTS-first-audio / stop-to-first-audio latency. Transports reset
 	 *  their per-response "audio started" flag when a new response begins. */

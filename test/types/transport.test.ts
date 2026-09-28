@@ -15,6 +15,7 @@ import type {
 	TransportToolCall,
 	TransportToolResult,
 } from '../../src/types/index.js';
+import type { GenerationEndReason } from '../../src/types/transport.js';
 
 describe('LLMTransport type definitions', () => {
 	it('TransportCapabilities has all 7 boolean fields', () => {
@@ -245,6 +246,43 @@ describe('LLMTransport type definitions', () => {
 		expect(stub.capabilities.textResponseModality).toBe(true);
 		stub.onTextOutput?.('hello');
 		expect(stub.onTextOutput).toHaveBeenCalledWith('hello');
+	});
+
+	it('LLMTransport accepts the widened onModelTurnStart and the generation pair', () => {
+		// Existing `() => void` handlers stay assignable to the widened callback.
+		const legacyStart: LLMTransport['onModelTurnStart'] = () => {};
+		const starts: Array<string | undefined> = [];
+		const ends: Array<[string, GenerationEndReason]> = [];
+		const stub: Pick<LLMTransport, 'onModelTurnStart' | 'onGenerationStart' | 'onGenerationEnd'> = {
+			onModelTurnStart: (generationId?: string) => starts.push(generationId),
+			onGenerationStart: (generationId: string) => starts.push(generationId),
+			onGenerationEnd: (generationId, reason) => ends.push([generationId, reason]),
+		};
+
+		legacyStart?.();
+		stub.onModelTurnStart?.();
+		stub.onModelTurnStart?.('gen_0');
+		stub.onGenerationStart?.('gen_0');
+		for (const reason of [
+			'generationComplete',
+			'interrupted',
+			'superseded',
+			'disconnected',
+		] satisfies GenerationEndReason[]) {
+			stub.onGenerationEnd?.('gen_0', reason);
+		}
+		// Never invoked: only type-checked.
+		const _rejectsUnknownReason = () =>
+			// @ts-expect-error — turnComplete is a turn boundary, not a GenerationEndReason.
+			stub.onGenerationEnd?.('gen_0', 'turnComplete');
+
+		expect(starts).toEqual([undefined, 'gen_0', 'gen_0']);
+		expect(ends).toEqual([
+			['gen_0', 'generationComplete'],
+			['gen_0', 'interrupted'],
+			['gen_0', 'superseded'],
+			['gen_0', 'disconnected'],
+		]);
 	});
 });
 

@@ -15,6 +15,7 @@ import {
 	type ConnectionLifecycleEvent,
 	type HooksManager,
 	type IEventBus,
+	type LLMTransport,
 	type LiveUsageMetadata,
 	ToolExecutor,
 	type TranscriptSink,
@@ -79,4 +80,15 @@ config.onConnectionLifecycle = (event: ConnectionLifecycleEvent): void => {
 };
 config.onUsageMetadata = (usage: TransportUsageMetadata): void => {
 	void (usage as LiveUsageMetadata).cachedContentTokenCount;
+};
+// A custom transport implements the widened onModelTurnStart and the generation start/end pair.
+const customTransport: Pick<
+	LLMTransport,
+	'onModelTurnStart' | 'onGenerationStart' | 'onGenerationEnd'
+> = {
+	onModelTurnStart: (generationId?: string): void => void generationId,
+	onGenerationStart: (generationId: string): void => void generationId,
+	onGenerationEnd: (generationId, reason): void => {
+		if (reason === 'superseded') void generationId;
+	},
 };
