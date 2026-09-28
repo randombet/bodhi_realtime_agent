@@ -44,6 +44,9 @@ export interface GreetingControllerDeps {
 	 *  held recovery can re-evaluate (turn finalize, invalidation, no-start
 	 *  timeout, client reset). Optional for harnesses. */
 	onGateReleased?(): void;
+	/** Synthetic-output hold: while it returns true, `sendGreeting()` sends
+	 *  and arms nothing. Optional for harnesses. */
+	isSyntheticHeld?(): boolean;
 	log(message: string): void;
 }
 
@@ -286,14 +289,17 @@ export class GreetingController {
 	}
 
 	/** Send the active agent's greeting prompt to the LLM to trigger a spoken
-	 *  greeting. No-op (and clears `_greetingInFlight`) if the agent has no
-	 *  greeting configured. */
-	sendGreeting(): void {
+	 *  greeting. Returns `true` when the greeting was sent. Returns `false`,
+	 *  sending nothing, when the agent has no greeting configured (clearing
+	 *  `_greetingInFlight`) or while synthetic output is held (arming
+	 *  nothing: no pre-audio gate, no suppression, no notification reset). */
+	sendGreeting(): boolean {
 		const agent = this.deps.getActiveAgent();
 		if (!agent.greeting) {
 			this._greetingInFlight = false;
-			return;
+			return false;
 		}
+		if (this.deps.isSyntheticHeld?.() === true) return false;
 		this.deps.log(`Sending greeting for agent "${agent.name}"`);
 		// The effective pre-audio gate must start at the actual greeting send,
 		// not only at setup-complete: in the common ordering where the LLM is
@@ -335,6 +341,7 @@ export class GreetingController {
 			: agent.greeting;
 		const greetingText = `${memoryPrefix}${greetingBody}`;
 		this.deps.transport.sendContent([{ role: 'user', text: greetingText }], true);
+		return true;
 	}
 
 	/** Client-(re)connect reset: a fresh browser tab / RTC audio context
