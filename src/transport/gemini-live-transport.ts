@@ -3,6 +3,7 @@ import {
 	type LiveServerMessage,
 	type RealtimeInputConfig,
 	type Session,
+	type UsageMetadata,
 } from '@google/genai';
 import { DEFAULT_CONNECT_TIMEOUT_MS, DEFAULT_RECONNECT_TIMEOUT_MS } from '../core/constants.js';
 import type { ToolDefinition } from '../types/tool.js';
@@ -19,8 +20,12 @@ import type {
 	RetainedUserTurn,
 	SessionUpdate,
 	TransportCapabilities,
+	TransportDiagnostics,
 	TransportToolCall,
 	TransportToolResult,
+	TransportUsageMetadata,
+	UpstreamCounters,
+	UpstreamSlotCounters,
 } from '../types/transport.js';
 import { ConnectionLifecycleLedger } from './connection-lifecycle-ledger.js';
 import { normalizeGeminiUsageMetadata } from './realtime-usage-normalize.js';
@@ -137,6 +142,14 @@ export interface GeminiTransportConfig {
 	reconnectTimeoutMs?: number;
 }
 
+/** Token accounting as reported by the Live server.
+ *
+ * Aliases the SDK's own schema so every field the server sends stays reachable
+ * — a hand-written subset would silently hide cache and tool-use counts.
+ * `promptTokenCount` is the standing prompt size, the field to watch for context
+ * growth; `totalTokenCount` adds response tokens and so does not describe it. */
+export type LiveUsageMetadata = UsageMetadata;
+
 /** Callbacks fired by GeminiLiveTransport when server messages arrive. */
 export interface GeminiTransportCallbacks {
 	/** Gemini session setup is complete and ready for audio. */
@@ -165,12 +178,73 @@ export interface GeminiTransportCallbacks {
 	onResumptionUpdate?(handle: string, resumable: boolean): void;
 	/** Connection-lifecycle facts (attempt / setup / close). */
 	onConnectionLifecycle?(event: ConnectionLifecycleEvent): void;
+	/** Server-reported token accounting. Fires on EVERY message carrying it,
+	 *  including ones that also carry serverContent, a tool call, or goAway. */
+	onUsageMetadata?(usage: LiveUsageMetadata): void;
 	/** Grounding metadata from Google Search results. */
 	onGroundingMetadata?(metadata: Record<string, unknown>): void;
 	/** Transport-level error. */
 	onError?(error: Error): void;
 	/** WebSocket connection closed. */
 	onClose?(code?: number, reason?: string): void;
+}
+
+function freshSlot(): UpstreamSlotCounters {
+	return {
+		attempted: 0,
+		queued: 0,
+		skippedNoSession: 0,
+		threw: 0,
+		attemptedRawBytes: 0,
+		queuedRawBytes: 0,
+		attemptedWireBytesEstimate: 0,
+		queuedWireBytesEstimate: 0,
+		lastAttemptedAt: null,
+		lastQueuedAt: null,
+		lastSkippedAt: null,
+		lastThrewAt: null,
+	};
+}
+
+function freshUpstreamCounters(): UpstreamCounters {
+	return {
+		audio: freshSlot(),
+		video: { ...freshSlot(), unsupportedMime: 0 },
+		text: { ...freshSlot(), skippedEmpty: 0 },
+	};
+}
+
+/** Raw and wire-estimate byte sizes of a `clientContent` batch payload: UTF-8
+ *  text parts count the same on both; inline data counts decoded bytes raw and
+ *  base64 characters on the wire. */
+function clientContentBytes(turns: ReadonlyArray<{ parts: ReadonlyArray<unknown> }>): {
+	raw: number;
+	wire: number;
+} {
+	let raw = 0;
+	let wire = 0;
+	// Tolerant of malformed input: instrumentation must never throw where the SDK
+	// send would have been reached.
+	for (const turn of Array.isArray(turns) ? turns : []) {
+		const parts = Array.isArray(turn?.parts) ? turn.parts : [];
+		for (const part of parts as ReadonlyArray<{
+			text?: string;
+			inlineData?: { data?: string };
+		} | null>) {
+			if (!part) continue;
+			if (typeof part.text === 'string') {
+				const bytes = Buffer.byteLength(part.text, 'utf8');
+				raw += bytes;
+				wire += bytes;
+			}
+			const data = part.inlineData?.data;
+			if (typeof data === 'string') {
+				raw += Buffer.byteLength(data, 'base64');
+				wire += data.length;
+			}
+		}
+	}
+	return { raw, wire };
 }
 
 /**
@@ -206,11 +280,13 @@ export class GeminiLiveTransport implements LLMTransport {
 	 *  that close settles so `abortIncumbent()` can still bound it. Only the call
 	 *  that recorded it clears it. */
 	private pendingDisconnectClose: Promise<void> | null = null;
+	/** Upstream send counters for the current generation; reset on `setupComplete`. */
+	private upstream: UpstreamCounters = freshUpstreamCounters();
 	/** Attempt/generation identity, fed this transport's `dialGen` (the fence in
 	 *  `connect()` keeps superseded dials' socket events away from it). */
 	private readonly lifecycle = new ConnectionLifecycleLedger((event) => {
 		// Adopt the minted generation before any observer runs, so a setup-ok
-		// observer reading `currentTransportGeneration` sees it.
+		// observer reading `currentTransportGeneration`/`getDiagnostics()` sees it.
 		if (event.kind === 'setup-ok') this.transportGeneration = event.transportGeneration;
 		this.notifyObserver('onConnectionLifecycle', () =>
 			this.callbacks.onConnectionLifecycle?.(event),
@@ -332,9 +408,14 @@ export class GeminiLiveTransport implements LLMTransport {
 	onTextDone?: () => void;
 	onSpeechStarted?: () => void;
 	onRealtimeLLMUsage?: (usage: RealtimeLLMUsageEvent) => void;
-	/** Connection-lifecycle facts, property form (VoiceSession wires this one).
-	 *  Initialized (not just typed) so it exists on every instance: VoiceSession
-	 *  warns at construction when a transport does not declare it. */
+	// The two diagnostics hooks are initialized (not just typed) so they exist on
+	// every instance: VoiceSession warns at construction when a transport
+	// declares neither.
+	/** Raw Live usage, property form (VoiceSession wires this one). Typed to the
+	 *  neutral shape so it satisfies LLMTransport; the object passed is the full
+	 *  provider payload, castable to `LiveUsageMetadata`. */
+	onUsageMetadata?: (usage: TransportUsageMetadata) => void = undefined;
+	/** Connection-lifecycle facts, property form (VoiceSession wires this one). */
 	onConnectionLifecycle?: (event: ConnectionLifecycleEvent) => void = undefined;
 
 	constructor(config: GeminiTransportConfig, callbacks: GeminiTransportCallbacks) {
@@ -677,12 +758,81 @@ export class GeminiLiveTransport implements LLMTransport {
 		return incumbent;
 	}
 
+	// --- Upstream send accounting ---
+
+	private noteAttempt(slot: UpstreamSlotCounters, rawBytes: number, wireBytes: number): void {
+		slot.attempted++;
+		slot.attemptedRawBytes += rawBytes;
+		slot.attemptedWireBytesEstimate += wireBytes;
+		slot.lastAttemptedAt = Date.now();
+	}
+
+	private noteSkip(slot: UpstreamSlotCounters, bump: () => void): void {
+		bump();
+		slot.lastSkippedAt = Date.now();
+	}
+
+	/** Runs the send; `queued` advances only on normal return. Exceptions are
+	 *  counted and RETHROWN — instrumentation must not change error behavior. */
+	private sendTracked(
+		slot: UpstreamSlotCounters,
+		rawBytes: number,
+		wireBytes: number,
+		send: () => void,
+	): void {
+		try {
+			send();
+		} catch (err) {
+			slot.threw++;
+			slot.lastThrewAt = Date.now();
+			throw err;
+		}
+		slot.queued++;
+		slot.queuedRawBytes += rawBytes;
+		slot.queuedWireBytesEstimate += wireBytes;
+		slot.lastQueuedAt = Date.now();
+	}
+
+	/** Shared tracked path for every text-slot send (both text APIs and the
+	 *  replay batch): attempt, then a missing session or an empty payload
+	 *  (nothing sent) is a skip, otherwise the dispatch is tracked. Callers that
+	 *  buffer during the wind-down window do so first, so a buffered send is
+	 *  counted when the deferred send runs. */
+	private sendTextTracked(
+		rawBytes: number,
+		wireBytes: number,
+		empty: boolean,
+		send: (session: Session) => void,
+	): void {
+		const slot = this.upstream.text;
+		this.noteAttempt(slot, rawBytes, wireBytes);
+		const session = this.session;
+		if (!session) {
+			this.noteSkip(slot, () => slot.skippedNoSession++);
+			return;
+		}
+		if (empty) {
+			this.noteSkip(slot, () => slot.skippedEmpty++);
+			return;
+		}
+		this.sendTracked(slot, rawBytes, wireBytes, () => send(session));
+	}
+
 	/** Send base64-encoded PCM audio to Gemini as realtime input. */
 	sendAudio(base64Data: string): void {
-		if (!this.session) return;
-		this.session.sendRealtimeInput({
-			audio: { data: base64Data, mimeType: 'audio/pcm;rate=16000' },
-		});
+		const slot = this.upstream.audio;
+		const raw = Buffer.byteLength(base64Data, 'base64');
+		this.noteAttempt(slot, raw, base64Data.length);
+		const session = this.session;
+		if (!session) {
+			this.noteSkip(slot, () => slot.skippedNoSession++);
+			return;
+		}
+		this.sendTracked(slot, raw, base64Data.length, () =>
+			session.sendRealtimeInput({
+				audio: { data: base64Data, mimeType: 'audio/pcm;rate=16000' },
+			}),
+		);
 	}
 
 	/** Send tool execution results back to Gemini (legacy API). */
@@ -706,9 +856,12 @@ export class GeminiLiveTransport implements LLMTransport {
 		turns: Array<{ role: string; parts: Array<{ text: string }> }>,
 		turnComplete = true,
 	): void {
-		if (!this.session) return;
-		if (this.bufferIfWindingDown(() => this.sendClientContent(turns, turnComplete))) return;
-		this.session.sendClientContent({ turns, turnComplete });
+		if (this.session && this.bufferIfWindingDown(() => this.sendClientContent(turns, turnComplete)))
+			return;
+		const { raw, wire } = clientContentBytes(turns);
+		this.sendTextTracked(raw, wire, false, (session) =>
+			session.sendClientContent({ turns, turnComplete }),
+		);
 	}
 
 	/** Update the tool declarations (applied on next reconnect). */
@@ -730,6 +883,14 @@ export class GeminiLiveTransport implements LLMTransport {
 		return this.session !== null;
 	}
 
+	/** Snapshot, not a live reference — safe for a caller to hold across ticks. */
+	getDiagnostics(): TransportDiagnostics {
+		return {
+			upstream: structuredClone(this.upstream),
+			transportGeneration: this.transportGeneration,
+		};
+	}
+
 	// --- LLMTransport methods ---
 
 	private shouldUseRealtimeTextForContent(): boolean {
@@ -742,33 +903,52 @@ export class GeminiLiveTransport implements LLMTransport {
 
 	/** Send provider-neutral content turns to Gemini. Converts ContentTurn to Gemini format. */
 	sendContent(turns: ContentTurn[], turnComplete = true): void {
-		if (!this.session) return;
-		if (this.bufferIfWindingDown(() => this.sendContent(turns, turnComplete))) return;
+		if (this.session && this.bufferIfWindingDown(() => this.sendContent(turns, turnComplete)))
+			return;
 		if (turnComplete && this.shouldUseRealtimeTextForContent()) {
 			const text = turns
 				.map((t) => t.text.trim())
 				.filter(Boolean)
 				.join('\n\n');
-			if (text.length > 0) {
-				this.session.sendRealtimeInput({ text });
-			}
+			const bytes = Buffer.byteLength(text, 'utf8');
+			this.sendTextTracked(bytes, bytes, text.length === 0, (session) =>
+				session.sendRealtimeInput({ text }),
+			);
 			return;
 		}
 		const geminiTurns = turns.map((t) => ({
 			role: t.role === 'assistant' ? 'model' : t.role,
 			parts: [{ text: t.text }],
 		}));
-		this.session.sendClientContent({ turns: geminiTurns, turnComplete });
+		const { raw, wire } = clientContentBytes(geminiTurns);
+		this.sendTextTracked(raw, wire, false, (session) =>
+			session.sendClientContent({ turns: geminiTurns, turnComplete }),
+		);
 	}
 
-	/** Send a file/image to Gemini as inline data. */
+	/** Send a file/image to Gemini as inline data.
+	 *
+	 *  Counted by media kind: `audio/*` on the audio slot, everything else on the
+	 *  video slot (images are single-frame video). Every MIME type is still sent
+	 *  inline here, so none counts as `unsupportedMime`. */
 	sendFile(base64Data: string, mimeType: string): void {
-		if (!this.session) return;
-		if (this.bufferIfWindingDown(() => this.sendFile(base64Data, mimeType))) return;
-		this.session.sendClientContent({
-			turns: [{ role: 'user', parts: [{ inlineData: { data: base64Data, mimeType } }] as never[] }],
-			turnComplete: false,
-		});
+		if (this.session && this.bufferIfWindingDown(() => this.sendFile(base64Data, mimeType))) return;
+		const slot = mimeType.startsWith('audio/') ? this.upstream.audio : this.upstream.video;
+		const raw = Buffer.byteLength(base64Data, 'base64');
+		this.noteAttempt(slot, raw, base64Data.length);
+		const session = this.session;
+		if (!session) {
+			this.noteSkip(slot, () => slot.skippedNoSession++);
+			return;
+		}
+		this.sendTracked(slot, raw, base64Data.length, () =>
+			session.sendClientContent({
+				turns: [
+					{ role: 'user', parts: [{ inlineData: { data: base64Data, mimeType } }] as never[] },
+				],
+				turnComplete: false,
+			}),
+		);
 	}
 
 	/** Send a tool result back to Gemini (LLMTransport API). */
@@ -815,26 +995,37 @@ export class GeminiLiveTransport implements LLMTransport {
 	 *  clean and post-barge-in states (raw PCM, no input transcription emitted —
 	 *  see design-retained-user-content-recovery.md). */
 	replayUserTurn(turn: RetainedUserTurn): boolean {
-		if (!this.session) return false;
 		// Same winding-down discipline as sendContent/sendFile: a replay must not
 		// race a session draining toward close.
-		if (this.bufferIfWindingDown(() => this.replayUserTurn(turn))) return true;
-		this.session.sendClientContent({
-			turns: [
-				{
-					role: 'user',
-					parts: [
-						{
-							inlineData: {
-								data: turn.pcm.toString('base64'),
-								mimeType: `audio/pcm;rate=${turn.sampleRateHz}`,
+		if (this.session && this.bufferIfWindingDown(() => this.replayUserTurn(turn))) return true;
+		// Recovery audio is upstream traffic like any other: counted on the audio
+		// slot, raw PCM bytes vs base64 characters on the wire.
+		const slot = this.upstream.audio;
+		const data = turn.pcm.toString('base64');
+		this.noteAttempt(slot, turn.pcm.length, data.length);
+		const session = this.session;
+		if (!session) {
+			this.noteSkip(slot, () => slot.skippedNoSession++);
+			return false;
+		}
+		this.sendTracked(slot, turn.pcm.length, data.length, () =>
+			session.sendClientContent({
+				turns: [
+					{
+						role: 'user',
+						parts: [
+							{
+								inlineData: {
+									data,
+									mimeType: `audio/pcm;rate=${turn.sampleRateHz}`,
+								},
 							},
-						},
-					] as never[],
-				},
-			],
-			turnComplete: true,
-		});
+						] as never[],
+					},
+				],
+				turnComplete: true,
+			}),
+		);
 		return true;
 	}
 
@@ -1021,7 +1212,13 @@ export class GeminiLiveTransport implements LLMTransport {
 			}
 		}
 
-		this.session.sendClientContent({ turns, turnComplete: false });
+		// Replay is send traffic like any other: the whole history goes out as ONE
+		// quiet clientContent batch, so it counts as one text-slot send whatever
+		// the items hold (inline history media included).
+		const { raw, wire } = clientContentBytes(turns);
+		this.sendTextTracked(raw, wire, false, (session) =>
+			session.sendClientContent({ turns, turnComplete: false }),
+		);
 	}
 
 	// --- Server-turn state machine (external-TTS turn completion) ---
@@ -1123,10 +1320,13 @@ export class GeminiLiveTransport implements LLMTransport {
 		return usage;
 	}
 
-	/** Run one observer in isolation: its failure is logged, never reaches the
-	 *  connection state machine (lifecycle events fire from inside `connect()`,
-	 *  socket close and `disconnect()`), and never keeps the next observer (the
-	 *  constructor callback, then the property form) from running. */
+	/** Run one observer in isolation: its failure is logged and never reaches
+	 *  message dispatch or the connection state machine. Lifecycle events fire
+	 *  from inside `connect()`, socket close and `disconnect()`; usage rides on
+	 *  the SAME message as audio, tool calls and goAway, so a throwing hook would
+	 *  otherwise drop them. Each observer form (the constructor callback, then the
+	 *  property form) is wrapped separately, so one failing never keeps the next
+	 *  from running. */
 	private notifyObserver(label: string, fn: () => void): void {
 		try {
 			fn();
@@ -1137,9 +1337,19 @@ export class GeminiLiveTransport implements LLMTransport {
 
 	// biome-ignore lint/suspicious/noExplicitAny: LiveServerMessage is a complex union type
 	private handleMessage(msg: any): void {
+		// BEFORE the branches below, which each return: usage rides along with
+		// serverContent and friends, so a branch of its own would miss most of it.
+		if (msg.usageMetadata) {
+			const usage = msg.usageMetadata as LiveUsageMetadata;
+			this.notifyObserver('onUsageMetadata', () => this.callbacks.onUsageMetadata?.(usage));
+			this.notifyObserver('onUsageMetadata', () => this.onUsageMetadata?.(usage));
+		}
+
 		if (msg.setupComplete) {
-			// A connection that completed setup is a new generation: the ledger mints
-			// it, and its emit adopts it before the setup-ok observers run.
+			// A connection that completed setup is a new generation; its upstream
+			// counters start at zero. Reset first, then mint: the ledger's emit
+			// adopts the new generation before the setup-ok observers run.
+			this.upstream = freshUpstreamCounters();
 			this.lifecycle.setupOk();
 			// Resolve the connect() promise so callers know Gemini is ready
 			if (this.setupResolver) {
@@ -1156,7 +1366,11 @@ export class GeminiLiveTransport implements LLMTransport {
 		if (msg.usageMetadata) {
 			this._cachedGeminiUsage = msg.usageMetadata;
 			const update = normalizeGeminiUsageMetadata(msg.usageMetadata, 'update');
-			if (update && this.onRealtimeLLMUsage) this.onRealtimeLLMUsage(this.tagUsage(update));
+			if (update) {
+				this.notifyObserver('onRealtimeLLMUsage', () =>
+					this.onRealtimeLLMUsage?.(this.tagUsage(update)),
+				);
+			}
 		}
 
 		if (msg.serverContent) {
@@ -1268,7 +1482,11 @@ export class GeminiLiveTransport implements LLMTransport {
 				// Final usage is only known at turnComplete.
 				if (this._cachedGeminiUsage) {
 					const fin = normalizeGeminiUsageMetadata(this._cachedGeminiUsage, 'final');
-					if (fin && this.onRealtimeLLMUsage) this.onRealtimeLLMUsage(this.tagUsage(fin));
+					if (fin) {
+						this.notifyObserver('onRealtimeLLMUsage', () =>
+							this.onRealtimeLLMUsage?.(this.tagUsage(fin)),
+						);
+					}
 					this._cachedGeminiUsage = null;
 				}
 				if (!firedEarly) {
