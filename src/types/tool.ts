@@ -52,9 +52,14 @@ export interface ToolContext {
 	/** Aborted when the tool call is cancelled (user interruption or timeout). */
 	abortSignal: AbortSignal;
 	/** Send a JSON message to the connected client (delivered as a WebSocket
-	 *  text frame). Core frames + registered `ClientProtocolServerExtensions`;
-	 *  unregistered frames fail to compile. */
-	sendJsonToClient?(message: import('./client-protocol.js').AnyServerToClientMessage): void;
+	 *  text frame). Core frames, registered `ClientProtocolServerExtensions`,
+	 *  or an application `HostClientFrame` whose `type` is not a core frame
+	 *  type; malformed core frames fail to compile. */
+	sendJsonToClient?<T extends string>(
+		message:
+			| import('./client-protocol.js').AnyServerToClientMessage
+			| import('./client-protocol.js').HostClientFrame<T>,
+	): void;
 	/**
 	 * Set an active directive by category key.
 	 * Directives are reinforced every turn via sendClientContent injection,

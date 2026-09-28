@@ -2,8 +2,11 @@ import type { CoreServerToClientMessage } from '../types/client-protocol.js';
 
 /** Callbacks fired by TranscriptManager when transcript state changes. */
 export interface TranscriptSink {
-	/** Send a JSON message to the connected client (partial or final transcript). */
-	sendToClient(msg: CoreServerToClientMessage): void;
+	/** Send a JSON message to the connected client (partial or final transcript).
+	 *  Implement it as `(msg: CoreServerToClientMessage) => void` or as
+	 *  `(msg: Record<string, unknown>) => void`: every frame sent is a core
+	 *  frame that is also a plain JSON object, so both shapes are accepted. */
+	sendToClient(msg: CoreServerToClientMessage & Record<string, unknown>): void;
 	/** Record a finalized user message in conversation context. */
 	addUserMessage(text: string): void;
 	/** Record a finalized assistant message in conversation context. */

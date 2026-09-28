@@ -35,7 +35,7 @@ import {
 	describeClientTransport,
 } from '../types/client-media.js';
 import { MIN_PLAYBACK_RATE } from '../types/client-protocol.js';
-import type { AnyServerToClientMessage } from '../types/client-protocol.js';
+import type { AnyServerToClientMessage, HostClientFrame } from '../types/client-protocol.js';
 import type { ConversationItem } from '../types/conversation.js';
 import type { ConversationHistoryStore, SessionAnalytics } from '../types/history.js';
 import type { FrameworkHooks } from '../types/hooks.js';
@@ -2458,7 +2458,7 @@ export class VoiceSession {
 			this.eventBus,
 			this.config.sessionId,
 			agentName,
-			(msg) => this.clientTransport.sendJsonToClient(msg),
+			(msg) => this.sendHostFrame(msg),
 			(key, value, scope) => this.directiveManager.set(key, value, scope),
 		);
 	}
@@ -3489,9 +3489,21 @@ export class VoiceSession {
 	 *  want to surface custom progress or UI state — e.g. an example pushing
 	 *  Whisper transcript fragments to a web UI during transcription mode.
 	 *
+	 *  Accepts core frames, registered `ClientProtocolServerExtensions`, or an
+	 *  application `HostClientFrame` whose `type` is not a core frame type.
+	 *
 	 *  Safe to call any time after `start()`; no-op when no client is connected. */
-	sendJsonToClient(message: AnyServerToClientMessage): void {
-		this.clientTransport.sendJsonToClient(message);
+	sendJsonToClient<T extends string>(message: AnyServerToClientMessage | HostClientFrame<T>): void {
+		this.sendHostFrame(message);
+	}
+
+	/** Internal boundary between the host-facing `sendJsonToClient` methods
+	 *  (VoiceSession, ToolContext) and the strict `IClientChannel`. Channels
+	 *  serialize frames verbatim, and registered frames are already enforced
+	 *  at the host method's type, so application frames cross here with one
+	 *  cast; `IClientChannel`/`SessionClientSender` stay strict. */
+	private sendHostFrame(message: AnyServerToClientMessage | HostClientFrame): void {
+		this.clientTransport.sendJsonToClient(message as AnyServerToClientMessage);
 	}
 
 	/** Lower-level: inject an arbitrary user message. Serialized via the

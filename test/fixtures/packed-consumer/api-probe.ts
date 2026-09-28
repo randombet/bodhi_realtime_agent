@@ -10,11 +10,16 @@
  * is compiled from the published declarations. Until all names below exist, run the script
  * with `--skip-declarations`.
  */
-import type {
-	ConnectionLifecycleEvent,
-	UpstreamCounters,
-	VoiceSession,
-	VoiceSessionConfig,
+import {
+	type ClientTransport,
+	type ConnectionLifecycleEvent,
+	type HooksManager,
+	type IEventBus,
+	ToolExecutor,
+	type TranscriptSink,
+	type UpstreamCounters,
+	type VoiceSession,
+	type VoiceSessionConfig,
 } from 'bodhi-realtime-agent';
 
 declare const session: VoiceSession;
@@ -38,3 +43,21 @@ config.probeState;
 config.shadowSttProvider;
 config.mediaResolution;
 config.compressionConfig = {};
+// The concrete ClientTransport accepts an application frame without importing a frame type.
+declare const ct: ClientTransport;
+ct.sendJsonToClient({ type: 'session_end' });
+// A TranscriptSink and a ToolExecutor callback may take any JSON object.
+const sink: TranscriptSink = {
+	sendToClient: (msg: Record<string, unknown>): void => void msg,
+	addUserMessage: (text: string): void => void text,
+	addAssistantMessage: (text: string): void => void text,
+};
+declare const hooks: HooksManager;
+declare const eventBus: IEventBus;
+const executor = new ToolExecutor(
+	hooks,
+	eventBus,
+	'sess',
+	'main',
+	(message: Record<string, unknown>): void => void message,
+);

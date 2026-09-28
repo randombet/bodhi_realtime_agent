@@ -1,5 +1,5 @@
 import { type WebSocket, WebSocketServer } from 'ws';
-import type { AnyServerToClientMessage } from '../types/client-protocol.js';
+import type { AnyServerToClientMessage, HostClientFrame } from '../types/client-protocol.js';
 import { AudioBuffer } from './audio-buffer.js';
 
 /** Callbacks fired by ClientTransport when client events occur. */
@@ -125,8 +125,10 @@ export class ClientTransport {
 		}
 	}
 
-	/** Send a JSON message to the client as a text frame. */
-	sendJsonToClient(message: AnyServerToClientMessage): void {
+	/** Send a JSON message to the client as a text frame. Accepts core frames,
+	 *  registered extensions, or an application `HostClientFrame` whose `type`
+	 *  is not a core frame type; the frame is serialized verbatim. */
+	sendJsonToClient<T extends string>(message: AnyServerToClientMessage | HostClientFrame<T>): void {
 		if (this.client?.readyState === 1) {
 			this.client.send(JSON.stringify(message));
 		}

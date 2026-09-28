@@ -157,6 +157,8 @@ The client WebSocket carries both audio and GUI events on the same connection us
 
 GUI events published on the EventBus (`gui.update`, `gui.notification`, `subagent.ui.send`) are automatically forwarded to the connected client. Client `ui.response` messages are published back to the EventBus as `subagent.ui.response` events, closing the loop for interactive subagent UIs.
 
+Apps can send their own frames with `session.sendJsonToClient(...)` (or `ctx.sendJsonToClient?.(...)` inside a tool). Any JSON object is accepted as an application frame as long as its `type` is not a core frame type; core frames must keep their exact shape. See [Custom frames from your app](docs/guide/transport.md#custom-frames-from-your-app).
+
 ### Hooks
 
 Lifecycle hooks for observability (logging, metrics, alerting):
