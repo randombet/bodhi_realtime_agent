@@ -61,4 +61,8 @@ export {
 // between types/events.ts and core/usage-helpers.ts).
 
 export { VoiceSession } from './voice-session.js';
-export type { VoiceSessionConfig, VoiceSessionDiagnostics } from './voice-session.js';
+export type {
+	InjectTextOptions,
+	VoiceSessionConfig,
+	VoiceSessionDiagnostics,
+} from './voice-session.js';
