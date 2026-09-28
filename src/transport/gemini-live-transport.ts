@@ -129,7 +129,9 @@ export interface GeminiTransportConfig {
 	realtimeInputConfig?: GeminiRealtimeInputConfig;
 	/** Timeout in ms for connect() to receive setupComplete (default: 30000). */
 	connectTimeoutMs?: number;
-	/** Timeout in ms for the overall reconnect operation (default: 45000). */
+	/** Force-kill delay in ms for `reconnect()` (default: 45000): when it expires
+	 *  and no newer dial has started, the session field is cleared. It does not
+	 *  bound the incumbent's close or the redial. */
 	reconnectTimeoutMs?: number;
 }
 
@@ -179,12 +181,26 @@ export interface GeminiTransportCallbacks {
  * LLMTransport callback properties.
  */
 export class GeminiLiveTransport implements LLMTransport {
+	/** Bound on `abortIncumbent()`'s close of the stranded session. */
+	private static readonly ABORT_INCUMBENT_CLOSE_TIMEOUT_MS = 5_000;
+
 	private session: Session | null = null;
 	private ai: GoogleGenAI;
 	private callbacks: GeminiTransportCallbacks;
 	private config: GeminiTransportConfig;
 	/** Resolves when setupComplete fires — used to make connect() await Gemini readiness. */
 	private setupResolver: (() => void) | null = null;
+	/** Increments per dial and when the current dial fails or is aborted; socket
+	 *  callbacks capture their dial's value so a superseded dial's events never
+	 *  reach the live handlers. */
+	private dialGen = 0;
+	/** Post-setup generation counter, distinct from the dial counter (which also
+	 *  advances on failed and aborted dials). Not minted yet: stays 0. */
+	private transportGeneration = 0;
+	/** The close `disconnect()` is awaiting on the session it detached, kept until
+	 *  that close settles so `abortIncumbent()` can still bound it. Only the call
+	 *  that recorded it clears it. */
+	private pendingDisconnectClose: Promise<void> | null = null;
 	/** Tracks whether onModelTurnStart has already fired for the current turn. */
 	private _modelTurnStarted = false;
 	/** Tracks whether onFirstAudioChunk has already fired for the current response. */
@@ -333,8 +349,14 @@ export class GeminiLiveTransport implements LLMTransport {
 			this.applyTransportConfig(transportConfig);
 		}
 
+		// Per-dial: set once THIS dial's setupComplete arrives (stale dials' messages
+		// are fenced out below), so a socket close can tell setup failure apart.
+		let setupDone = false;
 		const setupComplete = new Promise<void>((resolve) => {
-			this.setupResolver = resolve;
+			this.setupResolver = () => {
+				setupDone = true;
+				resolve();
+			};
 		});
 
 		const model = this.config.model ?? DEFAULT_GEMINI_LIVE_MODEL;
@@ -410,26 +432,9 @@ export class GeminiLiveTransport implements LLMTransport {
 			};
 		}
 
-		this.session = await this.ai.live.connect({
-			model,
-			config: connectConfig,
-			callbacks: {
-				onopen: () => {},
-				onmessage: (msg: LiveServerMessage) => this.handleMessage(msg),
-				onerror: (e: { message?: string }) => {
-					const error = new Error(e.message ?? 'WebSocket error');
-					this.callbacks.onError?.(error);
-					if (this.onError) this.onError({ error, recoverable: true });
-				},
-				onclose: (e: { code?: number; reason?: string }) => {
-					const code = e?.code;
-					const reason = e?.reason;
-					this.callbacks.onClose?.(code, reason);
-					if (this.onClose) this.onClose(code, reason);
-				},
-			},
-		});
-
+		// The deadline covers the dial itself, not just the setupComplete wait: the
+		// SDK's connect promise is resolve-only, so on a failed dial (DNS failure,
+		// refused socket) it never settles.
 		const timeoutMs = this.config.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		const timeout = new Promise<never>((_, reject) => {
@@ -438,7 +443,68 @@ export class GeminiLiveTransport implements LLMTransport {
 				timeoutMs,
 			);
 		});
-		await Promise.race([setupComplete, timeout]).finally(() => clearTimeout(timer));
+		// A socket that closes before setupComplete fails the dial immediately
+		// instead of at the deadline. It can close while the dial is still pending,
+		// before anything awaits this promise, hence the pre-attached handler.
+		let failSetup: (error: Error) => void = () => {};
+		const closedBeforeSetup = new Promise<never>((_, reject) => {
+			failSetup = reject;
+		});
+		closedBeforeSetup.catch(() => {});
+
+		const gen = ++this.dialGen;
+		const dial = this.ai.live.connect({
+			model,
+			config: connectConfig,
+			callbacks: {
+				onopen: () => {},
+				onmessage: (msg: LiveServerMessage) => {
+					if (gen !== this.dialGen) return;
+					this.handleMessage(msg);
+				},
+				onerror: (e: { message?: string }) => {
+					if (gen !== this.dialGen) return;
+					const error = new Error(e.message ?? 'WebSocket error');
+					this.callbacks.onError?.(error);
+					if (this.onError) this.onError({ error, recoverable: true });
+				},
+				onclose: (e: { code?: number; reason?: string }) => {
+					if (gen !== this.dialGen) return;
+					const code = e?.code;
+					const reason = e?.reason;
+					if (!setupDone) {
+						failSetup(new Error(`Gemini socket closed before setupComplete (code=${code})`));
+					}
+					this.callbacks.onClose?.(code, reason);
+					if (this.onClose) this.onClose(code, reason);
+				},
+			},
+		});
+
+		let dialSession: Session | undefined;
+		try {
+			dialSession = await Promise.race([dial, timeout, closedBeforeSetup]);
+			if (gen !== this.dialGen) {
+				// Superseded while dialing (abortIncumbent() or a newer dial): never
+				// install a session nothing owns — the catch below closes it.
+				throw new Error('Gemini dial superseded before setupComplete');
+			}
+			this.session = dialSession;
+			await Promise.race([setupComplete, timeout, closedBeforeSetup]);
+		} catch (err) {
+			if (gen === this.dialGen) {
+				this.dialGen++;
+				this.session = null;
+			} else if (dialSession !== undefined && this.session === dialSession) {
+				this.session = null;
+			}
+			// Abandoned dial: its callbacks are already stranded by the fence; close
+			// its socket if and when it resolves so it is never orphaned.
+			dial.then((s) => s?.close?.()).catch(() => {});
+			throw err;
+		} finally {
+			clearTimeout(timer);
+		}
 	}
 
 	/** Disconnect and reconnect, optionally with a new resumption handle or ReconnectState.
@@ -446,13 +512,19 @@ export class GeminiLiveTransport implements LLMTransport {
 	 */
 	async reconnect(stateOrHandle?: ReconnectState | string): Promise<void> {
 		const timeoutMs = this.config.reconnectTimeoutMs ?? DEFAULT_RECONNECT_TIMEOUT_MS;
+		// Generation-fenced force-kill: if a newer dial replaced the session while
+		// this timer was pending, nulling would kill the replacement instead.
+		const timerGen = this.dialGen;
 		const timer = setTimeout(() => {
-			// Force-kill the stale session so disconnect() unblocks
-			this.session = null;
+			if (this.dialGen === timerGen) this.session = null;
 		}, timeoutMs);
 
 		try {
 			await this.disconnect();
+			// The incumbent was aborted (or a newer dial started) while its close was
+			// in flight: whoever advanced the generation owns what comes next, so
+			// this reconnect must not dial.
+			if (this.dialGen !== timerGen) return;
 
 			// Honor the privacy/ZDR opt-out FIRST: if the caller configured
 			// sessionResumption: false, no incoming handle (constructor, state,
@@ -488,19 +560,87 @@ export class GeminiLiveTransport implements LLMTransport {
 		}
 	}
 
+	get currentDialGen(): number {
+		return this.dialGen;
+	}
+
+	get currentTransportGeneration(): number {
+		return this.transportGeneration;
+	}
+
+	/** Synchronously strand the incumbent connection: advance the dial generation
+	 *  (its callbacks go stale, an in-flight `reconnect()` continuation will not
+	 *  dial, and a later-resolving dial closes its own session), detach the
+	 *  session before any await, reset server-turn state and discard both
+	 *  resumption handle copies — a redial must never resume the abandoned
+	 *  server-side session. Returns a close bounded by 5 s: the detached
+	 *  session's `close()` or, when no session is attached, the close a
+	 *  `disconnect()` already has in flight (that session was detached before
+	 *  this call, and `disconnect()` alone would await it without a bound).
+	 *  Resolves `'closed'` when that close completed in time (at once when
+	 *  nothing is closing), `'forced'` on timeout or close error; never rejects.
+	 *  Does not go through `disconnect()`. */
+	abortIncumbent(): Promise<'closed' | 'forced'> {
+		this.dialGen += 1;
+		const incumbent = this.detachSession();
+		this.effectiveResumptionHandle = null;
+		this.config.resumptionHandle = undefined;
+		let closing: Promise<unknown>;
+		if (incumbent) {
+			closing = Promise.resolve().then(() => incumbent.close());
+		} else if (this.pendingDisconnectClose) {
+			closing = this.pendingDisconnectClose;
+		} else {
+			return Promise.resolve('closed');
+		}
+		return new Promise((resolve) => {
+			const deadline = setTimeout(
+				() => resolve('forced'),
+				GeminiLiveTransport.ABORT_INCUMBENT_CLOSE_TIMEOUT_MS,
+			);
+			void closing.then(
+				() => {
+					clearTimeout(deadline);
+					resolve('closed');
+				},
+				() => {
+					clearTimeout(deadline);
+					resolve('forced');
+				},
+			);
+		});
+	}
+
 	async disconnect(): Promise<void> {
+		// Detach before awaiting: a newer dial can install a replacement session
+		// while close() is in flight, and it must survive this call untouched —
+		// nothing below touches `this.session` once the close completes.
+		const incumbent = this.detachSession();
+		if (!incumbent) return;
+		// Recorded so a concurrent abortIncumbent() can bound this close; cleared
+		// only if no later disconnect() has recorded its own close since.
+		const closing = (async () => {
+			await incumbent.close();
+		})();
+		this.pendingDisconnectClose = closing;
+		try {
+			await closing;
+		} catch {
+			// Ignore close errors
+		} finally {
+			if (this.pendingDisconnectClose === closing) this.pendingDisconnectClose = null;
+		}
+	}
+
+	/** Capture and null the current session, and reset per-connection turn state. */
+	private detachSession(): Session | null {
 		this._modelTurnStarted = false;
 		this._firstAudioFired = false;
 		this._cachedGeminiUsage = null;
 		this.resetServerTurnState();
-		if (this.session) {
-			try {
-				await this.session.close();
-			} catch {
-				// Ignore close errors
-			}
-			this.session = null;
-		}
+		const incumbent = this.session;
+		this.session = null;
+		return incumbent;
 	}
 
 	/** Send base64-encoded PCM audio to Gemini as realtime input. */

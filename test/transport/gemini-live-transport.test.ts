@@ -259,6 +259,142 @@ describe('GeminiLiveTransport', () => {
 			const transport = new GeminiLiveTransport({ apiKey: 'test-key', connectTimeoutMs: 50 }, {});
 			await expect(transport.connect()).rejects.toThrow('timed out');
 		});
+
+		it(
+			'rejects with timeout when the SDK dial itself never settles (failed DNS/socket)',
+			{ timeout: 1000 },
+			async () => {
+				// live.connect()'s promise is resolve-only in the SDK — on a failed
+				// dial (getaddrinfo ENOTFOUND) it never settles, so the deadline must
+				// cover the dial, not just the setupComplete wait.
+				const { GoogleGenAI } = await import('@google/genai');
+				(GoogleGenAI as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => ({
+					live: {
+						connect: vi.fn(() => new Promise(() => {})),
+					},
+				}));
+
+				const transport = new GeminiLiveTransport({ apiKey: 'test-key', connectTimeoutMs: 50 }, {});
+				await expect(transport.connect()).rejects.toThrow('timed out');
+			},
+		);
+
+		it('a superseded dial closing late does not fire the live onClose callback', async () => {
+			// Real-SDK shape: closing a session fires that dial's onclose. A dial
+			// abandoned by timeout is closed when it finally resolves; that stale
+			// close must not reach the session's handleTransportClose, which would
+			// mistake it for the CURRENT connection and tear down a healthy
+			// replacement.
+			const { GoogleGenAI } = await import('@google/genai');
+			let resolveDial1!: (s: unknown) => void;
+			let dial1Callbacks!: Record<string, (...args: unknown[]) => void>;
+			const connectFn = vi.fn();
+			(GoogleGenAI as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => ({
+				live: { connect: connectFn },
+			}));
+			connectFn
+				.mockImplementationOnce((params: Record<string, unknown>) => {
+					dial1Callbacks = params.callbacks as typeof dial1Callbacks;
+					return new Promise((resolve) => {
+						resolveDial1 = resolve;
+					});
+				})
+				// Dial 2 behaves like a healthy socket: session + its own setupComplete.
+				.mockImplementationOnce(async (params: Record<string, unknown>) => {
+					const cbs = params.callbacks as Record<string, (...args: unknown[]) => void>;
+					setTimeout(() => cbs.onmessage?.({ setupComplete: { sessionId: 'live_sid' } }), 1);
+					return mockSession;
+				});
+
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key', connectTimeoutMs: 50 }, {});
+			const onCloseSpy = vi.fn();
+			transport.onClose = onCloseSpy;
+
+			// Dial 1 times out.
+			await expect(transport.connect()).rejects.toThrow('timed out');
+
+			// Dial 2 succeeds (default mock: resolves + fires setupComplete).
+			await transport.connect();
+			expect(transport.isConnected).toBe(true);
+
+			// Dial 1's socket finally opens; the transport closes the orphan and
+			// the SDK fires dial 1's onclose — as the real websocket would.
+			const dial1Session = {
+				close: vi.fn(() => dial1Callbacks.onclose?.({ code: 1000, reason: 'stale' })),
+			};
+			resolveDial1(dial1Session);
+			await new Promise((r) => setTimeout(r, 10));
+
+			expect(dial1Session.close).toHaveBeenCalled();
+			expect(onCloseSpy).not.toHaveBeenCalled();
+		});
+
+		it(
+			"a superseded dial's setupComplete cannot satisfy the current dial's setup wait",
+			{ timeout: 1000 },
+			async () => {
+				// setupResolver is per-connect state; a stale dial's late
+				// setupComplete must not resolve the replacement dial's wait.
+				const { GoogleGenAI } = await import('@google/genai');
+				let dial1Callbacks!: Record<string, (...args: unknown[]) => void>;
+				const connectFn = vi.fn();
+				(GoogleGenAI as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => ({
+					live: { connect: connectFn },
+				}));
+				connectFn
+					.mockImplementationOnce((params: Record<string, unknown>) => {
+						dial1Callbacks = params.callbacks as typeof dial1Callbacks;
+						return new Promise(() => {});
+					})
+					// Dial 2 resolves a session but its own setupComplete never fires.
+					.mockImplementationOnce(async () => mockSession);
+
+				const transport = new GeminiLiveTransport(
+					{ apiKey: 'test-key', connectTimeoutMs: 100 },
+					{},
+				);
+				await expect(transport.connect()).rejects.toThrow('timed out');
+
+				const secondDial = transport.connect();
+				// The stale dial's socket delivers a setupComplete mid-wait.
+				dial1Callbacks.onmessage?.({ setupComplete: { sessionId: 'stale_sid' } });
+
+				// Dial 2 must still time out — the stale ack proves nothing about it.
+				await expect(secondDial).rejects.toThrow('timed out');
+			},
+		);
+
+		it('socket close before setupComplete rejects connect() within 20 ms with "closed before setupComplete"', async () => {
+			// The socket dies mid-dial (the SDK's resolve-only connect promise never
+			// settles): connect() must fail on the close, not wait out the 30 s
+			// default deadline.
+			const { GoogleGenAI } = await import('@google/genai');
+			let closedAt = 0;
+			(GoogleGenAI as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => ({
+				live: {
+					connect: vi.fn((params: Record<string, unknown>) => {
+						const cbs = params.callbacks as Record<string, (...args: unknown[]) => void>;
+						setTimeout(() => {
+							closedAt = Date.now();
+							cbs.onclose?.({ code: 1006, reason: 'abnormal' });
+						}, 1);
+						return new Promise(() => {});
+					}),
+				},
+			}));
+
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			const onCloseSpy = vi.fn();
+			transport.onClose = onCloseSpy;
+
+			await expect(transport.connect()).rejects.toThrow(
+				'Gemini socket closed before setupComplete (code=1006)',
+			);
+			expect(Date.now() - closedAt).toBeLessThan(20);
+			expect(transport.isConnected).toBe(false);
+			// The property-form onClose still observes the setup-failure close.
+			expect(onCloseSpy).toHaveBeenCalledWith(1006, 'abnormal');
+		});
 	});
 
 	describe('sendAudio', () => {
@@ -548,6 +684,267 @@ describe('GeminiLiveTransport', () => {
 			await transport.disconnect();
 			expect(transport.isConnected).toBe(false);
 			expect(mockSession.close).toHaveBeenCalled();
+		});
+	});
+
+	describe('dial generation fence', () => {
+		type Cbs = Record<string, (...args: unknown[]) => void>;
+
+		/** A fake SDK session whose close() is controlled by the test. */
+		function fakeSession(close: () => unknown = () => {}) {
+			return {
+				sendRealtimeInput: vi.fn(),
+				sendToolResponse: vi.fn(),
+				sendClientContent: vi.fn(),
+				close: vi.fn(close),
+			};
+		}
+
+		/** Deferred close: `close()` stays pending until `release()`. */
+		function slowClose() {
+			let release: () => void = () => {};
+			const pending = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			return { close: () => pending, release: () => release() };
+		}
+
+		/** Route this test's GeminiLiveTransport through `connectFn`. */
+		async function useConnect(connectFn: ReturnType<typeof vi.fn>): Promise<void> {
+			const { GoogleGenAI } = await import('@google/genai');
+			(GoogleGenAI as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => ({
+				live: { connect: connectFn },
+			}));
+		}
+
+		/** A dial that resolves `session` and then acks setup. */
+		function healthyDial(session: unknown) {
+			return async (params: Record<string, unknown>) => {
+				const cbs = params.callbacks as Cbs;
+				setTimeout(() => cbs.onmessage?.({ setupComplete: { sessionId: 'sid' } }), 1);
+				return session;
+			};
+		}
+
+		it('`currentDialGen` is 1 after a successful first `connect()`, 2 after a first dial that fails, and `currentTransportGeneration` stays 0', async () => {
+			const healthy = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			expect(healthy.currentDialGen).toBe(0);
+			await healthy.connect();
+			expect(healthy.currentDialGen).toBe(1);
+			expect(healthy.currentTransportGeneration).toBe(0);
+
+			await useConnect(vi.fn(() => new Promise(() => {})));
+			const failing = new GeminiLiveTransport({ apiKey: 'test-key', connectTimeoutMs: 20 }, {});
+			await expect(failing.connect()).rejects.toThrow('timed out');
+			expect(failing.currentDialGen).toBe(2);
+			expect(failing.currentTransportGeneration).toBe(0);
+		});
+
+		it("a superseded dial whose setup deadline expires after the replacement dial became active leaves the replacement's session installed", async () => {
+			const stale = fakeSession();
+			const replacement = fakeSession();
+			const connectFn = vi
+				.fn()
+				// Dial 1 resolves its session, but its setupComplete never arrives.
+				.mockImplementationOnce(async () => stale)
+				.mockImplementationOnce(healthyDial(replacement));
+			await useConnect(connectFn);
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key', connectTimeoutMs: 50 }, {});
+
+			const firstDial = transport.connect();
+			// Dial 1's session is installed while it waits for setup.
+			await new Promise((r) => setTimeout(r, 0));
+			expect(transport.isConnected).toBe(true);
+
+			// A newer dial supersedes it and completes setup well inside the deadline.
+			await transport.connect();
+			expect(transport.isConnected).toBe(true);
+
+			// Dial 1's setup deadline expires only now, after the replacement is active.
+			await expect(firstDial).rejects.toThrow('timed out');
+			await new Promise((r) => setTimeout(r, 0));
+
+			// The abandoned dial closes its own session and leaves the shared field alone.
+			expect(stale.close).toHaveBeenCalledTimes(1);
+			expect(replacement.close).not.toHaveBeenCalled();
+			expect(transport.isConnected).toBe(true);
+			transport.sendAudio('AA==');
+			expect(replacement.sendRealtimeInput).toHaveBeenCalledTimes(1);
+			expect(stale.sendRealtimeInput).not.toHaveBeenCalled();
+		});
+
+		it('force-kill timer does not null a session established by a newer dial', async () => {
+			const incumbent = fakeSession(() => new Promise(() => {})); // close() hangs
+			const replacement = fakeSession();
+			const connectFn = vi
+				.fn()
+				.mockImplementationOnce(healthyDial(incumbent))
+				.mockImplementationOnce(healthyDial(replacement));
+			await useConnect(connectFn);
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key', reconnectTimeoutMs: 30 }, {});
+			await transport.connect();
+
+			// reconnect() is stuck in disconnect() awaiting the hung close; its
+			// force-kill timer (30 ms) is pending.
+			void transport.reconnect();
+			// A newer dial establishes the replacement meanwhile.
+			await transport.connect();
+			expect(transport.isConnected).toBe(true);
+
+			await new Promise((r) => setTimeout(r, 60)); // the force-kill timer fires
+			expect(transport.isConnected).toBe(true);
+			transport.sendAudio('AA==');
+			expect(replacement.sendRealtimeInput).toHaveBeenCalledTimes(1);
+		});
+
+		it('disconnect() does not null a session replaced while close() was in flight', async () => {
+			const gate = slowClose();
+			const incumbent = fakeSession(gate.close);
+			const replacement = fakeSession();
+			const connectFn = vi
+				.fn()
+				.mockImplementationOnce(healthyDial(incumbent))
+				.mockImplementationOnce(healthyDial(replacement));
+			await useConnect(connectFn);
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			const closing = transport.disconnect();
+			// Detached synchronously, before the close completes.
+			expect(transport.isConnected).toBe(false);
+			await transport.connect();
+
+			gate.release();
+			await closing;
+
+			expect(transport.isConnected).toBe(true);
+			transport.sendAudio('AA==');
+			expect(replacement.sendRealtimeInput).toHaveBeenCalledTimes(1);
+			expect(incumbent.sendRealtimeInput).not.toHaveBeenCalled();
+		});
+
+		it('abortIncumbent() while disconnect() is still awaiting a hanging close resolves `forced` after its 5 s bound, not `closed` at once, and a replacement session installed afterwards is untouched', async () => {
+			const incumbent = fakeSession(() => new Promise(() => {})); // close() hangs
+			const replacement = fakeSession();
+			const connectFn = vi
+				.fn()
+				.mockImplementationOnce(healthyDial(incumbent))
+				.mockImplementationOnce(healthyDial(replacement));
+			await useConnect(connectFn);
+			vi.useFakeTimers();
+			try {
+				const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+				const connecting = transport.connect();
+				await vi.advanceTimersByTimeAsync(1); // setupComplete
+				await connecting;
+
+				// disconnect() detaches the incumbent at once and then awaits its close.
+				void transport.disconnect();
+				expect(incumbent.close).toHaveBeenCalledTimes(1);
+				expect(transport.isConnected).toBe(false);
+
+				let outcome: 'closed' | 'forced' | undefined;
+				void transport.abortIncumbent().then((result) => {
+					outcome = result;
+				});
+				await vi.advanceTimersByTimeAsync(0);
+				expect(outcome).toBeUndefined();
+				await vi.advanceTimersByTimeAsync(4_999);
+				expect(outcome).toBeUndefined();
+				await vi.advanceTimersByTimeAsync(1);
+				expect(outcome).toBe('forced');
+
+				const redialing = transport.connect();
+				await vi.advanceTimersByTimeAsync(1); // setupComplete
+				await redialing;
+				await vi.advanceTimersByTimeAsync(60_000);
+
+				expect(transport.isConnected).toBe(true);
+				expect(replacement.close).not.toHaveBeenCalled();
+				expect(incumbent.close).toHaveBeenCalledTimes(1);
+				transport.sendAudio('AA==');
+				expect(replacement.sendRealtimeInput).toHaveBeenCalledTimes(1);
+				expect(incumbent.sendRealtimeInput).not.toHaveBeenCalled();
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it('abortIncumbent() during a slow incumbent close prevents the dial and closes a late-resolving session', async () => {
+			const gate = slowClose();
+			const incumbent = fakeSession(gate.close);
+			const late = fakeSession();
+			let resolveLateDial: (s: unknown) => void = () => {};
+			const connectFn = vi
+				.fn()
+				.mockImplementationOnce(healthyDial(incumbent))
+				.mockImplementationOnce(
+					() =>
+						new Promise((resolve) => {
+							resolveLateDial = resolve;
+						}),
+				);
+			await useConnect(connectFn);
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			// (1) reconnect() is awaiting the incumbent's slow close when the
+			// incumbent is aborted: once the close completes it must not dial.
+			const reconnecting = transport.reconnect();
+			expect(incumbent.close).toHaveBeenCalledTimes(1);
+			// The abort bounds that in-flight close, so it settles with the close.
+			const aborting = transport.abortIncumbent();
+			gate.release();
+			await expect(aborting).resolves.toBe('closed');
+			await reconnecting;
+			expect(connectFn).toHaveBeenCalledTimes(1);
+			expect(transport.isConnected).toBe(false);
+
+			// (2) A dial still pending when the incumbent is aborted closes its own
+			// session when it resolves late, and never installs it.
+			const dialing = transport.connect();
+			expect(connectFn).toHaveBeenCalledTimes(2);
+			await expect(transport.abortIncumbent()).resolves.toBe('closed');
+			resolveLateDial(late);
+			await expect(dialing).rejects.toThrow('superseded');
+			await new Promise((r) => setTimeout(r, 0));
+			expect(late.close).toHaveBeenCalledTimes(1);
+			expect(transport.isConnected).toBe(false);
+		});
+
+		it('abortIncumbent resolves `closed` and the next connect omits `sessionResumption.handle`', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', sessionResumption: { handle: 'h_seed' } },
+				{},
+			);
+			await transport.connect();
+			expect((capturedConnectConfig.config as Record<string, unknown>).sessionResumption).toEqual({
+				handle: 'h_seed',
+			});
+			const cbs = capturedConnectConfig.callbacks as Cbs;
+			cbs.onmessage({ sessionResumptionUpdate: { newHandle: 'h_server', resumable: true } });
+			const genBefore = transport.currentDialGen;
+
+			await expect(transport.abortIncumbent()).resolves.toBe('closed');
+			expect(mockSession.close).toHaveBeenCalledTimes(1);
+			expect(transport.isConnected).toBe(false);
+			expect(transport.currentDialGen).toBe(genBefore + 1);
+
+			await transport.connect();
+			expect((capturedConnectConfig.config as Record<string, unknown>).sessionResumption).toEqual(
+				{},
+			);
+		});
+
+		it('abortIncumbent resolves `forced` when close throws', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			mockSession.close.mockImplementationOnce(() => {
+				throw new Error('close failed');
+			});
+
+			await expect(transport.abortIncumbent()).resolves.toBe('forced');
+			expect(transport.isConnected).toBe(false);
 		});
 	});
 

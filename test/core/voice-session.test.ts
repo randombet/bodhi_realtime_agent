@@ -2338,6 +2338,150 @@ describe('VoiceSession', () => {
 				}),
 			);
 		});
+
+		it('close() cancels a pending backoff dial even while async finalizers are still running', async () => {
+			session = new VoiceSession({
+				sessionId: 'sess_close_backoff',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9908,
+				model: mockModel,
+			});
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+			session.sessionManager.updateResumptionHandle('handle_backoff');
+			let release!: () => void;
+			const blocked = new Promise<void>((r) => {
+				release = r;
+			});
+			session.sessionManager.registerPreCloseFinalizer(() => blocked);
+			const internals = session as unknown as {
+				reconnector: { triggerReconnect: (reason: string) => void };
+				transport: { reconnect: (...args: unknown[]) => Promise<void> };
+			};
+			const reconnect = vi.spyOn(internals.transport, 'reconnect');
+			internals.reconnector.triggerReconnect('transport-close'); // 1000 ms backoff pending
+			const closing = session.close();
+			// Finalizer still blocked: the state has not reached CLOSED yet.
+			await new Promise((r) => setTimeout(r, 1200));
+			internals.reconnector.triggerReconnect('transport-close'); // a close arriving mid-finalization
+			await new Promise((r) => setTimeout(r, 1200));
+			expect(reconnect).not.toHaveBeenCalled();
+			release();
+			await closing;
+			expect(session.sessionManager.state).toBe('CLOSED');
+			expect(reconnect).not.toHaveBeenCalled();
+		}, 10_000);
+
+		it('ignores a late-arriving GoAway after `session.close()`', async () => {
+			const onError = vi.fn();
+			const unhandled = vi.fn();
+			process.on('unhandledRejection', unhandled);
+			try {
+				session = new VoiceSession({
+					sessionId: 'sess_late_goaway',
+					userId: 'user_1',
+					apiKey: 'test-key',
+					agents: [createEchoAgent()],
+					initialAgent: 'echo',
+					port: 9907,
+					model: mockModel,
+					hooks: { onError },
+				});
+
+				await session.start();
+				await new Promise((r) => setTimeout(r, 50));
+				session.sessionManager.updateResumptionHandle('handle_late');
+				const dispose = vi.spyOn(
+					(session as unknown as { reconnector: { dispose: () => void } }).reconnector,
+					'dispose',
+				);
+
+				await session.close();
+				expect(session.sessionManager.state).toBe('CLOSED');
+				expect(dispose).toHaveBeenCalledTimes(1);
+
+				// The closed connection's socket still delivers a GoAway. Without the
+				// guard, CLOSED → RECONNECTING throws an invalid-transition
+				// SessionError out of the transport callback.
+				const { _getMessageHandler } = await import('@google/genai');
+				const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+				expect(() => fire({ goAway: { timeLeft: '30s' } })).not.toThrow();
+
+				await new Promise((r) => setTimeout(r, 50));
+
+				expect(unhandled).not.toHaveBeenCalled();
+				expect(session.sessionManager.state).toBe('CLOSED');
+				expect(onError).not.toHaveBeenCalled();
+			} finally {
+				process.off('unhandledRejection', unhandled);
+			}
+		});
+
+		it('start() rejects and the session is CLOSED, not wedged in CONNECTING, when the dial fails, and its listener port is released and providers and runtime are stopped', async () => {
+			const port = 9908;
+			const onSessionEnd = vi.fn();
+			const stt = {
+				configure: vi.fn(),
+				start: vi.fn(async () => {}),
+				stop: vi.fn(async () => {}),
+				feedAudio: vi.fn(),
+				commit: vi.fn(),
+				handleInterrupted: vi.fn(),
+				handleTurnComplete: vi.fn(),
+				onTranscript: undefined,
+				onPartialTranscript: undefined,
+			} satisfies STTProvider;
+			session = new VoiceSession({
+				sessionId: 'sess_dial_fails',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port,
+				model: mockModel,
+				orchestrationMode: 'actor',
+				sttProvider: stt,
+				hooks: { onSessionEnd },
+			});
+			const runtime = (session as unknown as { runtimeOrchestrator: { stop: () => Promise<void> } })
+				.runtimeOrchestrator;
+			const runtimeStop = vi.spyOn(runtime, 'stop');
+
+			// The dial's socket dies before setupComplete while the SDK's
+			// resolve-only connect promise never settles.
+			const { GoogleGenAI } = await import('@google/genai');
+			(GoogleGenAI as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => ({
+				live: {
+					connect: vi.fn((params: Record<string, unknown>) => {
+						const cbs = params.callbacks as Record<string, (...args: unknown[]) => void>;
+						setTimeout(() => cbs.onclose?.({ code: 1006, reason: 'ENOTFOUND' }), 5);
+						return new Promise(() => {});
+					}),
+				},
+			}));
+
+			await expect(session.start()).rejects.toThrow('closed before setupComplete');
+
+			expect(session.sessionManager.state).toBe('CLOSED');
+			expect(onSessionEnd).toHaveBeenCalledWith(
+				expect.objectContaining({ sessionId: 'sess_dial_fails', reason: 'connect_failed' }),
+			);
+			expect(stt.start).toHaveBeenCalledTimes(1);
+			expect(stt.stop).toHaveBeenCalledTimes(1);
+			expect(runtimeStop).toHaveBeenCalledTimes(1);
+
+			// The client listener was stopped: the port can be bound again.
+			const { createServer } = await import('node:net');
+			const probe = createServer();
+			await new Promise<void>((resolve, reject) => {
+				probe.once('error', reject);
+				probe.listen(port, resolve);
+			});
+			await new Promise<void>((resolve) => probe.close(() => resolve()));
+		});
 	});
 
 	// Background tool completion timing vs Gemini turn boundaries: verify with real server + web client (E2E).

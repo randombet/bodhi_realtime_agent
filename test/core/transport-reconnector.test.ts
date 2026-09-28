@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DEFAULT_RECONNECT_DEADLINE_MS } from '../../src/core/constants.js';
 import type {
 	ReconnectSessionManager,
 	TransportReconnectorDeps,
 } from '../../src/core/transport-reconnector.js';
 import { TransportReconnector } from '../../src/core/transport-reconnector.js';
+import { GeminiLiveTransport } from '../../src/transport/gemini-live-transport.js';
 import type { IClientChannel } from '../../src/types/session-client.js';
 import type { LLMTransport, ReplayItem } from '../../src/types/transport.js';
 
@@ -88,6 +90,8 @@ function makeHarness(opts: {
 	isSpeechActive?: TransportReconnectorDeps['isSpeechActive'];
 	hostedReconnectSpeech?: TransportReconnectorDeps['hostedReconnectSpeech'];
 	onReplayDispatched?: TransportReconnectorDeps['onReplayDispatched'];
+	isGreetingSuppressionArmed?: TransportReconnectorDeps['isGreetingSuppressionArmed'];
+	reconnectDeadlineMs?: number;
 }): Harness {
 	const sm = fakeSessionManager(
 		opts.initial ?? 'ACTIVE',
@@ -113,8 +117,15 @@ function makeHarness(opts: {
 		isSpeechActive: opts.isSpeechActive,
 		hostedReconnectSpeech: opts.hostedReconnectSpeech,
 		onReplayDispatched: opts.onReplayDispatched,
+		isGreetingSuppressionArmed: opts.isGreetingSuppressionArmed,
 	};
-	const reconnector = new TransportReconnector(deps, opts.watchdogMs ?? 8000);
+	const reconnector = new TransportReconnector(
+		deps,
+		opts.watchdogMs ?? 8000,
+		opts.reconnectDeadlineMs === undefined
+			? undefined
+			: { reconnectDeadlineMs: opts.reconnectDeadlineMs },
+	);
 	return { reconnector, sm, clientTransport, transport, eventBus, log, reportError };
 }
 
@@ -474,7 +485,7 @@ describe('TransportReconnector', () => {
 			expect(h.transport.reconnect).toHaveBeenCalledTimes(1);
 		});
 
-		it('GoAway is unbudgeted: it reconnects even after triggerReconnect spent the budget', async () => {
+		it('GoAway is unbudgeted: it reconnects after triggerReconnect spent all three attempts, while still ACTIVE', async () => {
 			const h = makeHarness({});
 			for (let i = 0; i < 3; i++) {
 				h.reconnector.triggerReconnect('transport-close');
@@ -483,14 +494,35 @@ describe('TransportReconnector', () => {
 			}
 			expect(h.transport.reconnect).toHaveBeenCalledTimes(3);
 
-			// triggerReconnect now gives up (budget spent)…
-			h.reconnector.triggerReconnect('transport-close');
-			expect(h.transport.reconnect).toHaveBeenCalledTimes(3);
+			// The budget is spent (a 4th triggerReconnect would give up and CLOSE),
+			// but the session is still ACTIVE — the only state GoAway acts in…
+			expect(h.sm.state).toBe('ACTIVE');
 
-			// …but GoAway still reconnects immediately (its own path, no budget).
+			// …so GoAway still reconnects immediately (its own path, no budget).
 			h.reconnector.handleGoAway('3s');
 			await vi.runAllTimersAsync();
 			expect(h.transport.reconnect).toHaveBeenCalledTimes(4);
+			expect(h.sm.closeWithReason).not.toHaveBeenCalled();
+			expect(h.sm.transitionTo).toHaveBeenLastCalledWith('ACTIVE');
+		});
+
+		it('handleGoAway is ignored without throwing when CLOSED', () => {
+			const h = makeHarness({ initial: 'CLOSED' });
+			// Mirror the real SessionManager: CLOSED has no valid transitions.
+			h.sm.transitionTo.mockImplementation((s: SessionState) => {
+				throw new Error(`Invalid transition: CLOSED → ${s}`);
+			});
+
+			expect(() => h.reconnector.handleGoAway('5s')).not.toThrow();
+
+			expect(h.eventBus.publish).toHaveBeenCalledWith('session.goaway', {
+				sessionId: 'sess_1',
+				timeLeft: '5s',
+			});
+			expect(h.sm.transitionTo).not.toHaveBeenCalled();
+			expect(h.clientTransport.startBuffering).not.toHaveBeenCalled();
+			expect(h.transport.reconnect).not.toHaveBeenCalled();
+			expect(h.sm.state).toBe('CLOSED');
 		});
 
 		it('does not reconnect when there is no resumption handle', () => {
@@ -527,6 +559,196 @@ describe('TransportReconnector', () => {
 			vi.advanceTimersByTime(1000);
 			await vi.runAllTimersAsync();
 			expect(h.transport.reconnect).toHaveBeenCalledTimes(1);
+		});
+	});
+
+	describe('reconnect deadline and guards', () => {
+		/** A transport whose reconnect() never settles, with an abortIncumbent spy. */
+		function stalledTransport() {
+			return fakeTransport({
+				reconnect: vi.fn(() => new Promise<void>(() => {})),
+				abortIncumbent: vi.fn(async () => 'closed' as const),
+			});
+		}
+
+		it('GoAway reconnect that never settles closes with reconnect_failed after the deadline', async () => {
+			const transport = stalledTransport();
+			const h = makeHarness({ transport });
+
+			h.reconnector.handleGoAway('5s');
+			expect(h.sm.state).toBe('RECONNECTING');
+			expect(transport.reconnect).toHaveBeenCalledTimes(1);
+
+			await vi.advanceTimersByTimeAsync(DEFAULT_RECONNECT_DEADLINE_MS - 1);
+			expect(h.sm.closeWithReason).not.toHaveBeenCalled();
+
+			await vi.advanceTimersByTimeAsync(1);
+			const abort = transport.abortIncumbent as ReturnType<typeof vi.fn>;
+			expect(abort).toHaveBeenCalledTimes(1);
+			// The incumbent is aborted BEFORE the close, so the stranded reconnect
+			// continuation cannot dial after CLOSED.
+			expect(abort.mock.invocationCallOrder[0]).toBeLessThan(
+				h.sm.closeWithReason.mock.invocationCallOrder[0],
+			);
+			expect(h.sm.closeWithReason).toHaveBeenCalledWith('reconnect_failed');
+			expect(h.reportError).toHaveBeenCalledWith(
+				'reconnect',
+				expect.objectContaining({
+					message: `Reconnect timed out after ${DEFAULT_RECONNECT_DEADLINE_MS}ms`,
+				}),
+			);
+			expect(h.clientTransport.stopBuffering).toHaveBeenCalled();
+			expect(h.sm.state).toBe('CLOSED');
+			expect(vi.getTimerCount()).toBe(0);
+		});
+
+		it('budgeted reconnect obeys the same deadline', async () => {
+			const transport = stalledTransport();
+			const h = makeHarness({ transport });
+
+			h.reconnector.triggerReconnect('transport-close');
+			await vi.advanceTimersByTimeAsync(1000); // backoff → dial
+			expect(transport.reconnect).toHaveBeenCalledTimes(1);
+
+			await vi.advanceTimersByTimeAsync(DEFAULT_RECONNECT_DEADLINE_MS - 1);
+			expect(h.sm.closeWithReason).not.toHaveBeenCalled();
+
+			await vi.advanceTimersByTimeAsync(1);
+			expect(transport.abortIncumbent).toHaveBeenCalledTimes(1);
+			expect(h.sm.closeWithReason).toHaveBeenCalledWith('reconnect_failed');
+			expect(h.reportError).toHaveBeenCalledWith(
+				'reconnect',
+				expect.objectContaining({
+					message: `Reconnect timed out after ${DEFAULT_RECONNECT_DEADLINE_MS}ms`,
+				}),
+			);
+			expect(h.sm.state).toBe('CLOSED');
+		});
+
+		it('reconnect resolving after CLOSED neither activates nor reports', async () => {
+			let resolveReconnect: () => void = () => {};
+			const transport = fakeTransport({
+				reconnect: vi.fn(
+					() =>
+						new Promise<void>((resolve) => {
+							resolveReconnect = resolve;
+						}),
+				),
+			});
+			const h = makeHarness({ transport });
+
+			h.reconnector.handleGoAway('5s');
+			expect(transport.reconnect).toHaveBeenCalledTimes(1);
+			await h.sm.closeWithReason('normal'); // the session closed mid-reconnect
+
+			resolveReconnect();
+			await vi.runAllTimersAsync();
+
+			expect(h.sm.transitionTo).not.toHaveBeenCalledWith('ACTIVE');
+			expect(h.sm.state).toBe('CLOSED');
+			expect(h.reportError).not.toHaveBeenCalled();
+			expect(h.sm.closeWithReason).toHaveBeenCalledTimes(1);
+			expect(h.log).toHaveBeenCalledWith(expect.stringContaining('result ignored'));
+			expect(vi.getTimerCount()).toBe(0); // the attempt deadline was cleared
+		});
+
+		it('a delayed incumbent close completing after the deadline neither dials nor leaves a provider connection', async () => {
+			// Real transport with a fake SDK: the incumbent's close() hangs past the
+			// session deadline, then completes.
+			let releaseClose: () => void = () => {};
+			const incumbent = {
+				close: vi.fn(
+					() =>
+						new Promise<void>((resolve) => {
+							releaseClose = resolve;
+						}),
+				),
+				sendRealtimeInput: vi.fn(),
+				sendClientContent: vi.fn(),
+				sendToolResponse: vi.fn(),
+			};
+			const connect = vi.fn(
+				async (params: { callbacks: { onmessage: (msg: unknown) => void } }) => {
+					void Promise.resolve().then(() =>
+						params.callbacks.onmessage({ setupComplete: { sessionId: 'sid_1' } }),
+					);
+					return incumbent;
+				},
+			);
+			const gemini = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			(gemini as unknown as { ai: unknown }).ai = { live: { connect } };
+			await gemini.connect();
+			expect(gemini.isConnected).toBe(true);
+
+			const h = makeHarness({ transport: gemini, reconnectDeadlineMs: 100 });
+			h.reconnector.handleGoAway('5s');
+			// reconnect() → disconnect() detached the incumbent and awaits its close.
+			expect(incumbent.close).toHaveBeenCalledTimes(1);
+
+			await vi.advanceTimersByTimeAsync(100); // session deadline
+			expect(h.sm.closeWithReason).toHaveBeenCalledWith('reconnect_failed');
+			expect(h.sm.state).toBe('CLOSED');
+
+			// The incumbent close finally completes: the stranded reconnect()
+			// continuation must not dial after CLOSED.
+			releaseClose();
+			await vi.runAllTimersAsync();
+
+			expect(connect).toHaveBeenCalledTimes(1);
+			expect(gemini.isConnected).toBe(false);
+			expect(h.sm.transitionTo).not.toHaveBeenCalledWith('ACTIVE');
+			expect(vi.getTimerCount()).toBe(0);
+		});
+
+		it('session close during backoff cancels the pending dial', async () => {
+			const h = makeHarness({});
+			h.reconnector.triggerReconnect('transport-close');
+			expect(h.sm.state).toBe('RECONNECTING');
+
+			await h.sm.closeWithReason('normal'); // closed before the 1000ms backoff elapses
+			await vi.advanceTimersByTimeAsync(1000);
+
+			expect(h.transport.reconnect).not.toHaveBeenCalled();
+			expect(h.sm.transitionTo).not.toHaveBeenCalledWith('ACTIVE');
+		});
+
+		it('dispose() is terminal: a later transport close or GoAway starts no dial', async () => {
+			const h = makeHarness({});
+			h.reconnector.dispose();
+			h.reconnector.triggerReconnect('transport-close');
+			h.reconnector.handleGoAway('10s');
+			await vi.advanceTimersByTimeAsync(5000);
+			expect(h.transport.reconnect).not.toHaveBeenCalled();
+			expect(h.sm.transitionTo).not.toHaveBeenCalledWith('RECONNECTING');
+		});
+
+		it('dispose() clears pending timers', async () => {
+			// Pending backoff dial, armed watchdog and a held recovery.
+			const h = makeHarness({ watchdogMs: 100, isGreetingSuppressionArmed: () => true });
+			h.reconnector.armResponseWatchdog();
+			await vi.advanceTimersByTimeAsync(100); // fires → held behind the greeting gate
+			expect(h.reconnector.isRecoveryHeld()).toBe(true);
+			h.reconnector.armResponseWatchdog();
+			h.reconnector.triggerReconnect('transport-close');
+			expect(vi.getTimerCount()).toBe(2); // watchdog + backoff
+
+			h.reconnector.dispose();
+			expect(vi.getTimerCount()).toBe(0);
+			expect(h.reconnector.isRecoveryHeld()).toBe(false);
+			await vi.advanceTimersByTimeAsync(5000);
+			expect(h.transport.reconnect).not.toHaveBeenCalled();
+
+			// In-flight attempt: its deadline is cleared and the incumbent aborted, once.
+			const transport = stalledTransport();
+			const g = makeHarness({ transport });
+			g.reconnector.handleGoAway('5s');
+			expect(vi.getTimerCount()).toBe(1); // the attempt deadline
+			g.reconnector.dispose();
+			g.reconnector.dispose(); // idempotent
+			expect(vi.getTimerCount()).toBe(0);
+			expect(transport.abortIncumbent).toHaveBeenCalledTimes(1);
+			await vi.advanceTimersByTimeAsync(DEFAULT_RECONNECT_DEADLINE_MS);
+			expect(g.sm.closeWithReason).not.toHaveBeenCalled();
 		});
 	});
 

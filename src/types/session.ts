@@ -36,6 +36,7 @@ export type KnownSessionEndReason =
 	| 'tts_fatal_error'
 	| 'reconnect_failed'
 	| 'transfer_failed'
+	| 'connect_failed'
 	| 'error'
 	| 'timeout';
 

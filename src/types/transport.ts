@@ -449,6 +449,19 @@ export interface LLMTransport {
 	replayHistory?(items: readonly ReplayItem[]): void;
 	readonly isConnected: boolean;
 
+	// --- Dial-generation fence (optional; GeminiLiveTransport implements it) ---
+	/** Synchronously strand the incumbent connection — advance the dial
+	 *  generation so its callbacks, an in-flight `reconnect()` continuation and a
+	 *  later-resolving dial can no longer install or deliver anything, detach the
+	 *  session, and drop the resumption handle — then close it within a bounded
+	 *  time. Never rejects: `'closed'` when the close completed, `'forced'` on
+	 *  timeout or close error. Unlike `disconnect()`, never awaited unboundedly. */
+	abortIncumbent?(): Promise<'closed' | 'forced'>;
+	/** Dial counter: advances per dial and when the current dial fails. */
+	readonly currentDialGen?: number;
+	/** Post-setup generation counter (advances only on a completed setup). */
+	readonly currentTransportGeneration?: number;
+
 	// --- Audio ---
 	sendAudio(base64Data: string): void;
 	readonly audioFormat: AudioFormatSpec;

@@ -1,5 +1,6 @@
 import type { IClientChannel } from '../types/session-client.js';
 import type { LLMTransport, ReplayItem, RetainedUserTurn } from '../types/transport.js';
+import { DEFAULT_RECONNECT_DEADLINE_MS } from './constants.js';
 import type { EventBus } from './event-bus.js';
 import { decideOnGateReleased, decideOnWatchdogFire } from './policies/recovery.policy.js';
 import type { SessionManager } from './session-manager.js';
@@ -86,6 +87,13 @@ export interface TransportReconnectorDeps {
 /** Reconnect-window speech verdict driving the stage-2 replay decision. */
 export type ReconnectWindowSpeech = 'none' | 'local-drained-speech' | 'hosted-speech' | 'unknown';
 
+/** Test-only overrides; production constructs the reconnector without them. */
+export interface TransportReconnectorOptions {
+	/** Deadline for one reconnect attempt (ms); `<= 0` disables it. Defaults to
+	 *  `DEFAULT_RECONNECT_DEADLINE_MS`. */
+	reconnectDeadlineMs?: number;
+}
+
 /**
  * Owns the transport reconnect path and the response-watchdog liveness timer as
  * one cohesive unit. Two reconnect triggers share this unit but NOT the same
@@ -98,6 +106,9 @@ export type ReconnectWindowSpeech = 'none' | 'local-drained-speech' | 'hosted-sp
  *  - {@link handleGoAway} reconnects **immediately** with the resumption handle
  *    — no budget, no backoff — because Gemini's GoAway is a graceful,
  *    handle-bearing migration signal, not an error.
+ *
+ * Both dial through {@link runReconnect}, which bounds each attempt by a
+ * session-level deadline, so the session can never stay in RECONNECTING.
  *
  * The watchdog's sole job is to force a {@link triggerReconnect} when the model
  * goes silent after the user's turn ends, so it lives here too.
@@ -133,12 +144,31 @@ export class TransportReconnector {
 	private _replayDeferred = false;
 	/** H4: a watchdog fire held behind full-greeting suppression. */
 	private _heldGate = false;
+	/** Pending budgeted-reconnect backoff timer (the dial has not started yet). */
+	private _backoffTimer?: ReturnType<typeof setTimeout>;
+	/** Deadline timer of the in-flight automatic reconnect attempt. */
+	private _deadlineTimer?: ReturnType<typeof setTimeout>;
+	/** Automatic-attempt token. Each {@link runReconnect} captures a fresh value;
+	 *  its resolution, rejection and deadline handlers act only while it is still
+	 *  current, so an abandoned attempt (deadline, {@link dispose}) settling late
+	 *  can never touch session state. */
+	private _attemptToken = 0;
+	/** True between a `transport.reconnect()` dispatch and its handling. */
+	private _attemptInFlight = false;
+	/** Set by dispose(): terminal, so a transport close or GoAway that arrives
+	 *  while the owning session is finalizing can never start a new dial. */
+	private _disposed = false;
+	/** Session-level deadline per reconnect attempt (ms); `<= 0` disables. */
+	private readonly reconnectDeadlineMs: number;
 
 	constructor(
 		private readonly deps: TransportReconnectorDeps,
 		/** Resolved watchdog timeout (ms); `<= 0` disables. */
 		private readonly responseWatchdogMs: number,
-	) {}
+		options?: TransportReconnectorOptions,
+	) {
+		this.reconnectDeadlineMs = options?.reconnectDeadlineMs ?? DEFAULT_RECONNECT_DEADLINE_MS;
+	}
 
 	/** Arm (or re-arm) the response watchdog after the user's turn ends. */
 	armResponseWatchdog(): void {
@@ -323,6 +353,7 @@ export class TransportReconnector {
 
 	/** Budgeted + backed-off reconnect entry (transport-close / watchdog). */
 	triggerReconnect(reason: string, elicit = false): void {
+		if (this._disposed) return;
 		if (this.deps.sessionManager.state !== 'ACTIVE') return;
 		const handle = this.deps.sessionManager.resumptionHandle;
 		if (handle && this.reconnectAttempts < TransportReconnector.MAX_RECONNECT_ATTEMPTS) {
@@ -334,45 +365,11 @@ export class TransportReconnector {
 			this.deps.sessionManager.transitionTo('RECONNECTING');
 			this.deps.clientTransport.startBuffering();
 			this.deps.onReconnectWindowStart?.();
-			setTimeout(() => {
-				this.deps.transport
-					.reconnect({
-						resumptionHandle: handle,
-						conversationHistory: this.deps.toReplayContent(),
-					})
-					.then(() => {
-						// H2 gate-aware drain: the session filters capture-tagged frames
-						// (gate-active discarded) and transform-sends admitted ones;
-						// the legacy raw path remains for harnesses without the dep.
-						let buffered: Buffer[];
-						if (this.deps.drainBufferedInbound) {
-							buffered = this.deps.drainBufferedInbound('reconnect');
-						} else {
-							buffered = this.deps.clientTransport.stopBuffering();
-							for (const chunk of buffered) {
-								this.deps.transport.sendAudio(chunk.toString('base64'));
-							}
-						}
-						// Reconnect-window speech verdict ("fresh speech wins" — never
-						// replay an old utterance after newer speech). Local mode: drained
-						// chunks are inbound mic PCM — energy-check them. Hosted mode
-						// drains nothing inbound; the session's input-side tee supplies
-						// the verdict (absent → 'none', the legacy behavior).
-						const reconnectSpeech: ReconnectWindowSpeech =
-							buffered.length > 0
-								? (this.deps.detectSpeech?.(buffered) ?? false)
-									? 'local-drained-speech'
-									: 'none'
-								: (this.deps.hostedReconnectSpeech?.() ?? 'none');
-						this.deps.sessionManager.transitionTo('ACTIVE');
-						this.deps.log('Reconnect complete; session ACTIVE');
-						if (elicit) this.recoverModelResponse(reason, reconnectSpeech);
-					})
-					.catch((err) => {
-						this.deps.clientTransport.stopBuffering();
-						this.deps.reportError('reconnect', err);
-						void this.deps.sessionManager.closeWithReason('reconnect_failed');
-					});
+			this._backoffTimer = setTimeout(() => {
+				this._backoffTimer = undefined;
+				// The session left RECONNECTING during the backoff (closed): no dial.
+				if (this.deps.sessionManager.state !== 'RECONNECTING') return;
+				this.runReconnect(reason, handle, { drainReason: 'reconnect', elicit });
 			}, delay);
 		} else {
 			if (this.reconnectAttempts >= TransportReconnector.MAX_RECONNECT_ATTEMPTS) {
@@ -382,6 +379,120 @@ export class TransportReconnector {
 			}
 			void this.deps.sessionManager.closeWithReason('reconnect_failed');
 		}
+	}
+
+	/**
+	 * One automatic reconnect attempt, shared by the budgeted path and GoAway:
+	 * `transport.reconnect()` raced against the session-level deadline. The
+	 * attempt's token is captured here; every handler below no-ops once it is no
+	 * longer current. A result is applied only while the session is still
+	 * RECONNECTING; a rejection closes with `reconnect_failed`; the deadline (like
+	 * {@link dispose}) first aborts the transport incumbent, so the in-flight
+	 * reconnect continuation cannot dial after CLOSED and a late dial result is
+	 * closed rather than orphaned.
+	 */
+	private runReconnect(
+		reason: string,
+		handle: string,
+		opts: { drainReason: 'reconnect' | 'goaway'; elicit: boolean },
+	): void {
+		const token = ++this._attemptToken;
+		this._attemptInFlight = true;
+		const deadlineMs = this.reconnectDeadlineMs;
+		if (deadlineMs > 0) {
+			this._deadlineTimer = setTimeout(() => {
+				this._deadlineTimer = undefined;
+				if (token !== this._attemptToken) return;
+				this.abandonAttempt();
+				this.deps.clientTransport.stopBuffering();
+				this.deps.reportError('reconnect', new Error(`Reconnect timed out after ${deadlineMs}ms`));
+				void this.deps.sessionManager.closeWithReason('reconnect_failed');
+			}, deadlineMs);
+		}
+		this.deps.transport
+			.reconnect({
+				resumptionHandle: handle,
+				conversationHistory: this.deps.toReplayContent(),
+			})
+			.then(() => {
+				if (token !== this._attemptToken) return;
+				this.settleAttempt();
+				const state = this.deps.sessionManager.state;
+				if (state !== 'RECONNECTING') {
+					// Closed while the reconnect was in flight: never re-activate a
+					// terminal session; just release the client buffer.
+					this.deps.clientTransport.stopBuffering();
+					this.deps.log(`Reconnect completed but session is ${state} — result ignored`);
+					return;
+				}
+				// H2 gate-aware drain: the session filters capture-tagged frames
+				// (gate-active discarded) and transform-sends admitted ones;
+				// the legacy raw path remains for harnesses without the dep.
+				let buffered: Buffer[];
+				if (this.deps.drainBufferedInbound) {
+					buffered = this.deps.drainBufferedInbound(opts.drainReason);
+				} else {
+					buffered = this.deps.clientTransport.stopBuffering();
+					for (const chunk of buffered) {
+						this.deps.transport.sendAudio(chunk.toString('base64'));
+					}
+				}
+				// Only the eliciting (watchdog) path consults the speech verdict.
+				const reconnectSpeech = opts.elicit ? this.reconnectWindowSpeech(buffered) : null;
+				this.deps.sessionManager.transitionTo('ACTIVE');
+				this.deps.log('Reconnect complete; session ACTIVE');
+				if (reconnectSpeech) this.recoverModelResponse(reason, reconnectSpeech);
+			})
+			.catch((err) => {
+				if (token !== this._attemptToken) return;
+				this.settleAttempt();
+				this.deps.clientTransport.stopBuffering();
+				this.deps.reportError('reconnect', err);
+				void this.deps.sessionManager.closeWithReason('reconnect_failed');
+			});
+	}
+
+	/** Reconnect-window speech verdict ("fresh speech wins" — never replay an old
+	 *  utterance after newer speech). Local mode: drained chunks are inbound mic
+	 *  PCM — energy-check them. Hosted mode drains nothing inbound; the session's
+	 *  input-side tee supplies the verdict (absent → 'none', the legacy behavior). */
+	private reconnectWindowSpeech(buffered: Buffer[]): ReconnectWindowSpeech {
+		if (buffered.length > 0) {
+			return (this.deps.detectSpeech?.(buffered) ?? false) ? 'local-drained-speech' : 'none';
+		}
+		return this.deps.hostedReconnectSpeech?.() ?? 'none';
+	}
+
+	/** The in-flight attempt was handled: clear its deadline. */
+	private settleAttempt(): void {
+		this._attemptInFlight = false;
+		if (this._deadlineTimer) {
+			clearTimeout(this._deadlineTimer);
+			this._deadlineTimer = undefined;
+		}
+	}
+
+	/** Strand the in-flight attempt (its late settlement becomes a no-op) and
+	 *  abort the transport incumbent, so the reconnect continuation cannot dial
+	 *  and a late-resolving dial closes its own session. */
+	private abandonAttempt(): void {
+		this._attemptToken++;
+		this.settleAttempt();
+		void this.deps.transport.abortIncumbent?.();
+	}
+
+	/** Session teardown: strand an in-flight reconnect (aborting the transport
+	 *  incumbent) and cancel its deadline, cancel a pending backoff dial, disarm
+	 *  the watchdog and drop a held recovery. Idempotent. */
+	dispose(): void {
+		this._disposed = true;
+		if (this._attemptInFlight) this.abandonAttempt();
+		if (this._backoffTimer) {
+			clearTimeout(this._backoffTimer);
+			this._backoffTimer = undefined;
+		}
+		this.disarmResponseWatchdog();
+		this.cancelHeldRecovery();
 	}
 
 	/** Post-reconnect recovery. STAGE 2: replay the retained utterance once on
@@ -456,34 +567,22 @@ export class TransportReconnector {
 			timeLeft,
 		});
 
+		if (this._disposed) return;
+		// Only ACTIVE → RECONNECTING is valid. A late GoAway from a connection that
+		// a close or an earlier reconnect already tore down must not throw an
+		// invalid-transition SessionError out of the transport callback.
+		const state = this.deps.sessionManager.state;
+		if (state !== 'ACTIVE') {
+			this.deps.log(`GoAway ignored — session state is ${state}, not ACTIVE`);
+			return;
+		}
+
 		// Initiate reconnection
 		const handle = this.deps.sessionManager.resumptionHandle;
 		if (handle) {
 			this.deps.sessionManager.transitionTo('RECONNECTING');
 			this.deps.clientTransport.startBuffering();
-
-			this.deps.transport
-				.reconnect({
-					resumptionHandle: handle,
-					conversationHistory: this.deps.toReplayContent(),
-				})
-				.then(() => {
-					if (this.deps.drainBufferedInbound) {
-						this.deps.drainBufferedInbound('goaway');
-					} else {
-						const buffered = this.deps.clientTransport.stopBuffering();
-						for (const chunk of buffered) {
-							this.deps.transport.sendAudio(chunk.toString('base64'));
-						}
-					}
-					this.deps.sessionManager.transitionTo('ACTIVE');
-					this.deps.log('Reconnect complete; session ACTIVE');
-				})
-				.catch((err) => {
-					this.deps.clientTransport.stopBuffering();
-					this.deps.reportError('reconnect', err);
-					void this.deps.sessionManager.closeWithReason('reconnect_failed');
-				});
+			this.runReconnect('goaway', handle, { drainReason: 'goaway', elicit: false });
 		}
 	}
 
