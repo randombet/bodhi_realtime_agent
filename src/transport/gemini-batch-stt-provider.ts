@@ -7,6 +7,16 @@ export interface GeminiBatchSTTConfig {
 	apiKey: string;
 	/** Model name for STT (e.g. "gemini-3-flash-preview"). */
 	model: string;
+	/**
+	 * Domain vocabulary hint appended to the transcription prompt — key terms
+	 * the session is about (e.g. a slide deck's technical terms). The model is
+	 * told to prefer these exact spellings when the audio plausibly matches, so
+	 * garbled audio near a known term resolves to the term instead of a phonetic
+	 * guess ("mass derivation" → "math derivation"). A function is re-read per
+	 * commit so the host can supply it AFTER construction (deck loads late); if
+	 * it throws, the error is logged and that request uses the base prompt.
+	 */
+	contextHint?: string | (() => string | undefined);
 }
 
 /** Maximum buffer size in bytes (~30s at 16kHz 16-bit mono = 32KB/s). */
@@ -94,12 +104,54 @@ export class GeminiBatchSTTProvider implements STTProvider {
 	private _bufferBytes = 0;
 	private _wasInterrupted = false;
 
+	private _contextHint?: string | (() => string | undefined);
+
 	onTranscript?: (text: string, turnId: number | undefined) => void;
 	onPartialTranscript?: (text: string) => void;
 
 	constructor(config: GeminiBatchSTTConfig) {
 		this.ai = new GoogleGenAI({ apiKey: config.apiKey });
 		this.model = config.model;
+		this._contextHint = config.contextHint;
+	}
+
+	/** Set/replace the domain vocabulary hint after construction. */
+	setContextHint(hint: string | (() => string | undefined) | undefined): void {
+		this._contextHint = hint;
+	}
+
+	/**
+	 * Resolve the current hint (function form re-read per call). A hint function
+	 * that throws is logged and treated as no hint: it runs synchronously inside
+	 * commit() while the request is built, before the promise chain whose catch
+	 * keeps STT failures non-fatal, so its error must not escape.
+	 */
+	private resolveContextHint(): string | undefined {
+		let h: string | undefined;
+		try {
+			h = typeof this._contextHint === 'function' ? this._contextHint() : this._contextHint;
+		} catch (err) {
+			console.warn(
+				'[GeminiBatchSTTProvider] contextHint function threw; using the base prompt:',
+				err,
+			);
+			return undefined;
+		}
+		const trimmed = h?.trim();
+		return trimmed ? trimmed : undefined;
+	}
+
+	/**
+	 * Build the user-part transcription prompt, with the vocabulary hint when
+	 * present. The output rules stay in the system instruction; the hint rides
+	 * with the user part because it can change between commits. Falls back to
+	 * the base prompt when the hint is absent, blank, or its function throws.
+	 * Exposed for tests.
+	 */
+	buildPrompt(): string {
+		const hint = this.resolveContextHint();
+		if (!hint) return USER_PROMPT;
+		return `${USER_PROMPT}\nThe speaker is discussing the following material; these exact terms are likely to occur:\n${hint}\nWhen a phrase in the audio plausibly matches one of these terms, transcribe the term with this exact spelling instead of a phonetic guess. Do NOT force a match onto speech that clearly says something else.`;
 	}
 
 	configure(audio: STTAudioConfig): void {
@@ -161,7 +213,7 @@ export class GeminiBatchSTTProvider implements STTProvider {
 									mimeType: 'audio/wav',
 								},
 							},
-							{ text: USER_PROMPT },
+							{ text: this.buildPrompt() },
 						],
 					},
 				],

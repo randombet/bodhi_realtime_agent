@@ -27,6 +27,7 @@ import {
 	type EchoEnvEntry,
 	EchoGuard,
 	type EchoGuardConfig,
+	type GeminiBatchSTTProvider,
 	type HooksManager,
 	type IEventBus,
 	type LLMTransport,
@@ -183,3 +184,8 @@ const envelopeLag: { corr: number; lagMs: number } = bestEnvelopeLag(
 	1500,
 	20,
 );
+// Batch transcription takes a vocabulary hint after construction, static or re-read per commit,
+// and exposes the prompt it sends.
+declare const batchStt: GeminiBatchSTTProvider;
+batchStt.setContextHint(() => 'KDA, delta rule');
+const batchSttPrompt: string = batchStt.buildPrompt();
