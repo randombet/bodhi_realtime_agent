@@ -205,6 +205,33 @@ describe('ClientMessageRouter', () => {
 		expect(onClientJson).toHaveBeenCalledWith(msg);
 	});
 
+	it.each(['onClientJson', 'onClientCommand'] as const)(
+		'a throwing %s is logged and reported, and the other host hook still receives the frame',
+		(throwing) => {
+			const hooks = {
+				onClientJson: vi.fn(),
+				onClientCommand: vi.fn(),
+			};
+			hooks[throwing].mockImplementation(() => {
+				throw new Error(`${throwing} broke`);
+			});
+			const log = vi.fn();
+			const { router, reportError } = makeRouter({ ...hooks, log });
+			const msg = { type: 'app.retry' };
+
+			expect(() => router.dispatch(msg)).not.toThrow();
+
+			expect(hooks.onClientJson).toHaveBeenCalledWith(msg);
+			expect(hooks.onClientCommand).toHaveBeenCalledWith(msg);
+			expect(reportError).toHaveBeenCalledTimes(1);
+			expect(reportError).toHaveBeenCalledWith(
+				`hook.${throwing}`,
+				expect.objectContaining({ message: `${throwing} broke` }),
+			);
+			expect(log).toHaveBeenCalledWith(`hook ${throwing} threw: ${throwing} broke`);
+		},
+	);
+
 	it('does NOT forward a malformed recognized type (behavior.set without key)', () => {
 		const { router, onClientJson, handleClientSet } = makeRouter();
 		router.dispatch({ type: 'behavior.set', preset: 'warm' });

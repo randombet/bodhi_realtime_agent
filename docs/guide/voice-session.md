@@ -175,6 +175,68 @@ The framework wires PCM rates and inbound PCM delivery when `rtcAudio === 'werif
 
 The root `bodhi-realtime-agent` entry has no native dependencies, so it bundles (for example with esbuild) without `.node` loaders. The werift + `@evan/opus` engine ships inside the package as an internal module, not as a public entry point, and a `werift_opus` session loads it on the first `rtc.offer`; no configuration change is needed. Only the package's own files can load that module, so `werift_opus` needs `bodhi-realtime-agent` loaded from its installed package: an app bundle that inlines the root entry cannot reach the engine and reports the load failure. If the load fails, the session logs a line naming the internal engine entry and sends the client one `rtc.error` frame.
 
+## Client attach hooks and host commands
+
+These options apply to both connection modes. A client attach is a real
+client on the local `ClientTransport` (never a probe or verifier) or a
+`notifyClientConnected()` call with `clientSender`.
+
+```ts
+const session = new VoiceSession({
+  // ...
+  // Client frames whose type is not a built-in, after onClientJson.
+  onClientCommand: (message) => {
+    if (message.type === 'app.retry') retryFromClient();
+  },
+  // A real client attached: runs before session.config and any greeting.
+  onClientConnected: () => resendAppState(),
+  onClientDisconnected: () => {},
+  // While true, an attach configures the client and does nothing else.
+  suppressClientAutoActions: () => hostOwnsRecovery,
+  reattachGreeting: 'until-first-turn',
+  reattachContextReplay: true,
+});
+```
+
+- **`onClientCommand`** receives each client JSON frame whose `type` the
+  session does not handle itself, after `onClientJson`. Built-in frames
+  (`behavior.set`, `ui.response`, `file_upload`, `text_input`,
+  `playback.ended`) never reach it; a built-in frame with a malformed payload
+  is dropped with a log line and reaches neither hook. Frames that arrive
+  before `session.config` has been sent are queued (up to 64) and delivered
+  after it. A throw from `onClientJson` or `onClientCommand` is reported
+  through `hooks.onError`; the other hook, the remaining queued frames and
+  the attach still run.
+- **`onClientConnected`** runs synchronously once `clientConnected` is `true`,
+  before the behavior catalog, `session.config` and any greeting.
+  **`onClientDisconnected`** runs at the end of the detach, once
+  `clientConnected` is `false`. A throwing hook is reported through
+  `hooks.onError` and does not stop the attach or detach.
+
+After the client is configured, an attach acts on the session state:
+
+| State at attach | What the attach does |
+|-----------------|----------------------|
+| `ACTIVE` | Sends the agent's greeting, if it has one, once per attached client under `reattachGreeting: 'per-client'` (the default). Under `'until-first-turn'` it greets only while no turn has completed; after that, with `reattachContextReplay: true`, it injects the last ten user and assistant messages as quiet context instead (no response is requested, and nothing is injected while synthetic output is held). |
+| `UPSTREAM_LOST` | Redials with `recoverUpstream({ reason: 'human-retry', skipContextInjection: false, holdSyntheticUntilFreshSpeech: false })`: a fresh dial without the resumption handle, no greeting, and quiet recent context once the session is `ACTIVE` again. A failed dial parks the session again. |
+| Any other state | Nothing more. A client attached before the first setup completes is greeted, under the same policy, when it does. |
+
+`suppressClientAutoActions` is read once per attach, after `session.config`
+is sent. While it returns `true` the attach sends no greeting, injects no
+context and does not redial. Under `upstreamLossPolicy: 'hold'` the
+reconnector reads it too: while it returns `true` the host owns recovery, so
+a lost provider connection parks the session instead of reconnecting on its
+own. Both reads log a throw from the gate and treat it as `false`.
+
+`session.clientConnected` reports whether a real client is attached. On the
+local `ClientTransport`, `getClientSocketHealth()` returns the attached
+socket's `{ readyState, bufferedAmount }` (`null` when none is attached), and
+`closeClientConnection(code, reason)` closes that socket, for example with
+`4000, 'goodbye'`, while the listener keeps accepting clients and the session
+stays up. With `clientSender` your server owns the socket, so
+`getClientSocketHealth()` returns `null` and `closeClientConnection()` returns
+`false`.
+
 ## Playback gate
 
 For client surfaces that can report when audio has actually finished playing,
@@ -219,7 +281,7 @@ stateDiagram-v2
   RECONNECTING --> ACTIVE: replacement connection set up
   RECONNECTING --> UPSTREAM_LOST: automatic recovery ends, recovery dial fails, parkUpstream() (hold)
   ACTIVE --> UPSTREAM_LOST: no resumption handle, parkUpstream() (hold)
-  UPSTREAM_LOST --> RECONNECTING: recoverUpstream()
+  UPSTREAM_LOST --> RECONNECTING: recoverUpstream(), client attach (not suppressed)
   ACTIVE --> TRANSFERRING: transfer()
   TRANSFERRING --> ACTIVE
   CONNECTING --> CLOSED: first dial fails (close)
@@ -232,8 +294,11 @@ stateDiagram-v2
 `UPSTREAM_LOST` exists only under `'hold'`. While parked, no microphone audio
 reaches the model, an external STT provider is stopped, and background
 notifications and framework-generated output (greeting, directive
-reinforcement) are held; nothing redials the session until you call
-`recoverUpstream()`. `close()` finalizes a parked session as usual.
+reinforcement) are held. Two things redial a parked session: your call to
+`recoverUpstream()`, and a client attach while `suppressClientAutoActions`
+does not return `true`, which calls `recoverUpstream()` itself (see
+[Client attach hooks and host commands](#client-attach-hooks-and-host-commands)).
+Nothing else does. `close()` finalizes a parked session as usual.
 `session.upstreamLost` carries `{ sessionId, reason, code?, detail? }`, where
 `reason` is `'reconnect-exhausted'`, `'no-resumption-handle'`,
 `'reconnect-failed'`, `'reconnect-timeout'`, `'connect-failed'`,
@@ -253,7 +318,7 @@ const session = new VoiceSession({
 });
 
 session.eventBus.subscribe('session.upstreamLost', ({ reason }) => {
-  // A deliberate parkUpstream() stays parked until you decide otherwise.
+  // Do not retry a deliberate parkUpstream().
   if (reason === 'host-parked') return;
   if (!session.getRecoveryCapabilities().recoverUpstream) return;
   // Retry after a pause: a recovery that fails parks the session again.
@@ -340,10 +405,11 @@ example after the client has been detached for a while: it cancels automatic
 recovery, parks the session in `UPSTREAM_LOST` without finalizing it
 (publishing `session.upstreamLost` with reason `'host-parked'` and your
 `reason` as `detail`), then disconnects the transport. The next
-`recoverUpstream()` redials. Under `'close'` or in actor mode it rejects with a
-`SessionError`. `clearResumption()` drops the session's and the
-transport's resumption handle without touching the connection and returns
-whether the session held one.
+`recoverUpstream()` redials it, as does a client attach that
+`suppressClientAutoActions` does not suppress. Under `'close'` or in actor
+mode it rejects with a `SessionError`. `clearResumption()` drops the
+session's and the transport's resumption handle without touching the
+connection and returns whether the session held one.
 
 ### Capabilities
 

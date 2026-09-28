@@ -143,3 +143,5 @@ const recovery: RecoverUpstreamResult = session.recoverUpstream(recoverArgs);
 const recoveryEpoch: number = recovery.attemptEpoch;
 declare const notificationQueue: BackgroundNotificationQueue;
 notificationQueue.setHeld(true);
+// The real-client detach edge is a host hook, beside the attach hook above.
+config.onClientDisconnected;

@@ -27,7 +27,8 @@ export interface ArtifactStore {
 }
 
 /** Built-in `type` values dispatched here. A *malformed* payload for one of these
- *  is dropped (not forwarded to `onClientJson`); only an unrecognized `type` is. */
+ *  is dropped with a log line (not forwarded to `onClientJson` or
+ *  `onClientCommand`); only an unrecognized `type` is. */
 type RoutedCoreClientType = Exclude<
 	CoreClientToServerMessage['type'],
 	RtcClientSignalingMessage['type']
@@ -89,6 +90,8 @@ export interface ClientMessageRouterDeps {
 	handleTextInput(text: string): Promise<void>;
 	/** Additive opt-in: fired ONLY for an unrecognized `type`. */
 	onClientJson?: (message: Record<string, unknown>) => void;
+	/** Host command hook: fired after `onClientJson`, for an unrecognized `type` only. */
+	onClientCommand?: (message: Record<string, unknown>) => void;
 	reportError(context: string, error: Error): void;
 	log(message: string): void;
 }
@@ -101,10 +104,11 @@ export interface ClientMessageRouterDeps {
  *
  * `VoiceSession.handleJsonFromClient` stays as the thin entry/intercept method
  * (an example monkey-patches it) and delegates to {@link dispatch}. A recognized
- * built-in `type` is consumed here; a *malformed* recognized type is dropped
- * exactly as before and is NOT forwarded to `onClientJson`. `onClientJson` fires
- * only for an unrecognized `type` — the former silent-drop fall-through — so the
- * change is byte-identical unless a consumer wires the hook.
+ * built-in `type` is consumed here; a *malformed* recognized type is dropped with
+ * a log line and is NOT forwarded to `onClientJson` or `onClientCommand`.
+ * `onClientJson`, then `onClientCommand`, fire only for an unrecognized `type` —
+ * the former silent-drop fall-through — so nothing changes for a consumer that
+ * wires neither hook.
  */
 export class ClientMessageRouter {
 	constructor(private readonly deps: ClientMessageRouterDeps) {}
@@ -149,10 +153,35 @@ export class ClientMessageRouter {
 		} else if (message.type === 'playback.ended' && typeof message.playbackId === 'number') {
 			this.handlePlaybackEnded(message.playbackId);
 		} else if (!isRecognizedType(message.type)) {
-			// A recognized type with a malformed payload was dropped above and is
-			// NOT forwarded; only an unrecognized `type` reaches `onClientJson` (the
-			// former silent-drop fall-through).
-			this.deps.onClientJson?.(message);
+			// Only an unrecognized `type` reaches the host hooks (the former
+			// silent-drop fall-through): `onClientJson` first, then `onClientCommand`.
+			this.callHostHook('onClientJson', this.deps.onClientJson, message);
+			this.callHostHook('onClientCommand', this.deps.onClientCommand, message);
+		} else {
+			// A recognized type with a malformed payload is never forwarded.
+			this.deps.log(`Client JSON: dropped malformed built-in "${message.type}"`);
+		}
+	}
+
+	/**
+	 * Run one host hook with throw isolation. Dispatch runs from the client
+	 * socket callback and from the attach bootstrap's drain of queued frames, so
+	 * a throw is logged and reported through `reportError` (the session's
+	 * `hooks.onError`) and never reaches the other hook, the rest of the drain
+	 * or the attach.
+	 */
+	private callHostHook(
+		name: 'onClientJson' | 'onClientCommand',
+		hook: ((message: Record<string, unknown>) => void) | undefined,
+		message: Record<string, unknown>,
+	): void {
+		if (!hook) return;
+		try {
+			hook(message);
+		} catch (err) {
+			const error = err instanceof Error ? err : new Error(String(err));
+			this.deps.log(`hook ${name} threw: ${error.message}`);
+			this.deps.reportError(`hook.${name}`, error);
 		}
 	}
 

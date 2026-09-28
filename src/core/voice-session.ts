@@ -44,7 +44,7 @@ import type { ConversationHistoryStore, SessionAnalytics } from '../types/histor
 import type { FrameworkHooks } from '../types/hooks.js';
 import type { ProcessedKnowledgeBase } from '../types/knowledge-base.js';
 import type { MemoryStore } from '../types/memory.js';
-import type { IClientChannel } from '../types/session-client.js';
+import type { ClientSocketHealth, IClientChannel } from '../types/session-client.js';
 import type { SessionClientSender } from '../types/session-client.js';
 import type { SessionEndReason } from '../types/session.js';
 import type { ToolDefinition } from '../types/tool.js';
@@ -327,6 +327,58 @@ export interface VoiceSessionConfig {
 	 */
 	onClientJson?: (message: Record<string, unknown>) => void;
 	/**
+	 * Client protocol frames the built-in handlers do not recognize, such as a
+	 * host's own retry command. Built-in types always run first and are never
+	 * forwarded; a malformed built-in is dropped with a log line and reaches
+	 * neither this hook nor `onClientJson`. Fires after `onClientJson` when both
+	 * are set. Frames that arrive before the attach bootstrap has sent
+	 * `session.config` are queued (up to 64) and dispatched after it. A throw
+	 * from this hook or `onClientJson` is reported through `hooks.onError` and
+	 * does not stop the other hook, the remaining queued frames or the attach.
+	 */
+	onClientCommand?: (message: Record<string, unknown>) => void;
+	/**
+	 * A real client attached: a connection on the local client WebSocket server
+	 * (never a probe or verifier), or `notifyClientConnected()` with a host-owned
+	 * channel. Runs synchronously once `clientConnected` is `true` and before the
+	 * behavior catalog, `session.config` and any greeting, so the host can resend
+	 * durable state first. A throw is reported through `hooks.onError` and does
+	 * not stop the attach.
+	 */
+	onClientConnected?: () => void;
+	/**
+	 * The real client detached. Runs at the end of the detach handling, once
+	 * `clientConnected` is `false`. A throw is reported through `hooks.onError`.
+	 */
+	onClientDisconnected?: () => void;
+	/**
+	 * Host gate for the automatic actions of a client attach, read once per
+	 * attach after the behavior catalog and `session.config` are sent (and when
+	 * the first setup completes with a client already attached). While it
+	 * returns `true` the client is configured but nothing else happens: no
+	 * greeting, no context replay, and no redial of a session parked in
+	 * `UPSTREAM_LOST`. Under `upstreamLossPolicy: 'hold'` the reconnector reads
+	 * it too: while it returns `true` the host owns recovery, so a lost provider
+	 * connection parks the session at once instead of reconnecting on its own.
+	 * Both reads log a throw from the gate and treat it as `false`.
+	 */
+	suppressClientAutoActions?: () => boolean;
+	/**
+	 * Greeting policy for a client that attaches to an ACTIVE session.
+	 * - `'per-client'` (default): each newly attached client is greeted once.
+	 * - `'until-first-turn'`: a client is greeted only while no turn has
+	 *   completed; a client that attaches later is not greeted (see
+	 *   `reattachContextReplay`).
+	 */
+	reattachGreeting?: 'per-client' | 'until-first-turn';
+	/**
+	 * With `reattachGreeting: 'until-first-turn'`, a client that attaches to an
+	 * ACTIVE session after a completed turn gets the last ten user and assistant
+	 * messages (150 characters each) injected as quiet context, which requests
+	 * no response. Suppressed while synthetic output is held. Default `false`.
+	 */
+	reattachContextReplay?: boolean;
+	/**
 	 * Client media plane profile (`websocket` PCM+JSON, or `direct_rtc` split plane: JSON on WS, RTC audio later).
 	 * Defaults to WebSocket when omitted. See {@link createClientChannel}.
 	 */
@@ -527,8 +579,9 @@ export interface VoiceSessionConfig {
 	 *   reconnect, and started again when a redial activates the session.
 	 *   A failed first dial still rejects `start()` but leaves the session
 	 *   parked; `close()` finalizes a parked session as usual. Only
-	 *   `recoverUpstream()` redials a parked session; `parkUpstream()` parks
-	 *   it on purpose.
+	 *   `recoverUpstream()` redials a parked session, which a client attach
+	 *   also calls unless `suppressClientAutoActions` returns `true`;
+	 *   `parkUpstream()` parks it on purpose.
 	 *
 	 * `'hold'` also enables host recovery (`recoverUpstream()`,
 	 * `parkUpstream()`, see `getRecoveryCapabilities()`), which `'close'`
@@ -579,12 +632,6 @@ export interface VoiceSessionConfig {
 	 *  covers post-greeting AEC convergence. Default `true`. */
 	greetingInterruptible?: boolean;
 }
-
-/** Internal view of an optional host hook reporting that the host owns
- *  upstream recovery. It is not a declared `VoiceSessionConfig` option, so it
- *  is read defensively; the reconnector consults it only under
- *  `upstreamLossPolicy: 'hold'`. */
-type HostRecoveryGateConfig = { suppressClientAutoActions?: () => boolean };
 
 /**
  * Top-level integration hub that wires all framework components together.
@@ -798,8 +845,8 @@ export class VoiceSession {
 	 *  reserved user message with the transport's fallback text. Generous by
 	 *  design: a batch STT round-trip is a whole-utterance model call. */
 	private readonly reservationTimeoutMs = 20_000;
-	/** Whether a client WebSocket connection is currently active. */
-	private clientConnected = false;
+	/** Whether a real client is attached; read through the `clientConnected` getter. */
+	private _clientConnected = false;
 	/**
 	 * Input admission follows the server bootstrap, not merely socket acceptance.
 	 * A restored pacing preset must be sent before `session.config` opens the
@@ -1767,6 +1814,7 @@ export class VoiceSession {
 			getArtifactRegistry: () => this.config.artifactRegistry,
 			handleTextInput: (text) => this.handleTextInput(text),
 			onClientJson: config.onClientJson,
+			onClientCommand: config.onClientCommand,
 			reportError: (context, error) => this.reportError(context, error),
 			log: (msg) => this.log(msg),
 		});
@@ -1809,10 +1857,7 @@ export class VoiceSession {
 				// Exhaustion policy, and the host-owned recovery gate it enables
 				// under 'hold'.
 				upstreamLossPolicy: config.upstreamLossPolicy ?? 'close',
-				hostOwnsRecovery: () =>
-					(
-						this.config as VoiceSessionConfig & HostRecoveryGateConfig
-					).suppressClientAutoActions?.() === true,
+				hostOwnsRecovery: () => this.config.suppressClientAutoActions?.() === true,
 				// H2: gate-aware drain + candidate-wide replay freshness.
 				drainBufferedInbound: (reason) => this.drainCapturedInboundFrames(reason),
 				isCandidateReplayEligible: (retained) => {
@@ -2937,7 +2982,7 @@ export class VoiceSession {
 		this.directiveManager.clearAgent();
 
 		// Send the new agent's greeting if configured
-		if (this.clientConnected && this.greeting.sendGreeting()) {
+		if (this._clientConnected && this.greeting.sendGreeting()) {
 			this._pendingResponseOrigin = 'assistant_initiated';
 		}
 	}
@@ -3273,7 +3318,7 @@ export class VoiceSession {
 	// --- Gemini event handlers ---
 
 	private handleSetupComplete(_sessionId: string): void {
-		this.log(`LLM transport setup complete (clientConnected=${this.clientConnected})`);
+		this.log(`LLM transport setup complete (clientConnected=${this._clientConnected})`);
 		// Greeting-grace pass 2: finalize the effective grace window against
 		// the transport's post-connect capabilities, BEFORE any sendGreeting()
 		// call below can request the first audio chunk. Idempotent — safe to
@@ -3310,10 +3355,14 @@ export class VoiceSession {
 		}
 		// Send the greeting only after the same post-restore bootstrap that admits
 		// client input. Both setup-complete and client-connect can reach this path;
-		// the generation guard keeps it exactly once for the live connection.
-		if (this.clientConnected) {
+		// the generation guard keeps it exactly once for the live connection. The
+		// host gate and the reattach policy apply here as on the attach path.
+		if (this._clientConnected) {
 			const generation = this.clientConnectionGeneration;
-			const greet = () => this.maybeSendGreetingForClient(generation);
+			const greet = () => {
+				if (this.clientAutoActionsSuppressed() || !this.reattachGreetingAllowed()) return;
+				this.maybeSendGreetingForClient(generation);
+			};
 			if (this.memoryAndDirectivesReady) greet();
 			else void this._memoryReadyPromise.then(greet);
 		}
@@ -3783,7 +3832,7 @@ export class VoiceSession {
 
 	private handleClientConnected(): void {
 		this.log(`Client connected (geminiActive=${this.sessionManager.isActive})`);
-		this.clientConnected = true;
+		this._clientConnected = true;
 		this.clientInputReady = false;
 		const generation = ++this.clientConnectionGeneration;
 		// Greeting interrupt grace: a fresh browser tab / RTC audio context
@@ -3793,8 +3842,11 @@ export class VoiceSession {
 		// audio chunk armed — leaking the prior session's grace into a
 		// different audio context.
 		this.greeting.resetForClientConnected();
+		// Host attach hook before the bootstrap below: a host resending durable
+		// state must reach the client ahead of any automatic output.
+		this.safeEmitHook('onClientConnected', () => this.config.onClientConnected?.());
 		const bootstrap = () => {
-			if (!this.clientConnected || generation !== this.clientConnectionGeneration) return;
+			if (!this._clientConnected || generation !== this.clientConnectionGeneration) return;
 			const transportInfo = describeClientTransport(this.config.clientMedia);
 
 			// Restore is complete here. Send pacing before `session.config`, because
@@ -3823,16 +3875,83 @@ export class VoiceSession {
 			this.clientInputReady = true;
 			const pending = this.pendingClientJson.splice(0);
 			for (const message of pending) this.clientMessageRouter.dispatch(message);
-			if (this.sessionManager.isActive) this.maybeSendGreetingForClient(generation);
+			// Host gate: the client is configured above, but a host that owns
+			// recovery also owns what the attach does next (no greeting, context
+			// replay or redial).
+			if (this.clientAutoActionsSuppressed()) return;
+			this.runClientAttachPolicy(generation);
 		};
 
 		if (this.memoryAndDirectivesReady) bootstrap();
 		else void this._memoryReadyPromise.then(bootstrap);
 	}
 
+	/** Reads the host gate once; logs when it suppresses the automatic actions.
+	 *  The gate is a host hook read from the attach bootstrap and the setup
+	 *  completion, so, as in the reconnector's recovery-ownership check, a throw
+	 *  is logged and read as false: the attach runs its automatic actions. */
+	private clientAutoActionsSuppressed(): boolean {
+		let suppressed: boolean;
+		try {
+			suppressed = this.config.suppressClientAutoActions?.() === true;
+		} catch (e) {
+			this.log(
+				`Host client auto-action gate threw (treated as not suppressed): ${e instanceof Error ? e.message : String(e)}`,
+			);
+			return false;
+		}
+		if (!suppressed) return false;
+		this.log('Client auto-actions suppressed by host gate');
+		return true;
+	}
+
+	/** Whether the reattach greeting policy lets a client be greeted now:
+	 *  always under `'per-client'`, and only before the first completed turn
+	 *  under `'until-first-turn'`. */
+	private reattachGreetingAllowed(): boolean {
+		return this.config.reattachGreeting !== 'until-first-turn' || this.turns.numericId === 0;
+	}
+
+	/**
+	 * What a client attach does once the client is configured, by session state:
+	 * ACTIVE greets the client when the reattach policy allows, otherwise
+	 * injects the recent conversation as quiet context when
+	 * `reattachContextReplay` is set; UPSTREAM_LOST redials through
+	 * `recoverUpstream` (fresh dial, no greeting, context after activation);
+	 * any other state does nothing.
+	 */
+	private runClientAttachPolicy(generation: number): void {
+		const state = this.sessionManager.state;
+		if (state === 'ACTIVE') {
+			if (this.reattachGreetingAllowed()) {
+				this.maybeSendGreetingForClient(generation);
+			} else if (this.config.reattachContextReplay === true) {
+				this.injectRecentContext('client-reconnect-context');
+			}
+			return;
+		}
+		if (state !== 'UPSTREAM_LOST') return;
+		try {
+			const { attemptEpoch } = this.recoverUpstream({
+				reason: 'human-retry',
+				skipContextInjection: false,
+				holdSyntheticUntilFreshSpeech: false,
+			});
+			this.log(`client attach: redialing UPSTREAM_LOST session, attempt ${attemptEpoch}`);
+		} catch (error) {
+			// Refused synchronously (for example a transport without the recovery
+			// primitives): the session stays parked. A dial that fails later
+			// parks it again on its own.
+			this.log(
+				`client attach: cannot redial UPSTREAM_LOST session: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			this.reportError('recover-upstream', error);
+		}
+	}
+
 	private maybeSendGreetingForClient(generation: number): void {
 		if (
-			!this.clientConnected ||
+			!this._clientConnected ||
 			!this.clientInputReady ||
 			generation !== this.clientConnectionGeneration ||
 			this.greetingClientGeneration === generation
@@ -3850,10 +3969,11 @@ export class VoiceSession {
 
 	private handleClientDisconnected(): void {
 		this.log('Client disconnected');
-		this.clientConnected = false;
+		this._clientConnected = false;
 		this.clientInputReady = false;
 		this.pendingClientJson = [];
 		this.clientConnectionGeneration++;
+		this.safeEmitHook('onClientDisconnected', () => this.config.onClientDisconnected?.());
 	}
 
 	/** Feed client audio into the session (LLM + STT). Used when the server owns the socket (multi-user). */
@@ -3896,6 +4016,36 @@ export class VoiceSession {
 	/** Notify the session that the client disconnected. Used when the server owns the socket (multi-user). */
 	notifyClientDisconnected(): void {
 		this.handleClientDisconnected();
+	}
+
+	/** Whether a real client is attached: a connection on the local client
+	 *  WebSocket server (never a probe or verifier), or between
+	 *  `notifyClientConnected()` and `notifyClientDisconnected()` with a
+	 *  host-owned channel. */
+	get clientConnected(): boolean {
+		return this._clientConnected;
+	}
+
+	/**
+	 * `readyState` and `bufferedAmount` of the attached client socket, for
+	 * example to watch outbound backpressure. `null` when no socket is attached,
+	 * and always with `clientSender` or `direct_rtc`, where the host owns the
+	 * socket.
+	 */
+	getClientSocketHealth(): ClientSocketHealth | null {
+		return this.clientTransport.getSocketHealth?.() ?? null;
+	}
+
+	/**
+	 * Close the attached client connection with the given WebSocket close code
+	 * and reason (for example `4000, 'goodbye'`). The listener keeps accepting
+	 * connections and the session stays up; the socket's close then runs the
+	 * usual disconnect handling. Returns `false` when no socket was attached,
+	 * and always with `clientSender` or `direct_rtc`, where the host owns the
+	 * socket and closes it itself.
+	 */
+	closeClientConnection(code?: number, reason?: string): boolean {
+		return this.clientTransport.closeClient?.(code, reason) ?? false;
 	}
 
 	/** Session ID for logging and multi-user association. */
@@ -3983,9 +4133,10 @@ export class VoiceSession {
 	 * session in UPSTREAM_LOST without finalizing it (publishing
 	 * `session.upstreamLost` with reason `'host-parked'` and `reason` as its
 	 * `detail`), then disconnects the transport. Nothing redials it until
-	 * `recoverUpstream()`. Rejects with `SessionError` in actor mode, under
-	 * `upstreamLossPolicy: 'close'`, while closing, and outside ACTIVE,
-	 * RECONNECTING and UPSTREAM_LOST.
+	 * `recoverUpstream()`, which a client attach also calls unless
+	 * `suppressClientAutoActions` returns `true`. Rejects with `SessionError`
+	 * in actor mode, under `upstreamLossPolicy: 'close'`, while closing, and
+	 * outside ACTIVE, RECONNECTING and UPSTREAM_LOST.
 	 */
 	parkUpstream(reason: string): Promise<void> {
 		return this.hostRecovery.parkUpstream(reason);
