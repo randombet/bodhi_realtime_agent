@@ -46,6 +46,19 @@ The **client ↔ framework** audio/control path is **not** the same socket as th
 
 **Important:** `direct_rtc` does **not** replace **`VoiceSession`** or **`LLMTransport`**. Gemini/OpenAI still use their **existing** provider WebSockets from the server. Only the **device ↔ your app server ↔ `VoiceSession` input/output** audio encoding changes when you opt into direct RTC.
 
+### Local `ClientTransport` connections
+
+When your server does not own the socket, the local `ClientTransport` accepts
+the WebSocket itself and holds one connection at a time. A second real client is
+closed with `4409` `client-busy`. A `?probe=1` connection receives one
+`probeState` frame (when that option is configured), then closes with `1000`
+and never attaches. A `?verify=1` connection attaches as a verifier that never
+counts as the client and is preempted with `4411` when a real client arrives. A
+`?takeover=1` connection closes the attached real client with `4410` and takes
+its place. Outbound frames go to whichever connection holds the slot, including
+a verifier. See
+[Local client connection roles](/guide/voice-session#local-client-connection-roles).
+
 ### Playback-state support
 
 The playback gate needs one ordered path for assistant audio and JSON. It is

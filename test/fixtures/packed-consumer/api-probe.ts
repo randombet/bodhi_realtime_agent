@@ -11,7 +11,16 @@
  * with `--skip-declarations`.
  */
 import {
-	type ClientTransport,
+	CLOSE_CODE_CLIENT_BUSY,
+	CLOSE_CODE_SUPERSEDED_BY_TAKEOVER,
+	CLOSE_CODE_VERIFIER_PREEMPTED,
+	CLOSE_REASON_CLIENT_BUSY,
+	CLOSE_REASON_SUPERSEDED_BY_TAKEOVER,
+	CLOSE_REASON_VERIFIER_PREEMPTED,
+	type ClientConnectionRole,
+	ClientTransport,
+	type ClientTransportCallbacks,
+	type ClientTransportOptions,
 	type ConnectionLifecycleEvent,
 	type HooksManager,
 	type IEventBus,
@@ -92,3 +101,26 @@ const customTransport: Pick<
 		if (reason === 'superseded') void generationId;
 	},
 };
+// ClientTransport is a root value: the five-argument constructor takes the verifier hooks and
+// the probe option, the role getters are public, and the six close constants are exported.
+const owned = new ClientTransport(
+	9900,
+	{ onVerifierConnected: (): void => {}, onVerifierDisconnected: (): void => {} },
+	'127.0.0.1',
+	10_000,
+	{ probeState: () => ({ type: 'agent.state', v: 1, initialized: true }) },
+);
+const ownedCallbacks: ClientTransportCallbacks = { onClientConnected: (): void => {} };
+const ownedOptions: ClientTransportOptions = { probeState: () => ({ initialized: true }) };
+const ownedRole: ClientConnectionRole | null = owned.attachedRole;
+const verifierAttached: boolean = owned.isVerifierConnected;
+const closeCodes: readonly [number, number, number] = [
+	CLOSE_CODE_CLIENT_BUSY,
+	CLOSE_CODE_SUPERSEDED_BY_TAKEOVER,
+	CLOSE_CODE_VERIFIER_PREEMPTED,
+];
+const closeReasons: readonly [string, string, string] = [
+	CLOSE_REASON_CLIENT_BUSY,
+	CLOSE_REASON_SUPERSEDED_BY_TAKEOVER,
+	CLOSE_REASON_VERIFIER_PREEMPTED,
+];
