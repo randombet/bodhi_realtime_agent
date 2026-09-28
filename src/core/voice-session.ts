@@ -46,6 +46,11 @@ import type { ProcessedKnowledgeBase } from '../types/knowledge-base.js';
 import type { MemoryStore } from '../types/memory.js';
 import type { ClientSocketHealth, IClientChannel } from '../types/session-client.js';
 import type { SessionClientSender } from '../types/session-client.js';
+import type {
+	AssistantOutputInterceptor,
+	AudioInputObserver,
+	AudioOutputObserver,
+} from '../types/session-seams.js';
 import type { SessionEndReason } from '../types/session.js';
 import type { ToolDefinition } from '../types/tool.js';
 import type {
@@ -73,7 +78,7 @@ import { ConversationContext } from './conversation-context.js';
 import { ConversationHistoryWriter } from './conversation-history-writer.js';
 import { DictationController } from './dictation-controller.js';
 import { DirectiveManager } from './directive-manager.js';
-import { ValidationError } from './errors.js';
+import { SessionError, ValidationError } from './errors.js';
 import { EventBus } from './event-bus.js';
 import { GreetingController } from './greeting-controller.js';
 import { HooksManager } from './hooks.js';
@@ -290,6 +295,15 @@ export interface VoiceSessionConfig {
 	subagentConfigs?: Record<string, SubagentConfig>;
 	/** Lifecycle hooks for observability. */
 	hooks?: FrameworkHooks;
+	/**
+	 * Host hooks between the provider's native assistant output and the
+	 * session: screen or hold transcript chunks, drop audio chunks, and
+	 * release held text before each transcript flush. See
+	 * {@link AssistantOutputInterceptor}. Only native audio output passes
+	 * through `transcript` and `audio`; text-mode and external-TTS output
+	 * bypass them.
+	 */
+	outputInterceptor?: AssistantOutputInterceptor;
 	/** Connection-lifecycle facts: attempt / setup-ok / setup-failed /
 	 *  attempt-close / generation-close, correlated by `connectAttemptId`.
 	 *  `handleSupplied` on the attempt is what lets a consumer track resumed
@@ -685,6 +699,17 @@ export class VoiceSession {
 	private runtimeToolRegistry?: Map<string, ToolRoutingInfo>;
 	private subagentConfigs: Record<string, SubagentConfig>;
 	private persistentSubagents = new PersistentSubagentManager();
+	/** The declared tool list: the active agent's tools plus the behavior
+	 *  tools, as changed by `registerTools()` and `replaceTools()`. An agent
+	 *  transfer resets it from the new agent. */
+	private currentTools: ToolDefinition[] = [];
+	/** Instructions set by the active agent definition or the last
+	 *  `updateInstructions()`. An agent transfer resets it from the new agent. */
+	private currentInstructions = '';
+	/** Native assistant audio observers (`observeAudioOutput`). */
+	private readonly audioOutputObservers = new Set<AudioOutputObserver>();
+	/** Inbound client audio observers (`observeAudioInput`). */
+	private readonly audioInputObservers = new Set<AudioInputObserver>();
 	/** Resolved Gemini VAD config for the built-in transport path. Undefined when `config.transport` is
 	 *  injected, with `realtimeInputConfig: false`, and with `vadConfig` (the transport sends that verbatim). */
 	private resolvedRealtimeInputConfig?: GeminiRealtimeInputConfig;
@@ -990,6 +1015,20 @@ export class VoiceSession {
 			}
 		};
 
+		// The host's output interceptor releases held assistant text before each
+		// flush commits the buffers. A throwing hook is reported and the flush
+		// continues, so turn finalization and close still commit the buffers.
+		const outputInterceptor = config.outputInterceptor;
+		if (outputInterceptor?.beforeTranscriptFlush) {
+			this.transcriptManager.onBeforeFlush = () => {
+				try {
+					outputInterceptor.beforeTranscriptFlush?.();
+				} catch (e) {
+					this.reportError('output-interceptor.beforeTranscriptFlush', e);
+				}
+			};
+		}
+
 		this._isActorMode = config.orchestrationMode === 'actor';
 
 		// Legacy mode: in-process BackgroundNotificationQueue. Actor mode skips
@@ -1173,6 +1212,8 @@ export class VoiceSession {
 		const { instructions, tools: agentTools } = liveResolved;
 		const behaviorTools = this.behaviorManager?.tools ?? [];
 		const allInitialTools = [...agentTools, ...behaviorTools];
+		this.currentTools = allInitialTools;
+		this.currentInstructions = instructions;
 
 		// Determine inputAudioTranscription setting:
 		// Keep Gemini's built-in transcription enabled even when an external STT
@@ -1676,7 +1717,7 @@ export class VoiceSession {
 				? {
 						inputPcmSampleRate: this.transport.audioFormat.inputSampleRate,
 						outputPcmSampleRate: this.transport.audioFormat.outputSampleRate,
-						onInboundPcm: (pcm: Buffer) => this.audioRouter.handleFromClient(pcm, 'rtc'),
+						onInboundPcm: (pcm: Buffer) => this.ingestClientAudio(pcm, 'rtc'),
 					}
 				: undefined;
 		this.clientTransport = createClientChannel({
@@ -1687,7 +1728,7 @@ export class VoiceSession {
 			host: config.host,
 			listenTimeoutMs: config.listenTimeoutMs,
 			callbacks: {
-				onAudioFromClient: (data) => this.audioRouter.handleFromClient(data, 'websocket'),
+				onAudioFromClient: (data) => this.ingestClientAudio(data, 'websocket'),
 				onJsonFromClient: (message) => this.handleJsonFromClient(message),
 				onClientConnected: () => this.handleClientConnected(),
 				onClientDisconnected: () => this.handleClientDisconnected(),
@@ -2128,7 +2169,21 @@ export class VoiceSession {
 	 *  TTS and native text/speech-started callbacks are wired separately
 	 *  (`wireTtsProvider` / the native gate's `installBargeIn`). */
 	private wireTransportCallbacks(): void {
-		this.transport.onAudioOutput = (data) => this.handleAudioOutput(data);
+		const interceptor = this.config.outputInterceptor;
+		this.transport.onAudioOutput = (data) => {
+			// The host interceptor can drop a native audio chunk before the session
+			// sees it. A throwing hook is reported and the chunk is delivered.
+			if (interceptor?.audio) {
+				let drop = false;
+				try {
+					drop = interceptor.audio(data) === false;
+				} catch (e) {
+					this.reportError('output-interceptor.audio', e);
+				}
+				if (drop) return;
+			}
+			this.handleAudioOutput(data);
+		};
 		// No-TTS text mode: the model emits text (not audio). Surface each chunk via the
 		// normal transcript path (which the client-sender already emits as
 		// `{ type:'transcript', role:'assistant', partial }`); turn finalization still flows
@@ -2272,6 +2327,20 @@ export class VoiceSession {
 			// (`part.text`). Gemini also echoes it as `outputTranscription`, so feeding it
 			// here too would double every chunk. Skip it (onTextOutput is the source).
 			if (this.isNoTtsTextMode) return;
+			// The host interceptor may hold a chunk and forward it later, for
+			// example from its beforeTranscriptFlush hook. A throwing hook is
+			// reported and the original chunk is forwarded unchanged.
+			if (interceptor?.transcript) {
+				try {
+					interceptor.transcript(text, (forwarded) =>
+						this.transcriptManager.handleOutput(forwarded),
+					);
+				} catch (e) {
+					this.reportError('output-interceptor.transcript', e);
+					this.transcriptManager.handleOutput(text);
+				}
+				return;
+			}
 			this.transcriptManager.handleOutput(text);
 		};
 		this.transport.onSessionReady = (sessionId) => this.handleSetupComplete(sessionId);
@@ -2967,6 +3036,11 @@ export class VoiceSession {
 		this.toolExecutor = this.createToolExecutor(agent.name);
 		const behaviorTools = this.behaviorManager?.tools ?? [];
 		this.toolExecutor.register([...resolved.tools, ...behaviorTools]);
+		// A transfer re-resolves tools and instructions from the new agent's
+		// definition, dropping registerTools(), replaceTools() and
+		// updateInstructions() changes.
+		this.currentTools = [...resolved.tools, ...behaviorTools];
+		this.currentInstructions = resolved.instructions;
 		if (this.toolCallRouter) {
 			this.toolCallRouter.toolExecutor = this.toolExecutor;
 		}
@@ -3290,7 +3364,31 @@ export class VoiceSession {
 		// it consumes the transport's audioFormat directly via its own bridge.
 		const outEnc = this.transport.audioFormat.outputEncoding ?? this.transport.audioFormat.encoding;
 		const buffer: Buffer = outEnc === 'pcmu' ? decodeMulawToPcm(raw) : raw;
+		if (this.audioOutputObservers.size > 0) {
+			this.notifyAudioObservers(this.audioOutputObservers, 'audio-output-observer', buffer, {
+				turnId: turn.id,
+				sampleRate: this.transport.audioFormat.outputSampleRate,
+				encoding: 'pcm',
+			});
+		}
 		this.clientTransport.sendAudioToClient(buffer);
+	}
+
+	/** Call each audio observer in turn; a throwing observer is reported through
+	 *  `hooks.onError` and never stops the others or the audio path. */
+	private notifyAudioObservers<M>(
+		observers: ReadonlySet<(pcm: Buffer, meta: M) => void>,
+		component: string,
+		pcm: Buffer,
+		meta: M,
+	): void {
+		for (const observer of observers) {
+			try {
+				observer(pcm, meta);
+			} catch (e) {
+				this.reportError(component, e);
+			}
+		}
 	}
 
 	/**
@@ -3989,7 +4087,20 @@ export class VoiceSession {
 				this._reconnectWindowSpeech = true;
 			}
 		}
-		this.audioRouter.handleFromClient(data, 'websocket');
+		this.ingestClientAudio(data, 'websocket');
+	}
+
+	/** The single entry for inbound client audio from every ingress: the local
+	 *  client WebSocket, the direct RTC audio plane and `feedAudioFromClient`.
+	 *  Input observers see the frame before the audio router gates it. */
+	private ingestClientAudio(data: Buffer, source: 'websocket' | 'rtc'): void {
+		if (this.audioInputObservers.size > 0) {
+			this.notifyAudioObservers(this.audioInputObservers, 'audio-input-observer', data, {
+				source,
+				sampleRate: this.clientAudioInputRate,
+			});
+		}
+		this.audioRouter.handleFromClient(data, source);
 	}
 
 	/** R7c hosted reconnect-window verdict (consulted by the recovery controller
@@ -4184,6 +4295,117 @@ export class VoiceSession {
 		this.reconnector.resetReplayState();
 		this.log(`Conversation context reset (${reason}): ${cleared} item(s) cleared`);
 		return { cleared };
+	}
+
+	// --- Audio observers ---
+
+	/**
+	 * Observe each chunk of native assistant audio as PCM, with its turn id,
+	 * right before it is sent to the client. Audio from an external TTS
+	 * provider is not observed. A throwing observer is reported through
+	 * `hooks.onError` and does not stop delivery. Returns a function that
+	 * removes the observer.
+	 */
+	observeAudioOutput(observer: AudioOutputObserver): () => void {
+		this.audioOutputObservers.add(observer);
+		return () => {
+			this.audioOutputObservers.delete(observer);
+		};
+	}
+
+	/**
+	 * Observe each inbound client audio frame as it enters the session, before
+	 * routing or gating, from the local client WebSocket, the direct RTC audio
+	 * plane and `feedAudioFromClient()`. A throwing observer is reported
+	 * through `hooks.onError` and does not stop the frame. Returns a function
+	 * that removes the observer.
+	 */
+	observeAudioInput(observer: AudioInputObserver): () => void {
+		this.audioInputObservers.add(observer);
+		return () => {
+			this.audioInputObservers.delete(observer);
+		};
+	}
+
+	// --- Runtime tool and instruction updates ---
+
+	/**
+	 * Add tools at runtime: each becomes executable at once and is merged by
+	 * name into the declared tool list, which is sent with
+	 * `transport.updateSession({ tools })` (applied in place where the
+	 * transport supports it, on the next connect on Gemini). A tool missing
+	 * from the active agent definition executes inline with immediate
+	 * scheduling. An agent transfer declares the new agent's tools instead.
+	 *
+	 * If `updateSession` rejects, the declared list is restored and the
+	 * rejection is passed on; the new executors stay registered. Rejects with
+	 * `SessionError` with `orchestrationMode: 'actor'`.
+	 */
+	async registerTools(tools: ToolDefinition[]): Promise<void> {
+		this.assertLegacyOrchestration('registerTools');
+		this.toolExecutor.register(tools);
+		const merged = new Map(this.currentTools.map((tool) => [tool.name, tool]));
+		for (const tool of tools) merged.set(tool.name, tool);
+		await this.declareTools([...merged.values()]);
+	}
+
+	/**
+	 * Replace the declared tool list with exactly `tools`, sent with
+	 * `transport.updateSession({ tools })`, for example to restrict what the
+	 * model may call. Only the declarations change: every tool registered so
+	 * far stays executable. A later `replaceTools()` with the full list
+	 * restores the hidden tools.
+	 *
+	 * If `updateSession` rejects, the declared list is restored and the
+	 * rejection is passed on. Rejects with `SessionError` with
+	 * `orchestrationMode: 'actor'`.
+	 */
+	async replaceTools(tools: ToolDefinition[]): Promise<void> {
+		this.assertLegacyOrchestration('replaceTools');
+		await this.declareTools([...tools]);
+	}
+
+	/**
+	 * Replace the system instructions, sent with
+	 * `transport.updateSession({ instructions })` (applied in place where the
+	 * transport supports it, on the next connect on Gemini). An agent transfer
+	 * applies the new agent's instructions instead. Rejects with
+	 * `SessionError` with `orchestrationMode: 'actor'`.
+	 */
+	async updateInstructions(instructions: string): Promise<void> {
+		this.assertLegacyOrchestration('updateInstructions');
+		const previous = this.currentInstructions;
+		this.currentInstructions = instructions;
+		try {
+			await this.transport.updateSession({ instructions });
+		} catch (err) {
+			if (this.currentInstructions === instructions) this.currentInstructions = previous;
+			throw err;
+		}
+	}
+
+	/** Record `tools` as the declared list and send it to the transport,
+	 *  restoring the previous list when the transport rejects it (unless a
+	 *  later call has replaced it meanwhile). */
+	private async declareTools(tools: ToolDefinition[]): Promise<void> {
+		const previous = this.currentTools;
+		this.currentTools = tools;
+		try {
+			await this.transport.updateSession({ tools });
+		} catch (err) {
+			if (this.currentTools === tools) this.currentTools = previous;
+			throw err;
+		}
+	}
+
+	/** Runtime tool and instruction updates drive the legacy tool router; the
+	 *  actor runtime keeps its own tool registry. */
+	private assertLegacyOrchestration(method: string): void {
+		if (this._isActorMode) {
+			throw new SessionError(
+				`${method}() is not supported with orchestrationMode 'actor'; runtime tool and instruction updates require legacy orchestration`,
+			);
+		}
 	}
 
 	// --- Error handling ---

@@ -82,6 +82,12 @@ export class TranscriptManager {
 	 *  arm the fallback seal timer. */
 	onInputReserved?: (turnId: number) => void;
 
+	/** Fired once at the top of `flush()`, before the buffers are committed;
+	 *  never from `flushInput()`. Output passed to `handleOutput` from here is
+	 *  part of the assistant message this flush commits. VoiceSession wires
+	 *  `outputInterceptor.beforeTranscriptFlush` here. */
+	onBeforeFlush?: () => void;
+
 	constructor(
 		private sink: TranscriptSink,
 		private options: TranscriptManagerOptions = {},
@@ -364,6 +370,7 @@ export class TranscriptManager {
 
 	/** Flush all transcript buffers — finalize user and assistant messages. */
 	flush(): void {
+		this.onBeforeFlush?.();
 		if (!this.inputFinalizedThisTurn && this.inputBuffer.trim()) {
 			const text = this.inputBuffer.trim();
 			this.commitUserText(text);
