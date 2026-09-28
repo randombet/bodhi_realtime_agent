@@ -42,7 +42,7 @@ The **client ↔ framework** audio/control path is **not** the same socket as th
 | Profile | Meaning |
 |---------|--------|
 | **`websocket` (default)** | Mic and assistant PCM use **binary WebSocket** frames on the same connection as JSON control (or local `ClientTransport` when the server does not own the socket). |
-| **`direct_rtc`** | **Split plane:** JSON control (and RTC signaling) stay on the **WebSocket** via **`SessionClientSender.sendJson`**; optional **Opus RTP** for mic/assistant audio when `rtcAudio: 'werift_opus'` is enabled. |
+| **`direct_rtc`** | **Split plane:** JSON control (and RTC signaling) stay on the **WebSocket** via **`SessionClientSender.sendJson`**; optional **Opus RTP** for mic/assistant audio when `rtcAudio: 'werift_opus'` is enabled. That profile loads the shipped engine, an internal module of the package and the only code that loads `werift` and `@evan/opus`, on the first `rtc.offer`, with no configuration change; a load failure is sent to the client as one `rtc.error` frame. The root `bodhi-realtime-agent` entry has no native dependencies. |
 
 **Important:** `direct_rtc` does **not** replace **`VoiceSession`** or **`LLMTransport`**. Gemini/OpenAI still use their **existing** provider WebSockets from the server. Only the **device ↔ your app server ↔ `VoiceSession` input/output** audio encoding changes when you opt into direct RTC.
 

@@ -4,8 +4,11 @@ import { z } from 'zod';
 import { VoiceSession } from '../../src/core/voice-session.js';
 import { InMemoryPostSessionPipeline } from '../../src/post-session/pipeline.js';
 import { type PostSessionContext, PostSessionProcessor } from '../../src/post-session/types.js';
+import { DirectRtcClientChannel } from '../../src/transport/direct-rtc-client-channel.js';
 import { DEFAULT_GEMINI_REALTIME_INPUT_CONFIG } from '../../src/transport/gemini-live-transport.js';
+import { LazyRtcAudioEngine } from '../../src/transport/lazy-rtc-audio-engine.js';
 import type { MainAgent } from '../../src/types/agent.js';
+import type { RtcAudioEngine, RtcAudioEngineOptions } from '../../src/types/rtc-engine.js';
 import type {
 	AudioFormatSpec,
 	LLMTransport,
@@ -3149,5 +3152,107 @@ describe('VoiceSession realtimeInputConfig defaulting', () => {
 		// The injected transport's connect was not pre-called with VAD args; we just
 		// confirm it was used by VoiceSession (updateSession was invoked at construct).
 		expect(injected.updateSession).toHaveBeenCalled();
+	});
+});
+
+describe('VoiceSession direct_rtc with werift_opus', () => {
+	const ENGINE_IMPORT = '#direct-rtc';
+	let session: VoiceSession | null = null;
+
+	afterEach(async () => {
+		vi.doUnmock(ENGINE_IMPORT);
+		vi.resetModules();
+		if (session) {
+			await session.close();
+			session = null;
+		}
+	});
+
+	it('constructs without configuration and reports RTC audio not ready until signaling', async () => {
+		const createWeriftOpusRtcEngine = vi.fn(() => {
+			const engine = {
+				mediaReady: false,
+				handleClientSignaling: vi.fn(async () => {
+					engine.mediaReady = true;
+				}),
+				sendAssistantPcm: vi.fn(),
+				dispose: vi.fn(async () => {}),
+			};
+			return engine;
+		});
+		vi.doMock(ENGINE_IMPORT, () => ({ createWeriftOpusRtcEngine }));
+
+		session = new VoiceSession({
+			sessionId: 'sess_rtc_opus',
+			userId: 'user_1',
+			apiKey: 'test-key',
+			agents: [createEchoAgent()],
+			initialAgent: 'echo',
+			model: mockModel,
+			transport: createMutableServerTurnTransport(),
+			clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			clientMedia: { kind: 'direct_rtc', rtcAudio: 'werift_opus' },
+		});
+		const channel = (session as unknown as { directRtcChannel: DirectRtcClientChannel | null })
+			.directRtcChannel;
+		expect(channel).toBeInstanceOf(DirectRtcClientChannel);
+		expect((channel as unknown as { engine: unknown }).engine).toBeInstanceOf(LazyRtcAudioEngine);
+		expect(channel?.isRtcAudioReady).toBe(false);
+		// Nothing is loaded from the engine entry before the first signaling message.
+		expect(createWeriftOpusRtcEngine).not.toHaveBeenCalled();
+
+		session.feedJsonFromClient({ type: 'rtc.offer', sdp: 'v=0' });
+		await vi.waitFor(() => expect(channel?.isRtcAudioReady).toBe(true));
+		expect(createWeriftOpusRtcEngine).toHaveBeenCalledOnce();
+	});
+
+	it('on the default Gemini transport, builds the engine with the transport PCM rates and routes engine PCM through the audio router to transport.sendAudio', async () => {
+		const captured: RtcAudioEngineOptions[] = [];
+		const createWeriftOpusRtcEngine = vi.fn((options: RtcAudioEngineOptions): RtcAudioEngine => {
+			captured.push(options);
+			return {
+				mediaReady: true,
+				handleClientSignaling: vi.fn(async () => {}),
+				sendAssistantPcm: vi.fn(),
+				dispose: vi.fn(async () => {}),
+			};
+		});
+		vi.doMock(ENGINE_IMPORT, () => ({ createWeriftOpusRtcEngine }));
+
+		// No `transport`: the session builds its default Gemini Live transport.
+		session = new VoiceSession({
+			sessionId: 'sess_rtc_opus_gemini',
+			userId: 'user_1',
+			apiKey: 'test-key',
+			agents: [createEchoAgent()],
+			initialAgent: 'echo',
+			model: mockModel,
+			clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			clientMedia: { kind: 'direct_rtc', rtcAudio: 'werift_opus' },
+		});
+		const internals = session as unknown as {
+			transport: LLMTransport;
+			audioRouter: { handleFromClient(data: Buffer, source?: 'websocket' | 'rtc'): void };
+		};
+		const sendAudio = vi.spyOn(internals.transport, 'sendAudio');
+		const handleFromClient = vi.spyOn(internals.audioRouter, 'handleFromClient');
+
+		await session.start();
+		session.notifyClientConnected();
+		session.feedJsonFromClient({ type: 'rtc.offer', sdp: 'v=0' });
+		await vi.waitFor(() => expect(createWeriftOpusRtcEngine).toHaveBeenCalledOnce());
+
+		expect(captured[0].inputPcmSampleRate).toBe(16000);
+		expect(captured[0].inputPcmSampleRate).toBe(internals.transport.audioFormat.inputSampleRate);
+		expect(captured[0].outputPcmSampleRate).toBe(internals.transport.audioFormat.outputSampleRate);
+
+		// Decoded mic PCM from the engine takes the audio router's 'rtc' source path
+		// straight to the LLM transport (already at the transport's input rate).
+		const frame = Buffer.alloc(480 * 2);
+		for (let i = 0; i < frame.length; i += 2) frame.writeInt16LE(2400, i);
+		captured[0].onInboundPcm(frame);
+		expect(handleFromClient).toHaveBeenCalledWith(frame, 'rtc');
+		expect(sendAudio).toHaveBeenCalledOnce();
+		expect(sendAudio).toHaveBeenCalledWith(frame.toString('base64'));
 	});
 });
