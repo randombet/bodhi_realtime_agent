@@ -11,6 +11,7 @@
  * with `--skip-declarations`.
  */
 import {
+	type BackgroundNotificationQueue,
 	CLOSE_CODE_CLIENT_BUSY,
 	CLOSE_CODE_SUPERSEDED_BY_TAKEOVER,
 	CLOSE_CODE_VERIFIER_PREEMPTED,
@@ -26,6 +27,10 @@ import {
 	type IEventBus,
 	type LLMTransport,
 	type LiveUsageMetadata,
+	RECOVERY_CAPABILITIES,
+	type RecoverUpstreamArgs,
+	type RecoverUpstreamResult,
+	type RecoveryCapabilities,
 	ToolExecutor,
 	type TranscriptSink,
 	type TransportDiagnostics,
@@ -126,3 +131,15 @@ const closeReasons: readonly [string, string, string] = [
 ];
 // Gemini server-VAD settings sent verbatim as realtimeInputConfig.automaticActivityDetection.
 config.vadConfig = { silenceDurationMs: 200, prefixPaddingMs: 0 };
+// The host recovery descriptor and types resolve from the root, and the legacy notification
+// queue can be held.
+const fullRecovery: RecoveryCapabilities = RECOVERY_CAPABILITIES;
+const recoverArgs: RecoverUpstreamArgs = {
+	reason: 'human-retry',
+	skipContextInjection: false,
+	holdSyntheticUntilFreshSpeech: false,
+};
+const recovery: RecoverUpstreamResult = session.recoverUpstream(recoverArgs);
+const recoveryEpoch: number = recovery.attemptEpoch;
+declare const notificationQueue: BackgroundNotificationQueue;
+notificationQueue.setHeld(true);

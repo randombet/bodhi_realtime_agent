@@ -193,6 +193,170 @@ the protocol disabled and use the server fallback timer.
 See [Playback Gate](/guide/playback-gate) for the wire messages, supported
 surfaces, and client behavior.
 
+## Upstream loss and host recovery
+
+The provider connection (Leg 2) can drop while the client stays attached.
+`VoiceSession` first recovers on its own: a GoAway resumes at once with the
+session resumption handle, and a transport close or a response-watchdog stall
+starts up to three backed-off reconnects with that handle.
+`upstreamLossPolicy` decides what happens when this automatic recovery cannot
+continue (the attempts are spent, there is no resumption handle, or an attempt
+fails or times out):
+
+| `upstreamLossPolicy` | Automatic recovery ends | The first dial in `start()` fails |
+|----------------------|-------------------------|-----------------------------------|
+| `'close'` (default) | The session closes with `reconnect_failed`: `session.close` and `onSessionEnd` fire and the post-session pipeline runs. | `start()` rejects and the session closes with `connect_failed`. |
+| `'hold'` | The session parks in `UPSTREAM_LOST`. Nothing is finalized, the client listener stays up, and `session.upstreamLost` is published. | `start()` rejects and the session parks in `UPSTREAM_LOST`. |
+
+```mermaid
+stateDiagram-v2
+  [*] --> CREATED
+  CREATED --> CONNECTING: start()
+  CONNECTING --> ACTIVE: setup complete
+  CONNECTING --> UPSTREAM_LOST: first dial fails (hold)
+  CONNECTING --> RECONNECTING: recoverUpstream()
+  ACTIVE --> RECONNECTING: transport close, GoAway, watchdog stall, recoverUpstream()
+  RECONNECTING --> ACTIVE: replacement connection set up
+  RECONNECTING --> UPSTREAM_LOST: automatic recovery ends, recovery dial fails, parkUpstream() (hold)
+  ACTIVE --> UPSTREAM_LOST: no resumption handle, parkUpstream() (hold)
+  UPSTREAM_LOST --> RECONNECTING: recoverUpstream()
+  ACTIVE --> TRANSFERRING: transfer()
+  TRANSFERRING --> ACTIVE
+  CONNECTING --> CLOSED: first dial fails (close)
+  ACTIVE --> CLOSED: close(), no resumption handle (close)
+  RECONNECTING --> CLOSED: close(), automatic recovery ends (close)
+  UPSTREAM_LOST --> CLOSED: close()
+  CLOSED --> [*]
+```
+
+`UPSTREAM_LOST` exists only under `'hold'`. While parked, no microphone audio
+reaches the model, an external STT provider is stopped, and background
+notifications and framework-generated output (greeting, directive
+reinforcement) are held; nothing redials the session until you call
+`recoverUpstream()`. `close()` finalizes a parked session as usual.
+`session.upstreamLost` carries `{ sessionId, reason, code?, detail? }`, where
+`reason` is `'reconnect-exhausted'`, `'no-resumption-handle'`,
+`'reconnect-failed'`, `'reconnect-timeout'`, `'connect-failed'`,
+`'host-owns-recovery'`, `'recover-upstream-failed'` or `'host-parked'`, and
+`code`/`detail` carry the transport close code and reason or the error text
+when known.
+
+`'hold'` requires legacy orchestration: combining it with
+`orchestrationMode: 'actor'` throws a `ValidationError` at construction.
+
+### Redialing with `recoverUpstream()`
+
+```ts
+const session = new VoiceSession({
+  // ...
+  upstreamLossPolicy: 'hold',
+});
+
+session.eventBus.subscribe('session.upstreamLost', ({ reason }) => {
+  // A deliberate parkUpstream() stays parked until you decide otherwise.
+  if (reason === 'host-parked') return;
+  if (!session.getRecoveryCapabilities().recoverUpstream) return;
+  // Retry after a pause: a recovery that fails parks the session again.
+  setTimeout(() => {
+    if (session.sessionManager.state !== 'UPSTREAM_LOST') return; // closed or redialed meanwhile
+    try {
+      const { activated } = session.recoverUpstream({
+        reason: 'human-retry',
+        skipContextInjection: false,
+        holdSyntheticUntilFreshSpeech: false,
+      });
+      activated.catch(() => {}); // parked again; the next session.upstreamLost retries
+    } catch (err) {
+      console.warn('recoverUpstream refused:', err); // SessionError: the session is closing
+    }
+  }, 5_000);
+});
+```
+
+`recoverUpstream(args)` abandons the current provider connection and dials a
+fresh one without closing the session. It is accepted from `CONNECTING`,
+`ACTIVE`, `RECONNECTING` (it takes over an automatic reconnect, cancelling its
+pending attempt) and `UPSTREAM_LOST`, and throws a `SessionError` from any
+other state, while the session is closing, or when
+`getRecoveryCapabilities().recoverUpstream` is `false`. From `CONNECTING` it
+replaces the first dial of `start()` and the session is left to the recovery:
+`start()` neither closes nor parks it. If the recovery comes before `start()`
+begins its dial (calls the transport's `connect()`), from a
+`session.stateChange` subscriber of the `CONNECTING` transition or while a
+pre-constructed transport in text mode is still being switched to text
+responses, `start()` dials nothing and resolves. Otherwise
+`start()` settles with the stranded dial's own settlement: it rejects with that
+dial's error, or resolves if the dial completes late. A dial stranded before
+its setup completed can take up to the transport's connect deadline to settle
+(`connectTimeoutMs` on the Gemini transport, 30 seconds by default), so await
+the recovery's `activated`, not `start()`, to know when the session is ready. A
+recovery from `ACTIVE`, after the first dial has set up, leaves `start()` to
+complete as usual.
+
+Before it returns, it finalizes the active turn as interrupted (`turn.interrupted`,
+then `turn.end`), aborts the current connection, enters `RECONNECTING`,
+publishes `session.reset` and one `session.reconnectBoundary`, and clears the
+resumption handle, so the redial opens a fresh server session instead of
+resuming the stalled one. Tool results for calls made on the abandoned
+connection, and external-STT transcripts of audio captured before the boundary,
+are dropped.
+
+It returns `{ attemptEpoch, activated, incumbentClosed }`:
+
+- **`attemptEpoch`** is the dial generation the replacement dials on, the
+  value later `turn.start` events carry as `attemptEpoch` and the lifecycle
+  attempt id `att_<attemptEpoch>` from `onConnectionLifecycle`. It is not
+  comparable with `turn.start.transportGeneration`, which counts completed
+  setups only. `session.reconnectBoundary` carries it both as `attemptEpoch`
+  and, under its older name, as `transportGeneration`.
+- **`activated`** resolves once the replacement is `ACTIVE`. It rejects when
+  the dial or another recovery step fails, which reports a `recover-upstream`
+  error through `onError` and parks the session in `UPSTREAM_LOST`
+  (`session.upstreamLost` with reason `'recover-upstream-failed'`), and when the
+  session closes or `parkUpstream()` runs first.
+- **`incumbentClosed`** settles with `'closed'` or `'forced'` once the abandoned
+  connection's close completes or times out; it never rejects.
+
+On activation no greeting is sent. With `skipContextInjection: false` the last
+ten user and assistant messages are injected as quiet context (no response is
+requested); with `true` nothing is injected. Notifications that arrive during
+the dial are held and one is delivered on activation when the model is idle.
+
+With `holdSyntheticUntilFreshSpeech: true`, framework-generated output (the
+greeting, directive reinforcement, notifications and injected context) stays
+held after activation until the user is heard again: input transcription, an
+external STT final, a provider interruption, or typed or injected text.
+Microphone audio alone does not release it. `isSyntheticHoldActive()` reports
+it.
+
+The call is single-flight: while a recovery is in flight, including from an
+event subscriber during the call itself, `recoverUpstream()` returns that
+recovery's result instead of starting a second dial.
+
+### Parking on purpose with `parkUpstream()`
+
+`parkUpstream(reason)` takes the provider connection down deliberately, for
+example after the client has been detached for a while: it cancels automatic
+recovery, parks the session in `UPSTREAM_LOST` without finalizing it
+(publishing `session.upstreamLost` with reason `'host-parked'` and your
+`reason` as `detail`), then disconnects the transport. The next
+`recoverUpstream()` redials. Under `'close'` or in actor mode it rejects with a
+`SessionError`. `clearResumption()` drops the session's and the
+transport's resumption handle without touching the connection and returns
+whether the session held one.
+
+### Capabilities
+
+Gate host recovery on `getRecoveryCapabilities()`, not on method presence. It
+returns `RECOVERY_CAPABILITIES` (every flag `true`) for a legacy-orchestration
+session with `upstreamLossPolicy: 'hold'` on a transport that implements the
+recovery primitives (the built-in Gemini transport). Under `'close'`, in actor
+mode, or on another transport, `recoverUpstream`, `reconnectBoundary` and
+`syntheticHold` are `false`, `turnStartPublication` is `true`, and
+`transportGenerations` says whether the transport reports its generation
+counters. In actor mode `recoverUpstream()` throws and `parkUpstream()`
+rejects with a `SessionError`.
+
 ## Related
 
 - [Agents](/guide/agents)
