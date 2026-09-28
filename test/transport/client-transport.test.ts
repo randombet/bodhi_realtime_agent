@@ -197,6 +197,40 @@ describe('ClientTransport', () => {
 		await new Promise<void>((r) => ws.on('close', r));
 	});
 
+	it('owned discardBuffered() returns nothing and leaves the reconnect drain nothing to forward; stopBuffering() still returns the frames', async () => {
+		const onAudioFromClient = vi.fn();
+		transport = new ClientTransport(TEST_PORT, { onAudioFromClient });
+		await transport.start();
+		transport.installInboundCaptureClassifier(() => ({ voiced: true, gateActive: false }));
+
+		const ws = await open();
+		transport.startBuffering();
+		ws.send(Buffer.alloc(100, 1));
+		ws.send(Buffer.alloc(100, 2));
+		await tick();
+
+		expect(transport.discardBuffered()).toBeUndefined();
+		expect(transport.buffering).toBe(false);
+		// Neither drain path (raw or capture-tagged) finds anything to forward.
+		expect(transport.stopBuffering()).toEqual([]);
+		expect(transport.stopInboundCapture()).toEqual([]);
+		expect(onAudioFromClient).not.toHaveBeenCalled();
+
+		// Buffering mode ended: new microphone audio flows straight through.
+		ws.send(Buffer.alloc(100, 3));
+		await tick();
+		expect(onAudioFromClient).toHaveBeenCalledTimes(1);
+
+		// stopBuffering() still hands the buffered frames on.
+		transport.startBuffering();
+		ws.send(Buffer.alloc(100, 4));
+		await tick();
+		expect(transport.stopBuffering()).toEqual([Buffer.alloc(100, 4)]);
+
+		ws.close();
+		await new Promise<void>((r) => ws.on('close', r));
+	});
+
 	it('sends JSON to client as a text frame', async () => {
 		transport = new ClientTransport(TEST_PORT, {});
 		await transport.start();

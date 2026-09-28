@@ -24,6 +24,9 @@ export class BackgroundNotificationQueue {
 	private queue: Array<{ turns: Turn[]; turnComplete: boolean; priority: QueuePriority }> = [];
 	private audioReceived = false;
 	private interrupted = false;
+	/** While held, nothing is delivered: every notification queues and turn
+	 *  completion flushes nothing until the hold is released. */
+	private held = false;
 
 	constructor(
 		private sendContent: (turns: Turn[], turnComplete: boolean) => void,
@@ -41,6 +44,13 @@ export class BackgroundNotificationQueue {
 	 */
 	sendOrQueue(turns: Turn[], turnComplete: boolean, options?: SendOrQueueOptions): void {
 		const priority = options?.priority ?? 'normal';
+
+		if (this.held) {
+			this.log('Notification delivery held — queuing background notification');
+			if (priority === 'high') this.queue.unshift({ turns, turnComplete, priority });
+			else this.queue.push({ turns, turnComplete, priority });
+			return;
+		}
 
 		if (priority === 'high') {
 			if (this.audioReceived && !this.messageTruncation) {
@@ -61,6 +71,15 @@ export class BackgroundNotificationQueue {
 		} else {
 			this.sendContent(turns, turnComplete);
 		}
+	}
+
+	/**
+	 * Hold or release delivery. While held, `sendOrQueue` queues everything
+	 * (high priority at the front) and `onTurnComplete` flushes nothing.
+	 * Releasing does not flush by itself: the next turn completion does.
+	 */
+	setHeld(held: boolean): void {
+		this.held = held;
 	}
 
 	/** Mark that the first audio chunk has been received this turn. */
@@ -98,6 +117,7 @@ export class BackgroundNotificationQueue {
 	}
 
 	private flushOne(): void {
+		if (this.held) return;
 		const notification = this.queue.shift();
 		if (notification) {
 			this.log(`Flushing queued background notification (${this.queue.length} remaining)`);

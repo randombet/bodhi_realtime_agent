@@ -158,6 +158,11 @@ export interface EventPayloadMap {
 	};
 	'session.resume': { sessionId: string; handle: string };
 	'session.goaway': { sessionId: string; timeLeft: string };
+	/** The session parked in UPSTREAM_LOST (`upstreamLossPolicy: 'hold'`): the
+	 *  provider connection is gone, nothing was finalized, and no automatic
+	 *  dial follows. `code`/`detail` carry the transport close code and reason
+	 *  or the failure text, when known. */
+	'session.upstreamLost': { sessionId: string; reason: string; code?: number; detail?: string };
 	'session.transcription_mode_changed': {
 		sessionId: string;
 		/** Public, stable mode — 'agent' | 'transcription'. */

@@ -539,6 +539,10 @@ export interface LLMTransport {
 	readonly currentDialGen?: number;
 	/** Post-setup generation counter (advances only on a completed setup). */
 	readonly currentTransportGeneration?: number;
+	/** Drop every copy of the session resumption handle the transport holds,
+	 *  so the next dial opens a fresh server session instead of resuming the
+	 *  current one. Does not touch the connection itself. */
+	clearResumption?(): void;
 
 	// --- Audio ---
 	sendAudio(base64Data: string): void;

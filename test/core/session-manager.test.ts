@@ -95,6 +95,68 @@ describe('SessionManager', () => {
 			mgr.transitionTo('CLOSED');
 			expect(mgr.state).toBe('CLOSED');
 		});
+
+		it('ACTIVE → UPSTREAM_LOST → RECONNECTING → ACTIVE is legal and fires no onSessionEnd', () => {
+			const { mgr, eventBus, hooks } = createManager();
+			const onSessionEnd = vi.fn();
+			hooks.register({ onSessionEnd });
+			const closed = vi.fn();
+			eventBus.subscribe('session.close', closed);
+
+			mgr.transitionTo('CONNECTING');
+			mgr.transitionTo('ACTIVE');
+			mgr.transitionTo('UPSTREAM_LOST');
+			expect(mgr.state).toBe('UPSTREAM_LOST');
+			expect(mgr.isActive).toBe(false);
+			expect(mgr.isDisconnected).toBe(true);
+			mgr.transitionTo('RECONNECTING');
+			mgr.transitionTo('ACTIVE');
+
+			expect(mgr.state).toBe('ACTIVE');
+			expect(onSessionEnd).not.toHaveBeenCalled();
+			expect(closed).not.toHaveBeenCalled();
+		});
+
+		it('CONNECTING → UPSTREAM_LOST → RECONNECTING → ACTIVE is legal', () => {
+			const { mgr, eventBus } = createManager();
+			const started = vi.fn();
+			eventBus.subscribe('session.start', started);
+
+			// A failed first dial parks the session before it was ever ACTIVE.
+			mgr.transitionTo('CONNECTING');
+			mgr.transitionTo('UPSTREAM_LOST');
+			expect(mgr.startedAtMs).toBeNull();
+			mgr.transitionTo('RECONNECTING');
+			mgr.transitionTo('ACTIVE');
+
+			expect(mgr.state).toBe('ACTIVE');
+			// The first activation still counts as the session start.
+			expect(started).toHaveBeenCalledTimes(1);
+			expect(mgr.startedAtMs).not.toBeNull();
+		});
+
+		it('CONNECTING → RECONNECTING → ACTIVE is legal and fires no onSessionEnd', () => {
+			const { mgr, eventBus, hooks } = createManager();
+			const onSessionEnd = vi.fn();
+			hooks.register({ onSessionEnd });
+			const closed = vi.fn();
+			eventBus.subscribe('session.close', closed);
+			const started = vi.fn();
+			eventBus.subscribe('session.start', started);
+
+			// A host recovery replaces the still-pending first dial.
+			mgr.transitionTo('CONNECTING');
+			mgr.transitionTo('RECONNECTING');
+			expect(mgr.state).toBe('RECONNECTING');
+			expect(mgr.isDisconnected).toBe(true);
+			expect(mgr.startedAtMs).toBeNull();
+			mgr.transitionTo('ACTIVE');
+
+			expect(mgr.state).toBe('ACTIVE');
+			expect(started).toHaveBeenCalledTimes(1);
+			expect(onSessionEnd).not.toHaveBeenCalled();
+			expect(closed).not.toHaveBeenCalled();
+		});
 	});
 
 	describe('invalid transitions', () => {
@@ -110,10 +172,10 @@ describe('SessionManager', () => {
 			expect(() => mgr.transitionTo('ACTIVE')).toThrow(SessionError);
 		});
 
-		it('CONNECTING → RECONNECTING throws', () => {
+		it('CONNECTING → TRANSFERRING throws', () => {
 			const { mgr } = createManager();
 			mgr.transitionTo('CONNECTING');
-			expect(() => mgr.transitionTo('RECONNECTING')).toThrow(SessionError);
+			expect(() => mgr.transitionTo('TRANSFERRING')).toThrow(SessionError);
 		});
 	});
 

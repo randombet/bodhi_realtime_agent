@@ -825,8 +825,7 @@ export class GeminiLiveTransport implements LLMTransport {
 	abortIncumbent(): Promise<'closed' | 'forced'> {
 		this.dialGen += 1;
 		const incumbent = this.detachSession();
-		this.effectiveResumptionHandle = null;
-		this.config.resumptionHandle = undefined;
+		this.clearResumption();
 		let closing: Promise<unknown>;
 		if (incumbent) {
 			closing = Promise.resolve().then(() => incumbent.close());
@@ -851,6 +850,14 @@ export class GeminiLiveTransport implements LLMTransport {
 				},
 			);
 		});
+	}
+
+	/** Drop both resumption handle copies: the effective handle the next dial
+	 *  resumes with and the legacy `config.resumptionHandle` alias. The next
+	 *  dial then opens a fresh server session. The connection is untouched. */
+	clearResumption(): void {
+		this.effectiveResumptionHandle = null;
+		this.config.resumptionHandle = undefined;
 	}
 
 	async disconnect(): Promise<void> {
