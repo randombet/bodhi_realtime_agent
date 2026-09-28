@@ -29,6 +29,7 @@ function makeRouter(over: Partial<AudioRouterDeps> & { transport: AudioRouterDep
 		vad,
 		clientAudioInputRate: over.clientAudioInputRate ?? 16000,
 		getSttProvider: over.getSttProvider ?? (() => undefined),
+		getShadowSttProvider: over.getShadowSttProvider,
 		getWhisperProvider: over.getWhisperProvider ?? (() => undefined),
 		isSessionActive: over.isSessionActive ?? (() => true),
 		isRtcAudioReady: over.isRtcAudioReady ?? (() => false),
@@ -143,6 +144,59 @@ describe('AudioRouter — transcription mode', () => {
 		router.drainTransitionBufferToWhisper();
 		const calls = (whisper.feedAudio as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]);
 		expect(calls).toEqual([a.toString('base64'), b.toString('base64')]); // FIFO order
+	});
+});
+
+describe('AudioRouter — shadow STT feed', () => {
+	// Client rate differs from the transport rate, so the transport receives
+	// resampled audio while both transcribers receive the raw client PCM.
+	function routerWithShadow(over: Partial<AudioRouterDeps> = {}): ReturnType<typeof makeRouter> & {
+		transport: ReturnType<typeof mockTransport>;
+		stt: { feedAudio: ReturnType<typeof vi.fn> };
+		shadow: { feedAudio: ReturnType<typeof vi.fn> };
+	} {
+		const transport = mockTransport(16000, 'pcm');
+		const stt = { supportedEncodings: ['pcm'], feedAudio: vi.fn() };
+		const shadow = { feedAudio: vi.fn() };
+		const made = makeRouter({
+			transport,
+			clientAudioInputRate: 24000,
+			getSttProvider: () => stt as unknown as STTProvider,
+			getShadowSttProvider: () => shadow,
+			...over,
+		});
+		return { ...made, transport, stt, shadow };
+	}
+
+	it('feeds the shadow the same post-gate raw PCM as the STT provider', () => {
+		const { router, transport, stt, shadow } = routerWithShadow();
+		router.handleFromClient(FRAME, 'websocket');
+		expect(transport.sendAudio).toHaveBeenCalledTimes(1);
+		expect(transport.sendAudio).not.toHaveBeenCalledWith(FRAME.toString('base64'));
+		expect(stt.feedAudio).toHaveBeenCalledWith(FRAME.toString('base64'));
+		expect(shadow.feedAudio).toHaveBeenCalledTimes(1);
+		expect(shadow.feedAudio).toHaveBeenCalledWith(FRAME.toString('base64'));
+	});
+
+	it('feeds the shadow nothing during the greeting grace drop', () => {
+		const { router, transport, stt, shadow } = routerWithShadow({
+			shouldDropOutbound: () => true,
+		});
+		router.handleFromClient(FRAME, 'websocket');
+		expect(transport.sendAudio).not.toHaveBeenCalled();
+		expect(stt.feedAudio).not.toHaveBeenCalled();
+		expect(shadow.feedAudio).not.toHaveBeenCalled();
+	});
+
+	it('feeds the shadow nothing in transcription mode', () => {
+		const whisper = { feedAudio: vi.fn() };
+		const { router, shadow } = routerWithShadow({
+			getMode: () => 'transcription',
+			getWhisperProvider: () => whisper as unknown as STTProvider,
+		});
+		router.handleFromClient(FRAME, 'websocket');
+		expect(whisper.feedAudio).toHaveBeenCalledTimes(1);
+		expect(shadow.feedAudio).not.toHaveBeenCalled();
 	});
 });
 

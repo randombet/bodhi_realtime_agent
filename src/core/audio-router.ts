@@ -29,6 +29,9 @@ export interface AudioRouterDeps {
 	/** Inbound client PCM sample rate (what `handleFromClient` receives). */
 	clientAudioInputRate: number;
 	getSttProvider: () => STTProvider | undefined;
+	/** Observation-only second transcriber, fed the same raw client PCM as
+	 *  `getSttProvider` on the agent path, after the greeting-grace gate. */
+	getShadowSttProvider?: () => { feedAudio(base64Pcm: string): void } | undefined;
 	getWhisperProvider: () => STTProvider | undefined;
 	isSessionActive: () => boolean;
 	/** True when a direct-RTC audio plane is live — websocket frames are ignored. */
@@ -221,6 +224,8 @@ export class AudioRouter {
 				stt.feedAudio(encodePcmToMulaw(stt8k).toString('base64'));
 			}
 		}
+		// Shadow transcription hears exactly what a PCM sttProvider would.
+		this.d.getShadowSttProvider?.()?.feedAudio(data.toString('base64'));
 	}
 
 	/** Forward a PCM frame to the whisper provider (resampled to its 24 kHz). */

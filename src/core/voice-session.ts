@@ -107,6 +107,7 @@ import { decideRetention } from './policies/retention.policy.js';
 import { decideWatchdogArm } from './policies/watchdog-arm.policy.js';
 import { ResponseTriggerCoordinator } from './response-trigger-coordinator.js';
 import { SessionManager } from './session-manager.js';
+import { ShadowSttController } from './shadow-stt-controller.js';
 import { ToolCallRouter } from './tool-call-router.js';
 import { TranscriptManager } from './transcript-manager.js';
 import { TransportReconnector } from './transport-reconnector.js';
@@ -476,6 +477,32 @@ export interface VoiceSessionConfig {
 	 *  When set, transport built-in transcription is automatically disabled.
 	 *  When omitted, the transport's built-in transcription is used. */
 	sttProvider?: STTProvider;
+	/** Observation-only second transcription. Unlike `sttProvider` it does not
+	 *  replace the transport's built-in transcription: the provider hears the
+	 *  same client audio, its per-turn transcript is compared with what the
+	 *  model itself heard, and a divergence is logged and reported through
+	 *  `onTranscriptionDivergence`. What the model hears, answers and records is
+	 *  unchanged (unless `divergenceCorrection` is on). A model mishearing is
+	 *  otherwise invisible, since its transcript and its answer agree.
+	 *
+	 *  Ignored (with a log line) when `sttProvider` is set, since there is no
+	 *  built-in transcription to compare against. Must be a distinct instance
+	 *  from `whisperProvider`; sharing one throws a `ValidationError` at
+	 *  construction. Receives no audio in transcription mode. */
+	shadowSttProvider?: STTProvider;
+	/** Called when the shadow transcription disagrees with the built-in one
+	 *  (normalized comparison; a much shorter fragment of the other side counts
+	 *  as streaming truncation, not a mishearing). `turnId` is the turn the
+	 *  shadow result belongs to. */
+	onTranscriptionDivergence?: (liveText: string, shadowText: string, turnId?: number) => void;
+	/** With `shadowSttProvider` set, answer a meaningful divergence with a
+	 *  spoken self-correction: the in-flight answer is interrupted and the
+	 *  model is told what the user actually said. The shadow result arrives
+	 *  after the answer has started, so the start of the wrong answer is still
+	 *  heard. Only a result for the still-current turn corrects; a stale one,
+	 *  transcription mode or the synthetic-output hold send nothing.
+	 *  Default `false` (observation only). */
+	divergenceCorrection?: boolean;
 	/** Sample rate of inbound client PCM (what `handleAudioFromClient` receives).
 	 *  When omitted, defaults to `transport.audioFormat.inputSampleRate` — which
 	 *  matches what the framework instructs clients to send (browser RTC, voice
@@ -726,6 +753,9 @@ export class VoiceSession {
 		getActiveServerTurnId: () => this.transport.getActiveServerTurnId?.(),
 	});
 	private sttProvider?: STTProvider;
+	/** Observation-only second transcription (`config.shadowSttProvider`).
+	 *  Absent when unset or when `sttProvider` replaces built-in transcription. */
+	private shadowStt?: ShadowSttController;
 	/** Last routed user utterance for watchdog-stall recovery replay. Only
 	 *  constructed when `config.watchdogReplayRecovery` is true (dark rollout). */
 	private utteranceRetainer?: LastUtteranceRetainer;
@@ -955,6 +985,15 @@ export class VoiceSession {
 			throw new ValidationError(
 				"VoiceSession: upstreamLossPolicy 'hold' requires legacy orchestration; " +
 					"orchestrationMode 'actor' supports only 'close'.",
+			);
+		}
+		// Checked before the dictation controller configures the whisper provider:
+		// a shared instance would have its format and transcript callback taken
+		// over by the shadow, and dictation would silently stop filling its buffer.
+		if (config.shadowSttProvider && config.shadowSttProvider === config.whisperProvider) {
+			throw new ValidationError(
+				'VoiceSession: shadowSttProvider must be a distinct instance from whisperProvider. ' +
+					'Sharing one instance lets the shadow take over the dictation transcript callback.',
 			);
 		}
 		this.config = config;
@@ -1354,6 +1393,7 @@ export class VoiceSession {
 			nowMs: () => this.nowMs(),
 			clientAudioInputRate: this.clientAudioInputRate,
 			getSttProvider: () => this.sttProvider,
+			getShadowSttProvider: () => this.shadowStt,
 			getWhisperProvider: () => this.dictation.whisper,
 			isSessionActive: () => this.sessionManager.isActive && this.clientInputReady,
 			isRtcAudioReady: () => this.directRtcChannel?.isRtcAudioReady ?? false,
@@ -1519,8 +1559,35 @@ export class VoiceSession {
 				this.hold.release('input-transcription'); // fresh evidence (see above)
 				this.reconnector.notifyProviderActivity(); // liveness (see above)
 				this.logInputTranscriptionLatency(text, 'provider');
+				this.shadowStt?.noteLiveTranscript(text);
 				this.transcriptManager.handleInput(text);
 			};
+		}
+
+		// Shadow STT: a second transcriber over the same client audio, compared
+		// per turn with the built-in transcription above. Built-in transcription
+		// stays the only transcript source; the shadow never reaches
+		// transcriptManager (that would duplicate every user turn). With an
+		// sttProvider there is no built-in transcription left to compare against.
+		if (config.shadowSttProvider && !config.sttProvider) {
+			this.shadowStt = new ShadowSttController({
+				provider: config.shadowSttProvider,
+				// The format the audio router feeds: raw client PCM.
+				audio: {
+					sampleRate: this.clientAudioInputRate,
+					bitDepth: 16,
+					channels: 1,
+					encoding: 'pcm',
+				},
+				getCurrentTurnId: () => this.turns.numericId,
+				onDivergence: config.onTranscriptionDivergence,
+				correctionEnabled: config.divergenceCorrection === true,
+				sendCorrection: (text, turnId) =>
+					this.sendSyntheticLiveText([{ role: 'user', text }], 'shadow-stt-correction', turnId),
+				log: (msg) => this.log(msg),
+			});
+		} else if (config.shadowSttProvider) {
+			this.log('[ShadowSTT] ignored — sttProvider already replaces built-in transcription');
 		}
 
 		// (Transcription-mode Whisper wiring + initial-mode seed live in the
@@ -1610,6 +1677,12 @@ export class VoiceSession {
 				this.fence.stampSttCommit(this.turns.numericId);
 				this.sttProvider.commit(this.turns.numericId);
 			}
+			// Once per turn id (the controller ignores repeats): snapshot the
+			// turn's built-in transcript and have the shadow transcribe the turn.
+			// Not for a trailing start of an already-finalized turn: the counter
+			// has already moved on, and committing now would spend the next
+			// turn's single commit before that turn's speech is heard.
+			if (modelTurn) this.shadowStt?.commit(this.turns.numericId);
 		};
 
 		// Wire TTS provider (actor-mode only)
@@ -2418,12 +2491,20 @@ export class VoiceSession {
 		this.eventBus.subscribe('session.stateChange', (payload: { toState: string }) => {
 			if (payload.toState === 'ACTIVE') {
 				this.startSttProvider();
+				this.startShadowStt();
 			} else if (
 				payload.toState === 'RECONNECTING' ||
 				payload.toState === 'TRANSFERRING' ||
 				payload.toState === 'UPSTREAM_LOST'
 			) {
 				void this.sttProvider?.stop();
+				this.shadowStt
+					?.stop()
+					.catch((err) =>
+						this.log(
+							`[ShadowSTT] stop failed: ${err instanceof Error ? err.message : String(err)}`,
+						),
+					);
 			}
 			// Parked, nothing can reach the model: a notification sent now would
 			// be dropped by the disconnected transport, and synthetic output has
@@ -2654,6 +2735,7 @@ export class VoiceSession {
 			});
 		}
 		await this.sttProvider?.start();
+		await this.shadowStt?.start();
 		await this.ttsPipeline?.provider.start();
 		// Phase 3: when constructed with initial transcriptionMode='transcription',
 		// bring Whisper up and quiesce the agent transport before start() resolves.
@@ -2973,6 +3055,7 @@ export class VoiceSession {
 		// 2. Fallible resource teardown, each isolated so one failure doesn't abort
 		//    the rest (the session is already CLOSED and post-session work dispatched).
 		await this.safeTeardown('stt.stop', () => this.sttProvider?.stop());
+		await this.safeTeardown('shadowStt.stop', () => this.shadowStt?.stop());
 		// Stop the dictation-mode Whisper provider so prewarmed/active sockets don't
 		// survive session close. Idempotent.
 		await this.safeTeardown('dictation.stopWhisper', () => this.dictation.stopWhisper());
@@ -3494,6 +3577,12 @@ export class VoiceSession {
 	private startSttProvider(): void {
 		if (!this.sttProvider) return;
 		this.sttProvider.start().catch((err) => this.reportError('stt', err));
+	}
+
+	/** Start the shadow STT when the session becomes ACTIVE. Fire-and-forget. */
+	private startShadowStt(): void {
+		if (!this.shadowStt) return;
+		this.shadowStt.start().catch((err) => this.reportError('shadow-stt', err));
 	}
 
 	private handleTurnComplete(serverTurnId?: number): void {
@@ -4602,6 +4691,27 @@ export class VoiceSession {
 		return this.enqueueDirectInput(async () => {
 			sent = await this.sendInjectedText(turns, opts);
 		}).then(() => sent);
+	}
+
+	/** A framework-generated live correction for turn `turnId` (the shadow STT's
+	 *  self-correction). It runs on the direct-input FIFO, pre-empts the
+	 *  in-flight answer, and sends nothing while the synthetic-output hold is
+	 *  engaged or outside agent mode. Its validity is checked once at the head
+	 *  of the FIFO, before its own preemption finalizes the turn: newer typed
+	 *  input that already pre-empted `turnId` has moved the turn on, and the
+	 *  correction is dropped. Resolves whether it was sent. */
+	private sendSyntheticLiveText(
+		turns: ContentTurn[],
+		origin: string,
+		turnId: number,
+	): Promise<boolean> {
+		return this.injectTextInternal(turns, {
+			mode: 'live',
+			preempt: true,
+			respectSyntheticHold: true,
+			origin,
+			stillValid: () => this.turns.numericId === turnId,
+		});
 	}
 
 	/** Checks, optional preemption and the send itself. Never rejects. */
