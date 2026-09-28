@@ -63,3 +63,7 @@ const executor = new ToolExecutor(
 );
 // The public per-attempt reconnect deadline is a static on VoiceSession.
 const n: number = VoiceSession.RECONNECT_DEADLINE_MS;
+// The connection-lifecycle event type resolves from the root and narrows by kind.
+config.onConnectionLifecycle = (event: ConnectionLifecycleEvent): void => {
+	if (event.kind === 'generation-close') void event.transportGeneration;
+};

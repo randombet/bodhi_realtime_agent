@@ -726,12 +726,13 @@ describe('GeminiLiveTransport', () => {
 			};
 		}
 
-		it('`currentDialGen` is 1 after a successful first `connect()`, 2 after a first dial that fails, and `currentTransportGeneration` stays 0', async () => {
+		it('`currentDialGen` is 1 after a successful first `connect()`, 2 after a first dial that fails; `currentTransportGeneration` advances only on setup-ok', async () => {
 			const healthy = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
 			expect(healthy.currentDialGen).toBe(0);
+			expect(healthy.currentTransportGeneration).toBe(0);
 			await healthy.connect();
 			expect(healthy.currentDialGen).toBe(1);
-			expect(healthy.currentTransportGeneration).toBe(0);
+			expect(healthy.currentTransportGeneration).toBe(1);
 
 			await useConnect(vi.fn(() => new Promise(() => {})));
 			const failing = new GeminiLiveTransport({ apiKey: 'test-key', connectTimeoutMs: 20 }, {});
@@ -945,6 +946,329 @@ describe('GeminiLiveTransport', () => {
 
 			await expect(transport.abortIncumbent()).resolves.toBe('forced');
 			expect(transport.isConnected).toBe(false);
+		});
+	});
+
+	describe('connection lifecycle events', () => {
+		type Ev = { kind: string; connectAttemptId: string } & Record<string, unknown>;
+
+		it('a clean connect emits attempt (handleSupplied=false) then setup-ok with the generation', async () => {
+			const events: Ev[] = [];
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key' },
+				{
+					onConnectionLifecycle: (e) => events.push(e as Ev),
+				},
+			);
+			await transport.connect();
+
+			expect(events.map((e) => e.kind)).toEqual(['attempt', 'setup-ok']);
+			expect(events[0].handleSupplied).toBe(false);
+			expect(events[1].transportGeneration).toBe(1);
+			expect(events[0].connectAttemptId).toBe(events[1].connectAttemptId);
+			expect(transport.currentTransportGeneration).toBe(1);
+		});
+
+		it('a dial with a stored resumption handle reports handleSupplied=true (sessionResumption and legacy resumptionHandle)', async () => {
+			const viaSessionResumption: Ev[] = [];
+			await new GeminiLiveTransport(
+				{ apiKey: 'test-key', sessionResumption: { handle: 'handle_1' } },
+				{ onConnectionLifecycle: (e) => viaSessionResumption.push(e as Ev) },
+			).connect();
+			expect(viaSessionResumption[0]).toMatchObject({ kind: 'attempt', handleSupplied: true });
+
+			const viaLegacy: Ev[] = [];
+			await new GeminiLiveTransport(
+				{ apiKey: 'test-key', resumptionHandle: 'handle_2' },
+				{ onConnectionLifecycle: (e) => viaLegacy.push(e as Ev) },
+			).connect();
+			expect(viaLegacy[0]).toMatchObject({ kind: 'attempt', handleSupplied: true });
+
+			// The privacy opt-out sends no handle, so the attempt supplies none.
+			const optedOut: Ev[] = [];
+			await new GeminiLiveTransport(
+				{ apiKey: 'test-key', sessionResumption: false, resumptionHandle: 'handle_3' },
+				{ onConnectionLifecycle: (e) => optedOut.push(e as Ev) },
+			).connect();
+			expect(optedOut[0]).toMatchObject({ kind: 'attempt', handleSupplied: false });
+		});
+
+		it('a close after setup is generation-close carrying the generation', async () => {
+			const events: Ev[] = [];
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key' },
+				{
+					onConnectionLifecycle: (e) => events.push(e as Ev),
+				},
+			);
+			await transport.connect();
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (e?: unknown) => void>;
+			cbs.onclose({ code: 1011, reason: 'internal error' });
+
+			const last = events.at(-1) as Ev;
+			expect(last.kind).toBe('generation-close');
+			expect(last.connectAttemptId).toBe('att_1');
+			expect(last.transportGeneration).toBe(1);
+			expect(last.code).toBe(1011);
+			expect(last.reason).toBe('internal error');
+		});
+
+		it('a socket that dies BEFORE setupComplete emits attempt-close (no generation) then setup-failed', async () => {
+			// The dial resolves a session but setupComplete never arrives; the
+			// socket closes, which rejects connect() at once.
+			const { GoogleGenAI } = await import('@google/genai');
+			let dialCallbacks!: Record<string, (...args: unknown[]) => void>;
+			const connectFn = vi.fn().mockImplementationOnce(async (params: Record<string, unknown>) => {
+				dialCallbacks = params.callbacks as typeof dialCallbacks;
+				return mockSession;
+			});
+			(GoogleGenAI as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => ({
+				live: { connect: connectFn },
+			}));
+
+			const events: Ev[] = [];
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', connectTimeoutMs: 1000 },
+				{
+					onConnectionLifecycle: (e) => events.push(e as Ev),
+				},
+			);
+			const pending = transport.connect();
+			await new Promise((r) => setTimeout(r, 5));
+			dialCallbacks.onclose?.({ code: 1006, reason: 'died during setup' });
+			await expect(pending).rejects.toThrow('closed before setupComplete');
+
+			const kinds = events.map((e) => e.kind);
+			expect(kinds).toEqual(['attempt', 'attempt-close', 'setup-failed']);
+			const close = events[1];
+			expect(close.code).toBe(1006);
+			expect(Object.hasOwn(close, 'transportGeneration')).toBe(false);
+			// Both events describe one attempt — correlated by id, not by guesswork.
+			expect(close.connectAttemptId).toBe(events[0].connectAttemptId);
+			expect(events[2].connectAttemptId).toBe(events[0].connectAttemptId);
+			expect(events[2].reason).toContain('closed before setupComplete');
+			expect(transport.currentTransportGeneration).toBe(0);
+		});
+
+		it('a superseded dial emits no setup-failed — stale-dial fencing covers failures too', async () => {
+			const { GoogleGenAI } = await import('@google/genai');
+			const connectFn = vi.fn();
+			(GoogleGenAI as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => ({
+				live: { connect: connectFn },
+			}));
+			connectFn
+				// Dial 1 never resolves; dial 2 is healthy.
+				.mockImplementationOnce(() => new Promise(() => {}))
+				.mockImplementationOnce(async (params: Record<string, unknown>) => {
+					const cbs = params.callbacks as Record<string, (...args: unknown[]) => void>;
+					setTimeout(() => cbs.onmessage?.({ setupComplete: { sessionId: 'sid_2' } }), 1);
+					return mockSession;
+				});
+
+			const events: Ev[] = [];
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', connectTimeoutMs: 200 },
+				{
+					onConnectionLifecycle: (e) => events.push(e as Ev),
+				},
+			);
+			const first = transport.connect();
+			first.catch(() => {}); // outcome asserted below; silence unhandled-rejection
+			await new Promise((r) => setTimeout(r, 5));
+			await transport.connect(); // supersedes dial 1
+			await expect(first).rejects.toThrow('timed out');
+
+			const kinds = events.map((e) => `${e.kind}:${e.connectAttemptId}`);
+			expect(kinds).toEqual(['attempt:att_1', 'attempt:att_2', 'setup-ok:att_2']);
+		});
+
+		it('reconnect() emits generation-close for the socket it closes locally, exactly once', async () => {
+			const events: Ev[] = [];
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key' },
+				{
+					onConnectionLifecycle: (e) => events.push(e as Ev),
+				},
+			);
+			await transport.connect();
+			const firstCbs = capturedConnectConfig.callbacks as Record<string, (e?: unknown) => void>;
+			await transport.reconnect({ resumptionHandle: undefined, conversationHistory: [] });
+			// The closed socket's own onclose lands late: fenced, never a second close.
+			firstCbs.onclose({ code: 1000, reason: 'late' });
+
+			const closes = events.filter((e) => e.kind === 'generation-close');
+			expect(closes).toHaveLength(1);
+			expect(closes[0]).toMatchObject({
+				connectAttemptId: 'att_1',
+				transportGeneration: 1,
+				code: 1000,
+				reason: 'local disconnect',
+			});
+			// The reconnect's own lineage continues: attempt + setup-ok for att_2.
+			expect(events.map((e) => e.kind)).toEqual([
+				'attempt',
+				'setup-ok',
+				'generation-close',
+				'attempt',
+				'setup-ok',
+			]);
+			expect(events[4]).toMatchObject({ connectAttemptId: 'att_2', transportGeneration: 2 });
+		});
+
+		it('a socket close landing while disconnect() awaits close() is not a second generation-close', async () => {
+			// Real-SDK shape: close() fires this dial's onclose before the next dial
+			// advances the fence, so only the ledger's once-per-attempt rule stops a
+			// duplicate after the local disconnect.
+			const { GoogleGenAI } = await import('@google/genai');
+			let dial1Callbacks!: Record<string, (...args: unknown[]) => void>;
+			const dial1Session = {
+				...mockSession,
+				close: vi.fn(() => dial1Callbacks.onclose?.({ code: 1000, reason: 'closed by client' })),
+			};
+			const connectFn = vi
+				.fn()
+				.mockImplementationOnce(async (params: Record<string, unknown>) => {
+					dial1Callbacks = params.callbacks as typeof dial1Callbacks;
+					setTimeout(() => dial1Callbacks.onmessage?.({ setupComplete: { sessionId: 's1' } }), 1);
+					return dial1Session;
+				})
+				.mockImplementationOnce(async (params: Record<string, unknown>) => {
+					const cbs = params.callbacks as Record<string, (...args: unknown[]) => void>;
+					setTimeout(() => cbs.onmessage?.({ setupComplete: { sessionId: 's2' } }), 1);
+					return mockSession;
+				});
+			(GoogleGenAI as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => ({
+				live: { connect: connectFn },
+			}));
+
+			const events: Ev[] = [];
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key' },
+				{ onConnectionLifecycle: (e) => events.push(e as Ev) },
+			);
+			await transport.connect();
+			await transport.reconnect({ resumptionHandle: undefined, conversationHistory: [] });
+
+			expect(dial1Session.close).toHaveBeenCalledTimes(1);
+			expect(events.map((e) => `${e.kind}:${e.connectAttemptId}`)).toEqual([
+				'attempt:att_1',
+				'setup-ok:att_1',
+				'generation-close:att_1',
+				'attempt:att_2',
+				'setup-ok:att_2',
+			]);
+			expect(events[2]).toMatchObject({ code: 1000, reason: 'local disconnect' });
+		});
+
+		it('setup-failed fires after the dial fence advanced: an observer that redials is not superseded', async () => {
+			const { GoogleGenAI } = await import('@google/genai');
+			let dial1Callbacks!: Record<string, (...args: unknown[]) => void>;
+			const connectFn = vi
+				.fn()
+				// Dial 1 resolves a session whose setupComplete never arrives.
+				.mockImplementationOnce(async (params: Record<string, unknown>) => {
+					dial1Callbacks = params.callbacks as typeof dial1Callbacks;
+					return mockSession;
+				})
+				.mockImplementationOnce(async (params: Record<string, unknown>) => {
+					const cbs = params.callbacks as Record<string, (...args: unknown[]) => void>;
+					setTimeout(() => cbs.onmessage?.({ setupComplete: { sessionId: 's2' } }), 1);
+					return mockSession;
+				});
+			(GoogleGenAI as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => ({
+				live: { connect: connectFn },
+			}));
+
+			const events: Ev[] = [];
+			let redial: Promise<void> | undefined;
+			let connectedDuringSetupFailed: boolean | undefined;
+			const transport: GeminiLiveTransport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', connectTimeoutMs: 1000 },
+				{
+					onConnectionLifecycle: (e) => {
+						events.push(e as Ev);
+						if (e.kind === 'setup-failed') {
+							connectedDuringSetupFailed = transport.isConnected;
+							redial = transport.connect();
+						}
+					},
+				},
+			);
+			const pending = transport.connect();
+			await new Promise((r) => setTimeout(r, 5));
+			dial1Callbacks.onclose?.({ code: 1006, reason: 'died during setup' });
+			await expect(pending).rejects.toThrow('closed before setupComplete');
+
+			expect(connectedDuringSetupFailed).toBe(false);
+			await expect(redial).resolves.toBeUndefined();
+			expect(transport.isConnected).toBe(true);
+			expect(events.map((e) => `${e.kind}:${e.connectAttemptId}`)).toEqual([
+				'attempt:att_1',
+				'attempt-close:att_1',
+				'setup-failed:att_1',
+				'attempt:att_3',
+				'setup-ok:att_3',
+			]);
+		});
+
+		it('abortIncumbent() emits no local generation-close (only disconnect() does)', async () => {
+			const events: Ev[] = [];
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key' },
+				{ onConnectionLifecycle: (e) => events.push(e as Ev) },
+			);
+			await transport.connect();
+			await expect(transport.abortIncumbent()).resolves.toBe('closed');
+
+			expect(events.map((e) => e.kind)).toEqual(['attempt', 'setup-ok']);
+		});
+
+		it('a throwing observer cannot interrupt the connection state machine', async () => {
+			// A throwing attempt observer must not prevent dialing; a throwing
+			// setup-ok observer must not fake a timeout; a throwing close observer
+			// must not keep disconnect() from closing the socket.
+			const seen: string[] = [];
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key' },
+				{
+					onConnectionLifecycle: (e) => {
+						seen.push(e.kind);
+						throw new Error(`observer failed on ${e.kind}`);
+					},
+				},
+			);
+			transport.onConnectionLifecycle = () => {
+				throw new Error('property-form observer failed');
+			};
+
+			await transport.connect(); // resolves despite attempt+setup-ok throwing
+			expect(transport.isConnected).toBe(true);
+			expect(transport.currentTransportGeneration).toBe(1);
+
+			await transport.disconnect(); // completes despite generation-close throwing
+			expect(mockSession.close).toHaveBeenCalled();
+			expect(transport.isConnected).toBe(false);
+
+			expect(seen).toEqual(['attempt', 'setup-ok', 'generation-close']);
+		});
+
+		it('property-form callback fires too — the path VoiceSession wires', async () => {
+			const events: Ev[] = [];
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			transport.onConnectionLifecycle = (e) => events.push(e as Ev);
+			await transport.connect();
+			expect(events.map((e) => e.kind)).toEqual(['attempt', 'setup-ok']);
+		});
+
+		it('a setup-ok observer already reads the minted generation from the transport', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			const read: number[] = [];
+			transport.onConnectionLifecycle = (e) => {
+				if (e.kind === 'setup-ok') read.push(transport.currentTransportGeneration);
+			};
+			await transport.connect();
+			expect(read).toEqual([1]);
 		});
 	});
 
