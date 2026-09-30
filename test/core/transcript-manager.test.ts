@@ -107,9 +107,10 @@ describe('TranscriptManager', () => {
 		expect(sink.assistantMessages).toEqual(['answer']);
 	});
 
-	it('ignores late input after flushInput finalized the user transcript', () => {
+	it('ignores a late authoritative (batch STT) transcript after flushInput finalized the user transcript', () => {
 		const sink = createSink();
-		const mgr = new TranscriptManager(sink);
+		// correctInput/handleInput split only exists with an external STT provider.
+		const mgr = new TranscriptManager(sink, { expectsAuthoritativeInput: true });
 
 		mgr.correctInput('What time is it?');
 		mgr.flushInput();
@@ -117,6 +118,22 @@ describe('TranscriptManager', () => {
 		mgr.flush();
 
 		expect(sink.userMessages).toEqual(['What time is it?']);
+	});
+
+	it('keeps late provider deltas after a tool-call flushInput as a follow-up user message', () => {
+		const sink = createSink();
+		// No external STT: handleInput carries the transport's own incremental
+		// deltas, which can lag behind the model's tool call.
+		const mgr = new TranscriptManager(sink);
+
+		mgr.handleInput('investigate ');
+		mgr.flushInput(); // tool call splits the turn
+		mgr.handleInput('slow startup');
+		mgr.flush();
+
+		expect(sink.userMessages).toEqual(['investigate', 'slow startup']);
+		const finals = sink.messages.filter((m) => m.role === 'user' && m.partial === false);
+		expect(finals.map((m) => m.text)).toEqual(['investigate', 'slow startup']);
 	});
 
 	it('accepts late input after an empty flushInput call', () => {

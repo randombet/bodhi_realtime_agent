@@ -46,6 +46,10 @@ export class TranscriptManager {
 	private outputPrefix = '';
 	/** True after the user transcript was finalized early for a tool call. */
 	private inputFinalizedThisTurn = false;
+	/** True when that early finalize came from `flushInput()` (a tool-call
+	 *  split) rather than a replay promotion; only this lock reopens for late
+	 *  provider deltas. */
+	private inputFinalizedByToolCall = false;
 	/** Display-only accumulation of realtime input deltas on interrupted turns. */
 	private interruptedInputDisplay = '';
 	/** Accumulation of the provider's own input-transcription deltas for the
@@ -223,8 +227,17 @@ export class TranscriptManager {
 	 * plain delta-append behavior.
 	 */
 	handleInput(text: string, turnId?: number): void {
-		if (this.inputFinalizedThisTurn) return;
 		if (!text.trim()) return;
+		if (this.inputFinalizedThisTurn) {
+			// An external STT provider re-sends the whole utterance after a
+			// tool-call split; that duplicate is what the lock exists for. The
+			// transport's own transcription streams deltas, so a late one is the
+			// tail of the same utterance: reopen the buffer and let flush() commit
+			// it as a follow-up user message instead of losing it.
+			if (this.options.expectsAuthoritativeInput || !this.inputFinalizedByToolCall) return;
+			this.inputFinalizedThisTurn = false;
+			this.inputFinalizedByToolCall = false;
+		}
 
 		if (
 			turnId !== undefined &&
@@ -350,6 +363,7 @@ export class TranscriptManager {
 			});
 			this.inputBuffer = '';
 			this.inputFinalizedThisTurn = true;
+			this.inputFinalizedByToolCall = true;
 			this.onInputFinalized?.(text);
 		}
 		this.interruptedInputDisplay = '';
@@ -386,6 +400,7 @@ export class TranscriptManager {
 		this.outputBuffer = '';
 		this.outputPrefix = '';
 		this.inputFinalizedThisTurn = false;
+		this.inputFinalizedByToolCall = false;
 		this.interruptedInputDisplay = '';
 		this.correctionBuffer = '';
 		this.inputFromCorrection = false;
