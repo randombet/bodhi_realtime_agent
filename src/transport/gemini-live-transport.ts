@@ -1,4 +1,5 @@
 import {
+	type FunctionResponseScheduling,
 	GoogleGenAI,
 	type LiveServerMessage,
 	type RealtimeInputConfig,
@@ -35,6 +36,18 @@ function warnLegacyResumptionHandleOnce(): void {
 			'use sessionResumption: { handle } instead. Will be removed in a future release.',
 	);
 }
+
+/** Framework scheduling hint to Gemini's `FunctionResponseScheduling`. `immediate` sends none,
+ *  leaving Gemini's own default for a non-blocking response. */
+const GEMINI_SCHEDULING: Record<
+	NonNullable<TransportToolResult['scheduling']>,
+	FunctionResponseScheduling | undefined
+> = {
+	immediate: undefined,
+	when_idle: 'WHEN_IDLE' as FunctionResponseScheduling,
+	interrupt: 'INTERRUPT' as FunctionResponseScheduling,
+	silent: 'SILENT' as FunctionResponseScheduling,
+};
 
 function toFunctionResponsePayload(value: unknown): Record<string, unknown> {
 	if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
@@ -608,12 +621,21 @@ export class GeminiLiveTransport implements LLMTransport {
 	sendToolResult(result: TransportToolResult): void {
 		if (!this.session) return;
 		if (this.bufferIfWindingDown(() => this.sendToolResult(result))) return;
+		// Gemini honours `scheduling` only on a NON_BLOCKING function, so it is sent only for a tool
+		// declared that way; every other result keeps the plain wire format.
+		const tool = this.config.tools?.find((t) => t.name === result.name);
+		const behavior = tool?.behavior ?? this.config.functionBehavior;
+		const scheduling =
+			behavior === 'NON_BLOCKING' && result.scheduling
+				? GEMINI_SCHEDULING[result.scheduling]
+				: undefined;
 		this.session.sendToolResponse({
 			functionResponses: [
 				{
 					id: result.id,
 					name: result.name,
 					response: toFunctionResponsePayload(result.result),
+					...(scheduling && { scheduling }),
 				},
 			],
 		});

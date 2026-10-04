@@ -1155,6 +1155,54 @@ describe('GeminiLiveTransport', () => {
 			});
 		});
 
+		it('sends Gemini scheduling for a NON_BLOCKING tool, and none for a blocking one', async () => {
+			const walk: ToolDefinition = { ...createTestTool(), name: 'walk', behavior: 'NON_BLOCKING' };
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', tools: [createTestTool(), walk] },
+				{},
+			);
+			await transport.connect();
+
+			transport.sendToolResult({
+				id: 'fc_w',
+				name: 'walk',
+				result: { ok: 1 },
+				scheduling: 'when_idle',
+			});
+			transport.sendToolResult({
+				id: 'fc_s',
+				name: 'search',
+				result: { ok: 2 },
+				scheduling: 'when_idle',
+			});
+			transport.sendToolResult({
+				id: 'fc_i',
+				name: 'walk',
+				result: { ok: 3 },
+				scheduling: 'immediate',
+			});
+
+			const sent = mockSession.sendToolResponse.mock.calls.map(
+				(c) => (c[0] as { functionResponses: Array<Record<string, unknown>> }).functionResponses[0],
+			);
+			expect(sent[0]).toMatchObject({ id: 'fc_w', scheduling: 'WHEN_IDLE' });
+			expect(sent[1]).not.toHaveProperty('scheduling');
+			expect(sent[2]).not.toHaveProperty('scheduling');
+		});
+
+		it('takes NON_BLOCKING from the transport functionBehavior too', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', tools: [createTestTool()], functionBehavior: 'NON_BLOCKING' },
+				{},
+			);
+			await transport.connect();
+			transport.sendToolResult({ id: 'fc_x', name: 'search', result: {}, scheduling: 'silent' });
+			const [call] = mockSession.sendToolResponse.mock.calls.at(-1) as [
+				{ functionResponses: Array<Record<string, unknown>> },
+			];
+			expect(call.functionResponses[0].scheduling).toBe('SILENT');
+		});
+
 		it('wraps primitive results into an object payload', async () => {
 			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
 			await transport.connect();
