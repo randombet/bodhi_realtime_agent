@@ -5,7 +5,7 @@ import {
 	type Session,
 } from '@google/genai';
 import { DEFAULT_CONNECT_TIMEOUT_MS, DEFAULT_RECONNECT_TIMEOUT_MS } from '../core/constants.js';
-import type { ToolDefinition } from '../types/tool.js';
+import type { FunctionBehavior, ToolDefinition } from '../types/tool.js';
 import type {
 	AudioFormatSpec,
 	ContentTurn,
@@ -121,6 +121,9 @@ export interface GeminiTransportConfig {
 	speechConfig?: { voiceName?: string };
 	/** Context window compression settings (trigger and target token counts). */
 	compressionConfig?: { triggerTokens: number; targetTokens: number };
+	/** Default `behavior` written on every function declaration that does not set its own.
+	 *  Unset sends no `behavior`, so the model's default applies. */
+	functionBehavior?: FunctionBehavior;
 	/** Enable Gemini's built-in Google Search grounding. */
 	googleSearch?: boolean;
 	/** Enable server-side transcription of user audio input (default: true). */
@@ -379,7 +382,11 @@ export class GeminiLiveTransport implements LLMTransport {
 			toolEntries.push({ googleSearch: {} });
 		}
 		if (this.config.tools?.length) {
-			toolEntries.push({ functionDeclarations: this.config.tools.map(toolToDeclaration) });
+			toolEntries.push({
+				functionDeclarations: this.config.tools.map((tool) =>
+					toolToDeclaration(tool, this.config.functionBehavior),
+				),
+			});
 		}
 		if (toolEntries.length > 0) {
 			connectConfig.tools = toolEntries;
@@ -1143,11 +1150,17 @@ export class GeminiLiveTransport implements LLMTransport {
 	}
 }
 
-/** Convert a ToolDefinition to a Gemini function declaration (name + description + JSON Schema). */
-function toolToDeclaration(tool: ToolDefinition): Record<string, unknown> {
+/** Convert a ToolDefinition to a Gemini function declaration (name + description + JSON Schema),
+ *  with `behavior` when the tool or the transport sets one. */
+export function toolToDeclaration(
+	tool: ToolDefinition,
+	fallbackBehavior?: FunctionBehavior,
+): Record<string, unknown> {
+	const behavior = tool.behavior ?? fallbackBehavior;
 	return {
 		name: tool.name,
 		description: tool.description,
 		parameters: zodToJsonSchema(tool.parameters),
+		...(behavior && { behavior }),
 	};
 }

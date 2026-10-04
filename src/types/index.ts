@@ -80,7 +80,7 @@ export type {
 	SessionState,
 } from './session.js';
 
-export type { ToolContext, ToolDefinition, ToolExecution } from './tool.js';
+export type { FunctionBehavior, ToolContext, ToolDefinition, ToolExecution } from './tool.js';
 
 export type {
 	AudioFormatSpec,
