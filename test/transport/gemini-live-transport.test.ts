@@ -159,6 +159,44 @@ describe('GeminiLiveTransport', () => {
 			expect(tools[0].functionDeclarations[0].description).toBe('Search the web');
 		});
 
+		it('sends no behavior on a declaration unless one is set, so the model default applies', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', tools: [createTestTool()] },
+				{},
+			);
+			await transport.connect();
+			const config = capturedConnectConfig.config as Record<string, unknown>;
+			const [entry] = config.tools as Array<{
+				functionDeclarations: Array<Record<string, unknown>>;
+			}>;
+			expect(entry.functionDeclarations[0]).not.toHaveProperty('behavior');
+		});
+
+		it('writes the transport functionBehavior on every declaration, and a tool can override it', async () => {
+			const blocking: ToolDefinition = {
+				...createTestTool(),
+				name: 'restart',
+				behavior: 'BLOCKING',
+			};
+			const transport = new GeminiLiveTransport(
+				{
+					apiKey: 'test-key',
+					tools: [createTestTool(), blocking],
+					functionBehavior: 'NON_BLOCKING',
+				},
+				{},
+			);
+			await transport.connect();
+			const config = capturedConnectConfig.config as Record<string, unknown>;
+			const [entry] = config.tools as Array<{
+				functionDeclarations: Array<Record<string, unknown>>;
+			}>;
+			expect(entry.functionDeclarations.map((d) => [d.name, d.behavior])).toEqual([
+				['search', 'NON_BLOCKING'],
+				['restart', 'BLOCKING'],
+			]);
+		});
+
 		it('includes googleSearch when enabled', async () => {
 			const transport = new GeminiLiveTransport(
 				{ apiKey: 'test-key', googleSearch: true, tools: [createTestTool()] },

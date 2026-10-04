@@ -44,7 +44,7 @@ import type { MemoryStore } from '../types/memory.js';
 import type { IClientChannel } from '../types/session-client.js';
 import type { SessionClientSender } from '../types/session-client.js';
 import type { SessionEndReason } from '../types/session.js';
-import type { ToolDefinition } from '../types/tool.js';
+import type { FunctionBehavior, ToolDefinition } from '../types/tool.js';
 import type { LLMTransport, LLMTransportError, STTProvider } from '../types/transport.js';
 import type { TTSProvider } from '../types/tts.js';
 import type { ArtifactRef, ArtifactStore, SaveArtifactParams } from '../types/workspace.js';
@@ -276,6 +276,9 @@ export interface VoiceSessionConfig {
 	speechConfig?: { voiceName?: string };
 	/** Context window compression thresholds. */
 	compressionConfig?: { triggerTokens: number; targetTokens: number };
+	/** Gemini Live default function-call `behavior` for every tool that does not set its own
+	 *  (see `ToolDefinition.behavior`). Unset leaves the model's default in place. */
+	functionBehavior?: FunctionBehavior;
 	/** Enable server-side transcription of user audio input (default: true).
 	 *  Has no effect when sttProvider is set (built-in is disabled automatically).
 	 *  Use false to disable all input transcription for privacy or cost control. */
@@ -977,6 +980,7 @@ export class VoiceSession {
 					googleSearch: initialForLive?.googleSearch,
 					speechConfig: config.speechConfig,
 					compressionConfig: config.compressionConfig,
+					functionBehavior: config.functionBehavior,
 					inputAudioTranscription: inputTranscription,
 					realtimeInputConfig: this.resolvedRealtimeInputConfig,
 				},
