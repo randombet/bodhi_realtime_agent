@@ -1,6 +1,6 @@
 {
   "name": "bodhi-realtime-agent",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "private": false,
   "description": "TypeScript framework for real-time voice agent applications using Google Gemini Live API",
   "homepage": "https://github.com/randombet/bodhi_realtime_agent#readme",
