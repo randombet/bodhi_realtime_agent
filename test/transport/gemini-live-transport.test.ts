@@ -2851,6 +2851,30 @@ describe('GeminiLiveTransport', () => {
 			expect(call.functionResponses[0].scheduling).toBe('SILENT');
 		});
 
+		it('schedules by the declarations on the live session until a reconnect applies staged tools', async () => {
+			const nonBlocking: ToolDefinition = { ...createTestTool(), behavior: 'NON_BLOCKING' };
+			const blocking: ToolDefinition = { ...createTestTool(), behavior: 'BLOCKING' };
+			const lastScheduling = () =>
+				(
+					mockSession.sendToolResponse.mock.calls.at(-1) as [
+						{ functionResponses: Array<Record<string, unknown>> },
+					]
+				)[0].functionResponses[0].scheduling;
+			for (const stage of [
+				(t: GeminiLiveTransport) => t.updateTools([blocking]),
+				(t: GeminiLiveTransport) => t.updateSession({ tools: [blocking] }),
+			]) {
+				const transport = new GeminiLiveTransport({ apiKey: 'test-key', tools: [nonBlocking] }, {});
+				await transport.connect();
+				await stage(transport);
+				transport.sendToolResult({ id: 'fc_1', name: 'search', result: {}, scheduling: 'silent' });
+				expect(lastScheduling()).toBe('SILENT');
+				await transport.reconnect();
+				transport.sendToolResult({ id: 'fc_2', name: 'search', result: {}, scheduling: 'silent' });
+				expect(lastScheduling()).toBeUndefined();
+			}
+		});
+
 		it('wraps primitive results into an object payload', async () => {
 			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
 			await transport.connect();

@@ -382,6 +382,13 @@ export class GeminiLiveTransport implements LLMTransport {
 	 *  that close settles so `abortIncumbent()` can still bound it. Only the call
 	 *  that recorded it clears it. */
 	private pendingDisconnectClose: Promise<void> | null = null;
+	/** Behavior of the declarations sent on the last dial; staged tool updates apply only on reconnect. */
+	private liveBehaviors: {
+		byTool: Map<string, FunctionBehavior | undefined>;
+		fallback?: FunctionBehavior;
+	} = {
+		byTool: new Map(),
+	};
 	/** Upstream send counters for the current generation; reset on `setupComplete`. */
 	private upstream: UpstreamCounters = freshUpstreamCounters();
 	/** Attempt/generation identity, fed this transport's `dialGen` (the fence in
@@ -639,6 +646,10 @@ export class GeminiLiveTransport implements LLMTransport {
 		if (this.config.googleSearch) {
 			toolEntries.push({ googleSearch: {} });
 		}
+		this.liveBehaviors = {
+			byTool: new Map((this.config.tools ?? []).map((t) => [t.name, t.behavior])),
+			fallback: this.config.functionBehavior,
+		};
 		if (this.config.tools?.length) {
 			toolEntries.push({
 				functionDeclarations: this.config.tools.map((tool) =>
@@ -1209,9 +1220,8 @@ export class GeminiLiveTransport implements LLMTransport {
 		if (!this.session) return;
 		if (this.bufferIfWindingDown(() => this.sendToolResult(result))) return;
 		// Gemini honours `scheduling` only on a NON_BLOCKING function, so it is sent only for a tool
-		// declared that way; every other result keeps the plain wire format.
-		const tool = this.config.tools?.find((t) => t.name === result.name);
-		const behavior = tool?.behavior ?? this.config.functionBehavior;
+		// declared that way on the connected session; every other result keeps the plain wire format.
+		const behavior = this.liveBehaviors.byTool.get(result.name) ?? this.liveBehaviors.fallback;
 		const scheduling =
 			behavior === 'NON_BLOCKING' && result.scheduling
 				? GEMINI_SCHEDULING[result.scheduling]
