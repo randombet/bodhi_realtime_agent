@@ -41,12 +41,16 @@ const loud = (() => {
 })();
 const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 
-function makeProvider(opts: { rotateAfterMs?: number } = {}) {
+type ProviderOptions = Partial<ConstructorParameters<typeof GeminiLiveTranscribeSTTProvider>[0]>;
+
+function makeProvider(opts: ProviderOptions = {}) {
 	const sockets: FakeSocket[] = [];
 	const p = new GeminiLiveTranscribeSTTProvider({
 		apiKey: 'k',
-		rotateAfterMs: opts.rotateAfterMs ?? 60_000,
+		rotateAfterMs: 60_000,
 		drainMs: 5,
+		retryDelayMs: 5,
+		...opts,
 		createSocket: () => {
 			const s = new FakeSocket();
 			sockets.push(s);
@@ -57,11 +61,19 @@ function makeProvider(opts: { rotateAfterMs?: number } = {}) {
 	return { p, sockets };
 }
 
+/** start() resolves on setupComplete, so the fake socket must answer before it is awaited. */
+async function startReady(p: GeminiLiveTranscribeSTTProvider, socket: () => FakeSocket) {
+	const started = p.start();
+	socket().openAndSetup();
+	await started;
+}
+
+const final = (text: string) => JSON.stringify({ serverContent: { inputTranscription: { text } } });
+
 describe('GeminiLiveTranscribeSTTProvider', () => {
 	it('sends the Transcribe Live setup and 16 kHz audio', async () => {
 		const { p, sockets } = makeProvider();
-		await p.start();
-		sockets[0].openAndSetup();
+		await startReady(p, () => sockets[0]);
 		p.feedAudio(chunk);
 		const setup = sockets[0].sent[0].setup;
 		expect(setup.model).toBe('models/gemini-3.5-transcribe-live');
@@ -85,19 +97,19 @@ describe('GeminiLiveTranscribeSTTProvider', () => {
 			},
 		});
 		p.configure({ sampleRate: 24000, bitDepth: 16, channels: 1 });
-		await p.start();
-		sockets[0].openAndSetup();
+		await startReady(p, () => sockets[0]);
 		expect(sockets[0].sent[0].setup.inputAudioTranscription.customVocabulary).toEqual(['Sutando']);
 		await p.stop();
 	});
 
 	it('buffers audio until setup completes', async () => {
 		const { p, sockets } = makeProvider();
-		await p.start();
+		const started = p.start();
 		p.feedAudio(chunk);
 		p.feedAudio(chunk);
 		expect(sockets[0].audioCount()).toBe(0);
 		sockets[0].openAndSetup();
+		await started;
 		p.feedAudio(chunk);
 		expect(sockets[0].audioCount()).toBe(3);
 		await p.stop();
@@ -109,8 +121,7 @@ describe('GeminiLiveTranscribeSTTProvider', () => {
 		const partials: string[] = [];
 		p.onTranscript = (t) => finals.push(t);
 		p.onPartialTranscript = (t) => partials.push(t);
-		await p.start();
-		sockets[0].openAndSetup();
+		await startReady(p, () => sockets[0]);
 		sockets[0].emit(
 			'message',
 			JSON.stringify({ serverContent: { interimInputTranscription: { text: 'hel' } } }),
@@ -130,8 +141,7 @@ describe('GeminiLiveTranscribeSTTProvider', () => {
 		const { p, sockets } = makeProvider({ rotateAfterMs: 20 });
 		const finals: string[] = [];
 		p.onTranscript = (t) => finals.push(t);
-		await p.start();
-		sockets[0].openAndSetup();
+		await startReady(p, () => sockets[0]);
 		p.feedAudio(loud);
 		await tick(30);
 		expect(sockets.length).toBe(2);
@@ -170,8 +180,7 @@ describe('GeminiLiveTranscribeSTTProvider', () => {
 			},
 		});
 		p.configure({ sampleRate: 24000, bitDepth: 16, channels: 1 });
-		await p.start();
-		sockets[0].openAndSetup();
+		await startReady(p, () => sockets[0]);
 		await tick(15);
 		sockets[1].openAndSetup();
 		p.feedAudio(loud);
@@ -184,14 +193,98 @@ describe('GeminiLiveTranscribeSTTProvider', () => {
 
 	it('reconnects when the active socket drops', async () => {
 		const { p, sockets } = makeProvider();
-		await p.start();
-		sockets[0].openAndSetup();
+		await startReady(p, () => sockets[0]);
 		sockets[0].readyState = 3;
 		sockets[0].emit('close', 1011, 'boom');
 		p.feedAudio(chunk);
 		expect(sockets.length).toBe(2);
 		sockets[1].openAndSetup();
 		expect(sockets[1].audioCount()).toBe(1);
+		await p.stop();
+	});
+
+	it('resolves start() only once the session is set up, sharing it across callers', async () => {
+		const { p, sockets } = makeProvider();
+		let done = 0;
+		const prewarm = p.start().then(() => done++);
+		const entry = p.start().then(() => done++);
+		await tick();
+		expect(sockets.length).toBe(1);
+		expect(done).toBe(0);
+		sockets[0].openAndSetup();
+		await Promise.all([prewarm, entry]);
+		expect(done).toBe(2);
+		await p.stop();
+	});
+
+	it('rejects start() when the session closes before setup, and can start again', async () => {
+		const { p, sockets } = makeProvider();
+		const started = p.start();
+		sockets[0].emit('close', 1008, 'API key not valid');
+		await expect(started).rejects.toThrow(/closed before setup/);
+		await tick(20);
+		expect(sockets.length).toBe(1);
+		await startReady(p, () => sockets[1]);
+		expect(sockets.length).toBe(2);
+		await p.stop();
+	});
+
+	it('rejects start() when setup times out', async () => {
+		const { p, sockets } = makeProvider({ connectTimeoutMs: 10 });
+		await expect(p.start()).rejects.toThrow(/timed out/);
+		expect(sockets[0].closed).toBe(true);
+	});
+
+	it('retries a replacement that fails before the handover', async () => {
+		const { p, sockets } = makeProvider({ rotateAfterMs: 20 });
+		await startReady(p, () => sockets[0]);
+		await tick(30);
+		expect(sockets.length).toBe(2);
+		sockets[1].emit('close', 1011, 'boom');
+		await tick(20);
+		expect(sockets.length).toBe(3);
+		sockets[2].openAndSetup();
+		for (let i = 0; i < 3; i++) p.feedAudio(chunk);
+		expect(sockets[2].audioCount()).toBeGreaterThan(0);
+		await p.stop();
+	});
+
+	it('schedules a new rotation when a replacement or reconnect becomes active', async () => {
+		const { p, sockets } = makeProvider({ rotateAfterMs: 20 });
+		await startReady(p, () => sockets[0]);
+		await tick(30);
+		sockets[1].openAndSetup();
+		sockets[0].readyState = 3;
+		sockets[0].emit('close', 1011, 'boom'); // promotes the ready replacement
+		await tick(30);
+		expect(sockets.length).toBe(3);
+		sockets[2].openAndSetup();
+		for (let i = 0; i < 3; i++) p.feedAudio(chunk); // hand over to sockets[2]
+		sockets[2].readyState = 3;
+		sockets[2].emit('close', 1011, 'boom'); // no replacement: reconnect
+		expect(sockets.length).toBe(4);
+		sockets[3].openAndSetup();
+		await tick(30);
+		expect(sockets.length).toBe(5);
+		await p.stop();
+	});
+
+	it('closes retired sockets on stop and drops their late transcripts', async () => {
+		const { p, sockets } = makeProvider({ rotateAfterMs: 20, drainMs: 5_000 });
+		const finals: string[] = [];
+		p.onTranscript = (t) => finals.push(t);
+		await startReady(p, () => sockets[0]);
+		await tick(30);
+		sockets[1].openAndSetup();
+		for (let i = 0; i < 3; i++) p.feedAudio(chunk); // sockets[0] is retired and draining
+		expect(sockets[0].closed).toBe(false);
+		await p.stop();
+		expect(sockets[0].closed).toBe(true);
+		sockets[0].emit('message', final('old run'));
+		await startReady(p, () => sockets[2]);
+		sockets[0].emit('message', final('old run'));
+		sockets[2].emit('message', final('new run'));
+		expect(finals).toEqual(['new run']);
 		await p.stop();
 	});
 });
