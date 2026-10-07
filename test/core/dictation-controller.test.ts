@@ -88,7 +88,8 @@ interface MockSttProvider extends STTProvider {
 	__startCount: number;
 	__stopCount: number;
 	__config?: STTAudioConfig;
-	__triggerTranscript(text: string): void;
+	__triggerTranscript(text: string, turnId?: number): void;
+	__triggerPartial(text: string): void;
 	__failNextStart(): void;
 }
 
@@ -130,7 +131,8 @@ function createMockSttProvider(): MockSttProvider {
 	Object.defineProperty(result, '__startCount', { get: () => startCount });
 	Object.defineProperty(result, '__stopCount', { get: () => stopCount });
 	Object.defineProperty(result, '__config', { get: () => config });
-	result.__triggerTranscript = (text: string) => onTranscript?.(text, undefined);
+	result.__triggerTranscript = (text: string, turnId?: number) => onTranscript?.(text, turnId);
+	result.__triggerPartial = (text: string) => result.onPartialTranscript?.(text);
 	result.__failNextStart = () => {
 		failNext = true;
 	};
@@ -364,6 +366,80 @@ describe('DictationController', () => {
 			whisper.__triggerTranscript('x');
 			controller.clearDictationBuffer();
 			expect(controller.getDictationBuffer()).toBe('');
+		});
+	});
+
+	describe('transcript subscription', () => {
+		it('delivers partials and finals in transcription mode, after the final is buffered', async () => {
+			const { controller, whisper } = build();
+			const seen: Array<{ text: string; partial: boolean; turnId?: number; buffer: string }> = [];
+			controller.onTranscript((e) => seen.push({ ...e, buffer: controller.getDictationBuffer() }));
+			await controller.enterTranscriptionMode();
+			whisper.__triggerPartial('hel');
+			whisper.__triggerTranscript('hello world', 7);
+			expect(seen).toEqual([
+				{ text: 'hel', partial: true, buffer: '' },
+				{ text: 'hello world', partial: false, turnId: 7, buffer: 'hello world' },
+			]);
+		});
+
+		it('delivers nothing in agent mode, though finals still reach the buffer', () => {
+			const { controller, whisper } = build();
+			const listener = vi.fn();
+			controller.onTranscript(listener);
+			whisper.__triggerPartial('p');
+			whisper.__triggerTranscript('stray');
+			expect(listener).not.toHaveBeenCalled();
+			expect(controller.getDictationBuffer()).toBe('stray');
+		});
+
+		it('delivers finals that land while whisper is stopping', async () => {
+			const { controller, whisper } = build();
+			const texts: string[] = [];
+			controller.onTranscript((e) => texts.push(e.text));
+			await controller.enterTranscriptionMode();
+			whisper.stop = async () => whisper.__triggerTranscript('last words');
+			await controller.exitTranscriptionMode();
+			expect(texts).toEqual(['last words']);
+		});
+
+		it('unsubscribe stops delivery', async () => {
+			const { controller, whisper } = build();
+			const listener = vi.fn();
+			const off = controller.onTranscript(listener);
+			await controller.enterTranscriptionMode();
+			whisper.__triggerTranscript('one');
+			off();
+			whisper.__triggerTranscript('two');
+			expect(listener).toHaveBeenCalledTimes(1);
+			expect(controller.getDictationBuffer()).toBe('one two');
+		});
+
+		it('a throwing listener is reported and does not break buffering or other listeners', async () => {
+			const { controller, whisper, reportError } = build();
+			const other = vi.fn();
+			controller.onTranscript(() => {
+				throw new Error('boom');
+			});
+			controller.onTranscript(other);
+			await controller.enterTranscriptionMode();
+			whisper.__triggerTranscript('kept');
+			expect(controller.getDictationBuffer()).toBe('kept');
+			expect(other).toHaveBeenCalledTimes(1);
+			expect(reportError).toHaveBeenCalledWith('dictation-transcript-listener', expect.any(Error));
+		});
+
+		it('keeps delivering across exit and re-entry (provider stop/start)', async () => {
+			const { controller, whisper } = build();
+			const texts: string[] = [];
+			controller.onTranscript((e) => texts.push(e.text));
+			await controller.enterTranscriptionMode();
+			whisper.__triggerTranscript('first run');
+			await controller.exitTranscriptionMode();
+			await controller.enterTranscriptionMode();
+			whisper.__triggerTranscript('second run');
+			expect(whisper.__startCount).toBe(2);
+			expect(texts).toEqual(['first run', 'second run']);
 		});
 	});
 });

@@ -67,6 +67,7 @@ export type {
 	RecoveryCapabilities,
 } from './host-recovery.js';
 
+export type { DictationTranscriptEvent } from './dictation-controller.js';
 export { VoiceSession } from './voice-session.js';
 export type {
 	InjectTextOptions,
