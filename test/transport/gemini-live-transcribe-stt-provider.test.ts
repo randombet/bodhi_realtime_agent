@@ -287,4 +287,36 @@ describe('GeminiLiveTranscribeSTTProvider', () => {
 		expect(finals).toEqual(['new run']);
 		await p.stop();
 	});
+
+	it('retries a replacement that closes after setup but before the handover', async () => {
+		const { p, sockets } = makeProvider({ rotateAfterMs: 20 });
+		await startReady(p, () => sockets[0]);
+		await tick(30);
+		sockets[1].openAndSetup();
+		p.feedAudio(loud); // speech continues on sockets[0]
+		sockets[1].readyState = 3;
+		sockets[1].emit('close', 1011, 'boom');
+		await tick(20);
+		expect(sockets.length).toBe(3);
+		sockets[2].openAndSetup();
+		for (let i = 0; i < 3; i++) p.feedAudio(chunk);
+		expect(sockets[2].audioCount()).toBeGreaterThan(0);
+		await p.stop();
+	});
+
+	it('does not promote a replacement that is no longer open', async () => {
+		const { p, sockets } = makeProvider({ rotateAfterMs: 20 });
+		await startReady(p, () => sockets[0]);
+		await tick(30);
+		sockets[1].openAndSetup();
+		sockets[1].readyState = 3; // dropped, close event not delivered yet
+		sockets[0].readyState = 3;
+		sockets[0].emit('close', 1011, 'boom');
+		expect(sockets.length).toBe(3);
+		sockets[2].openAndSetup();
+		p.feedAudio(chunk);
+		expect(sockets[2].audioCount()).toBe(1);
+		expect(sockets[1].audioCount()).toBe(0);
+		await p.stop();
+	});
 });

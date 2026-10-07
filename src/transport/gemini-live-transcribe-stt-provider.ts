@@ -295,9 +295,17 @@ export class GeminiLiveTranscribeSTTProvider implements STTProvider {
 				this.onFailed(conn, new Error(`Gemini Transcribe Live closed before setup (${code})`));
 				return;
 			}
-			if (conn.run !== this.run || !this.running || this.active !== conn) return;
-			// Loss of the socket being fed: promote the replacement or reconnect, buffering meanwhile.
-			this.activate(this.next ?? this.open());
+			if (conn.run !== this.run || !this.running) return;
+			if (conn === this.next) {
+				this.next = null;
+				this.retryReplacement();
+				return;
+			}
+			if (this.active !== conn) return;
+			// Loss of the socket being fed: promote an open replacement or reconnect, buffering meanwhile.
+			const next = this.next;
+			this.next = null;
+			this.activate(next && next.ws.readyState === OPEN ? next : this.open());
 		});
 		return conn;
 	}
@@ -310,16 +318,7 @@ export class GeminiLiveTranscribeSTTProvider implements STTProvider {
 		if (conn.run !== this.run || !this.running || this.starting) return;
 		if (conn === this.next) {
 			this.next = null;
-			if (this.replaceRetries >= this.cfg.maxRetries) {
-				this.log('[Transcribe] replacement session kept failing; staying on the current one');
-				return;
-			}
-			this.replaceRetries++;
-			this.retryLater(this.replaceRetries, () => {
-				this.next = this.open();
-				this.switchDeadline = Date.now() + this.cfg.pauseWaitMs;
-				this.quietMs = 0;
-			});
+			this.retryReplacement();
 		} else if (conn === this.active) {
 			if (this.activeRetries >= this.cfg.maxRetries) {
 				this.log('[Transcribe] session kept failing; giving up');
@@ -328,6 +327,21 @@ export class GeminiLiveTranscribeSTTProvider implements STTProvider {
 			this.activeRetries++;
 			this.retryLater(this.activeRetries, () => this.activate(this.open()));
 		}
+	}
+
+	/** Opens a new replacement after the last one failed or closed, within the replacement budget. */
+	private retryReplacement(): void {
+		if (this.replaceRetries >= this.cfg.maxRetries) {
+			this.log('[Transcribe] replacement session kept failing; staying on the current one');
+			return;
+		}
+		this.replaceRetries++;
+		this.retryLater(this.replaceRetries, () => {
+			if (this.next) return;
+			this.next = this.open();
+			this.switchDeadline = Date.now() + this.cfg.pauseWaitMs;
+			this.quietMs = 0;
+		});
 	}
 
 	private retryLater(attempt: number, fn: () => void): void {
