@@ -60,5 +60,16 @@ export {
 // public type (defined identically in both modules to avoid an import cycle
 // between types/events.ts and core/usage-helpers.ts).
 
+export { RECOVERY_CAPABILITIES } from './host-recovery.js';
+export type {
+	RecoverUpstreamArgs,
+	RecoverUpstreamResult,
+	RecoveryCapabilities,
+} from './host-recovery.js';
+
 export { VoiceSession } from './voice-session.js';
-export type { VoiceSessionConfig } from './voice-session.js';
+export type {
+	InjectTextOptions,
+	VoiceSessionConfig,
+	VoiceSessionDiagnostics,
+} from './voice-session.js';

@@ -402,3 +402,148 @@ describe('GeminiBatchSTTProvider', () => {
 		});
 	});
 });
+
+describe('contextHint (deck vocabulary bias)', () => {
+	const okResponse = { candidates: [{ content: { parts: [{ text: 'hello' }] } }] };
+
+	/** The user-part prompt text and systemInstruction of the n-th generateContent request. */
+	function request(n: number): { prompt: string; systemInstruction: unknown } {
+		const args = mockGenerateContent.mock.calls[n][0];
+		return {
+			prompt: args.contents[0].parts[1].text as string,
+			systemInstruction: args.config?.systemInstruction,
+		};
+	}
+
+	beforeEach(() => {
+		mockGenerateContent.mockReset();
+		mockGenerateContent.mockResolvedValue(okResponse);
+	});
+
+	it('base prompt without a hint is exactly the minimal user prompt', () => {
+		const p = new GeminiBatchSTTProvider({ apiKey: 'k', model: 'm' });
+		expect(p.buildPrompt()).toBe('Transcribe.');
+	});
+
+	it('static hint is embedded with prefer-exact-spelling instruction', () => {
+		const p = new GeminiBatchSTTProvider({
+			apiKey: 'k',
+			model: 'm',
+			contextHint: 'KDA, math derivation, delta rule',
+		});
+		const prompt = p.buildPrompt();
+		expect(prompt.startsWith('Transcribe.\n')).toBe(true);
+		expect(prompt).toContain('math derivation');
+		expect(prompt).toContain('exact spelling');
+		expect(prompt).toContain('Do NOT force a match');
+	});
+
+	it('function hint is re-read per call — deck can load after construction', () => {
+		const holder: { deck?: string } = {};
+		const p = new GeminiBatchSTTProvider({
+			apiKey: 'k',
+			model: 'm',
+			contextHint: () => holder.deck,
+		});
+		expect(p.buildPrompt()).toBe('Transcribe.');
+		holder.deck = 'MoonViT, LatentMoE';
+		expect(p.buildPrompt()).toContain('MoonViT');
+		holder.deck = 'RoPE';
+		expect(p.buildPrompt()).toContain('RoPE');
+		expect(p.buildPrompt()).not.toContain('MoonViT');
+	});
+
+	it('setContextHint replaces the hint; empty/whitespace hint falls back to base', () => {
+		const p = new GeminiBatchSTTProvider({ apiKey: 'k', model: 'm', contextHint: 'KDA' });
+		p.setContextHint('   ');
+		expect(p.buildPrompt()).toBe('Transcribe.');
+		p.setContextHint('');
+		expect(p.buildPrompt()).toBe('Transcribe.');
+		p.setContextHint(() => ' \n ');
+		expect(p.buildPrompt()).toBe('Transcribe.');
+		p.setContextHint('RoPE, NoPE');
+		expect(p.buildPrompt()).toContain('NoPE');
+		expect(p.buildPrompt()).not.toContain('KDA');
+		p.setContextHint(undefined);
+		expect(p.buildPrompt()).toBe('Transcribe.');
+	});
+
+	it('commit() sends the hinted prompt in the user part and leaves systemInstruction unchanged', () => {
+		const plain = new GeminiBatchSTTProvider({ apiKey: 'k', model: 'm' });
+		plain.configure({ sampleRate: 16000, bitDepth: 16, channels: 1 });
+		plain.feedAudio(toneChunk);
+		plain.commit(0);
+
+		const hinted = new GeminiBatchSTTProvider({
+			apiKey: 'k',
+			model: 'm',
+			contextHint: 'KDA, math derivation',
+		});
+		hinted.configure({ sampleRate: 16000, bitDepth: 16, channels: 1 });
+		hinted.feedAudio(toneChunk);
+		hinted.commit(1);
+
+		expect(mockGenerateContent).toHaveBeenCalledTimes(2);
+		const base = request(0);
+		const withHint = request(1);
+		expect(base.prompt).toBe('Transcribe.');
+		expect(withHint.prompt).toBe(hinted.buildPrompt());
+		expect(withHint.prompt).toContain('math derivation');
+		expect(typeof withHint.systemInstruction).toBe('string');
+		expect(withHint.systemInstruction).toBe(base.systemInstruction);
+		expect(withHint.systemInstruction).not.toContain('math derivation');
+	});
+
+	it('changing the hint between commits changes only the next request', () => {
+		const holder: { deck?: string } = { deck: 'KDA' };
+		const p = new GeminiBatchSTTProvider({
+			apiKey: 'k',
+			model: 'm',
+			contextHint: () => holder.deck,
+		});
+		p.configure({ sampleRate: 16000, bitDepth: 16, channels: 1 });
+
+		p.feedAudio(toneChunk);
+		p.commit(1);
+		// The deck changes after the first request was sent and before the next commit.
+		p.feedAudio(toneChunk);
+		holder.deck = 'MoonViT';
+		p.commit(2);
+		p.setContextHint('LatentMoE');
+		p.feedAudio(toneChunk);
+		p.commit(3);
+
+		expect(mockGenerateContent).toHaveBeenCalledTimes(3);
+		expect(request(0).prompt).toContain('KDA');
+		expect(request(0).prompt).not.toContain('MoonViT');
+		expect(request(1).prompt).toContain('MoonViT');
+		expect(request(1).prompt).not.toContain('KDA');
+		expect(request(2).prompt).toContain('LatentMoE');
+		expect(request(2).prompt).not.toContain('MoonViT');
+		expect(request(1).systemInstruction).toBe(request(0).systemInstruction);
+		expect(request(2).systemInstruction).toBe(request(0).systemInstruction);
+	});
+
+	it('a throwing hint function falls back to the base prompt and never escapes commit()', () => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		const hintError = new Error('deck lookup failed');
+		const p = new GeminiBatchSTTProvider({
+			apiKey: 'k',
+			model: 'm',
+			contextHint: () => {
+				throw hintError;
+			},
+		});
+		p.configure({ sampleRate: 16000, bitDepth: 16, channels: 1 });
+
+		expect(p.buildPrompt()).toBe('Transcribe.');
+
+		p.feedAudio(toneChunk);
+		expect(() => p.commit(1)).not.toThrow();
+
+		expect(mockGenerateContent).toHaveBeenCalledOnce();
+		expect(request(0).prompt).toBe('Transcribe.');
+		expect(warn).toHaveBeenCalledWith(expect.stringContaining('contextHint'), hintError);
+		warn.mockRestore();
+	});
+});

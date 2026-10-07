@@ -1,6 +1,6 @@
 import type { LanguageModelV1 } from 'ai';
 import { generateText } from 'ai';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AgentRouter } from '../../src/agent/agent-router.js';
 import { ConversationContext } from '../../src/core/conversation-context.js';
 import { AgentError } from '../../src/core/errors.js';
@@ -202,6 +202,12 @@ describe('AgentRouter', () => {
 	});
 
 	describe('handoff', () => {
+		// The ai mock is module-wide, so clear its recorded calls: a test that reads
+		// generateText's last call must see its own handoff, not an earlier test's.
+		beforeEach(() => {
+			vi.mocked(generateText).mockClear();
+		});
+
 		it('spawns subagent and returns result', async () => {
 			const { router } = setup();
 			router.registerAgents([createTestAgent('general')]);
@@ -231,6 +237,39 @@ describe('AgentRouter', () => {
 			expect(vi.mocked(generateText)).toHaveBeenCalledWith(
 				expect.objectContaining({ model: overrideModel }),
 			);
+		});
+
+		it('runs on reasoningModel when the deprecated model name is also set', async () => {
+			const { router } = setup();
+			router.registerAgents([createTestAgent('general')]);
+			router.setInitialAgent('general');
+
+			const overrideModel = { modelId: 'reasoning-override' } as unknown as LanguageModelV1;
+			await router.handoff(
+				{ toolCallId: 'tc_1', toolName: 'search', args: {} },
+				{
+					name: 'search-agent',
+					instructions: 'Search',
+					tools: {},
+					model: 'legacy-model-name',
+					reasoningModel: overrideModel,
+				},
+			);
+
+			expect(vi.mocked(generateText).mock.lastCall?.[0].model).toBe(overrideModel);
+		});
+
+		it('runs on the session model when only the deprecated model name is set', async () => {
+			const { router } = setup();
+			router.registerAgents([createTestAgent('general')]);
+			router.setInitialAgent('general');
+
+			await router.handoff(
+				{ toolCallId: 'tc_1', toolName: 'search', args: {} },
+				{ name: 'search-agent', instructions: 'Search', tools: {}, model: 'legacy-model-name' },
+			);
+
+			expect(vi.mocked(generateText).mock.lastCall?.[0].model).toBe(mockModel);
 		});
 
 		it('publishes agent.handoff event', async () => {

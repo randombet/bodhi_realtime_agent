@@ -22,6 +22,8 @@ export class Turn {
 	readonly agentName: string;
 
 	private _state: TurnState = 'active';
+	/** Whether `turn.start` was already published for this turn. */
+	private _startPublished = false;
 	/** Every transport server-turn id this framework turn has absorbed. */
 	private readonly _serverTurnIds = new Set<number>();
 
@@ -50,6 +52,16 @@ export class Turn {
 
 	ownsServerTurn(id: number): boolean {
 		return this._serverTurnIds.has(id);
+	}
+
+	/**
+	 * Claim the one `turn.start` publication for this turn. Returns `true` only
+	 * for the first caller; independent of the terminal transition.
+	 */
+	markStartPublished(): boolean {
+		if (this._startPublished) return false;
+		this._startPublished = true;
+		return true;
 	}
 
 	/**

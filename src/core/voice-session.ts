@@ -21,10 +21,14 @@ import { ToolExecutor } from '../tools/tool-executor.js';
 import { createClientChannel } from '../transport/client-channel-factory.js';
 import { ClientTransport } from '../transport/client-transport.js';
 import { DirectRtcClientChannel } from '../transport/direct-rtc-client-channel.js';
+import { EchoGuard, type EchoGuardConfig } from '../transport/echo-guard.js';
 import {
 	DEFAULT_GEMINI_LIVE_MODEL,
+	type GeminiCompressionConfig,
 	GeminiLiveTransport,
+	type GeminiMediaResolution,
 	type GeminiRealtimeInputConfig,
+	type GeminiVadConfig,
 	resolveGeminiRealtimeInputConfig,
 } from '../transport/gemini-live-transport.js';
 import type { MainAgent, SubagentConfig } from '../types/agent.js';
@@ -35,17 +39,30 @@ import {
 	describeClientTransport,
 } from '../types/client-media.js';
 import { MIN_PLAYBACK_RATE } from '../types/client-protocol.js';
-import type { AnyServerToClientMessage } from '../types/client-protocol.js';
+import type { AnyServerToClientMessage, HostClientFrame } from '../types/client-protocol.js';
 import type { ConversationItem } from '../types/conversation.js';
 import type { ConversationHistoryStore, SessionAnalytics } from '../types/history.js';
 import type { FrameworkHooks } from '../types/hooks.js';
 import type { ProcessedKnowledgeBase } from '../types/knowledge-base.js';
 import type { MemoryStore } from '../types/memory.js';
-import type { IClientChannel } from '../types/session-client.js';
+import type { ClientSocketHealth, IClientChannel } from '../types/session-client.js';
 import type { SessionClientSender } from '../types/session-client.js';
+import type {
+	AssistantOutputInterceptor,
+	AudioInputObserver,
+	AudioOutputObserver,
+} from '../types/session-seams.js';
 import type { SessionEndReason } from '../types/session.js';
 import type { FunctionBehavior, ToolDefinition } from '../types/tool.js';
-import type { LLMTransport, LLMTransportError, STTProvider } from '../types/transport.js';
+import type {
+	ConnectionLifecycleEvent,
+	ContentTurn,
+	LLMTransport,
+	LLMTransportError,
+	STTProvider,
+	TransportUsageMetadata,
+	UpstreamCounters,
+} from '../types/transport.js';
 import type { TTSProvider } from '../types/tts.js';
 import type { ArtifactRef, ArtifactStore, SaveArtifactParams } from '../types/workspace.js';
 import { AudioRouter } from './audio-router.js';
@@ -53,14 +70,27 @@ import { BackgroundNotificationQueue } from './background-notification-queue.js'
 import { ClientMessageRouter } from './client-message-router.js';
 import { ClientVadDetector, pcmChunksContainSpeech } from './client-vad-detector.js';
 import type { VadTerminalDescriptor } from './client-vad-semantics.js';
-import { DEFAULT_REPLAY_MAX_AGE_MS, DEFAULT_RESPONSE_WATCHDOG_MS } from './constants.js';
+import {
+	DEFAULT_RECONNECT_DEADLINE_MS,
+	DEFAULT_REPLAY_MAX_AGE_MS,
+	DEFAULT_RESPONSE_WATCHDOG_MS,
+} from './constants.js';
 import { ConversationContext } from './conversation-context.js';
 import { ConversationHistoryWriter } from './conversation-history-writer.js';
 import { DictationController } from './dictation-controller.js';
 import { DirectiveManager } from './directive-manager.js';
+import { SessionError, ValidationError } from './errors.js';
 import { EventBus } from './event-bus.js';
 import { GreetingController } from './greeting-controller.js';
 import { HooksManager } from './hooks.js';
+import {
+	DialGenerationFence,
+	HostRecoveryController,
+	type RecoverUpstreamArgs,
+	type RecoverUpstreamResult,
+	type RecoveryCapabilities,
+	SyntheticOutputHold,
+} from './host-recovery.js';
 import { InteractionModeManager } from './interaction-mode.js';
 import { LastUtteranceRetainer } from './last-utterance-retainer.js';
 import { MemoryCacheManager } from './memory-cache-manager.js';
@@ -78,6 +108,7 @@ import { decideRetention } from './policies/retention.policy.js';
 import { decideWatchdogArm } from './policies/watchdog-arm.policy.js';
 import { ResponseTriggerCoordinator } from './response-trigger-coordinator.js';
 import { SessionManager } from './session-manager.js';
+import { ShadowSttController } from './shadow-stt-controller.js';
 import { ToolCallRouter } from './tool-call-router.js';
 import { TranscriptManager } from './transcript-manager.js';
 import { TransportReconnector } from './transport-reconnector.js';
@@ -202,6 +233,52 @@ export function clampGraceMs(raw: number | undefined): number | undefined {
 	return raw;
 }
 
+/** Shape returned by {@link VoiceSession.getDiagnostics}. */
+export interface VoiceSessionDiagnostics {
+	/** Upstream send counters of the current transport generation; `null` on a
+	 *  transport that does not report diagnostics. */
+	upstream: UpstreamCounters | null;
+	/** Increments on each connection that completes setup; `null` on a
+	 *  transport that does not report diagnostics. */
+	transportGeneration: number | null;
+	/** Client audio frames suppressed as echo, monotonic per session; 0 when no
+	 *  echo suppression is active. */
+	echoSuppressed: number;
+}
+
+/** Options for {@link VoiceSession.injectText}. */
+export interface InjectTextOptions {
+	/**
+	 * `'live'`: realtime input the model responds to, as if the user had just
+	 * said it (`transport.sendLiveText`, or `sendContent(turns, true)` on a
+	 * transport without it).
+	 *
+	 * `'quiet'`: context added to the conversation without completing the
+	 * turn (`sendContent(turns, false)`), so it prompts no response by itself.
+	 *
+	 * Neither mode records the text in the session's `ConversationContext`.
+	 */
+	mode: 'live' | 'quiet';
+}
+
+/** Options of the internal injection path. The public `injectText` passes only
+ *  `mode`; the rest serve framework-generated corrections. */
+interface InjectTextInternalOptions extends InjectTextOptions {
+	/** Serialize on the direct-input FIFO and, at its head, cancel the in-flight
+	 *  response and finalize its turn as interrupted before sending (the
+	 *  `injectTranscript` preemption). */
+	preempt?: boolean;
+	/** Refuse to send while the synthetic-output hold is active, checked before
+	 *  any preemption. Host content leaves this unset and bypasses the hold. */
+	respectSyntheticHold?: boolean;
+	/** Evaluated once: at the head of the direct-input FIFO before preemption
+	 *  when `preempt` is set, otherwise immediately before sending. `false`
+	 *  abandons the injection. */
+	stillValid?: () => boolean;
+	/** Label for log lines. */
+	origin?: string;
+}
+
 /**
  * Configuration for creating a VoiceSession.
  */
@@ -220,6 +297,29 @@ export interface VoiceSessionConfig {
 	subagentConfigs?: Record<string, SubagentConfig>;
 	/** Lifecycle hooks for observability. */
 	hooks?: FrameworkHooks;
+	/**
+	 * Host hooks between the provider's native assistant output and the
+	 * session: screen or hold transcript chunks, drop audio chunks, and
+	 * release held text before each transcript flush. See
+	 * {@link AssistantOutputInterceptor}. Only native audio output passes
+	 * through `transcript` and `audio`; text-mode and external-TTS output
+	 * bypass them.
+	 */
+	outputInterceptor?: AssistantOutputInterceptor;
+	/** Connection-lifecycle facts: attempt / setup-ok / setup-failed /
+	 *  attempt-close / generation-close, correlated by `connectAttemptId`.
+	 *  `handleSupplied` on the attempt is what lets a consumer track resumed
+	 *  lineages without inferring them from log lines. Fires only on transports
+	 *  that report lifecycle (the Gemini Live transport); on a transport that
+	 *  declares neither this nor `onUsageMetadata`, a warning is logged at
+	 *  construction. */
+	onConnectionLifecycle?: (event: ConnectionLifecycleEvent) => void;
+	/** Server-reported token accounting, the provider's raw payload, once per
+	 *  message that carries it. `promptTokenCount` is the standing prompt size —
+	 *  the signal for context growth. Fires alongside (not instead of) the
+	 *  normalized `hooks.onRealtimeLLMUsage` / `realtime.usage`, and only on
+	 *  transports that report it (the Gemini Live transport). */
+	onUsageMetadata?: (usage: TransportUsageMetadata) => void;
 	/** Optional diagnostic logger. Defaults to console.log. */
 	log?: (message: string) => void;
 	/**
@@ -243,6 +343,58 @@ export interface VoiceSessionConfig {
 	 */
 	onClientJson?: (message: Record<string, unknown>) => void;
 	/**
+	 * Client protocol frames the built-in handlers do not recognize, such as a
+	 * host's own retry command. Built-in types always run first and are never
+	 * forwarded; a malformed built-in is dropped with a log line and reaches
+	 * neither this hook nor `onClientJson`. Fires after `onClientJson` when both
+	 * are set. Frames that arrive before the attach bootstrap has sent
+	 * `session.config` are queued (up to 64) and dispatched after it. A throw
+	 * from this hook or `onClientJson` is reported through `hooks.onError` and
+	 * does not stop the other hook, the remaining queued frames or the attach.
+	 */
+	onClientCommand?: (message: Record<string, unknown>) => void;
+	/**
+	 * A real client attached: a connection on the local client WebSocket server
+	 * (never a probe or verifier), or `notifyClientConnected()` with a host-owned
+	 * channel. Runs synchronously once `clientConnected` is `true` and before the
+	 * behavior catalog, `session.config` and any greeting, so the host can resend
+	 * durable state first. A throw is reported through `hooks.onError` and does
+	 * not stop the attach.
+	 */
+	onClientConnected?: () => void;
+	/**
+	 * The real client detached. Runs at the end of the detach handling, once
+	 * `clientConnected` is `false`. A throw is reported through `hooks.onError`.
+	 */
+	onClientDisconnected?: () => void;
+	/**
+	 * Host gate for the automatic actions of a client attach, read once per
+	 * attach after the behavior catalog and `session.config` are sent (and when
+	 * the first setup completes with a client already attached). While it
+	 * returns `true` the client is configured but nothing else happens: no
+	 * greeting, no context replay, and no redial of a session parked in
+	 * `UPSTREAM_LOST`. Under `upstreamLossPolicy: 'hold'` the reconnector reads
+	 * it too: while it returns `true` the host owns recovery, so a lost provider
+	 * connection parks the session at once instead of reconnecting on its own.
+	 * Both reads log a throw from the gate and treat it as `false`.
+	 */
+	suppressClientAutoActions?: () => boolean;
+	/**
+	 * Greeting policy for a client that attaches to an ACTIVE session.
+	 * - `'per-client'` (default): each newly attached client is greeted once.
+	 * - `'until-first-turn'`: a client is greeted only while no turn has
+	 *   completed; a client that attaches later is not greeted (see
+	 *   `reattachContextReplay`).
+	 */
+	reattachGreeting?: 'per-client' | 'until-first-turn';
+	/**
+	 * With `reattachGreeting: 'until-first-turn'`, a client that attaches to an
+	 * ACTIVE session after a completed turn gets the last ten user and assistant
+	 * messages (150 characters each) injected as quiet context, which requests
+	 * no response. Suppressed while synthetic output is held. Default `false`.
+	 */
+	reattachContextReplay?: boolean;
+	/**
 	 * Client media plane profile (`websocket` PCM+JSON, or `direct_rtc` split plane: JSON on WS, RTC audio later).
 	 * Defaults to WebSocket when omitted. See {@link createClientChannel}.
 	 */
@@ -253,6 +405,20 @@ export interface VoiceSessionConfig {
 	host?: string;
 	/** Listen timeout for local client WebSocket server startup (legacy/local mode). */
 	listenTimeoutMs?: number;
+	/** Supplies the JSON state frame sent to `?probe=1` health-probe connections
+	 *  on the local client WebSocket server. When absent, probes are upgraded and
+	 *  closed (code 1000) without a frame. Probe sockets never attach as the
+	 *  client and never run connect/disconnect handling. Local server only: with
+	 *  `clientSender` the host owns the socket and must implement probes itself. */
+	probeState?: () => object;
+	/** A verification-role (`?verify=1`) connection attached to the local client
+	 *  WebSocket server. Narrow hook for embedders (e.g. to wake the upstream);
+	 *  real-client connect handling (greeting, `session.config`, attachment
+	 *  accounting) never runs for it. Local server only. */
+	onVerifierConnected?: () => void;
+	/** The verification-role connection detached (clean close or preemption by
+	 *  an arriving real client). Local server only. */
+	onVerifierDisconnected?: () => void;
 	/** Model-silence watchdog (ms) after the user's turn ends. If the model emits
 	 *  nothing for this long, force a reconnect. Default 5000; `<= 0` disables. */
 	responseWatchdogMs?: number;
@@ -274,8 +440,11 @@ export interface VoiceSessionConfig {
 	model: LanguageModelV1;
 	/** Voice configuration for Gemini's speech output. */
 	speechConfig?: { voiceName?: string };
-	/** Context window compression thresholds. */
-	compressionConfig?: { triggerTokens: number; targetTokens: number };
+	/** Context-window compression (Gemini only). Thresholds are in tokens; an
+	 *  unset one is omitted so the server default applies (trigger at 80% of the
+	 *  model limit, target half of it), and `{}` enables compression with both
+	 *  defaults. */
+	compressionConfig?: GeminiCompressionConfig;
 	/** Gemini Live default function-call `behavior` for every tool that does not set its own
 	 *  (see `ToolDefinition.behavior`). Unset leaves the model's default in place. */
 	functionBehavior?: FunctionBehavior;
@@ -285,18 +454,71 @@ export interface VoiceSessionConfig {
 	inputAudioTranscription?: boolean;
 	/**
 	 * Gemini Live realtime input/VAD tuning. Applied only on the built-in
-	 * Gemini transport path. When omitted, the framework applies
-	 * `DEFAULT_GEMINI_REALTIME_INPUT_CONFIG` (END_SENSITIVITY_HIGH,
-	 * silenceDurationMs=500). User-supplied fields deep-merge over the default
-	 * at the `automaticActivityDetection` level. Has no effect when an external
-	 * transport is injected via `config.transport` — that transport owns its
-	 * own VAD config.
+	 * Gemini transport path. When omitted (and `vadConfig` is not set), the
+	 * framework applies `DEFAULT_GEMINI_REALTIME_INPUT_CONFIG`
+	 * (END_SENSITIVITY_HIGH, silenceDurationMs=500). User-supplied fields
+	 * deep-merge over the default at the `automaticActivityDetection` level.
+	 * `false` opts out of the default: no `realtimeInputConfig` is sent at all,
+	 * so the server's own VAD settings apply. Mutually exclusive with
+	 * `vadConfig`. Has no effect when an external transport is injected via
+	 * `config.transport` — that transport owns its own VAD config.
 	 */
-	realtimeInputConfig?: GeminiRealtimeInputConfig;
+	realtimeInputConfig?: GeminiRealtimeInputConfig | false;
+	/**
+	 * Gemini automatic-VAD tuning, sent verbatim as
+	 * `realtimeInputConfig.automaticActivityDetection` with no framework
+	 * default merged in (built-in Gemini path only). Supplying it together with
+	 * `realtimeInputConfig` (including `false`) throws a `ValidationError` at
+	 * construction.
+	 */
+	vadConfig?: GeminiVadConfig;
+	/** Session-wide media token cost for image/video input (Gemini only;
+	 *  `MEDIA_RESOLUTION_LOW` = 64 tokens per frame). Applies to every
+	 *  realtime-input image on the session; realtime input has no per-send
+	 *  override. Omitted → server default. */
+	mediaResolution?: GeminiMediaResolution;
 	/** External STT provider for user input transcription.
 	 *  When set, transport built-in transcription is automatically disabled.
 	 *  When omitted, the transport's built-in transcription is used. */
 	sttProvider?: STTProvider;
+	/** Observation-only second transcription. Unlike `sttProvider` it does not
+	 *  replace the transport's built-in transcription: the provider hears the
+	 *  same client audio, its per-turn transcript is compared with what the
+	 *  model itself heard, and a divergence is logged and reported through
+	 *  `onTranscriptionDivergence`. What the model hears, answers and records is
+	 *  unchanged (unless `divergenceCorrection` is on). A model mishearing is
+	 *  otherwise invisible, since its transcript and its answer agree.
+	 *
+	 *  Ignored (with a log line) when `sttProvider` is set, since there is no
+	 *  built-in transcription to compare against. Must be a distinct instance
+	 *  from `whisperProvider`; sharing one throws a `ValidationError` at
+	 *  construction. Receives no audio in transcription mode. */
+	shadowSttProvider?: STTProvider;
+	/** Called when the shadow transcription disagrees with the built-in one
+	 *  (normalized comparison; a much shorter fragment of the other side counts
+	 *  as streaming truncation, not a mishearing). `turnId` is the turn the
+	 *  shadow result belongs to. */
+	onTranscriptionDivergence?: (liveText: string, shadowText: string, turnId?: number) => void;
+	/** With `shadowSttProvider` set, answer a meaningful divergence with a
+	 *  spoken self-correction: the in-flight answer is interrupted and the
+	 *  model is told what the user actually said. The shadow result arrives
+	 *  after the answer has started, so the start of the wrong answer is still
+	 *  heard. Only a result for the still-current turn corrects; a stale one,
+	 *  transcription mode or the synthetic-output hold send nothing.
+	 *  Default `false` (observation only). */
+	divergenceCorrection?: boolean;
+	/** Acoustic echo suppression at the audio-ingestion chokepoint: inbound
+	 *  client audio whose energy envelope correlates with recently played
+	 *  native model audio (speakerphone loopback) is dropped before the client
+	 *  VAD, the model and STT hear it, which stops the model transcribing its
+	 *  own voice as phantom user commands. OPT-IN: pass `{ enabled: true }` to
+	 *  activate (double-talk on strong-echo paths can drop overlapped user
+	 *  speech, a deliberate per-deployment choice); the environment variable
+	 *  `BODHI_ECHO_GUARD=0` hard-disables it. The reference is the native
+	 *  model audio only: `ttsProvider` output is not fed, and combining the
+	 *  two logs a warning at construction. Suppressed frames are counted in
+	 *  `getDiagnostics().echoSuppressed`. */
+	echoGuard?: EchoGuardConfig;
 	/** Sample rate of inbound client PCM (what `handleAudioFromClient` receives).
 	 *  When omitted, defaults to `transport.audioFormat.inputSampleRate` — which
 	 *  matches what the framework instructs clients to send (browser RTC, voice
@@ -395,10 +617,36 @@ export interface VoiceSessionConfig {
 	 *  the Agent Composer CLI). When `ttsProvider` is set, text mode is implied regardless of
 	 *  this field. Requires a transport advertising `textResponseModality`. */
 	responseModality?: 'audio' | 'text';
-	/** Pre-constructed LLM transport. If provided, apiKey/geminiModel/speechConfig/compressionConfig are ignored. */
+	/** Pre-constructed LLM transport. If provided, apiKey/geminiModel/speechConfig/compressionConfig/
+	 *  mediaResolution/realtimeInputConfig/vadConfig are ignored. */
 	transport?: LLMTransport;
 	/** Orchestration engine for tool routing/subagent lifecycle (default: legacy). */
 	orchestrationMode?: 'legacy' | 'actor';
+	/**
+	 * What happens when the provider connection is lost for good.
+	 *
+	 * - `'close'` (default): today's behavior. Once automatic reconnection is
+	 *   exhausted (attempt budget spent, no resumption handle, or a failed or
+	 *   timed-out attempt) the session closes with `reconnect_failed`, and a
+	 *   failed first dial in `start()` closes it with `connect_failed`.
+	 * - `'hold'`: the session parks in `UPSTREAM_LOST` instead. Nothing is
+	 *   finalized (no `session.close`, no `onSessionEnd`, no post-session run),
+	 *   the client listener stays up, and `session.upstreamLost` is published.
+	 *   An external STT provider is stopped while parked, as during a
+	 *   reconnect, and started again when a redial activates the session.
+	 *   A failed first dial still rejects `start()` but leaves the session
+	 *   parked; `close()` finalizes a parked session as usual. Only
+	 *   `recoverUpstream()` redials a parked session, which a client attach
+	 *   also calls unless `suppressClientAutoActions` returns `true`;
+	 *   `parkUpstream()` parks it on purpose.
+	 *
+	 * `'hold'` also enables host recovery (`recoverUpstream()`,
+	 * `parkUpstream()`, see `getRecoveryCapabilities()`), which `'close'`
+	 * rejects with a `SessionError`. `'hold'` requires legacy orchestration:
+	 * combining it with `orchestrationMode: 'actor'` throws a
+	 * `ValidationError` at construction.
+	 */
+	upstreamLossPolicy?: 'close' | 'hold';
 	/** Optional per-session artifact registry for cross-tool binary sharing (images, documents). */
 	artifactRegistry?: {
 		store(
@@ -467,6 +715,12 @@ export interface VoiceSessionConfig {
  * ```
  */
 export class VoiceSession {
+	/** Max wait for one reconnect attempt before giving up and closing the
+	 *  session with `reconnect_failed`. Without this deadline, a reconnect whose
+	 *  dial or setup never settles (an ECONNRESET on the in-flight WebSocket dial)
+	 *  leaves the session in RECONNECTING forever. */
+	static readonly RECONNECT_DEADLINE_MS = DEFAULT_RECONNECT_DEADLINE_MS;
+
 	readonly eventBus: EventBus;
 	readonly sessionManager: SessionManager;
 	readonly conversationContext: ConversationContext;
@@ -488,7 +742,19 @@ export class VoiceSession {
 	private runtimeToolRegistry?: Map<string, ToolRoutingInfo>;
 	private subagentConfigs: Record<string, SubagentConfig>;
 	private persistentSubagents = new PersistentSubagentManager();
-	/** Resolved Gemini VAD config for the built-in transport path. Undefined when `config.transport` is injected. */
+	/** The declared tool list: the active agent's tools plus the behavior
+	 *  tools, as changed by `registerTools()` and `replaceTools()`. An agent
+	 *  transfer resets it from the new agent. */
+	private currentTools: ToolDefinition[] = [];
+	/** Instructions set by the active agent definition or the last
+	 *  `updateInstructions()`. An agent transfer resets it from the new agent. */
+	private currentInstructions = '';
+	/** Native assistant audio observers (`observeAudioOutput`). */
+	private readonly audioOutputObservers = new Set<AudioOutputObserver>();
+	/** Inbound client audio observers (`observeAudioInput`). */
+	private readonly audioInputObservers = new Set<AudioInputObserver>();
+	/** Resolved Gemini VAD config for the built-in transport path. Undefined when `config.transport` is
+	 *  injected, with `realtimeInputConfig: false`, and with `vadConfig` (the transport sends that verbatim). */
 	private resolvedRealtimeInputConfig?: GeminiRealtimeInputConfig;
 	private behaviorManager?: BehaviorManager;
 	private memoryDistiller?: MemoryDistiller;
@@ -503,6 +769,12 @@ export class VoiceSession {
 		getActiveServerTurnId: () => this.transport.getActiveServerTurnId?.(),
 	});
 	private sttProvider?: STTProvider;
+	/** Observation-only second transcription (`config.shadowSttProvider`).
+	 *  Absent when unset or when `sttProvider` replaces built-in transcription. */
+	private shadowStt?: ShadowSttController;
+	/** Acoustic echo suppressor (`config.echoGuard`), fed the decoded native
+	 *  model audio and consulted by the audio router. Absent when unset. */
+	private echoGuard?: EchoGuard;
 	/** Last routed user utterance for watchdog-stall recovery replay. Only
 	 *  constructed when `config.watchdogReplayRecovery` is true (dark rollout). */
 	private utteranceRetainer?: LastUtteranceRetainer;
@@ -534,6 +806,18 @@ export class VoiceSession {
 	 *  `maybeArmGraceOnFirstAudio`, `requestInterrupt`, `shouldDropOutbound`,
 	 *  and `resetForClientConnected` to it. See `greeting-controller.ts`. */
 	private greeting!: GreetingController;
+	/** Synthetic-output hold: the gate every framework-generated send (greeting,
+	 *  directive reinforcement, guarded generation triggers, hold-respecting
+	 *  injections, watchdog recovery) passes, released by fresh user evidence.
+	 *  Nothing engages it outside a host recovery. See `host-recovery.ts`. */
+	private hold!: SyntheticOutputHold;
+	/** Drops tool results and external-STT captures that belong to a provider
+	 *  connection a host recovery abandoned; inert until a recovery marks a
+	 *  boundary. Wraps `transport.sendToolResult`. See `host-recovery.ts`. */
+	private fence!: DialGenerationFence;
+	/** Host-driven upstream recovery: `recoverUpstream`, `parkUpstream` and
+	 *  the recovery boundary. See `host-recovery.ts`. */
+	private hostRecovery!: HostRecoveryController;
 	/** Per-session single-flight FIFO chaining direct-user-input bodies
 	 *  (`handleTextInput`, `injectTranscript`, `injectDictationBuffer`). Each
 	 *  body awaits `cancelResponse({ waitForDone: true })` then finalizes any
@@ -635,8 +919,8 @@ export class VoiceSession {
 	 *  reserved user message with the transport's fallback text. Generous by
 	 *  design: a batch STT round-trip is a whole-utterance model call. */
 	private readonly reservationTimeoutMs = 20_000;
-	/** Whether a client WebSocket connection is currently active. */
-	private clientConnected = false;
+	/** Whether a real client is attached; read through the `clientConnected` getter. */
+	private _clientConnected = false;
 	/**
 	 * Input admission follows the server bootstrap, not merely socket acceptance.
 	 * A restored pacing preset must be sent before `session.config` opens the
@@ -714,6 +998,23 @@ export class VoiceSession {
 	private static readonly MIN_PLAYBACK_RATE = MIN_PLAYBACK_RATE;
 
 	constructor(config: VoiceSessionConfig) {
+		// Parking a lost upstream is legacy-orchestration only: the actor runtime
+		// runs its own retry loop, which must never contend with a held session.
+		if (config.orchestrationMode === 'actor' && config.upstreamLossPolicy === 'hold') {
+			throw new ValidationError(
+				"VoiceSession: upstreamLossPolicy 'hold' requires legacy orchestration; " +
+					"orchestrationMode 'actor' supports only 'close'.",
+			);
+		}
+		// Checked before the dictation controller configures the whisper provider:
+		// a shared instance would have its format and transcript callback taken
+		// over by the shadow, and dictation would silently stop filling its buffer.
+		if (config.shadowSttProvider && config.shadowSttProvider === config.whisperProvider) {
+			throw new ValidationError(
+				'VoiceSession: shadowSttProvider must be a distinct instance from whisperProvider. ' +
+					'Sharing one instance lets the shadow take over the dictation transcript callback.',
+			);
+		}
 		this.config = config;
 		this.nowMs = config.nowMs ?? Date.now;
 		this.ownsClientTransport = !config.clientSender;
@@ -772,6 +1073,20 @@ export class VoiceSession {
 			}
 		};
 
+		// The host's output interceptor releases held assistant text before each
+		// flush commits the buffers. A throwing hook is reported and the flush
+		// continues, so turn finalization and close still commit the buffers.
+		const outputInterceptor = config.outputInterceptor;
+		if (outputInterceptor?.beforeTranscriptFlush) {
+			this.transcriptManager.onBeforeFlush = () => {
+				try {
+					outputInterceptor.beforeTranscriptFlush?.();
+				} catch (e) {
+					this.reportError('output-interceptor.beforeTranscriptFlush', e);
+				}
+			};
+		}
+
 		this._isActorMode = config.orchestrationMode === 'actor';
 
 		// Legacy mode: in-process BackgroundNotificationQueue. Actor mode skips
@@ -801,6 +1116,13 @@ export class VoiceSession {
 				this.runtimeOrchestrator?.runtime.tell(type, payload, to),
 			);
 		}
+		// The hold drives notification delivery through the sink: legacy only,
+		// since the actor sink refuses to hold.
+		this.hold = new SyntheticOutputHold({
+			setNotificationsHeld: (held) => this.notificationSink.setHeld(held),
+			drainNotifications: () => this.drainNotificationsWhenIdle(),
+			log: (msg) => this.log(msg),
+		});
 
 		if (config.hooks) {
 			this.hooks.register(config.hooks);
@@ -842,6 +1164,8 @@ export class VoiceSession {
 			this.eventBus,
 			this.hooks,
 			postSessionPipeline ? { pipeline: postSessionPipeline, drain: drainPostSession } : undefined,
+			// Owned by this session: its reset() refuses once the session is finalized.
+			true,
 		);
 		// Shared close-time finalization for EVERY path to CLOSED (graceful close,
 		// reconnect-fail, transfer-fail). Runs inside closeWithReason before
@@ -860,6 +1184,15 @@ export class VoiceSession {
 		}
 
 		this.subagentConfigs = config.subagentConfigs ?? {};
+		// The deprecated model name is accepted but never selects a model:
+		// reasoningModel wins, otherwise the session default runs.
+		for (const [toolName, subagent] of Object.entries(this.subagentConfigs)) {
+			if (subagent.model !== undefined && subagent.reasoningModel === undefined) {
+				this.log(
+					`[WARN] subagent "${subagent.name}" (tool "${toolName}") sets the deprecated SubagentConfig.model ("${subagent.model}"), which is ignored: it runs on the session model. Set reasoningModel to choose its model.`,
+				);
+			}
+		}
 
 		this.responseWatchdogMs = config.responseWatchdogMs ?? DEFAULT_RESPONSE_WATCHDOG_MS;
 		this.normalizeDrainedInbound = config.normalizeDrainedInboundAudio !== false;
@@ -946,6 +1279,8 @@ export class VoiceSession {
 		const { instructions, tools: agentTools } = liveResolved;
 		const behaviorTools = this.behaviorManager?.tools ?? [];
 		const allInitialTools = [...agentTools, ...behaviorTools];
+		this.currentTools = allInitialTools;
+		this.currentInstructions = instructions;
 
 		// Determine inputAudioTranscription setting:
 		// Keep Gemini's built-in transcription enabled even when an external STT
@@ -968,9 +1303,18 @@ export class VoiceSession {
 			});
 		} else {
 			// Construct GeminiLiveTransport from config (backward compatibility)
-			this.resolvedRealtimeInputConfig = resolveGeminiRealtimeInputConfig(
-				config.realtimeInputConfig,
-			);
+			if (config.realtimeInputConfig !== undefined && config.vadConfig !== undefined) {
+				throw new ValidationError(
+					'VoiceSession: realtimeInputConfig and vadConfig are mutually exclusive. ' +
+						'vadConfig is shorthand for realtimeInputConfig: { automaticActivityDetection: vadConfig }; set only one.',
+				);
+			}
+			// vadConfig goes to the transport as given; only without it does the
+			// realtimeInputConfig resolution (default, deep-merge or opt-out) apply.
+			this.resolvedRealtimeInputConfig =
+				config.vadConfig === undefined
+					? resolveGeminiRealtimeInputConfig(config.realtimeInputConfig)
+					: undefined;
 			this.transport = new GeminiLiveTransport(
 				{
 					apiKey: config.apiKey,
@@ -981,8 +1325,10 @@ export class VoiceSession {
 					speechConfig: config.speechConfig,
 					compressionConfig: config.compressionConfig,
 					functionBehavior: config.functionBehavior,
+					mediaResolution: config.mediaResolution,
 					inputAudioTranscription: inputTranscription,
 					realtimeInputConfig: this.resolvedRealtimeInputConfig,
+					vadConfig: config.vadConfig,
 				},
 				{},
 			);
@@ -1064,6 +1410,18 @@ export class VoiceSession {
 			this.nowMs,
 		);
 
+		// Echo suppression: the router checks inbound audio against the native
+		// model audio fed in `handleAudioOutput`. Opt-in inside the guard.
+		if (config.echoGuard) {
+			this.echoGuard = new EchoGuard({
+				...config.echoGuard,
+				log: config.echoGuard.log ?? ((msg) => this.log(msg)),
+			});
+			if (this.echoGuard.enabled) {
+				this.log('EchoGuard enabled (envelope-correlation echo suppression)');
+			}
+		}
+
 		// Inbound client-audio fast path. Dependencies are read through
 		// getters/predicates so the router observes the same call-time values the
 		// former inline `handleAudioFromClient` did (providers, mode, gate, and
@@ -1076,9 +1434,11 @@ export class VoiceSession {
 			nowMs: () => this.nowMs(),
 			clientAudioInputRate: this.clientAudioInputRate,
 			getSttProvider: () => this.sttProvider,
+			getShadowSttProvider: () => this.shadowStt,
 			getWhisperProvider: () => this.dictation.whisper,
 			isSessionActive: () => this.sessionManager.isActive && this.clientInputReady,
 			isRtcAudioReady: () => this.directRtcChannel?.isRtcAudioReady ?? false,
+			echoGuard: this.echoGuard,
 			getMode: () => this.dictation.mode,
 			shouldDropOutbound: () => this.greeting.shouldDropOutbound(),
 			retainer: this.utteranceRetainer,
@@ -1099,6 +1459,12 @@ export class VoiceSession {
 		this.ttsPlaybackFallbackMarginMs = this.resolveTtsPlaybackFallbackMarginMs(
 			config.ttsPlaybackFallbackMarginMs,
 		);
+
+		// Dial-generation fence: it wraps `transport.sendToolResult` here, BEFORE
+		// the dictation controller below captures that sender, so tool results
+		// the controller queues in transcription mode and drains later still
+		// pass through the fence.
+		this.fence = new DialGenerationFence(this.transport, (msg) => this.log(msg));
 
 		// Transcription/dictation subsystem. Owns `internalMode`, the dictation
 		// buffer, the Whisper provider, and the §3.5 send-guard wrappers — its
@@ -1163,6 +1529,9 @@ export class VoiceSession {
 			// `turnId < turns.staleInputCutoff` prevents dropping valid late results while
 			// still rejecting truly stale transcripts from 2+ turns ago.
 			this.sttProvider.onTranscript = (text, turnId) => {
+				// Placed by its capture, not its arrival: a capture committed on a
+				// connection a host recovery abandoned is not fresh user evidence.
+				const captureStale = this.fence.isSttCaptureStale(turnId);
 				// A reserved user message for this turn is waiting on exactly this
 				// transcript — resolve it even though the turn has already finalized
 				// (and regardless of the stale cutoff, since the reservation, not the
@@ -1170,9 +1539,21 @@ export class VoiceSession {
 				// whenever the batch call outlives its turn.
 				if (turnId !== undefined && this.transcriptManager.sealReservedInput(turnId, text)) {
 					this.clearReservationTimer(turnId);
+					if (!captureStale) this.hold.release('external-stt-final');
 					return;
 				}
 				if (turnId !== undefined && turnId < this.turns.staleInputCutoff) return; // Drop stale results (2+ turns old)
+				// The turn window above admits the preceding turn, which is exactly
+				// where a capture from before a host recovery lands: drop it.
+				if (captureStale) {
+					this.log(
+						`[Transcript] Dropped transcript for turn ${turnId}: captured before a host recovery`,
+					);
+					return;
+				}
+				// Any capture in the window from the current connection is fresh
+				// evidence, even one for a turn whose input has already finalized.
+				this.hold.release('external-stt-final');
 				if (turnId !== undefined && this.turns.isInputFinalized(turnId)) return;
 				// New user input ends the post-interrupt correction-skip window, but
 				// only for a genuinely *new* turn. The interrupted turn's own barge-in
@@ -1201,6 +1582,8 @@ export class VoiceSession {
 			// immediately as a display-only partial; the batch STT then corrects
 			// and finalizes it via handleInput/flush.
 			this.transport.onInputTranscription = (text) => {
+				// The provider heard the user: fresh evidence.
+				this.hold.release('input-transcription');
 				// Liveness: the provider is transcribing the committed turn, so a
 				// response is in the pipeline — extend the response watchdog (capped)
 				// instead of letting it force a reconnect under an active turn.
@@ -1215,10 +1598,38 @@ export class VoiceSession {
 		} else {
 			// No external STT — use transport built-in transcription
 			this.transport.onInputTranscription = (text) => {
+				this.hold.release('input-transcription'); // fresh evidence (see above)
 				this.reconnector.notifyProviderActivity(); // liveness (see above)
 				this.logInputTranscriptionLatency(text, 'provider');
+				this.shadowStt?.noteLiveTranscript(text);
 				this.transcriptManager.handleInput(text);
 			};
+		}
+
+		// Shadow STT: a second transcriber over the same client audio, compared
+		// per turn with the built-in transcription above. Built-in transcription
+		// stays the only transcript source; the shadow never reaches
+		// transcriptManager (that would duplicate every user turn). With an
+		// sttProvider there is no built-in transcription left to compare against.
+		if (config.shadowSttProvider && !config.sttProvider) {
+			this.shadowStt = new ShadowSttController({
+				provider: config.shadowSttProvider,
+				// The format the audio router feeds: raw client PCM.
+				audio: {
+					sampleRate: this.clientAudioInputRate,
+					bitDepth: 16,
+					channels: 1,
+					encoding: 'pcm',
+				},
+				getCurrentTurnId: () => this.turns.numericId,
+				onDivergence: config.onTranscriptionDivergence,
+				correctionEnabled: config.divergenceCorrection === true,
+				sendCorrection: (text, turnId) =>
+					this.sendSyntheticLiveText([{ role: 'user', text }], 'shadow-stt-correction', turnId),
+				log: (msg) => this.log(msg),
+			});
+		} else if (config.shadowSttProvider) {
+			this.log('[ShadowSTT] ignored — sttProvider already replaces built-in transcription');
 		}
 
 		// (Transcription-mode Whisper wiring + initial-mode seed live in the
@@ -1228,10 +1639,10 @@ export class VoiceSession {
 		// P4: also allocate the eager turn id here. Chain pattern preserves
 		// any pre-attached handler on injected transports.
 		const prevModelTurnStart = this.transport.onModelTurnStart;
-		this.transport.onModelTurnStart = () => {
+		this.transport.onModelTurnStart = (generationId?: string) => {
 			this._responseEpoch++;
 			try {
-				prevModelTurnStart?.();
+				prevModelTurnStart?.(generationId);
 			} catch (e) {
 				this.log(`pre-attached onModelTurnStart threw: ${(e as Error).message}`);
 			}
@@ -1246,6 +1657,18 @@ export class VoiceSession {
 			this._turnTiming.modelStartMs = this.nowMs();
 			this._turnTiming.firstAudioMs = null;
 			const modelTurn = this.turns.ensureCurrent();
+			// A recovery the synthetic-output hold holds (rather than the greeting
+			// gate, whose own model start is ambiguous) is answered by this start:
+			// nothing synthetic can open a model turn while the hold is engaged,
+			// so the model is responding. Idle it, or the first fresh evidence
+			// would re-fire it mid-answer; the clears below then run as usual.
+			if (
+				modelTurn &&
+				this.reconnector.isRecoveryHeld() &&
+				!this.greeting.isUninterruptibleGreetingActive()
+			) {
+				this.reconnector.cancelHeldRecovery();
+			}
 			// Correlated model activity consumed the pending utterance — clear the
 			// recovery-replay candidate, the replay stage, and the response
 			// watchdog. Trailing model-start for a just-finalized turn
@@ -1272,6 +1695,18 @@ export class VoiceSession {
 			const origin =
 				this._pendingResponseOrigin ?? (wasToolContinuation ? 'tool_continuation' : 'user_audio');
 			this._pendingResponseOrigin = null;
+			// Once per framework Turn, on its first model start. Both counters,
+			// because they are different domains: the post-setup generation
+			// (correlates with lifecycle setup-ok) and the dial epoch. Undefined on
+			// transports without the getters.
+			if (modelTurn?.markStartPublished()) {
+				this.eventBus.publish('turn.start', {
+					sessionId: this.config.sessionId,
+					turnId: modelTurn.id,
+					transportGeneration: this.transport.currentTransportGeneration,
+					attemptEpoch: this.transport.currentDialGen,
+				});
+			}
 			this.eventBus.publish('response.started', {
 				sessionId: this.config.sessionId,
 				turnId: this.turns.current?.id ?? 'unknown',
@@ -1281,12 +1716,26 @@ export class VoiceSession {
 			this.logProviderUserTurnRecognition('model/tool processing started');
 			if (this.sttProvider && !this._commitFiredForTurn) {
 				this._commitFiredForTurn = true;
+				this.fence.stampSttCommit(this.turns.numericId);
 				this.sttProvider.commit(this.turns.numericId);
 			}
+			// Once per turn id (the controller ignores repeats): snapshot the
+			// turn's built-in transcript and have the shadow transcribe the turn.
+			// Not for a trailing start of an already-finalized turn: the counter
+			// has already moved on, and committing now would spend the next
+			// turn's single commit before that turn's speech is heard.
+			if (modelTurn) this.shadowStt?.commit(this.turns.numericId);
 		};
 
 		// Wire TTS provider (actor-mode only)
 		if (config.ttsProvider && config.orchestrationMode === 'actor') {
+			// The echo guard's reference is the native model audio only; external
+			// TTS output never reaches it, so it cannot recognize echo of that speech.
+			if (this.echoGuard) {
+				this.log(
+					'[WARN] echoGuard is configured with ttsProvider: external TTS output is not fed to the echo guard, so its echo is not suppressed',
+				);
+			}
 			this.ttsPipeline = new TtsPipeline(config.ttsProvider, {
 				transport: this.transport,
 				getClientTransport: () => this.clientTransport,
@@ -1345,6 +1794,42 @@ export class VoiceSession {
 		this.wireUsageCallbacks();
 
 		this.buildOrchestration(config, agentTools, behaviorTools);
+
+		this.hostRecovery = new HostRecoveryController({
+			transport: this.transport,
+			sessionManager: this.sessionManager,
+			reconnector: this.reconnector,
+			clientTransport: this.clientTransport,
+			eventBus: this.eventBus,
+			hold: this.hold,
+			fence: this.fence,
+			getSessionId: () => this.config.sessionId,
+			upstreamLossPolicy: config.upstreamLossPolicy ?? 'close',
+			actorMode: this._isActorMode,
+			dialTransport: async () => {
+				await this.dialTransport();
+			},
+			flushTranscript: () => this.transcriptManager.flush(),
+			abandonActiveTurn: () => this.abandonActiveTurn(),
+			// Interrupted finalization keeps the provider's buffered audio (the
+			// STT contract), and audio fed after a commit already fired would
+			// otherwise ride into the replacement turn's first commit as fresh
+			// input; a turn completion now, with the interruption consumed,
+			// discards it.
+			discardSttUtterance: () => this.sttProvider?.handleTurnComplete(),
+			clearGreetingState: () => {
+				// A greeting sent on the abandoned connection is over whether or
+				// not its turn started: drop its suppression, grace and pending
+				// response origin, sending nothing, or an uninterruptible greeting
+				// would keep dropping microphone input to the replacement.
+				this.greeting.resetForClientConnected();
+				this._pendingResponseOrigin = null;
+			},
+			clearRetainedUtterances: () => this.utteranceRetainer?.clearAll(),
+			injectRecentContext: (origin) => this.injectRecentContext(origin),
+			reportError: (component, error) => this.reportError(component, error),
+			log: (msg) => this.log(msg),
+		});
 	}
 
 	private buildClientChannelAndGating(config: VoiceSessionConfig): void {
@@ -1354,7 +1839,7 @@ export class VoiceSession {
 				? {
 						inputPcmSampleRate: this.transport.audioFormat.inputSampleRate,
 						outputPcmSampleRate: this.transport.audioFormat.outputSampleRate,
-						onInboundPcm: (pcm: Buffer) => this.audioRouter.handleFromClient(pcm, 'rtc'),
+						onInboundPcm: (pcm: Buffer) => this.ingestClientAudio(pcm, 'rtc'),
 					}
 				: undefined;
 		this.clientTransport = createClientChannel({
@@ -1365,14 +1850,35 @@ export class VoiceSession {
 			host: config.host,
 			listenTimeoutMs: config.listenTimeoutMs,
 			callbacks: {
-				onAudioFromClient: (data) => this.audioRouter.handleFromClient(data, 'websocket'),
+				onAudioFromClient: (data) => this.ingestClientAudio(data, 'websocket'),
 				onJsonFromClient: (message) => this.handleJsonFromClient(message),
 				onClientConnected: () => this.handleClientConnected(),
 				onClientDisconnected: () => this.handleClientDisconnected(),
+				// Verifier hooks go straight to the host: a verification-role
+				// connection never runs handleClientConnected, so it never greets,
+				// bootstraps or counts as the attached client.
+				onVerifierConnected: config.onVerifierConnected,
+				onVerifierDisconnected: config.onVerifierDisconnected,
 			},
+			// Spelled out on purpose: hosts detect probe support with
+			// String(VoiceSession).includes('probeState'), so this property access
+			// must stay in the class body.
+			options: { probeState: config.probeState },
 		});
 		this.directRtcChannel =
 			this.clientTransport instanceof DirectRtcClientChannel ? this.clientTransport : null;
+		if (!(this.clientTransport instanceof ClientTransport)) {
+			const roleOptions = [
+				...(config.probeState ? ['probeState'] : []),
+				...(config.onVerifierConnected ? ['onVerifierConnected'] : []),
+				...(config.onVerifierDisconnected ? ['onVerifierDisconnected'] : []),
+			];
+			if (roleOptions.length > 0) {
+				this.log(
+					`[WARN] ${roleOptions.join(', ')} configured, but the client channel is host-owned (clientSender): the framework never sees the socket upgrade, so ?probe=1 and ?verify=1 connections are not recognized; probe isolation must be implemented by the host.`,
+				);
+			}
+		}
 
 		// Resolve effective playback-state protocol participation: the surface
 		// must intend it AND the client channel must support ordered delivery.
@@ -1403,6 +1909,7 @@ export class VoiceSession {
 				resetNotificationAudio: () => this.notificationSink.resetAudio(),
 				// H4: a held recovery re-evaluates when the gate releases.
 				onGateReleased: () => this.reconnector.onGreetingGateReleased(),
+				isSyntheticHeld: () => !this.hold.gate('greeting'),
 				log: (msg) => this.log(msg),
 			},
 			{
@@ -1462,6 +1969,9 @@ export class VoiceSession {
 			getSessionActive: () => this.sessionManager.isActive,
 			conversationContext: this.conversationContext,
 			sendFile: (base64, mimeType) => this.transport.sendFile(base64, mimeType),
+			sendInlineFile: this.transport.sendInlineFile
+				? (base64, mimeType) => this.transport.sendInlineFile?.(base64, mimeType)
+				: undefined,
 			getArbiter: () => this.completionArbiter,
 			getLiveGate: () => this.liveGate(),
 			getPlaybackStateProtocolActive: () => this.playbackStateProtocolActive,
@@ -1469,6 +1979,7 @@ export class VoiceSession {
 			getArtifactRegistry: () => this.config.artifactRegistry,
 			handleTextInput: (text) => this.handleTextInput(text),
 			onClientJson: config.onClientJson,
+			onClientCommand: config.onClientCommand,
 			reportError: (context, error) => this.reportError(context, error),
 			log: (msg) => this.log(msg),
 		});
@@ -1505,6 +2016,13 @@ export class VoiceSession {
 				// H4 hold predicate: FULL-greeting suppression only (the greeting
 				// controller's uninterruptible state — never grace windows).
 				isGreetingSuppressionArmed: () => this.greeting.isUninterruptibleGreetingActive(),
+				// A watchdog fire under the synthetic-output hold is held, never
+				// replayed, nudged or reconnected; the hold's release re-evaluates it.
+				isSyntheticHeld: () => this.hold.isActive(),
+				// Exhaustion policy, and the host-owned recovery gate it enables
+				// under 'hold'.
+				upstreamLossPolicy: config.upstreamLossPolicy ?? 'close',
+				hostOwnsRecovery: () => this.config.suppressClientAutoActions?.() === true,
 				// H2: gate-aware drain + candidate-wide replay freshness.
 				drainBufferedInbound: (reason) => this.drainCapturedInboundFrames(reason),
 				isCandidateReplayEligible: (retained) => {
@@ -1532,6 +2050,7 @@ export class VoiceSession {
 			},
 			this.responseWatchdogMs,
 		);
+		this.hold.onRelease(() => this.reconnector.onSyntheticHoldReleased());
 	}
 
 	private buildAgentRouter(
@@ -1772,7 +2291,21 @@ export class VoiceSession {
 	 *  TTS and native text/speech-started callbacks are wired separately
 	 *  (`wireTtsProvider` / the native gate's `installBargeIn`). */
 	private wireTransportCallbacks(): void {
-		this.transport.onAudioOutput = (data) => this.handleAudioOutput(data);
+		const interceptor = this.config.outputInterceptor;
+		this.transport.onAudioOutput = (data) => {
+			// The host interceptor can drop a native audio chunk before the session
+			// sees it. A throwing hook is reported and the chunk is delivered.
+			if (interceptor?.audio) {
+				let drop = false;
+				try {
+					drop = interceptor.audio(data) === false;
+				} catch (e) {
+					this.reportError('output-interceptor.audio', e);
+				}
+				if (drop) return;
+			}
+			this.handleAudioOutput(data);
+		};
 		// No-TTS text mode: the model emits text (not audio). Surface each chunk via the
 		// normal transcript path (which the client-sender already emits as
 		// `{ type:'transcript', role:'assistant', partial }`); turn finalization still flows
@@ -1849,6 +2382,8 @@ export class VoiceSession {
 			}
 		};
 		this.transport.onToolCall = (calls) => {
+			// Stamp each call with the dial it was issued on, for the tool-result fence.
+			this.fence.stampToolCalls(calls.map((c) => c.id));
 			this.reconnector.disarmResponseWatchdog();
 			// Native playback-end gate: this response dispatched a tool call, so
 			// it is not the turn's terminal spoken response.
@@ -1873,6 +2408,34 @@ export class VoiceSession {
 		};
 		this.transport.onTurnComplete = (serverTurnId) => this.handleTurnComplete(serverTurnId);
 		this.transport.onInterrupted = (serverTurnId) => this.handleInterrupted(serverTurnId);
+		// The generation pair, chained over handlers a pre-configured injected
+		// transport already attached. Not turn.*: a generation outlives the
+		// provider's turn boundary (see events.ts).
+		const prevGenerationStart = this.transport.onGenerationStart;
+		this.transport.onGenerationStart = (generationId) => {
+			try {
+				prevGenerationStart?.(generationId);
+			} catch (e) {
+				this.log(`pre-attached onGenerationStart threw: ${(e as Error).message}`);
+			}
+			this.eventBus.publish('generation.start', {
+				sessionId: this.config.sessionId,
+				generationId,
+			});
+		};
+		const prevGenerationEnd = this.transport.onGenerationEnd;
+		this.transport.onGenerationEnd = (generationId, reason) => {
+			try {
+				prevGenerationEnd?.(generationId, reason);
+			} catch (e) {
+				this.log(`pre-attached onGenerationEnd threw: ${(e as Error).message}`);
+			}
+			this.eventBus.publish('generation.end', {
+				sessionId: this.config.sessionId,
+				generationId,
+				reason,
+			});
+		};
 		this.transport.onOutputTranscription = (text) => {
 			const turn = this.turns.ensureCurrent();
 			if (!turn) {
@@ -1886,6 +2449,20 @@ export class VoiceSession {
 			// (`part.text`). Gemini also echoes it as `outputTranscription`, so feeding it
 			// here too would double every chunk. Skip it (onTextOutput is the source).
 			if (this.isNoTtsTextMode) return;
+			// The host interceptor may hold a chunk and forward it later, for
+			// example from its beforeTranscriptFlush hook. A throwing hook is
+			// reported and the original chunk is forwarded unchanged.
+			if (interceptor?.transcript) {
+				try {
+					interceptor.transcript(text, (forwarded) =>
+						this.transcriptManager.handleOutput(forwarded),
+					);
+				} catch (e) {
+					this.reportError('output-interceptor.transcript', e);
+					this.transcriptManager.handleOutput(text);
+				}
+				return;
+			}
 			this.transcriptManager.handleOutput(text);
 		};
 		this.transport.onSessionReady = (sessionId) => this.handleSetupComplete(sessionId);
@@ -1895,6 +2472,49 @@ export class VoiceSession {
 		this.transport.onResumptionUpdate = (handle, resumable) =>
 			this.reconnector.handleResumptionUpdate(handle, resumable);
 		this.transport.onGroundingMetadata = (metadata) => this.handleGroundingMetadata(metadata);
+		this.wireDiagnosticsCallbacks();
+	}
+
+	/** Wire the config's raw diagnostics callbacks, only those configured (an
+	 *  unconfigured one leaves the transport's hook untouched), chained over any
+	 *  handler a pre-configured injected transport already attached. The
+	 *  transport isolates each observer from its dispatch and connection state
+	 *  machine. */
+	private wireDiagnosticsCallbacks(): void {
+		const { onConnectionLifecycle, onUsageMetadata } = this.config;
+		const configured = [
+			...(onConnectionLifecycle ? ['onConnectionLifecycle'] : []),
+			...(onUsageMetadata ? ['onUsageMetadata'] : []),
+		];
+		if (configured.length === 0) return;
+		// Read before assigning below: assignment would create the members.
+		if (!('onConnectionLifecycle' in this.transport) && !('onUsageMetadata' in this.transport)) {
+			this.log(
+				`[WARN] ${configured.join(' and ')} configured, but the transport declares neither onConnectionLifecycle nor onUsageMetadata (e.g. OpenAI, Qwen); ${configured.length > 1 ? 'they are' : 'it is'} not expected to fire.`,
+			);
+		}
+		if (onConnectionLifecycle) {
+			const prevLifecycle = this.transport.onConnectionLifecycle;
+			this.transport.onConnectionLifecycle = (event) => {
+				try {
+					prevLifecycle?.(event);
+				} catch (e) {
+					this.log(`pre-attached onConnectionLifecycle threw: ${(e as Error).message}`);
+				}
+				onConnectionLifecycle(event);
+			};
+		}
+		if (onUsageMetadata) {
+			const prevUsage = this.transport.onUsageMetadata;
+			this.transport.onUsageMetadata = (usage) => {
+				try {
+					prevUsage?.(usage);
+				} catch (e) {
+					this.log(`pre-attached onUsageMetadata threw: ${(e as Error).message}`);
+				}
+				onUsageMetadata(usage);
+			};
+		}
 	}
 
 	/** Wire EventBus subscriptions: GUI event → client forwarding, STT lifecycle
@@ -1913,13 +2533,33 @@ export class VoiceSession {
 			this.clientTransport.sendJsonToClient({ type: 'ui.payload', payload: payload.payload });
 		});
 
-		// Bind STT lifecycle to session state: start when ACTIVE (agent ready), stop when disconnecting
+		// Bind STT lifecycle to session state: start when ACTIVE (agent ready), stop when disconnecting.
+		// A session parked in UPSTREAM_LOST is disconnected too (and routes no
+		// microphone audio), so STT stops there as well; a redial's activation
+		// starts it again.
 		this.eventBus.subscribe('session.stateChange', (payload: { toState: string }) => {
 			if (payload.toState === 'ACTIVE') {
 				this.startSttProvider();
-			} else if (payload.toState === 'RECONNECTING' || payload.toState === 'TRANSFERRING') {
+				this.startShadowStt();
+			} else if (
+				payload.toState === 'RECONNECTING' ||
+				payload.toState === 'TRANSFERRING' ||
+				payload.toState === 'UPSTREAM_LOST'
+			) {
 				void this.sttProvider?.stop();
+				this.shadowStt
+					?.stop()
+					.catch((err) =>
+						this.log(
+							`[ShadowSTT] stop failed: ${err instanceof Error ? err.message : String(err)}`,
+						),
+					);
 			}
+			// Parked, nothing can reach the model: a notification sent now would
+			// be dropped by the disconnected transport, and synthetic output has
+			// nowhere to go. The dial window holds both until a recovery's
+			// replacement connection activates. Only legacy sessions park.
+			if (payload.toState === 'UPSTREAM_LOST') this.hold.engageDialWindow();
 		});
 
 		// Route UI button responses back to the waiting SubagentSession
@@ -1986,13 +2626,14 @@ export class VoiceSession {
 					agentName = this.agentRouter.activeAgent.name;
 				}
 			}
-			if (this.hooks.onRealtimeLLMUsage) {
-				this.hooks.onRealtimeLLMUsage({
+			// Isolated: a throwing hook must not stop the `realtime.usage` publish below.
+			this.safeEmitHook('onRealtimeLLMUsage', () =>
+				this.hooks.onRealtimeLLMUsage?.({
 					sessionId: this.config.sessionId,
 					agentName,
 					usage,
-				});
-			}
+				}),
+			);
 			const seqKey = `${turnId ?? 'no_turn'}:${source}`;
 			const sequence = this.turns.nextUsageSequence(seqKey);
 			const ratio = computeCacheHitRatio(usage, source);
@@ -2098,7 +2739,22 @@ export class VoiceSession {
 		return true;
 	}
 
-	/** Start the client WebSocket server and connect to the LLM transport. */
+	/**
+	 * Start the client WebSocket server and connect to the LLM transport.
+	 *
+	 * When `recoverUpstream()` runs while the session is CONNECTING, it
+	 * replaces the first dial and owns the session from then on: `start()`
+	 * neither closes, parks nor transitions the session, and runs no
+	 * post-connect step. If the recovery came before `start()` began its dial
+	 * (called the transport's `connect()`), from a `session.stateChange`
+	 * subscriber of the CONNECTING transition or during the text-mode session
+	 * update a pre-constructed transport gets before it connects, nothing is
+	 * dialed and the returned promise resolves. Otherwise it settles with the
+	 * stranded dial's own settlement: it rejects with that dial's error, or
+	 * resolves if the dial completes late. For a dial stranded before setup
+	 * completed that can take up to the transport's connect deadline. Await
+	 * the recovery's `activated` to learn when the session is ready.
+	 */
 	async start(): Promise<void> {
 		// Validate TTS config
 		if (this.ttsPipeline) {
@@ -2128,6 +2784,7 @@ export class VoiceSession {
 			});
 		}
 		await this.sttProvider?.start();
+		await this.shadowStt?.start();
 		await this.ttsPipeline?.provider.start();
 		// Phase 3: when constructed with initial transcriptionMode='transcription',
 		// bring Whisper up and quiesce the agent transport before start() resolves.
@@ -2164,22 +2821,61 @@ export class VoiceSession {
 		await this.clientTransport.start();
 		this.log('Connecting to LLM transport...');
 		this.sessionManager.transitionTo('CONNECTING');
-		if (this.config.transport) {
-			if (this.isTextMode) {
-				await this.transport.updateSession({ responseModality: 'text' });
+		// recoverUpstream() during CONNECTING strands this dial and dials the
+		// replacement itself, which then owns the session. Only a recovery that
+		// starts from CONNECTING says so: one that runs after this dial set up
+		// (the session is ACTIVE) leaves the completion below to run as usual.
+		const replacedByRecovery = () => this.hostRecovery.firstDialReplaced;
+		// A recovery from a subscriber of the CONNECTING transition has already
+		// dialed: dialing here too would supersede its replacement.
+		if (replacedByRecovery()) {
+			this.log(
+				'A host recovery replaced the first dial before it began — leaving the session to the recovery',
+			);
+			return;
+		}
+		let connected: boolean;
+		try {
+			connected = await this.dialTransport(replacedByRecovery);
+		} catch (error) {
+			if (replacedByRecovery()) {
+				const message = error instanceof Error ? error.message : String(error);
+				this.log(
+					`LLM transport first dial failed after a host recovery replaced it: ${message} — leaving the session to the recovery`,
+				);
+				throw error;
 			}
-			await this.transport.connect();
-		} else {
-			await this.transport.connect({
-				auth: { type: 'api_key', apiKey: this.config.apiKey },
-				model: this.config.geminiModel ?? DEFAULT_GEMINI_LIVE_MODEL,
-				...(this.resolvedRealtimeInputConfig
-					? {
-							realtimeInputConfig: this.resolvedRealtimeInputConfig as Record<string, unknown>,
-						}
-					: {}),
-				...(this.isTextMode ? { responseModality: 'text' as const } : {}),
-			});
+			// A failed initial dial must not wedge the session in CONNECTING. The
+			// providers, runtime and client listener started above are already
+			// live, so run the full close() teardown, not a bare state change.
+			// Under upstreamLossPolicy 'hold' the session parks in UPSTREAM_LOST
+			// instead, unfinalized and with the listener still up, so a host can
+			// redial it later; start() still rejects.
+			if (this.sessionManager.state === 'CONNECTING') {
+				const message = error instanceof Error ? error.message : String(error);
+				if (this.config.upstreamLossPolicy === 'hold') {
+					this.log(`LLM transport connect failed: ${message} — session parked in UPSTREAM_LOST`);
+					this.reconnector.parkUpstreamLost('connect-failed', { reason: message });
+				} else {
+					this.log(`LLM transport connect failed: ${message} — closing session`);
+					try {
+						await this.close('connect_failed');
+					} catch (closeError) {
+						this.log(
+							`close('connect_failed') failed: ${closeError instanceof Error ? closeError.message : String(closeError)}`,
+						);
+					}
+				}
+			}
+			throw error;
+		}
+		if (replacedByRecovery()) {
+			this.log(
+				connected
+					? 'LLM transport first dial completed after a host recovery replaced it — the recovery dial stays in place'
+					: 'A host recovery replaced the first dial before it dialed — leaving the session to the recovery',
+			);
+			return;
 		}
 		// (Resume model prefill happens in handleSetupComplete, before the ACTIVE transition /
 		// greeting — see the transport.replayHistory?.() call there.)
@@ -2190,6 +2886,32 @@ export class VoiceSession {
 		// (terminal fields cleared) by the time `start()` resolves.
 		await this.historyWriter?.drain();
 		this.log('LLM transport connected and setup complete');
+	}
+
+	/** Dial the LLM transport: the initial connect in `start()` and the
+	 *  replacement dial of a host recovery. `skipConnect`, checked right before
+	 *  connecting (after any pre-connect session update), abandons the dial.
+	 *  Resolves `true` when it connected, `false` when it was abandoned. */
+	private async dialTransport(skipConnect?: () => boolean): Promise<boolean> {
+		if (this.config.transport && this.isTextMode) {
+			await this.transport.updateSession({ responseModality: 'text' });
+		}
+		if (skipConnect?.()) return false;
+		if (this.config.transport) {
+			await this.transport.connect();
+			return true;
+		}
+		await this.transport.connect({
+			auth: { type: 'api_key', apiKey: this.config.apiKey },
+			model: this.config.geminiModel ?? DEFAULT_GEMINI_LIVE_MODEL,
+			...(this.resolvedRealtimeInputConfig
+				? {
+						realtimeInputConfig: this.resolvedRealtimeInputConfig as Record<string, unknown>,
+					}
+				: {}),
+			...(this.isTextMode ? { responseModality: 'text' as const } : {}),
+		});
+		return true;
 	}
 
 	/** Load memory cache and restore behavior directives; used in parallel with connect(). */
@@ -2362,20 +3084,35 @@ export class VoiceSession {
 		//    memoized close promise, so if a failure path (reconnect/transfer) already
 		//    claimed close with a still-pending drain, we await THAT before teardown /
 		//    eventBus.clear() rather than racing it.
+		//    The reconnector and the host recovery controller are disposed
+		//    synchronously BEFORE that await: the state stays ACTIVE/RECONNECTING
+		//    while async finalizers run, so a pending backoff dial, a transport
+		//    close or a host recovery arriving mid-finalization would otherwise
+		//    dial a session that is closing.
+		try {
+			this.reconnector.dispose();
+		} catch (err) {
+			this.log(`close: reconnector.dispose threw: ${String(err)}`);
+		}
+		try {
+			this.hostRecovery.dispose();
+		} catch (err) {
+			this.log(`close: hostRecovery.dispose threw: ${String(err)}`);
+		}
 		await this.sessionManager.closeWithReason(reason);
 
 		// 2. Fallible resource teardown, each isolated so one failure doesn't abort
 		//    the rest (the session is already CLOSED and post-session work dispatched).
 		await this.safeTeardown('stt.stop', () => this.sttProvider?.stop());
+		await this.safeTeardown('shadowStt.stop', () => this.shadowStt?.stop());
 		// Stop the dictation-mode Whisper provider so prewarmed/active sockets don't
 		// survive session close. Idempotent.
 		await this.safeTeardown('dictation.stopWhisper', () => this.dictation.stopWhisper());
 		await this.safeTeardown('ttsGate.clearTimers', () => this.ttsPipeline?.gate.clearTimers());
-		await this.safeTeardown('disarmResponseWatchdog', () =>
-			this.reconnector.disarmResponseWatchdog(),
-		);
+		// Cancels a pending backoff dial and an in-flight reconnect (aborting the
+		// transport incumbent and the attempt deadline), the response watchdog and a
+		// held recovery.
 		await this.safeTeardown('greetingGate.dispose', () => this.greeting.dispose());
-		await this.safeTeardown('cancelHeldRecovery', () => this.reconnector.cancelHeldRecovery());
 		// close() bypasses finalizeTurn — tear down the native gate directly so no
 		// native playback timer outlives the session.
 		if (this.nativePlaybackGatingActive) {
@@ -2431,6 +3168,11 @@ export class VoiceSession {
 		this.toolExecutor = this.createToolExecutor(agent.name);
 		const behaviorTools = this.behaviorManager?.tools ?? [];
 		this.toolExecutor.register([...resolved.tools, ...behaviorTools]);
+		// A transfer re-resolves tools and instructions from the new agent's
+		// definition, dropping registerTools(), replaceTools() and
+		// updateInstructions() changes.
+		this.currentTools = [...resolved.tools, ...behaviorTools];
+		this.currentInstructions = resolved.instructions;
 		if (this.toolCallRouter) {
 			this.toolCallRouter.toolExecutor = this.toolExecutor;
 		}
@@ -2448,11 +3190,8 @@ export class VoiceSession {
 		this.directiveManager.clearAgent();
 
 		// Send the new agent's greeting if configured
-		if (this.clientConnected) {
-			if (this.agentRouter.activeAgent.greeting) {
-				this._pendingResponseOrigin = 'assistant_initiated';
-			}
-			this.greeting.sendGreeting();
+		if (this._clientConnected && this.greeting.sendGreeting()) {
+			this._pendingResponseOrigin = 'assistant_initiated';
 		}
 	}
 
@@ -2462,7 +3201,7 @@ export class VoiceSession {
 			this.eventBus,
 			this.config.sessionId,
 			agentName,
-			(msg) => this.clientTransport.sendJsonToClient(msg),
+			(msg) => this.sendHostFrame(msg),
 			(key, value, scope) => this.directiveManager.set(key, value, scope),
 		);
 	}
@@ -2757,7 +3496,34 @@ export class VoiceSession {
 		// it consumes the transport's audioFormat directly via its own bridge.
 		const outEnc = this.transport.audioFormat.outputEncoding ?? this.transport.audioFormat.encoding;
 		const buffer: Buffer = outEnc === 'pcmu' ? decodeMulawToPcm(raw) : raw;
+		// Echo reference: remember what is being played so the audio router can
+		// recognize (and drop) its echo coming back through the client mic.
+		this.echoGuard?.feedReference(buffer, this.transport.audioFormat.outputSampleRate);
+		if (this.audioOutputObservers.size > 0) {
+			this.notifyAudioObservers(this.audioOutputObservers, 'audio-output-observer', buffer, {
+				turnId: turn.id,
+				sampleRate: this.transport.audioFormat.outputSampleRate,
+				encoding: 'pcm',
+			});
+		}
 		this.clientTransport.sendAudioToClient(buffer);
+	}
+
+	/** Call each audio observer in turn; a throwing observer is reported through
+	 *  `hooks.onError` and never stops the others or the audio path. */
+	private notifyAudioObservers<M>(
+		observers: ReadonlySet<(pcm: Buffer, meta: M) => void>,
+		component: string,
+		pcm: Buffer,
+		meta: M,
+	): void {
+		for (const observer of observers) {
+			try {
+				observer(pcm, meta);
+			} catch (e) {
+				this.reportError(component, e);
+			}
+		}
 	}
 
 	/**
@@ -2787,7 +3553,7 @@ export class VoiceSession {
 	// --- Gemini event handlers ---
 
 	private handleSetupComplete(_sessionId: string): void {
-		this.log(`LLM transport setup complete (clientConnected=${this.clientConnected})`);
+		this.log(`LLM transport setup complete (clientConnected=${this._clientConnected})`);
 		// Greeting-grace pass 2: finalize the effective grace window against
 		// the transport's post-connect capabilities, BEFORE any sendGreeting()
 		// call below can request the first audio chunk. Idempotent — safe to
@@ -2796,12 +3562,14 @@ export class VoiceSession {
 		this.finalizeGreetingInterruptGrace();
 		// Resume (§2): prefill the model with the loaded history on the INITIAL connect, BEFORE the
 		// ACTIVE transition and any greeting/first send — so the first turn always sees the prior
-		// conversation. `state === 'CONNECTING'` scopes this to the initial connect (not
-		// transfer/reconnect, where transports self-replay from ReconnectState); the flag + the
+		// conversation. "Never been ACTIVE" scopes this to the first connection that sets up: the
+		// first dial of start(), or the replacement of a host recovery that stranded it before
+		// setup (the session is RECONNECTING then, not CONNECTING). Transfer/reconnect of a session
+		// that was ACTIVE is excluded (transports self-replay from ReconnectState); the flag + the
 		// transport's own guard keep it to exactly one seeding. `replayHistory?.` is a no-op on a
 		// transport that does not implement the optional method.
 		if (
-			this.sessionManager.state === 'CONNECTING' &&
+			this.sessionManager.startedAtMs === null &&
 			!this.initialHistoryReplayed &&
 			(this.config.initialHistory?.length ?? 0) > 0
 		) {
@@ -2822,10 +3590,14 @@ export class VoiceSession {
 		}
 		// Send the greeting only after the same post-restore bootstrap that admits
 		// client input. Both setup-complete and client-connect can reach this path;
-		// the generation guard keeps it exactly once for the live connection.
-		if (this.clientConnected) {
+		// the generation guard keeps it exactly once for the live connection. The
+		// host gate and the reattach policy apply here as on the attach path.
+		if (this._clientConnected) {
 			const generation = this.clientConnectionGeneration;
-			const greet = () => this.maybeSendGreetingForClient(generation);
+			const greet = () => {
+				if (this.clientAutoActionsSuppressed() || !this.reattachGreetingAllowed()) return;
+				this.maybeSendGreetingForClient(generation);
+			};
 			if (this.memoryAndDirectivesReady) greet();
 			else void this._memoryReadyPromise.then(greet);
 		}
@@ -2857,6 +3629,12 @@ export class VoiceSession {
 	private startSttProvider(): void {
 		if (!this.sttProvider) return;
 		this.sttProvider.start().catch((err) => this.reportError('stt', err));
+	}
+
+	/** Start the shadow STT when the session becomes ACTIVE. Fire-and-forget. */
+	private startShadowStt(): void {
+		if (!this.shadowStt) return;
+		this.shadowStt.start().catch((err) => this.reportError('shadow-stt', err));
 	}
 
 	private handleTurnComplete(serverTurnId?: number): void {
@@ -3004,6 +3782,7 @@ export class VoiceSession {
 		// uses the turn being completed and stale-drop rejects prior-turn results.
 		if (this.sttProvider) {
 			if (!this._commitFiredForTurn) {
+				this.fence.stampSttCommit(this.turns.numericId);
 				safeStep('stt.commit', () => this.sttProvider?.commit(this.turns.numericId));
 			}
 			safeStep('stt.complete', () => this.sttProvider?.handleTurnComplete());
@@ -3076,11 +3855,15 @@ export class VoiceSession {
 	private reinforceDirectives(): void {
 		const text = this.directiveManager.getReinforcementText();
 		if (!text) return;
+		if (!this.hold.gate('directive-reinforcement')) return;
 		this.log(`Reinforcing directives: ${text.slice(0, 120)}...`);
 		this.transport.sendContent([{ role: 'user', text }], false);
 	}
 
 	private handleInterrupted(serverTurnId?: number): void {
+		// The provider detected user speech over model output: fresh evidence,
+		// whichever turn the interrupt resolves to.
+		this.hold.release('provider-interrupted');
 		// Correlate the interrupt to its Turn. A `stale` interrupt for a
 		// long-gone turn is ignored; `new` (no turn / interrupt before any model
 		// output) births one via the no-turn net. The structural idempotency of
@@ -3102,6 +3885,16 @@ export class VoiceSession {
 
 		this.reconnector.disarmResponseWatchdog();
 		this.finalizeTurn(turn, { interrupted: true });
+	}
+
+	/** Host recovery boundary: finalize the active turn, if any, as
+	 *  interrupted while the incumbent connection is still open. Interrupted
+	 *  finalization publishes `turn.interrupted` then `turn.end` once, sends the
+	 *  client frames, advances the turn, resets the STT commit latch so the
+	 *  replacement turn can commit, and sends no directive reinforcement and no
+	 *  notification flush. */
+	private abandonActiveTurn(): void {
+		this.finalizeTurn(this.turns.active(), { interrupted: true });
 	}
 
 	/** Handle a message from an interactive subagent (question, progress update). */
@@ -3242,8 +4035,20 @@ export class VoiceSession {
 		}
 	}
 
+	/** Typed or injected text is direct user action: fresh evidence that
+	 *  releases the synthetic-output hold. It also supersedes a watchdog fire
+	 *  the hold held, so that recovery is idled first, as
+	 *  `preEmptForDirectInput` does for the greeting gate: the release would
+	 *  otherwise re-fire it (replay, nudge or reconnect) ahead of the text. */
+	private releaseHoldForDirectInput(): void {
+		if (!this.hold.isActive()) return;
+		this.reconnector.cancelHeldRecovery();
+		this.hold.release('typed-input');
+	}
+
 	private handleTextInput(text: string): Promise<void> {
 		if (!this.sessionManager.isActive || !text.trim()) return Promise.resolve();
+		this.releaseHoldForDirectInput();
 		const trimmed = text.trim();
 		return this.enqueueDirectInput(async () => {
 			await this.preEmptForDirectInput();
@@ -3268,7 +4073,7 @@ export class VoiceSession {
 
 	private handleClientConnected(): void {
 		this.log(`Client connected (geminiActive=${this.sessionManager.isActive})`);
-		this.clientConnected = true;
+		this._clientConnected = true;
 		this.clientInputReady = false;
 		const generation = ++this.clientConnectionGeneration;
 		// Greeting interrupt grace: a fresh browser tab / RTC audio context
@@ -3278,8 +4083,11 @@ export class VoiceSession {
 		// audio chunk armed — leaking the prior session's grace into a
 		// different audio context.
 		this.greeting.resetForClientConnected();
+		// Host attach hook before the bootstrap below: a host resending durable
+		// state must reach the client ahead of any automatic output.
+		this.safeEmitHook('onClientConnected', () => this.config.onClientConnected?.());
 		const bootstrap = () => {
-			if (!this.clientConnected || generation !== this.clientConnectionGeneration) return;
+			if (!this._clientConnected || generation !== this.clientConnectionGeneration) return;
 			const transportInfo = describeClientTransport(this.config.clientMedia);
 
 			// Restore is complete here. Send pacing before `session.config`, because
@@ -3308,16 +4116,83 @@ export class VoiceSession {
 			this.clientInputReady = true;
 			const pending = this.pendingClientJson.splice(0);
 			for (const message of pending) this.clientMessageRouter.dispatch(message);
-			if (this.sessionManager.isActive) this.maybeSendGreetingForClient(generation);
+			// Host gate: the client is configured above, but a host that owns
+			// recovery also owns what the attach does next (no greeting, context
+			// replay or redial).
+			if (this.clientAutoActionsSuppressed()) return;
+			this.runClientAttachPolicy(generation);
 		};
 
 		if (this.memoryAndDirectivesReady) bootstrap();
 		else void this._memoryReadyPromise.then(bootstrap);
 	}
 
+	/** Reads the host gate once; logs when it suppresses the automatic actions.
+	 *  The gate is a host hook read from the attach bootstrap and the setup
+	 *  completion, so, as in the reconnector's recovery-ownership check, a throw
+	 *  is logged and read as false: the attach runs its automatic actions. */
+	private clientAutoActionsSuppressed(): boolean {
+		let suppressed: boolean;
+		try {
+			suppressed = this.config.suppressClientAutoActions?.() === true;
+		} catch (e) {
+			this.log(
+				`Host client auto-action gate threw (treated as not suppressed): ${e instanceof Error ? e.message : String(e)}`,
+			);
+			return false;
+		}
+		if (!suppressed) return false;
+		this.log('Client auto-actions suppressed by host gate');
+		return true;
+	}
+
+	/** Whether the reattach greeting policy lets a client be greeted now:
+	 *  always under `'per-client'`, and only before the first completed turn
+	 *  under `'until-first-turn'`. */
+	private reattachGreetingAllowed(): boolean {
+		return this.config.reattachGreeting !== 'until-first-turn' || this.turns.numericId === 0;
+	}
+
+	/**
+	 * What a client attach does once the client is configured, by session state:
+	 * ACTIVE greets the client when the reattach policy allows, otherwise
+	 * injects the recent conversation as quiet context when
+	 * `reattachContextReplay` is set; UPSTREAM_LOST redials through
+	 * `recoverUpstream` (fresh dial, no greeting, context after activation);
+	 * any other state does nothing.
+	 */
+	private runClientAttachPolicy(generation: number): void {
+		const state = this.sessionManager.state;
+		if (state === 'ACTIVE') {
+			if (this.reattachGreetingAllowed()) {
+				this.maybeSendGreetingForClient(generation);
+			} else if (this.config.reattachContextReplay === true) {
+				this.injectRecentContext('client-reconnect-context');
+			}
+			return;
+		}
+		if (state !== 'UPSTREAM_LOST') return;
+		try {
+			const { attemptEpoch } = this.recoverUpstream({
+				reason: 'human-retry',
+				skipContextInjection: false,
+				holdSyntheticUntilFreshSpeech: false,
+			});
+			this.log(`client attach: redialing UPSTREAM_LOST session, attempt ${attemptEpoch}`);
+		} catch (error) {
+			// Refused synchronously (for example a transport without the recovery
+			// primitives): the session stays parked. A dial that fails later
+			// parks it again on its own.
+			this.log(
+				`client attach: cannot redial UPSTREAM_LOST session: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			this.reportError('recover-upstream', error);
+		}
+	}
+
 	private maybeSendGreetingForClient(generation: number): void {
 		if (
-			!this.clientConnected ||
+			!this._clientConnected ||
 			!this.clientInputReady ||
 			generation !== this.clientConnectionGeneration ||
 			this.greetingClientGeneration === generation
@@ -3325,20 +4200,21 @@ export class VoiceSession {
 			return;
 		}
 		this.greetingClientGeneration = generation;
-		// Only mark the origin when a greeting will actually send — a stale
-		// pending origin would otherwise taint the next real response.
-		if (this.agentRouter.activeAgent.greeting) {
+		// Only mark the origin when a greeting was actually sent (none configured
+		// or held sends nothing) — a stale pending origin would otherwise taint
+		// the next real response.
+		if (this.greeting.sendGreeting()) {
 			this._pendingResponseOrigin = 'assistant_initiated';
 		}
-		this.greeting.sendGreeting();
 	}
 
 	private handleClientDisconnected(): void {
 		this.log('Client disconnected');
-		this.clientConnected = false;
+		this._clientConnected = false;
 		this.clientInputReady = false;
 		this.pendingClientJson = [];
 		this.clientConnectionGeneration++;
+		this.safeEmitHook('onClientDisconnected', () => this.config.onClientDisconnected?.());
 	}
 
 	/** Feed client audio into the session (LLM + STT). Used when the server owns the socket (multi-user). */
@@ -3352,7 +4228,20 @@ export class VoiceSession {
 				this._reconnectWindowSpeech = true;
 			}
 		}
-		this.audioRouter.handleFromClient(data, 'websocket');
+		this.ingestClientAudio(data, 'websocket');
+	}
+
+	/** The single entry for inbound client audio from every ingress: the local
+	 *  client WebSocket, the direct RTC audio plane and `feedAudioFromClient`.
+	 *  Input observers see the frame before the audio router gates it. */
+	private ingestClientAudio(data: Buffer, source: 'websocket' | 'rtc'): void {
+		if (this.audioInputObservers.size > 0) {
+			this.notifyAudioObservers(this.audioInputObservers, 'audio-input-observer', data, {
+				source,
+				sampleRate: this.clientAudioInputRate,
+			});
+		}
+		this.audioRouter.handleFromClient(data, source);
 	}
 
 	/** R7c hosted reconnect-window verdict (consulted by the recovery controller
@@ -3383,9 +4272,281 @@ export class VoiceSession {
 		this.handleClientDisconnected();
 	}
 
+	/** Whether a real client is attached: a connection on the local client
+	 *  WebSocket server (never a probe or verifier), or between
+	 *  `notifyClientConnected()` and `notifyClientDisconnected()` with a
+	 *  host-owned channel. */
+	get clientConnected(): boolean {
+		return this._clientConnected;
+	}
+
+	/**
+	 * `readyState` and `bufferedAmount` of the attached client socket, for
+	 * example to watch outbound backpressure. `null` when no socket is attached,
+	 * and always with `clientSender` or `direct_rtc`, where the host owns the
+	 * socket.
+	 */
+	getClientSocketHealth(): ClientSocketHealth | null {
+		return this.clientTransport.getSocketHealth?.() ?? null;
+	}
+
+	/**
+	 * Close the attached client connection with the given WebSocket close code
+	 * and reason (for example `4000, 'goodbye'`). The listener keeps accepting
+	 * connections and the session stays up; the socket's close then runs the
+	 * usual disconnect handling. Returns `false` when no socket was attached,
+	 * and always with `clientSender` or `direct_rtc`, where the host owns the
+	 * socket and closes it itself.
+	 */
+	closeClientConnection(code?: number, reason?: string): boolean {
+		return this.clientTransport.closeClient?.(code, reason) ?? false;
+	}
+
 	/** Session ID for logging and multi-user association. */
 	getSessionId(): string {
 		return this.config.sessionId;
+	}
+
+	/**
+	 * Point-in-time send-path diagnostics; safe to sample on any tick.
+	 *
+	 * `upstream`/`transportGeneration` are null on transports that do not report
+	 * diagnostics (injected fakes, OpenAI, Qwen) — null means unobserved, never
+	 * zero. `echoSuppressed` is session-owned (suppressed frames never reach the
+	 * transport counters): the echo guard's suppressed count, 0 without one.
+	 */
+	getDiagnostics(): VoiceSessionDiagnostics {
+		const t = this.transport.getDiagnostics?.();
+		return {
+			upstream: t?.upstream ?? null,
+			transportGeneration: t?.transportGeneration ?? null,
+			echoSuppressed: this.echoGuard?.suppressedCount ?? 0,
+		};
+	}
+
+	// --- Host upstream recovery ---
+
+	/**
+	 * What this session's recovery surface supports. `RECOVERY_CAPABILITIES`
+	 * (everything) for a legacy-orchestration session with
+	 * `upstreamLossPolicy: 'hold'` on a transport with `abortIncumbent`,
+	 * `currentDialGen` and `currentTransportGeneration` (the Gemini transport).
+	 * Otherwise, under policy `'close'`, in actor mode or on another transport,
+	 * `recoverUpstream`, `reconnectBoundary` and `syntheticHold` are `false`,
+	 * `turnStartPublication` is `true` and `transportGenerations` reports the
+	 * transport's generation counters. Gate host recovery on this.
+	 */
+	getRecoveryCapabilities(): RecoveryCapabilities {
+		return this.hostRecovery.getRecoveryCapabilities();
+	}
+
+	/**
+	 * Abandon the current provider connection and dial a fresh one, without
+	 * closing the session. Allowed from CONNECTING, ACTIVE, RECONNECTING
+	 * (taking over an automatic reconnect) and UPSTREAM_LOST; the session goes
+	 * to RECONNECTING at once and to ACTIVE when the replacement is set up.
+	 * From CONNECTING it replaces the first dial of `start()`, still pending,
+	 * whose late outcome then settles only `start()`'s promise, or, when the
+	 * recovery comes before `start()` dials, `start()` dials nothing and
+	 * resolves. Throws `SessionError` when
+	 * `getRecoveryCapabilities().recoverUpstream` is `false`, while closing,
+	 * or from any other state.
+	 *
+	 * Before returning it finalizes the active turn as interrupted, aborts the
+	 * incumbent connection, publishes `session.reset` and one
+	 * `session.reconnectBoundary`, and clears the resumption handle, so the
+	 * redial resumes nothing. Tool results and external-STT captures from the
+	 * abandoned connection are dropped. No greeting is sent on activation;
+	 * with `skipContextInjection: false` the recent conversation is injected
+	 * as quiet context. Notifications are held during the dial and one is
+	 * delivered on activation when the model is idle.
+	 *
+	 * Single-flight: a call while a recovery is in flight, including one made
+	 * from an event subscriber during this call, returns that recovery's
+	 * result. `activated` rejects when the dial or another recovery step
+	 * fails, which reports a `recover-upstream` error and parks the session
+	 * in UPSTREAM_LOST, or when the session closes or `parkUpstream()` runs
+	 * first.
+	 */
+	recoverUpstream(args: RecoverUpstreamArgs): RecoverUpstreamResult {
+		return this.hostRecovery.recoverUpstream(args);
+	}
+
+	/**
+	 * Clear the resumption handle the session and the transport hold, so the
+	 * next dial opens a fresh server session. Returns `true` when the session
+	 * held a handle. The connection itself is untouched.
+	 */
+	clearResumption(): boolean {
+		return this.hostRecovery.clearResumption();
+	}
+
+	/**
+	 * Take the provider connection down on purpose, for example when no client
+	 * has been attached for a while: cancels automatic recovery, parks the
+	 * session in UPSTREAM_LOST without finalizing it (publishing
+	 * `session.upstreamLost` with reason `'host-parked'` and `reason` as its
+	 * `detail`), then disconnects the transport. Nothing redials it until
+	 * `recoverUpstream()`, which a client attach also calls unless
+	 * `suppressClientAutoActions` returns `true`. Rejects with `SessionError`
+	 * in actor mode, under `upstreamLossPolicy: 'close'`, while closing, and
+	 * outside ACTIVE, RECONNECTING and UPSTREAM_LOST.
+	 */
+	parkUpstream(reason: string): Promise<void> {
+		return this.hostRecovery.parkUpstream(reason);
+	}
+
+	// --- Conversation continuity ---
+
+	/**
+	 * Start the in-memory conversation over without ending the session, and
+	 * return how many items were dropped. Everything up to now is persisted
+	 * first, in this order: buffered transcripts are flushed into the context;
+	 * every pending user message is sealed with the text it already holds (its
+	 * fallback transcript, since a reset cannot wait for an external STT
+	 * result); the history writer persists the unflushed items once; then the
+	 * items, the checkpoint and the pending ids are cleared, and the retained
+	 * user audio and the reconnect replay state are dropped. `reason` is only
+	 * logged; no event is published.
+	 *
+	 * The history stores keep the pre-reset items. Later history flushes, the
+	 * next memory extraction, the close report's items, the post-session
+	 * snapshot and the context replayed on a reconnect or transfer cover only
+	 * items added after the reset. With `memory` configured, an extraction
+	 * still in flight during the reset can mark items added after the reset as
+	 * processed when it completes. The memory distiller and the history writer
+	 * share one checkpoint, so the distiller then skips those items and the
+	 * history writer never appends them to the history stores; only the close
+	 * report's items list them. A warning is logged on every reset while
+	 * `memory` is set.
+	 */
+	resetConversationContext(reason: string): { cleared: number } {
+		if (this.config.memory) {
+			this.log(
+				'[WARN] resetConversationContext: memory is configured; a memory extraction in flight during the reset can mark items added after the reset as processed when it completes. The memory distiller and the history writer share one checkpoint, so those items are then skipped by the distiller and never appended to the history store.',
+			);
+		}
+		this.transcriptManager.flush();
+		for (const timer of this.reservationTimers.values()) clearTimeout(timer);
+		this.reservationTimers.clear();
+		this.transcriptManager.sealPendingInput();
+		this.historyWriter?.flushNow();
+		const cleared = this.conversationContext.clear();
+		this.utteranceRetainer?.clearAll();
+		this.reconnector.resetReplayState();
+		this.log(`Conversation context reset (${reason}): ${cleared} item(s) cleared`);
+		return { cleared };
+	}
+
+	// --- Audio observers ---
+
+	/**
+	 * Observe each chunk of native assistant audio as PCM, with its turn id,
+	 * right before it is sent to the client. Audio from an external TTS
+	 * provider is not observed. A throwing observer is reported through
+	 * `hooks.onError` and does not stop delivery. Returns a function that
+	 * removes the observer.
+	 */
+	observeAudioOutput(observer: AudioOutputObserver): () => void {
+		this.audioOutputObservers.add(observer);
+		return () => {
+			this.audioOutputObservers.delete(observer);
+		};
+	}
+
+	/**
+	 * Observe each inbound client audio frame as it enters the session, before
+	 * routing or gating, from the local client WebSocket, the direct RTC audio
+	 * plane and `feedAudioFromClient()`. A throwing observer is reported
+	 * through `hooks.onError` and does not stop the frame. Returns a function
+	 * that removes the observer.
+	 */
+	observeAudioInput(observer: AudioInputObserver): () => void {
+		this.audioInputObservers.add(observer);
+		return () => {
+			this.audioInputObservers.delete(observer);
+		};
+	}
+
+	// --- Runtime tool and instruction updates ---
+
+	/**
+	 * Add tools at runtime: each becomes executable at once and is merged by
+	 * name into the declared tool list, which is sent with
+	 * `transport.updateSession({ tools })` (applied in place where the
+	 * transport supports it, on the next connect on Gemini). A tool missing
+	 * from the active agent definition executes inline with immediate
+	 * scheduling. An agent transfer declares the new agent's tools instead.
+	 *
+	 * If `updateSession` rejects, the declared list is restored and the
+	 * rejection is passed on; the new executors stay registered. Rejects with
+	 * `SessionError` with `orchestrationMode: 'actor'`.
+	 */
+	async registerTools(tools: ToolDefinition[]): Promise<void> {
+		this.assertLegacyOrchestration('registerTools');
+		this.toolExecutor.register(tools);
+		const merged = new Map(this.currentTools.map((tool) => [tool.name, tool]));
+		for (const tool of tools) merged.set(tool.name, tool);
+		await this.declareTools([...merged.values()]);
+	}
+
+	/**
+	 * Replace the declared tool list with exactly `tools`, sent with
+	 * `transport.updateSession({ tools })`, for example to restrict what the
+	 * model may call. Only the declarations change: every tool registered so
+	 * far stays executable. A later `replaceTools()` with the full list
+	 * restores the hidden tools.
+	 *
+	 * If `updateSession` rejects, the declared list is restored and the
+	 * rejection is passed on. Rejects with `SessionError` with
+	 * `orchestrationMode: 'actor'`.
+	 */
+	async replaceTools(tools: ToolDefinition[]): Promise<void> {
+		this.assertLegacyOrchestration('replaceTools');
+		await this.declareTools([...tools]);
+	}
+
+	/**
+	 * Replace the system instructions, sent with
+	 * `transport.updateSession({ instructions })` (applied in place where the
+	 * transport supports it, on the next connect on Gemini). An agent transfer
+	 * applies the new agent's instructions instead. Rejects with
+	 * `SessionError` with `orchestrationMode: 'actor'`.
+	 */
+	async updateInstructions(instructions: string): Promise<void> {
+		this.assertLegacyOrchestration('updateInstructions');
+		const previous = this.currentInstructions;
+		this.currentInstructions = instructions;
+		try {
+			await this.transport.updateSession({ instructions });
+		} catch (err) {
+			if (this.currentInstructions === instructions) this.currentInstructions = previous;
+			throw err;
+		}
+	}
+
+	/** Record `tools` as the declared list and send it to the transport,
+	 *  restoring the previous list when the transport rejects it (unless a
+	 *  later call has replaced it meanwhile). */
+	private async declareTools(tools: ToolDefinition[]): Promise<void> {
+		const previous = this.currentTools;
+		this.currentTools = tools;
+		try {
+			await this.transport.updateSession({ tools });
+		} catch (err) {
+			if (this.currentTools === tools) this.currentTools = previous;
+			throw err;
+		}
+	}
+
+	/** Runtime tool and instruction updates drive the legacy tool router; the
+	 *  actor runtime keeps its own tool registry. */
+	private assertLegacyOrchestration(method: string): void {
+		if (this._isActorMode) {
+			throw new SessionError(
+				`${method}() is not supported with orchestrationMode 'actor'; runtime tool and instruction updates require legacy orchestration`,
+			);
+		}
 	}
 
 	// --- Error handling ---
@@ -3493,9 +4654,21 @@ export class VoiceSession {
 	 *  want to surface custom progress or UI state — e.g. an example pushing
 	 *  Whisper transcript fragments to a web UI during transcription mode.
 	 *
+	 *  Accepts core frames, registered `ClientProtocolServerExtensions`, or an
+	 *  application `HostClientFrame` whose `type` is not a core frame type.
+	 *
 	 *  Safe to call any time after `start()`; no-op when no client is connected. */
-	sendJsonToClient(message: AnyServerToClientMessage): void {
-		this.clientTransport.sendJsonToClient(message);
+	sendJsonToClient<T extends string>(message: AnyServerToClientMessage | HostClientFrame<T>): void {
+		this.sendHostFrame(message);
+	}
+
+	/** Internal boundary between the host-facing `sendJsonToClient` methods
+	 *  (VoiceSession, ToolContext) and the strict `IClientChannel`. Channels
+	 *  serialize frames verbatim, and registered frames are already enforced
+	 *  at the host method's type, so application frames cross here with one
+	 *  cast; `IClientChannel`/`SessionClientSender` stay strict. */
+	private sendHostFrame(message: AnyServerToClientMessage | HostClientFrame): void {
+		this.clientTransport.sendJsonToClient(message as AnyServerToClientMessage);
 	}
 
 	/** Lower-level: inject an arbitrary user message. Serialized via the
@@ -3503,6 +4676,8 @@ export class VoiceSession {
 	 *  cancel-then-create sequence. */
 	injectTranscript(text: string): Promise<void> {
 		if (!text) return Promise.resolve();
+		// Also the path injectDictationBuffer takes.
+		this.releaseHoldForDirectInput();
 		return this.enqueueDirectInput(async () => {
 			await this.preEmptForDirectInput();
 			this._pendingResponseOrigin = 'user_text';
@@ -3511,6 +4686,174 @@ export class VoiceSession {
 			// so the user turn shows up in history / memory / subagent context.
 			this.conversationContext.addUserMessage(text);
 		});
+	}
+
+	/**
+	 * Inject host-generated text into the model's conversation: live input the
+	 * model responds to, or quiet context (see {@link InjectTextOptions}).
+	 *
+	 * Resolves `true` once the text was handed to the transport (in live mode,
+	 * a send the transport accepts into a send buffer counts as handed over)
+	 * and `false` when nothing was sent: empty text, the transport not
+	 * connected, transcription mode, or a transport send that failed (logged).
+	 * It never rejects for a transport failure, so callers can fire and forget
+	 * it.
+	 *
+	 * Unlike {@link injectTranscript}, the text is not recorded in the
+	 * `ConversationContext` and an in-flight response is not cancelled.
+	 */
+	injectText(input: string | ContentTurn[], opts: InjectTextOptions): Promise<boolean> {
+		return this.injectTextInternal(input, { mode: opts.mode });
+	}
+
+	/**
+	 * Send an image or audio clip (base64) to the model as realtime input
+	 * through `transport.sendFile`, e.g. a camera or screen frame. Nothing is
+	 * recorded in the conversation history. Returns `false`, sending nothing,
+	 * in transcription mode or when the transport is not connected, and
+	 * `false` when the transport send throws (the error is logged, never
+	 * rethrown); otherwise `true`, and the transport decides which MIME types it
+	 * carries (the Gemini transport takes `image/*` and `audio/*`).
+	 */
+	sendRealtimeMedia(base64Data: string, mimeType: string): boolean {
+		if (!this.transport.isConnected || !this.dictation.isAgentMode()) return false;
+		try {
+			this.transport.sendFile(base64Data, mimeType);
+		} catch (err) {
+			this.log(
+				`sendRealtimeMedia(${mimeType}) failed: ${err instanceof Error ? err.message : String(err)}`,
+			);
+			return false;
+		}
+		return true;
+	}
+
+	/** The injection path behind {@link injectText}, with the options that
+	 *  framework-generated corrections need. With `preempt` it runs on the
+	 *  direct-input FIFO; otherwise it sends immediately. */
+	private injectTextInternal(
+		input: string | ContentTurn[],
+		opts: InjectTextInternalOptions,
+	): Promise<boolean> {
+		const turns: ContentTurn[] =
+			typeof input === 'string' ? [{ role: 'user', text: input }] : input;
+		if (!turns.some((t) => t.text.trim())) return Promise.resolve(false);
+		if (!opts.preempt) return this.sendInjectedText(turns, opts);
+		let sent = false;
+		return this.enqueueDirectInput(async () => {
+			sent = await this.sendInjectedText(turns, opts);
+		}).then(() => sent);
+	}
+
+	/** A framework-generated live correction for turn `turnId` (the shadow STT's
+	 *  self-correction). It runs on the direct-input FIFO, pre-empts the
+	 *  in-flight answer, and sends nothing while the synthetic-output hold is
+	 *  engaged or outside agent mode. Its validity is checked once at the head
+	 *  of the FIFO, before its own preemption finalizes the turn: newer typed
+	 *  input that already pre-empted `turnId` has moved the turn on, and the
+	 *  correction is dropped. Resolves whether it was sent. */
+	private sendSyntheticLiveText(
+		turns: ContentTurn[],
+		origin: string,
+		turnId: number,
+	): Promise<boolean> {
+		return this.injectTextInternal(turns, {
+			mode: 'live',
+			preempt: true,
+			respectSyntheticHold: true,
+			origin,
+			stillValid: () => this.turns.numericId === turnId,
+		});
+	}
+
+	/** Checks, optional preemption and the send itself. Never rejects. */
+	private async sendInjectedText(
+		turns: ContentTurn[],
+		opts: InjectTextInternalOptions,
+	): Promise<boolean> {
+		const origin = opts.origin ?? 'host-inject';
+		const skip = (why: string): false => {
+			this.log(`injectText (${origin}): not sent — ${why}`);
+			return false;
+		};
+		if (!this.transport.isConnected) return skip('transport not connected');
+		if (!this.dictation.isAgentMode()) return skip('transcription mode');
+		// Before any preemption, so a held injection leaves the in-flight turn alone.
+		if (opts.respectSyntheticHold && this.isSyntheticHoldActive()) {
+			return skip('synthetic output is held');
+		}
+		try {
+			if (opts.stillValid && !opts.stillValid()) return skip('no longer valid');
+			if (opts.preempt) await this.preEmptForDirectInput();
+			if (opts.mode === 'quiet') {
+				this.transport.sendContent(turns, false);
+				return true;
+			}
+			// Generation-capable: invalidate a live greeting token so the
+			// response can never bind as the greeting (as guardedTriggerGeneration
+			// does). The input has no user speech to measure latency from.
+			this.triggerCoordinator.dispatch('assistant-initiated');
+			this._pendingResponseOrigin = 'assistant_initiated';
+			if (!this.transport.sendLiveText) {
+				this.transport.sendContent(turns, true);
+				return true;
+			}
+			const sent = this.transport.sendLiveText(turns);
+			if (!sent) this.log(`injectText (${origin}): live text was not delivered`);
+			return sent;
+		} catch (err) {
+			this.log(
+				`injectText (${origin}): send failed: ${err instanceof Error ? err.message : String(err)}`,
+			);
+			return false;
+		}
+	}
+
+	/** Quietly (no response requested) inject the last ten user and assistant
+	 *  items, 150 characters each, as context for a connection that starts
+	 *  without the server-side conversation. Suppressed (logged) while synthetic
+	 *  output is held; nothing is sent when there is no conversation yet. */
+	private injectRecentContext(
+		origin: 'gemini-reconnect-context' | 'client-reconnect-context',
+	): void {
+		const recent = this.conversationContext.items
+			.filter((item) => item.role === 'user' || item.role === 'assistant')
+			.slice(-10)
+			.map((item) => `${item.role}: ${item.content.slice(0, 150)}`)
+			.join('\n');
+		if (!recent) return;
+		if (!this.hold.gate(origin)) return;
+		const lead =
+			origin === 'client-reconnect-context' ? 'The client reconnected.' : 'You just reconnected.';
+		this.transport.sendContent(
+			[
+				{
+					role: 'user',
+					text: `[System: ${lead} Here is the recent conversation for context. Do NOT act on this content. Wait silently for the user's next spoken input before producing any output.]\n${recent}`,
+				},
+			],
+			false,
+		);
+		this.log(`Injected recent conversation context (${origin})`);
+	}
+
+	/** Whether the synthetic-output hold is engaged: after a
+	 *  `recoverUpstream({ holdSyntheticUntilFreshSpeech: true })`, until the user
+	 *  is heard again (input transcription, an external STT final, a provider
+	 *  interruption, or typed or injected text; microphone audio alone does not
+	 *  count). While it is, framework-generated output (greeting, directive
+	 *  reinforcement, notifications, injected context) is held. */
+	isSyntheticHoldActive(): boolean {
+		return this.hold.isActive();
+	}
+
+	/** Deliver one held-back notification once a dial window has released the
+	 *  notification hold, but only while the model is idle: no framework turn
+	 *  open and no requested response still waiting to start. Otherwise the
+	 *  next turn completion delivers it, as usual. */
+	private drainNotificationsWhenIdle(): void {
+		if (this.turns.active() !== null || this._pendingResponseOrigin !== null) return;
+		this.notificationSink.turnComplete();
 	}
 
 	/** Pre-start the whisper session without flipping audio routing. Useful
@@ -3539,7 +4882,8 @@ export class VoiceSession {
 
 	/** Defensive wrapper around triggerGeneration. Throws if invoked while
 	 *  not in agent mode — surfaces preset bugs loudly in tests rather than
-	 *  silently leaking audio into a dictation flow. */
+	 *  silently leaking audio into a dictation flow. Triggers nothing (logged)
+	 *  while the synthetic-output hold is engaged. */
 	guardedTriggerGeneration(
 		instructions?: string,
 		overrides?: Parameters<LLMTransport['triggerGeneration']>[1],
@@ -3549,6 +4893,9 @@ export class VoiceSession {
 				`TRANSCRIPTION_MODE_LOCKED: triggerGeneration is blocked while transcription mode is '${this.dictation.mode}'`,
 			);
 		}
+		// A framework-owned proactive generation is synthetic output: nothing
+		// is triggered while the hold is engaged.
+		if (!this.hold.gate('assistant-initiated')) return;
 		// Generation-capable path: invalidate a live greeting token so the
 		// triggered turn can never bind as the greeting (H1 enforcement).
 		this.triggerCoordinator.dispatch('assistant-initiated');

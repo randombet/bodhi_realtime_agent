@@ -132,7 +132,11 @@ interface SubagentConfig {
   /** Total execution timeout in ms (default: 600,000 — 10 min). */
   timeout?: number;
 
-  /** Override the LLM model for this subagent. */
+  /**
+   * Deprecated and ignored: the subagent runs on the session model. Set
+   * `reasoningModel` (a Vercel AI SDK model) to choose its model; a session
+   * logs one warning per subagent that sets `model` without it.
+   */
   model?: string;
 
   /** Enable interactive user communication via SubagentSession. */

@@ -1,9 +1,10 @@
 import type { IceServerEntry } from '../types/client-media.js';
 import type { AnyServerToClientMessage } from '../types/client-protocol.js';
+import type { RtcAudioEngine } from '../types/rtc-engine.js';
 import type { RtcClientSignalingMessage } from '../types/rtc-signaling.js';
 import type { IClientChannel, SessionClientSender } from '../types/session-client.js';
 import { AudioBuffer } from './audio-buffer.js';
-import { WeriftOpusRtcEngine } from './werift-opus-rtc-engine.js';
+import { LazyRtcAudioEngine } from './lazy-rtc-audio-engine.js';
 
 /** When set, mic/assistant audio uses Opus RTP (werift + @evan/opus) instead of WebSocket binary. */
 export interface WeriftOpusClientOptions {
@@ -35,7 +36,7 @@ export class DirectRtcClientChannel implements IClientChannel {
 	private readonly audioBuffer = new AudioBuffer();
 	private _buffering = false;
 	private _lastSignaling: RtcClientSignalingMessage | null = null;
-	private readonly engine: WeriftOpusRtcEngine | null;
+	private readonly engine: RtcAudioEngine | null;
 	private preMediaOutbound = Buffer.alloc(0);
 	/** True only when assistant audio renders over the WebSocket PCM path — the
 	 *  Opus-RTP sink sends audio on a separate channel from the JSON control
@@ -45,8 +46,11 @@ export class DirectRtcClientChannel implements IClientChannel {
 	constructor(options: DirectRtcClientChannelOptions) {
 		this.sender = options.sender;
 		this.supportsPlaybackStateProtocol = options.supportsPlaybackStateProtocol ?? false;
+		// The werift + @evan/opus engine is never imported here: the lazy engine loads it
+		// from the internal `#direct-rtc` engine entry on the first signaling message,
+		// which keeps native dependencies out of the root entry's import graph.
 		this.engine = options.weriftOpus
-			? new WeriftOpusRtcEngine({
+			? new LazyRtcAudioEngine({
 					iceServers: options.weriftOpus.iceServers,
 					inputPcmSampleRate: options.weriftOpus.inputPcmSampleRate,
 					outputPcmSampleRate: options.weriftOpus.outputPcmSampleRate,

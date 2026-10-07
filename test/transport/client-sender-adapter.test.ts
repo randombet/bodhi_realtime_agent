@@ -73,4 +73,31 @@ describe('ClientSenderAdapter — reconnect-drain semantics', () => {
 		adapter.sendAudioToClient(Buffer.from([2]));
 		expect(sender.sendAudio).toHaveBeenCalledTimes(2);
 	});
+
+	it('hosted discardBuffered() sends nothing to sender.sendAudio; stopBuffering() still flushes', () => {
+		const sender = mockSender();
+		const adapter = new ClientSenderAdapter(sender);
+		adapter.startBuffering();
+		adapter.sendAudioToClient(Buffer.from([1, 2]));
+		adapter.sendAudioToClient(Buffer.from([3, 4]));
+
+		adapter.discardBuffered();
+
+		// The abandoned turn's assistant audio is dropped, never delivered.
+		expect(sender.sendAudio).not.toHaveBeenCalled();
+		// Buffering mode ended: new audio goes straight to the sender, and a
+		// later window starts empty.
+		const fresh = Buffer.from([5]);
+		adapter.sendAudioToClient(fresh);
+		expect(sender.sendAudio).toHaveBeenCalledTimes(1);
+		expect(sender.sendAudio).toHaveBeenCalledWith(fresh);
+
+		// stopBuffering() keeps flushing the buffered audio to the sender.
+		const kept = Buffer.from([6]);
+		adapter.startBuffering();
+		adapter.sendAudioToClient(kept);
+		expect(adapter.stopBuffering()).toEqual([]);
+		expect(sender.sendAudio).toHaveBeenCalledTimes(2);
+		expect(sender.sendAudio).toHaveBeenLastCalledWith(kept);
+	});
 });

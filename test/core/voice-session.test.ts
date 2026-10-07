@@ -1,32 +1,41 @@
 import type { LanguageModelV1 } from 'ai';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
-import { VoiceSession } from '../../src/core/voice-session.js';
+import { ValidationError } from '../../src/core/errors.js';
+import { VoiceSession, type VoiceSessionConfig } from '../../src/core/voice-session.js';
 import { InMemoryPostSessionPipeline } from '../../src/post-session/pipeline.js';
 import { type PostSessionContext, PostSessionProcessor } from '../../src/post-session/types.js';
+import { DirectRtcClientChannel } from '../../src/transport/direct-rtc-client-channel.js';
 import { DEFAULT_GEMINI_REALTIME_INPUT_CONFIG } from '../../src/transport/gemini-live-transport.js';
+import { LazyRtcAudioEngine } from '../../src/transport/lazy-rtc-audio-engine.js';
 import type { MainAgent } from '../../src/types/agent.js';
+import type { EventPayloadMap } from '../../src/types/events.js';
+import type { RtcAudioEngine, RtcAudioEngineOptions } from '../../src/types/rtc-engine.js';
 import type {
 	AudioFormatSpec,
 	LLMTransport,
 	STTProvider,
+	SessionUpdate,
 	TransportCapabilities,
 } from '../../src/types/transport.js';
 
 declare module '@google/genai' {
 	function _getMessageHandler(): ((message: unknown) => void) | null;
 	function _getMockSession(): Record<string, ReturnType<typeof vi.fn>> | null;
+	function _getLastConnectConfig(): Record<string, unknown> | null;
 }
 
 // Mock the external deps
 vi.mock('@google/genai', () => {
 	let messageHandler: ((msg: unknown) => void) | null = null;
 	let mockSession: Record<string, ReturnType<typeof vi.fn>> | null = null;
+	let lastConnectConfig: Record<string, unknown> | null = null;
 
 	return {
 		GoogleGenAI: vi.fn().mockImplementation(() => ({
 			live: {
 				connect: vi.fn(async (params: Record<string, unknown>) => {
+					lastConnectConfig = params.config as Record<string, unknown>;
 					const cbs = params.callbacks as Record<string, (...args: unknown[]) => void>;
 					messageHandler = cbs.onmessage as (msg: unknown) => void;
 					// Fire setupComplete so connect() resolves (it awaits this)
@@ -43,6 +52,7 @@ vi.mock('@google/genai', () => {
 		})),
 		_getMessageHandler: () => messageHandler,
 		_getMockSession: () => mockSession,
+		_getLastConnectConfig: () => lastConnectConfig,
 	};
 });
 
@@ -859,6 +869,37 @@ describe('VoiceSession', () => {
 		await new Promise<void>((r) => ws.on('close', r));
 	});
 
+	it('routes a document upload to the transport sendInlineFile and an image to sendFile', async () => {
+		const transport = Object.assign(createMutableServerTurnTransport(), {
+			sendInlineFile: vi.fn(),
+		});
+		session = new VoiceSession({
+			sessionId: 'sess_upload',
+			userId: 'user_1',
+			apiKey: 'test-key',
+			agents: [createEchoAgent()],
+			initialAgent: 'echo',
+			model: mockModel,
+			transport,
+			clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+		});
+		await session.start();
+
+		session.feedJsonFromClient({
+			type: 'file_upload',
+			data: { base64: 'cGRm', mimeType: 'application/pdf', fileName: 'doc.pdf' },
+		});
+		session.feedJsonFromClient({
+			type: 'file_upload',
+			data: { base64: 'cG5n', mimeType: 'image/png', fileName: 'pic.png' },
+		});
+
+		expect(transport.sendInlineFile).toHaveBeenCalledTimes(1);
+		expect(transport.sendInlineFile).toHaveBeenCalledWith('cGRm', 'application/pdf');
+		expect(transport.sendFile).toHaveBeenCalledTimes(1);
+		expect(transport.sendFile).toHaveBeenCalledWith('cG5n', 'image/png');
+	});
+
 	it('publishes turn events on EventBus', async () => {
 		session = new VoiceSession({
 			sessionId: 'sess_1',
@@ -1469,6 +1510,167 @@ describe('VoiceSession', () => {
 
 			await session.close();
 			expect(endCount).toBe(1);
+		});
+
+		const MODEL_AUDIO = {
+			serverContent: { modelTurn: { parts: [{ inlineData: { data: 'AAAA' } }] } },
+		};
+
+		it('turn.start carries `transportGeneration` and `attemptEpoch` from the Gemini transport and `undefined` from a mock transport', async () => {
+			session = new VoiceSession({
+				sessionId: 'sess_ts_gemini',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				model: mockModel,
+				clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			});
+			const starts: EventPayloadMap['turn.start'][] = [];
+			session.eventBus.subscribe('turn.start', (e) => starts.push(e));
+			// A consumer handler typed on only the field it reads must stay assignable.
+			const consumerGenerations: Array<number | undefined> = [];
+			session.eventBus.subscribe('turn.start', (e: { transportGeneration?: number }) => {
+				consumerGenerations.push(e.transportGeneration);
+			});
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+			const gemini = (session as unknown as { transport: LLMTransport }).transport;
+			const { _getMessageHandler } = await import('@google/genai');
+
+			_getMessageHandler()?.(MODEL_AUDIO);
+			_getMessageHandler()?.({ serverContent: { turnComplete: true } });
+			// Strand the incumbent (the dial counter advances without a setup) and
+			// redial: the two counters now differ, so a swapped field would show.
+			await gemini.abortIncumbent?.();
+			await gemini.connect();
+			_getMessageHandler()?.(MODEL_AUDIO);
+
+			expect(starts).toEqual([
+				{ sessionId: 'sess_ts_gemini', turnId: 'turn_1', transportGeneration: 1, attemptEpoch: 1 },
+				{ sessionId: 'sess_ts_gemini', turnId: 'turn_2', transportGeneration: 2, attemptEpoch: 3 },
+			]);
+			expect(consumerGenerations).toEqual([1, 2]);
+			expect(gemini.currentTransportGeneration).toBe(2);
+			expect(gemini.currentDialGen).toBe(3);
+			await session.close();
+
+			const transport = createMutableServerTurnTransport();
+			session = new VoiceSession({
+				sessionId: 'sess_ts_mock',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				model: mockModel,
+				transport,
+				clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			});
+			const mockStarts: EventPayloadMap['turn.start'][] = [];
+			session.eventBus.subscribe('turn.start', (e) => mockStarts.push(e));
+			await session.start();
+			transport.onModelTurnStart?.();
+			// A second model start inside the same Turn publishes nothing.
+			transport.onModelTurnStart?.();
+			expect(mockStarts).toEqual([
+				{
+					sessionId: 'sess_ts_mock',
+					turnId: 'turn_1',
+					transportGeneration: undefined,
+					attemptEpoch: undefined,
+				},
+			]);
+		});
+
+		it('audio → turnComplete → late toolCall publishes exactly one `turn.start` and one `turn.end`', async () => {
+			session = new VoiceSession({
+				sessionId: 'sess_ts_tail',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createToolAgent()],
+				initialAgent: 'tool-agent',
+				model: mockModel,
+				clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			});
+			const starts: string[] = [];
+			const ends: string[] = [];
+			session.eventBus.subscribe('turn.start', (e) => starts.push(e.turnId));
+			session.eventBus.subscribe('turn.end', (e) => ends.push(e.turnId));
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = _getMessageHandler();
+
+			fire?.(MODEL_AUDIO);
+			fire?.({ serverContent: { turnComplete: true } });
+			fire?.({
+				toolCall: { functionCalls: [{ id: 'fc_late', name: 'get_weather', args: { city: 'SF' } }] },
+			});
+			await new Promise((r) => setTimeout(r, 50));
+			// Closing finalizes any turn the tail would have opened.
+			await session.close();
+
+			expect(starts).toEqual(['turn_1']);
+			expect(ends).toEqual(['turn_1']);
+		});
+
+		it('turn.start precedes response.started for the same turnId', async () => {
+			session = new VoiceSession({
+				sessionId: 'sess_ts_order',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				model: mockModel,
+				clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			});
+			const order: string[] = [];
+			session.eventBus.subscribe('turn.start', (e) => order.push(`turn.start:${e.turnId}`));
+			session.eventBus.subscribe('response.started', (e) =>
+				order.push(`response.started:${e.turnId}`),
+			);
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+			const { _getMessageHandler } = await import('@google/genai');
+
+			_getMessageHandler()?.(MODEL_AUDIO);
+
+			expect(order).toEqual(['turn.start:turn_1', 'response.started:turn_1']);
+		});
+
+		it('generation.start/generation.end chain over handlers pre-attached to an injected transport', async () => {
+			const transport = createMutableServerTurnTransport();
+			const preStart = vi.fn();
+			const preEnd = vi.fn();
+			transport.onGenerationStart = preStart;
+			transport.onGenerationEnd = preEnd;
+			session = new VoiceSession({
+				sessionId: 'sess_gen_chain',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				model: mockModel,
+				transport,
+				clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			});
+			const published: string[] = [];
+			session.eventBus.subscribe('generation.start', (e) =>
+				published.push(`start:${e.sessionId}:${e.generationId}`),
+			);
+			session.eventBus.subscribe('generation.end', (e) =>
+				published.push(`end:${e.sessionId}:${e.generationId}:${e.reason}`),
+			);
+
+			transport.onGenerationStart?.('gen_0');
+			transport.onGenerationEnd?.('gen_0', 'interrupted');
+
+			expect(preStart).toHaveBeenCalledWith('gen_0');
+			expect(preEnd).toHaveBeenCalledWith('gen_0', 'interrupted');
+			expect(published).toEqual([
+				'start:sess_gen_chain:gen_0',
+				'end:sess_gen_chain:gen_0:interrupted',
+			]);
 		});
 	});
 
@@ -2335,6 +2537,392 @@ describe('VoiceSession', () => {
 				}),
 			);
 		});
+
+		it('close() cancels a pending backoff dial even while async finalizers are still running', async () => {
+			session = new VoiceSession({
+				sessionId: 'sess_close_backoff',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port: 9908,
+				model: mockModel,
+			});
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+			session.sessionManager.updateResumptionHandle('handle_backoff');
+			let release!: () => void;
+			const blocked = new Promise<void>((r) => {
+				release = r;
+			});
+			session.sessionManager.registerPreCloseFinalizer(() => blocked);
+			const internals = session as unknown as {
+				reconnector: { triggerReconnect: (reason: string) => void };
+				transport: { reconnect: (...args: unknown[]) => Promise<void> };
+			};
+			const reconnect = vi.spyOn(internals.transport, 'reconnect');
+			internals.reconnector.triggerReconnect('transport-close'); // 1000 ms backoff pending
+			const closing = session.close();
+			// Finalizer still blocked: the state has not reached CLOSED yet.
+			await new Promise((r) => setTimeout(r, 1200));
+			internals.reconnector.triggerReconnect('transport-close'); // a close arriving mid-finalization
+			await new Promise((r) => setTimeout(r, 1200));
+			expect(reconnect).not.toHaveBeenCalled();
+			release();
+			await closing;
+			expect(session.sessionManager.state).toBe('CLOSED');
+			expect(reconnect).not.toHaveBeenCalled();
+		}, 10_000);
+
+		it('ignores a late-arriving GoAway after `session.close()`', async () => {
+			const onError = vi.fn();
+			const unhandled = vi.fn();
+			process.on('unhandledRejection', unhandled);
+			try {
+				session = new VoiceSession({
+					sessionId: 'sess_late_goaway',
+					userId: 'user_1',
+					apiKey: 'test-key',
+					agents: [createEchoAgent()],
+					initialAgent: 'echo',
+					port: 9907,
+					model: mockModel,
+					hooks: { onError },
+				});
+
+				await session.start();
+				await new Promise((r) => setTimeout(r, 50));
+				session.sessionManager.updateResumptionHandle('handle_late');
+				const dispose = vi.spyOn(
+					(session as unknown as { reconnector: { dispose: () => void } }).reconnector,
+					'dispose',
+				);
+
+				await session.close();
+				expect(session.sessionManager.state).toBe('CLOSED');
+				expect(dispose).toHaveBeenCalledTimes(1);
+
+				// The closed connection's socket still delivers a GoAway. Without the
+				// guard, CLOSED → RECONNECTING throws an invalid-transition
+				// SessionError out of the transport callback.
+				const { _getMessageHandler } = await import('@google/genai');
+				const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+				expect(() => fire({ goAway: { timeLeft: '30s' } })).not.toThrow();
+
+				await new Promise((r) => setTimeout(r, 50));
+
+				expect(unhandled).not.toHaveBeenCalled();
+				expect(session.sessionManager.state).toBe('CLOSED');
+				expect(onError).not.toHaveBeenCalled();
+			} finally {
+				process.off('unhandledRejection', unhandled);
+			}
+		});
+
+		it('start() rejects and the session is CLOSED, not wedged in CONNECTING, when the dial fails, and its listener port is released and providers and runtime are stopped', async () => {
+			const port = 9908;
+			const onSessionEnd = vi.fn();
+			const stt = {
+				configure: vi.fn(),
+				start: vi.fn(async () => {}),
+				stop: vi.fn(async () => {}),
+				feedAudio: vi.fn(),
+				commit: vi.fn(),
+				handleInterrupted: vi.fn(),
+				handleTurnComplete: vi.fn(),
+				onTranscript: undefined,
+				onPartialTranscript: undefined,
+			} satisfies STTProvider;
+			session = new VoiceSession({
+				sessionId: 'sess_dial_fails',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				port,
+				model: mockModel,
+				orchestrationMode: 'actor',
+				sttProvider: stt,
+				hooks: { onSessionEnd },
+			});
+			const runtime = (session as unknown as { runtimeOrchestrator: { stop: () => Promise<void> } })
+				.runtimeOrchestrator;
+			const runtimeStop = vi.spyOn(runtime, 'stop');
+
+			// The dial's socket dies before setupComplete while the SDK's
+			// resolve-only connect promise never settles.
+			const { GoogleGenAI } = await import('@google/genai');
+			(GoogleGenAI as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => ({
+				live: {
+					connect: vi.fn((params: Record<string, unknown>) => {
+						const cbs = params.callbacks as Record<string, (...args: unknown[]) => void>;
+						setTimeout(() => cbs.onclose?.({ code: 1006, reason: 'ENOTFOUND' }), 5);
+						return new Promise(() => {});
+					}),
+				},
+			}));
+
+			await expect(session.start()).rejects.toThrow('closed before setupComplete');
+
+			expect(session.sessionManager.state).toBe('CLOSED');
+			expect(onSessionEnd).toHaveBeenCalledWith(
+				expect.objectContaining({ sessionId: 'sess_dial_fails', reason: 'connect_failed' }),
+			);
+			expect(stt.start).toHaveBeenCalledTimes(1);
+			expect(stt.stop).toHaveBeenCalledTimes(1);
+			expect(runtimeStop).toHaveBeenCalledTimes(1);
+
+			// The client listener was stopped: the port can be bound again.
+			const { createServer } = await import('node:net');
+			const probe = createServer();
+			await new Promise<void>((resolve, reject) => {
+				probe.once('error', reject);
+				probe.listen(port, resolve);
+			});
+			await new Promise<void>((resolve) => probe.close(() => resolve()));
+		});
+
+		describe('upstreamLossPolicy on a failed first dial', () => {
+			/** The next dial's socket dies before setupComplete while the SDK's
+			 *  resolve-only connect promise never settles. */
+			async function failNextDial(): Promise<void> {
+				const { GoogleGenAI } = await import('@google/genai');
+				(GoogleGenAI as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => ({
+					live: {
+						connect: vi.fn((params: Record<string, unknown>) => {
+							const cbs = params.callbacks as Record<string, (...args: unknown[]) => void>;
+							setTimeout(() => cbs.onclose?.({ code: 1006, reason: 'ENOTFOUND' }), 5);
+							return new Promise(() => {});
+						}),
+					},
+				}));
+			}
+
+			function stubStt() {
+				return {
+					configure: vi.fn(),
+					start: vi.fn(async () => {}),
+					stop: vi.fn(async () => {}),
+					feedAudio: vi.fn(),
+					commit: vi.fn(),
+					handleInterrupted: vi.fn(),
+					handleTurnComplete: vi.fn(),
+					onTranscript: undefined,
+					onPartialTranscript: undefined,
+				} satisfies STTProvider;
+			}
+
+			it("a failed first dial under 'hold' parks in UPSTREAM_LOST with the client listener still up", async () => {
+				const port = 9927;
+				const onSessionEnd = vi.fn();
+				const stt = stubStt();
+				session = new VoiceSession({
+					sessionId: 'sess_dial_fails_hold',
+					userId: 'user_1',
+					apiKey: 'test-key',
+					agents: [createEchoAgent()],
+					initialAgent: 'echo',
+					port,
+					model: mockModel,
+					sttProvider: stt,
+					upstreamLossPolicy: 'hold',
+					// The host owns recovery, so the client attach below only configures
+					// the client and the session stays parked (an unsuppressed attach
+					// would redial it).
+					suppressClientAutoActions: () => true,
+					hooks: { onSessionEnd },
+				});
+				const upstreamLost = vi.fn();
+				const closed = vi.fn();
+				session.eventBus.subscribe('session.upstreamLost', upstreamLost);
+				session.eventBus.subscribe('session.close', closed);
+				await failNextDial();
+
+				// start() still rejects, but nothing is finalized or torn down.
+				await expect(session.start()).rejects.toThrow('closed before setupComplete');
+
+				expect(session.sessionManager.state).toBe('UPSTREAM_LOST');
+				expect(upstreamLost).toHaveBeenCalledTimes(1);
+				expect(upstreamLost).toHaveBeenCalledWith({
+					sessionId: 'sess_dial_fails_hold',
+					reason: 'connect-failed',
+					detail: expect.stringContaining('closed before setupComplete'),
+				});
+				expect(onSessionEnd).not.toHaveBeenCalled();
+				expect(closed).not.toHaveBeenCalled();
+				// Parked means disconnected: external STT stops, as during a reconnect.
+				expect(stt.stop).toHaveBeenCalledTimes(1);
+
+				// The client listener is still up: a client attaches.
+				const { default: WebSocket } = await import('ws');
+				const ws = new WebSocket(`ws://localhost:${port}`);
+				await new Promise<void>((resolve, reject) => {
+					ws.once('open', () => resolve());
+					ws.once('error', reject);
+				});
+				ws.close();
+				await new Promise<void>((resolve) => ws.once('close', () => resolve()));
+
+				// close() still finalizes the parked session exactly once.
+				await session.close();
+				session = null;
+				expect(onSessionEnd).toHaveBeenCalledTimes(1);
+				expect(closed).toHaveBeenCalledTimes(1);
+				expect(stt.stop).toHaveBeenCalledTimes(2); // the park, then close()'s teardown
+			});
+
+			it("a failed first dial under 'close' keeps the connect_failed teardown", async () => {
+				const port = 9928;
+				const onSessionEnd = vi.fn();
+				const stt = stubStt();
+				session = new VoiceSession({
+					sessionId: 'sess_dial_fails_close',
+					userId: 'user_1',
+					apiKey: 'test-key',
+					agents: [createEchoAgent()],
+					initialAgent: 'echo',
+					port,
+					model: mockModel,
+					sttProvider: stt,
+					upstreamLossPolicy: 'close',
+					hooks: { onSessionEnd },
+				});
+				const upstreamLost = vi.fn();
+				session.eventBus.subscribe('session.upstreamLost', upstreamLost);
+				await failNextDial();
+
+				await expect(session.start()).rejects.toThrow('closed before setupComplete');
+
+				expect(session.sessionManager.state).toBe('CLOSED');
+				expect(onSessionEnd).toHaveBeenCalledWith(
+					expect.objectContaining({ sessionId: 'sess_dial_fails_close', reason: 'connect_failed' }),
+				);
+				expect(upstreamLost).not.toHaveBeenCalled();
+				expect(stt.stop).toHaveBeenCalledTimes(1);
+
+				// The client listener was stopped: the port can be bound again.
+				const { createServer } = await import('node:net');
+				const probe = createServer();
+				await new Promise<void>((resolve, reject) => {
+					probe.once('error', reject);
+					probe.listen(port, resolve);
+				});
+				await new Promise<void>((resolve) => probe.close(() => resolve()));
+			});
+
+			it("orchestrationMode 'actor' with upstreamLossPolicy 'hold' throws ValidationError at construction", () => {
+				const config: VoiceSessionConfig = {
+					sessionId: 'sess_actor_hold',
+					userId: 'user_1',
+					apiKey: 'test-key',
+					agents: [createEchoAgent()],
+					initialAgent: 'echo',
+					port: 9929,
+					model: mockModel,
+					orchestrationMode: 'actor',
+				};
+				expect(() => new VoiceSession({ ...config, upstreamLossPolicy: 'hold' })).toThrow(
+					ValidationError,
+				);
+				// The default policy stays available in actor mode.
+				session = new VoiceSession({ ...config, upstreamLossPolicy: 'close' });
+				expect(session.sessionManager.state).toBe('CREATED');
+			});
+		});
+
+		// CONNECTING → RECONNECTING is legal only for a host recovery that
+		// replaces the pending first dial. A resumption handle is on hand in each
+		// case, so only the reconnector's state guards keep these callbacks from
+		// starting an automatic reconnect.
+		describe('transport callbacks during the first dial', () => {
+			function hostedSession(sessionId: string, upstreamLossPolicy?: 'close' | 'hold') {
+				const s = new VoiceSession({
+					sessionId,
+					userId: 'user_1',
+					apiKey: 'test-key',
+					agents: [createEchoAgent()],
+					initialAgent: 'echo',
+					clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+					model: mockModel,
+					...(upstreamLossPolicy ? { upstreamLossPolicy } : {}),
+				});
+				s.sessionManager.updateResumptionHandle('handle_first_dial');
+				const toStates: string[] = [];
+				s.eventBus.subscribe('session.stateChange', (p) => toStates.push(p.toState));
+				return { s, toStates };
+			}
+
+			/** Install the next dial's fake SDK; `script` drives its callbacks. */
+			async function scriptNextDial(
+				script: (cbs: Record<string, (...args: unknown[]) => void>) => void,
+				settle: 'resolve' | 'never' = 'resolve',
+			): Promise<ReturnType<typeof vi.fn>> {
+				const connect = vi.fn((params: Record<string, unknown>) => {
+					script(params.callbacks as Record<string, (...args: unknown[]) => void>);
+					if (settle === 'never') return new Promise(() => {});
+					return Promise.resolve({
+						sendRealtimeInput: vi.fn(),
+						sendToolResponse: vi.fn(),
+						sendClientContent: vi.fn(),
+						close: vi.fn(),
+					});
+				});
+				const { GoogleGenAI } = await import('@google/genai');
+				(GoogleGenAI as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => ({
+					live: { connect },
+				}));
+				return connect;
+			}
+
+			it('a GoAway delivered while CONNECTING does not enter RECONNECTING, and setup still activates the session', async () => {
+				const { s, toStates } = hostedSession('sess_goaway_connecting');
+				session = s;
+				const goAwayStates: string[] = [];
+				s.eventBus.subscribe('session.goaway', () => goAwayStates.push(s.sessionManager.state));
+				const connect = await scriptNextDial((cbs) => {
+					setTimeout(() => cbs.onmessage?.({ goAway: { timeLeft: '30s' } }), 1);
+					setTimeout(() => cbs.onmessage?.({ setupComplete: { sessionId: 'gs_1' } }), 20);
+				});
+
+				await s.start();
+				await new Promise((r) => setTimeout(r, 50));
+
+				expect(goAwayStates).toEqual(['CONNECTING']);
+				expect(toStates).toEqual(['CONNECTING', 'ACTIVE']);
+				expect(connect).toHaveBeenCalledTimes(1); // no reconnect dial
+			});
+
+			it.each([
+				['close', 'CLOSED'],
+				['hold', 'UPSTREAM_LOST'],
+			] as const)(
+				'a transport close delivered while CONNECTING does not enter RECONNECTING; start() handles the failed dial (policy %s)',
+				async (policy, finalState) => {
+					const { s, toStates } = hostedSession(`sess_close_connecting_${policy}`, policy);
+					session = s;
+					const upstreamLost = vi.fn();
+					s.eventBus.subscribe('session.upstreamLost', upstreamLost);
+					const connect = await scriptNextDial((cbs) => {
+						setTimeout(() => cbs.onclose?.({ code: 1006, reason: 'ENOTFOUND' }), 5);
+					}, 'never');
+
+					await expect(s.start()).rejects.toThrow('closed before setupComplete');
+					// Past the first automatic backoff (1000 ms): nothing redials.
+					await new Promise((r) => setTimeout(r, 1200));
+
+					expect(toStates).toEqual(['CONNECTING', finalState]);
+					expect(connect).toHaveBeenCalledTimes(1);
+					if (policy === 'hold') {
+						expect(upstreamLost).toHaveBeenCalledTimes(1);
+						expect(upstreamLost).toHaveBeenCalledWith(
+							expect.objectContaining({ reason: 'connect-failed' }),
+						);
+					} else {
+						expect(upstreamLost).not.toHaveBeenCalled();
+					}
+				},
+			);
+		});
 	});
 
 	// Background tool completion timing vs Gemini turn boundaries: verify with real server + web client (E2E).
@@ -3149,5 +3737,269 @@ describe('VoiceSession realtimeInputConfig defaulting', () => {
 		// The injected transport's connect was not pre-called with VAD args; we just
 		// confirm it was used by VoiceSession (updateSession was invoked at construct).
 		expect(injected.updateSession).toHaveBeenCalled();
+	});
+
+	function builtInConfig(
+		sessionId: string,
+		port: number,
+		options: Partial<VoiceSessionConfig>,
+	): VoiceSessionConfig {
+		return {
+			sessionId,
+			userId: 'user_1',
+			apiKey: 'test-key',
+			agents: [createEchoAgent()],
+			initialAgent: 'echo',
+			port,
+			model: mockModel,
+			...options,
+		};
+	}
+
+	/** Starts the session and returns the config its Gemini dial sent. */
+	async function startAndReadConnectConfig(s: VoiceSession): Promise<Record<string, unknown>> {
+		const { _getLastConnectConfig } = await import('@google/genai');
+		await s.start();
+		const connectConfig = _getLastConnectConfig();
+		expect(connectConfig).not.toBeNull();
+		return connectConfig as Record<string, unknown>;
+	}
+
+	it('realtimeInputConfig: false resolves to undefined and the dial sends no realtimeInputConfig key', async () => {
+		session = new VoiceSession(
+			builtInConfig('sess_vad_opt_out', 9970, { realtimeInputConfig: false }),
+		);
+		expect(getResolved(session)).toBeUndefined();
+
+		const connectConfig = await startAndReadConnectConfig(session);
+		expect(Object.hasOwn(connectConfig, 'realtimeInputConfig')).toBe(false);
+
+		// A reconnect dials again from the transport's retained config.
+		const { _getLastConnectConfig } = await import('@google/genai');
+		await (session as unknown as { transport: LLMTransport }).transport.reconnect();
+		const redialConfig = _getLastConnectConfig() as Record<string, unknown>;
+		expect(redialConfig).not.toBe(connectConfig);
+		expect(Object.hasOwn(redialConfig, 'realtimeInputConfig')).toBe(false);
+	});
+
+	it('compressionConfig: {} reaches the connect config as { slidingWindow: {} }', async () => {
+		session = new VoiceSession(builtInConfig('sess_compression', 9971, { compressionConfig: {} }));
+
+		const connectConfig = await startAndReadConnectConfig(session);
+		// Strict: an unset threshold must be absent, not present as undefined.
+		expect(connectConfig.contextWindowCompression).toStrictEqual({ slidingWindow: {} });
+	});
+
+	it('mediaResolution reaches the connect config', async () => {
+		session = new VoiceSession(
+			builtInConfig('sess_media_resolution', 9972, { mediaResolution: 'MEDIA_RESOLUTION_LOW' }),
+		);
+
+		const connectConfig = await startAndReadConnectConfig(session);
+		expect(connectConfig.mediaResolution).toBe('MEDIA_RESOLUTION_LOW');
+	});
+
+	it.each([
+		['maps verbatim with no default sensitivity merged', { silenceDurationMs: 200 }, 9973],
+		['sends an empty automaticActivityDetection when empty', {}, 9974],
+		['passes disabled: true through', { disabled: true }, 9975],
+		['keeps zero-valued durations', { silenceDurationMs: 0, prefixPaddingMs: 0 }, 9976],
+	])('vadConfig %s', async (_label, vadConfig, port) => {
+		session = new VoiceSession(builtInConfig(`sess_vad_${port}`, port, { vadConfig }));
+
+		const connectConfig = await startAndReadConnectConfig(session);
+		expect(connectConfig.realtimeInputConfig).toEqual({ automaticActivityDetection: vadConfig });
+	});
+
+	it('throws ValidationError when realtimeInputConfig and vadConfig are both supplied', () => {
+		expect(
+			() =>
+				new VoiceSession(
+					builtInConfig('sess_vad_both', 9977, {
+						realtimeInputConfig: { automaticActivityDetection: { silenceDurationMs: 500 } },
+						vadConfig: { silenceDurationMs: 200 },
+					}),
+				),
+		).toThrow(ValidationError);
+	});
+
+	it('throws ValidationError when realtimeInputConfig: false and vadConfig are both supplied', () => {
+		expect(
+			() =>
+				new VoiceSession(
+					builtInConfig('sess_vad_both_off', 9978, {
+						realtimeInputConfig: false,
+						vadConfig: { silenceDurationMs: 200 },
+					}),
+				),
+		).toThrow(ValidationError);
+	});
+});
+
+describe('VoiceSession direct_rtc with werift_opus', () => {
+	const ENGINE_IMPORT = '#direct-rtc';
+	let session: VoiceSession | null = null;
+
+	afterEach(async () => {
+		vi.doUnmock(ENGINE_IMPORT);
+		vi.resetModules();
+		if (session) {
+			await session.close();
+			session = null;
+		}
+	});
+
+	it('constructs without configuration and reports RTC audio not ready until signaling', async () => {
+		const createWeriftOpusRtcEngine = vi.fn(() => {
+			const engine = {
+				mediaReady: false,
+				handleClientSignaling: vi.fn(async () => {
+					engine.mediaReady = true;
+				}),
+				sendAssistantPcm: vi.fn(),
+				dispose: vi.fn(async () => {}),
+			};
+			return engine;
+		});
+		vi.doMock(ENGINE_IMPORT, () => ({ createWeriftOpusRtcEngine }));
+
+		session = new VoiceSession({
+			sessionId: 'sess_rtc_opus',
+			userId: 'user_1',
+			apiKey: 'test-key',
+			agents: [createEchoAgent()],
+			initialAgent: 'echo',
+			model: mockModel,
+			transport: createMutableServerTurnTransport(),
+			clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			clientMedia: { kind: 'direct_rtc', rtcAudio: 'werift_opus' },
+		});
+		const channel = (session as unknown as { directRtcChannel: DirectRtcClientChannel | null })
+			.directRtcChannel;
+		expect(channel).toBeInstanceOf(DirectRtcClientChannel);
+		expect((channel as unknown as { engine: unknown }).engine).toBeInstanceOf(LazyRtcAudioEngine);
+		expect(channel?.isRtcAudioReady).toBe(false);
+		// Nothing is loaded from the engine entry before the first signaling message.
+		expect(createWeriftOpusRtcEngine).not.toHaveBeenCalled();
+
+		session.feedJsonFromClient({ type: 'rtc.offer', sdp: 'v=0' });
+		await vi.waitFor(() => expect(channel?.isRtcAudioReady).toBe(true));
+		expect(createWeriftOpusRtcEngine).toHaveBeenCalledOnce();
+	});
+
+	it('on the default Gemini transport, builds the engine with the transport PCM rates and routes engine PCM through the audio router to transport.sendAudio', async () => {
+		const captured: RtcAudioEngineOptions[] = [];
+		const createWeriftOpusRtcEngine = vi.fn((options: RtcAudioEngineOptions): RtcAudioEngine => {
+			captured.push(options);
+			return {
+				mediaReady: true,
+				handleClientSignaling: vi.fn(async () => {}),
+				sendAssistantPcm: vi.fn(),
+				dispose: vi.fn(async () => {}),
+			};
+		});
+		vi.doMock(ENGINE_IMPORT, () => ({ createWeriftOpusRtcEngine }));
+
+		// No `transport`: the session builds its default Gemini Live transport.
+		session = new VoiceSession({
+			sessionId: 'sess_rtc_opus_gemini',
+			userId: 'user_1',
+			apiKey: 'test-key',
+			agents: [createEchoAgent()],
+			initialAgent: 'echo',
+			model: mockModel,
+			clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			clientMedia: { kind: 'direct_rtc', rtcAudio: 'werift_opus' },
+		});
+		const internals = session as unknown as {
+			transport: LLMTransport;
+			audioRouter: { handleFromClient(data: Buffer, source?: 'websocket' | 'rtc'): void };
+		};
+		const sendAudio = vi.spyOn(internals.transport, 'sendAudio');
+		const handleFromClient = vi.spyOn(internals.audioRouter, 'handleFromClient');
+
+		await session.start();
+		session.notifyClientConnected();
+		session.feedJsonFromClient({ type: 'rtc.offer', sdp: 'v=0' });
+		await vi.waitFor(() => expect(createWeriftOpusRtcEngine).toHaveBeenCalledOnce());
+
+		expect(captured[0].inputPcmSampleRate).toBe(16000);
+		expect(captured[0].inputPcmSampleRate).toBe(internals.transport.audioFormat.inputSampleRate);
+		expect(captured[0].outputPcmSampleRate).toBe(internals.transport.audioFormat.outputSampleRate);
+
+		// Decoded mic PCM from the engine takes the audio router's 'rtc' source path
+		// straight to the LLM transport (already at the transport's input rate).
+		const frame = Buffer.alloc(480 * 2);
+		for (let i = 0; i < frame.length; i += 2) frame.writeInt16LE(2400, i);
+		captured[0].onInboundPcm(frame);
+		expect(handleFromClient).toHaveBeenCalledWith(frame, 'rtc');
+		expect(sendAudio).toHaveBeenCalledOnce();
+		expect(sendAudio).toHaveBeenCalledWith(frame.toString('base64'));
+	});
+});
+
+describe('VoiceSession with a synchronous updateSession and the deprecated subagent model', () => {
+	let session: VoiceSession | null = null;
+
+	afterEach(async () => {
+		if (session) {
+			await session.close();
+			session = null;
+		}
+	});
+
+	it('calls a synchronous updateSession at construction and awaits it on updateInstructions', async () => {
+		const updateSession = vi.fn((_config: SessionUpdate): void => {});
+		session = new VoiceSession({
+			sessionId: 'sess_sync_update',
+			userId: 'user_1',
+			apiKey: 'test-key',
+			agents: [createEchoAgent()],
+			initialAgent: 'echo',
+			port: 9979,
+			model: mockModel,
+			transport: { ...createMutableServerTurnTransport(), updateSession },
+		});
+
+		expect(updateSession).toHaveBeenCalledWith(
+			expect.objectContaining({ instructions: 'You are an echo agent' }),
+		);
+
+		await session.updateInstructions('Be brief');
+		expect(updateSession).toHaveBeenLastCalledWith({ instructions: 'Be brief' });
+	});
+
+	it('logs one deprecation warning per subagent that sets model without reasoningModel', () => {
+		const lines: string[] = [];
+		session = new VoiceSession({
+			sessionId: 'sess_subagent_model',
+			userId: 'user_1',
+			apiKey: 'test-key',
+			agents: [createEchoAgent()],
+			initialAgent: 'echo',
+			port: 9980,
+			model: mockModel,
+			log: (line) => lines.push(line),
+			subagentConfigs: {
+				deep_research: {
+					name: 'researcher',
+					instructions: 'Research',
+					tools: {},
+					model: 'legacy-model-name',
+				},
+				lookup: {
+					name: 'looker',
+					instructions: 'Look up',
+					tools: {},
+					model: 'legacy-model-name',
+					reasoningModel: mockModel,
+				},
+				summarize: { name: 'summarizer', instructions: 'Summarize', tools: {} },
+			},
+		});
+
+		const warnings = lines.filter((line) => line.includes('SubagentConfig.model'));
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain('subagent "researcher"');
 	});
 });

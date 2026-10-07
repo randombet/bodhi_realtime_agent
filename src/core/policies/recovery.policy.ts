@@ -5,10 +5,11 @@
  * reconnect budget); this module owns only the verdict at fire time and at
  * gate release.
  *
- * THE HOLD PREDICATE IS FULL-GREETING SUPPRESSION ONLY — callers must pass
- * the uninterruptible-greeting state, never the ≤5 s AEC grace or the
- * pre-first-audio window (recovery proceeds through short grace windows
- * today, harmlessly; holding there would be an unapproved divergence).
+ * THE GREETING HOLD PREDICATE IS FULL-GREETING SUPPRESSION ONLY — callers
+ * must pass the uninterruptible-greeting state, never the ≤5 s AEC grace or
+ * the pre-first-audio window (recovery proceeds through short grace windows
+ * today, harmlessly; holding there would be an unapproved divergence). The
+ * only other hold input is the synthetic-output hold of a host recovery.
  *
  * Held-state override (H4): while a recovery is held, ambiguous model
  * activity must NOT cancel it or clear the retained candidate — the
@@ -24,13 +25,19 @@ export type WatchdogFireVerdict = 'defer-speech' | 'hold-gate' | 'recover';
 
 /** Fire-time decision, evaluated in priority order: live user speech defers
  *  (R7a, unchanged); full-greeting suppression holds (H4 — recovery output
- *  must not land inside an open greeting turn); otherwise recover. */
+ *  must not land inside an open greeting turn), and so does an active
+ *  synthetic-output hold after a host recovery (a replay or nudge is
+ *  synthetic output the hold forbids until fresh user evidence); otherwise
+ *  recover. Both holds share one verdict: the held recovery is re-evaluated
+ *  when its hold releases. */
 export function decideOnWatchdogFire(facts: {
 	speechActive: boolean;
 	greetingSuppressionArmed: boolean;
+	syntheticHoldActive: boolean;
 }): WatchdogFireVerdict {
 	if (facts.speechActive) return 'defer-speech';
 	if (facts.greetingSuppressionArmed) return 'hold-gate';
+	if (facts.syntheticHoldActive) return 'hold-gate';
 	return 'recover';
 }
 

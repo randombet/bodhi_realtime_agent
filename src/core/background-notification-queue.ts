@@ -7,6 +7,8 @@ export type QueuePriority = 'normal' | 'high';
 export interface SendOrQueueOptions {
 	/** Delivery priority. 'high' attempts immediate delivery or front-of-queue. Default: 'normal'. */
 	priority?: QueuePriority;
+	/** Tool call ID for deduplication. If provided, prevents duplicate notifications for the same tool call. */
+	toolCallId?: string;
 }
 
 /**
@@ -24,6 +26,11 @@ export class BackgroundNotificationQueue {
 	private queue: Array<{ turns: Turn[]; turnComplete: boolean; priority: QueuePriority }> = [];
 	private audioReceived = false;
 	private interrupted = false;
+	/** While held, nothing is delivered: every notification queues and turn
+	 *  completion flushes nothing until the hold is released. */
+	private held = false;
+	/** Track tool calls that have already been notified to prevent duplicates. */
+	private sentNotifications = new Set<string>();
 
 	constructor(
 		private sendContent: (turns: Turn[], turnComplete: boolean) => void,
@@ -38,9 +45,32 @@ export class BackgroundNotificationQueue {
 	 * High-priority messages attempt immediate delivery when the transport
 	 * supports message truncation (OpenAI). On non-truncation transports (Gemini),
 	 * high-priority messages are queued at the front of the queue.
+	 *
+	 * Deduplication: If a toolCallId is provided and has already been notified,
+	 * the notification is silently skipped to prevent race conditions where a
+	 * background task completes synchronously before audio generation begins.
 	 */
 	sendOrQueue(turns: Turn[], turnComplete: boolean, options?: SendOrQueueOptions): void {
 		const priority = options?.priority ?? 'normal';
+		const toolCallId = options?.toolCallId;
+
+		// Prevent duplicate notifications for the same tool call
+		if (toolCallId && this.sentNotifications.has(toolCallId)) {
+			this.log(`Skipping duplicate notification for tool call ${toolCallId}`);
+			return;
+		}
+
+		// Mark as sent/queued to prevent duplicates
+		if (toolCallId) {
+			this.sentNotifications.add(toolCallId);
+		}
+
+		if (this.held) {
+			this.log('Notification delivery held — queuing background notification');
+			if (priority === 'high') this.queue.unshift({ turns, turnComplete, priority });
+			else this.queue.push({ turns, turnComplete, priority });
+			return;
+		}
 
 		if (priority === 'high') {
 			if (this.audioReceived && !this.messageTruncation) {
@@ -61,6 +91,15 @@ export class BackgroundNotificationQueue {
 		} else {
 			this.sendContent(turns, turnComplete);
 		}
+	}
+
+	/**
+	 * Hold or release delivery. While held, `sendOrQueue` queues everything
+	 * (high priority at the front) and `onTurnComplete` flushes nothing.
+	 * Releasing does not flush by itself: the next turn completion does.
+	 */
+	setHeld(held: boolean): void {
+		this.held = held;
 	}
 
 	/** Mark that the first audio chunk has been received this turn. */
@@ -95,9 +134,11 @@ export class BackgroundNotificationQueue {
 	/** Drop all queued notifications (used on session close). */
 	clear(): void {
 		this.queue = [];
+		this.sentNotifications.clear();
 	}
 
 	private flushOne(): void {
+		if (this.held) return;
 		const notification = this.queue.shift();
 		if (notification) {
 			this.log(`Flushing queued background notification (${this.queue.length} remaining)`);

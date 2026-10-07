@@ -15,6 +15,7 @@ import type {
 	TransportToolCall,
 	TransportToolResult,
 } from '../../src/types/index.js';
+import type { GenerationEndReason } from '../../src/types/transport.js';
 
 describe('LLMTransport type definitions', () => {
 	it('TransportCapabilities has all 7 boolean fields', () => {
@@ -143,6 +144,94 @@ describe('LLMTransport type definitions', () => {
 		expect(stub.audioFormat.outputSampleRate).toBe(24000);
 	});
 
+	it('accepts a synchronous updateSession, and awaiting it resolves', async () => {
+		const applied: SessionUpdate[] = [];
+		const syncTransport: LLMTransport = {
+			capabilities: {
+				messageTruncation: false,
+				turnDetection: true,
+				userTranscription: true,
+				inPlaceSessionUpdate: true,
+				sessionResumption: false,
+				contextCompression: false,
+				groundingMetadata: false,
+			},
+			audioFormat: {
+				inputSampleRate: 16000,
+				outputSampleRate: 24000,
+				channels: 1,
+				bitDepth: 16,
+				encoding: 'pcm',
+			},
+			isConnected: false,
+			connect: vi.fn(),
+			disconnect: vi.fn(),
+			reconnect: vi.fn(),
+			sendAudio: vi.fn(),
+			commitAudio: vi.fn(),
+			clearAudio: vi.fn(),
+			updateSession: (config: SessionUpdate): void => {
+				applied.push(config);
+			},
+			transferSession: vi.fn(),
+			sendContent: vi.fn(),
+			sendFile: vi.fn(),
+			sendToolResult: vi.fn(),
+			triggerGeneration: vi.fn(),
+		};
+
+		const result = await syncTransport.updateSession({});
+
+		expect(result).toBeUndefined();
+		expect(applied).toEqual([{}]);
+	});
+
+	it('the live-text and inline-file members are optional', () => {
+		// A transport shaped before these members existed still satisfies the
+		// interface; one that has them must use the declared signatures.
+		const withoutThem: LLMTransport = {
+			capabilities: {
+				messageTruncation: false,
+				turnDetection: true,
+				userTranscription: true,
+				inPlaceSessionUpdate: false,
+				sessionResumption: false,
+				contextCompression: false,
+				groundingMetadata: false,
+			},
+			audioFormat: {
+				inputSampleRate: 16000,
+				outputSampleRate: 24000,
+				channels: 1,
+				bitDepth: 16,
+				encoding: 'pcm',
+			},
+			isConnected: false,
+			connect: vi.fn(),
+			disconnect: vi.fn(),
+			reconnect: vi.fn(),
+			sendAudio: vi.fn(),
+			commitAudio: vi.fn(),
+			clearAudio: vi.fn(),
+			updateSession: vi.fn(async () => {}),
+			transferSession: vi.fn(),
+			sendContent: vi.fn(),
+			sendFile: vi.fn(),
+			sendToolResult: vi.fn(),
+			triggerGeneration: vi.fn(),
+		};
+		const withThem: LLMTransport = {
+			...withoutThem,
+			sendLiveText: (turns: ContentTurn[]) => turns.length > 0,
+			sendInlineFile: (_base64Data: string, _mimeType: string) => {},
+		};
+
+		expect(withoutThem.sendLiveText).toBeUndefined();
+		expect(withoutThem.sendInlineFile).toBeUndefined();
+		expect(typeof withThem.sendLiveText).toBe('function');
+		expect(typeof withThem.sendInlineFile).toBe('function');
+	});
+
 	it('LLMTransportConfig supports all auth types', () => {
 		const apiKeyConfig: LLMTransportConfig = {
 			auth: { type: 'api_key', apiKey: 'test' },
@@ -245,6 +334,43 @@ describe('LLMTransport type definitions', () => {
 		expect(stub.capabilities.textResponseModality).toBe(true);
 		stub.onTextOutput?.('hello');
 		expect(stub.onTextOutput).toHaveBeenCalledWith('hello');
+	});
+
+	it('LLMTransport accepts the widened onModelTurnStart and the generation pair', () => {
+		// Existing `() => void` handlers stay assignable to the widened callback.
+		const legacyStart: LLMTransport['onModelTurnStart'] = () => {};
+		const starts: Array<string | undefined> = [];
+		const ends: Array<[string, GenerationEndReason]> = [];
+		const stub: Pick<LLMTransport, 'onModelTurnStart' | 'onGenerationStart' | 'onGenerationEnd'> = {
+			onModelTurnStart: (generationId?: string) => starts.push(generationId),
+			onGenerationStart: (generationId: string) => starts.push(generationId),
+			onGenerationEnd: (generationId, reason) => ends.push([generationId, reason]),
+		};
+
+		legacyStart?.();
+		stub.onModelTurnStart?.();
+		stub.onModelTurnStart?.('gen_0');
+		stub.onGenerationStart?.('gen_0');
+		for (const reason of [
+			'generationComplete',
+			'interrupted',
+			'superseded',
+			'disconnected',
+		] satisfies GenerationEndReason[]) {
+			stub.onGenerationEnd?.('gen_0', reason);
+		}
+		// Never invoked: only type-checked.
+		const _rejectsUnknownReason = () =>
+			// @ts-expect-error — turnComplete is a turn boundary, not a GenerationEndReason.
+			stub.onGenerationEnd?.('gen_0', 'turnComplete');
+
+		expect(starts).toEqual([undefined, 'gen_0', 'gen_0']);
+		expect(ends).toEqual([
+			['gen_0', 'generationComplete'],
+			['gen_0', 'interrupted'],
+			['gen_0', 'superseded'],
+			['gen_0', 'disconnected'],
+		]);
 	});
 });
 

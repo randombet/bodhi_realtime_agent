@@ -170,6 +170,23 @@ export class ConversationContext {
 		}
 	}
 
+	/**
+	 * Drop every item and start the timeline over: the checkpoint returns to 0
+	 * and all pending reservations are forgotten, so the next item added is the
+	 * first one `getItemsSinceCheckpoint()` returns. The summary is kept.
+	 * Persist anything still unflushed before calling this; it discards items
+	 * whether or not a history store has seen them.
+	 *
+	 * @returns The number of items removed.
+	 */
+	clear(): number {
+		const removed = this._items.length;
+		this._items = [];
+		this.checkpointIndex = 0;
+		this.pendingIds.clear();
+		return removed;
+	}
+
 	/** Store a compressed summary and evict all items before the current checkpoint. */
 	setSummary(summary: string): void {
 		this._summary = summary;

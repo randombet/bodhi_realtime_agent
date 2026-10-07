@@ -5,6 +5,16 @@ import type { ToolDefinition } from './tool.js';
  *  following / accuracy. `low` is the documented production default. */
 export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
 
+/** Why a model generation ended (see `LLMTransport.onGenerationEnd`):
+ *  `generationComplete` — the provider said so; `interrupted` — barged in on;
+ *  `superseded` — the model began a new answer without ever sending
+ *  `generationComplete`; `disconnected` — the connection went away with one open. */
+export type GenerationEndReason =
+	| 'generationComplete'
+	| 'interrupted'
+	| 'superseded'
+	| 'disconnected';
+
 /** Static capabilities — orchestrator branches on these, never on provider names. */
 export interface TransportCapabilities {
 	/** Can truncate server-side message at audio playback position (OpenAI: yes, Gemini: no). */
@@ -414,6 +424,74 @@ export interface RealtimeLLMUsageEvent {
 	serverTurnWindingDown?: boolean;
 }
 
+/** Per-slot upstream send accounting. Counts and bytes are split
+ *  attempted-vs-queued so dropped work is visible, not averaged away:
+ *  `queued` increments only after the SDK send returned without throwing.
+ *  Wire estimates count payload encoding only (base64/UTF-8), no envelope. */
+export interface UpstreamSlotCounters {
+	attempted: number;
+	queued: number;
+	skippedNoSession: number;
+	threw: number;
+	attemptedRawBytes: number;
+	queuedRawBytes: number;
+	attemptedWireBytesEstimate: number;
+	queuedWireBytesEstimate: number;
+	lastAttemptedAt: number | null;
+	lastQueuedAt: number | null;
+	lastSkippedAt: number | null;
+	lastThrewAt: number | null;
+}
+
+/** Upstream (agent→provider) send counters, one slot per realtime-input kind.
+ *  Reset when a new connection completes setup — a new socket starts at zero. */
+export interface UpstreamCounters {
+	audio: UpstreamSlotCounters;
+	video: UpstreamSlotCounters & { unsupportedMime: number };
+	text: UpstreamSlotCounters & { skippedEmpty: number };
+}
+
+/** Connection-lifecycle facts, one event per observable transition.
+ *
+ * Variants are split rather than made optional because `transportGeneration`
+ * is minted only on successful setup: a socket that dies BEFORE setupComplete
+ * has no generation, and a single close variant requiring one could not
+ * represent exactly the failures these events exist to preserve. A consumer
+ * correlates by `connectAttemptId`; more than one event can describe one
+ * attempt (e.g. attempt-close followed by setup-failed). */
+export type ConnectionLifecycleEvent =
+	| { kind: 'attempt'; connectAttemptId: string; handleSupplied: boolean }
+	| { kind: 'setup-ok'; connectAttemptId: string; transportGeneration: number }
+	| { kind: 'setup-failed'; connectAttemptId: string; reason?: string }
+	| { kind: 'attempt-close'; connectAttemptId: string; code?: number; reason?: string }
+	| {
+			kind: 'generation-close';
+			connectAttemptId: string;
+			transportGeneration: number;
+			code?: number;
+			reason?: string;
+	  };
+
+/** Point-in-time transport diagnostics; safe to sample on any tick. */
+export interface TransportDiagnostics {
+	upstream: UpstreamCounters;
+	/** Increments on each connection that completes setup. */
+	transportGeneration: number;
+}
+
+/** Provider-reported token accounting, in the fields every provider shares.
+ *
+ * `promptTokenCount` is the standing prompt size — what to watch for context
+ * growth. `totalTokenCount` adds response tokens and does not describe it.
+ * Providers send more; the object passes through whole, so cast to the
+ * provider's own type (e.g. Gemini's `LiveUsageMetadata`) to read the rest.
+ * The raw counterpart of the normalized `RealtimeLLMUsageEvent`: a transport
+ * reporting both fires both from the same server message. */
+export interface TransportUsageMetadata {
+	promptTokenCount?: number;
+	totalTokenCount?: number;
+}
+
 /**
  * Provider-agnostic interface for realtime LLM transports.
  *
@@ -448,6 +526,23 @@ export interface LLMTransport {
 	 *  Distinct from reconnect recovery, which transports drive internally from `ReconnectState`. */
 	replayHistory?(items: readonly ReplayItem[]): void;
 	readonly isConnected: boolean;
+
+	// --- Dial-generation fence (optional; GeminiLiveTransport implements it) ---
+	/** Synchronously strand the incumbent connection — advance the dial
+	 *  generation so its callbacks, an in-flight `reconnect()` continuation and a
+	 *  later-resolving dial can no longer install or deliver anything, detach the
+	 *  session, and drop the resumption handle — then close it within a bounded
+	 *  time. Never rejects: `'closed'` when the close completed, `'forced'` on
+	 *  timeout or close error. Unlike `disconnect()`, never awaited unboundedly. */
+	abortIncumbent?(): Promise<'closed' | 'forced'>;
+	/** Dial counter: advances per dial and when the current dial fails. */
+	readonly currentDialGen?: number;
+	/** Post-setup generation counter (advances only on a completed setup). */
+	readonly currentTransportGeneration?: number;
+	/** Drop every copy of the session resumption handle the transport holds,
+	 *  so the next dial opens a fresh server session instead of resuming the
+	 *  current one. Does not touch the connection itself. */
+	clearResumption?(): void;
 
 	// --- Audio ---
 	sendAudio(base64Data: string): void;
@@ -516,8 +611,10 @@ export interface LLMTransport {
 	 *  and resolves immediately. The merged config is sent in the single
 	 *  `session.update` issued at connect time.
 	 *  Post-connect: serialized via the transport's internal FIFO queue; each
-	 *  call produces one wire `session.update` and awaits its ack. */
-	updateSession(config: SessionUpdate): Promise<void>;
+	 *  call produces one wire `session.update` and awaits its ack.
+	 *  A custom transport may instead apply the update synchronously and
+	 *  return `void`. */
+	updateSession(config: SessionUpdate): void | Promise<void>;
 
 	// --- Agent transfer (transport decides: in-place vs reconnect) ---
 	transferSession(config: SessionUpdate, state?: ReconnectState): Promise<void>;
@@ -525,8 +622,20 @@ export interface LLMTransport {
 	// --- Content injection (greetings, directives, text input — NOT replay) ---
 	sendContent(turns: ContentTurn[], turnComplete?: boolean): void;
 
+	/** Send live, generation-triggering text through the provider's realtime
+	 *  input. Returns `true` when the send was dispatched or accepted into a
+	 *  send buffer (flushed best effort) and `false` when it was not (no text,
+	 *  not connected, or a send that failed). Never throws. Optional: a
+	 *  transport without it takes live text through `sendContent(turns, true)`. */
+	sendLiveText?(turns: ContentTurn[]): boolean;
+
 	// --- File/image injection ---
 	sendFile(base64Data: string, mimeType: string): void;
+
+	/** Send a file of any MIME type inline in the conversation content, without
+	 *  completing the turn (documents that `sendFile`'s realtime media path
+	 *  cannot carry). Optional: without it, such files go to `sendFile`. */
+	sendInlineFile?(base64Data: string, mimeType: string): void;
 
 	// --- Tool interaction ---
 	sendToolResult(result: TransportToolResult): void;
@@ -604,12 +713,22 @@ export interface LLMTransport {
 	onClose?: (code?: number, reason?: string) => void;
 
 	// --- Turn lifecycle callbacks ---
-	/** Fires when the model begins any response (audio, tool call, etc.).
-	 *  Used by VoiceSession to trigger STT provider commit. */
-	onModelTurnStart?: () => void;
+	/** Fires when the model begins a response (audio, text, tool call).
+	 *  Used by VoiceSession to trigger STT provider commit.
+	 *  @param generationId The generation that opened, on transports that model
+	 *  generations (GeminiLiveTransport: once per generation, with the same id
+	 *  as `onGenerationStart`, so a tool call after `turnComplete` that finishes
+	 *  the same answer does not fire it again); `undefined` elsewhere. */
+	onModelTurnStart?: (generationId?: string) => void;
+	/** A model generation opened. Paired with exactly one `onGenerationEnd`.
+	 *  A generation is one answer: it outlives the provider's turn boundary,
+	 *  because a tool call that finishes the answer can arrive after it. */
+	onGenerationStart?: (generationId: string) => void;
+	/** That generation closed, and why. Fires exactly once per start. */
+	onGenerationEnd?: (generationId: string, reason: GenerationEndReason) => void;
 
 	/** Fires once per model response, on the FIRST audio chunk emitted to the
-	 *  client. Distinct from `onModelTurnStart` (which fires on any response part,
+	 *  client. Distinct from `onModelTurnStart` (which fires as a response begins,
 	 *  including tool-only turns) — this marks the moment audio actually begins, the
 	 *  anchor for TTS-first-audio / stop-to-first-audio latency. Transports reset
 	 *  their per-response "audio started" flag when a new response begins. */
@@ -648,6 +767,18 @@ export interface LLMTransport {
 
 	/** Optional: fires when the provider reports token or duration usage for billing/observability. */
 	onRealtimeLLMUsage?: (usage: RealtimeLLMUsageEvent) => void;
+	/** Optional: the provider's raw usage payload, once per server message that
+	 *  carries it (including messages that also carry audio, a tool call or
+	 *  goAway). Declared by GeminiLiveTransport only. */
+	onUsageMetadata?: (usage: TransportUsageMetadata) => void;
+
+	// --- Optional diagnostics (only on supporting transports; GeminiLiveTransport) ---
+	/** Connection-lifecycle facts (attempt / setup / close), correlated by
+	 *  `connectAttemptId`. */
+	onConnectionLifecycle?: (event: ConnectionLifecycleEvent) => void;
+	/** Snapshot of the upstream send counters and the current transport
+	 *  generation. Absent on transports that do not count sends. */
+	getDiagnostics?(): TransportDiagnostics;
 
 	// --- Reasoning lifecycle (reasoning-capable models only) ---
 	/** Fires when the model begins emitting its hidden reasoning trace

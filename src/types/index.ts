@@ -67,9 +67,16 @@ export type { RtcClientSignalingMessage, RtcServerSignalingMessage } from './rtc
 export { tryParseRtcClientSignaling } from './rtc-signaling.js';
 
 export type {
+	ClientSocketHealth,
 	IClientChannel,
 	SessionClientSender,
 } from './session-client.js';
+
+export type {
+	AssistantOutputInterceptor,
+	AudioInputObserver,
+	AudioOutputObserver,
+} from './session-seams.js';
 
 export type {
 	PendingToolCall,
@@ -85,6 +92,7 @@ export type { FunctionBehavior, ToolContext, ToolDefinition, ToolExecution } fro
 export type {
 	AudioFormatSpec,
 	CacheConfigCommon,
+	ConnectionLifecycleEvent,
 	ContentTurn,
 	LLMTransport,
 	LLMTransportConfig,
@@ -101,6 +109,10 @@ export type {
 	STTProvider,
 	TransportAuth,
 	TransportCapabilities,
+	TransportDiagnostics,
+	TransportUsageMetadata,
+	UpstreamCounters,
+	UpstreamSlotCounters,
 	LLMTransportError,
 	TransportPendingToolCall,
 	TransportToolCall,
