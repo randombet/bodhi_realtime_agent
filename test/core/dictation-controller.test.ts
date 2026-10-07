@@ -20,14 +20,18 @@ import type {
 interface MockTransport extends LLMTransport {
 	__toolResults: TransportToolResult[];
 	__content: Array<{ turns: unknown; turnComplete?: boolean }>;
+	__liveText: unknown[];
 	__quiesceCount: number;
 	__unquiesceCount: number;
 	__clearAudioCount: number;
 }
 
-function createMockTransport(opts: { quiescible?: boolean } = {}): MockTransport {
+function createMockTransport(
+	opts: { quiescible?: boolean; liveText?: boolean } = {},
+): MockTransport {
 	const toolResults: TransportToolResult[] = [];
 	const content: Array<{ turns: unknown; turnComplete?: boolean }> = [];
+	const liveText: unknown[] = [];
 	let quiesceCount = 0;
 	let unquiesceCount = 0;
 	let clearAudioCount = 0;
@@ -50,6 +54,13 @@ function createMockTransport(opts: { quiescible?: boolean } = {}): MockTransport
 		triggerGeneration: vi.fn(),
 	};
 
+	if (opts.liveText !== false) {
+		transport.sendLiveText = (turns) => {
+			liveText.push(turns);
+			return true;
+		};
+	}
+
 	if (opts.quiescible !== false) {
 		transport.quiesce = async () => {
 			quiesceCount += 1;
@@ -62,6 +73,7 @@ function createMockTransport(opts: { quiescible?: boolean } = {}): MockTransport
 	const result = transport as MockTransport;
 	Object.defineProperty(result, '__toolResults', { get: () => toolResults });
 	Object.defineProperty(result, '__content', { get: () => content });
+	Object.defineProperty(result, '__liveText', { get: () => liveText });
 	Object.defineProperty(result, '__quiesceCount', { get: () => quiesceCount });
 	Object.defineProperty(result, '__unquiesceCount', { get: () => unquiesceCount });
 	Object.defineProperty(result, '__clearAudioCount', { get: () => clearAudioCount });
@@ -130,6 +142,7 @@ function createMockSttProvider(): MockSttProvider {
 function build(
 	overrides: Partial<DictationControllerConfig> = {},
 	depOverrides: Partial<DictationControllerDeps> = {},
+	transportOpts: { liveText?: boolean } = {},
 ): {
 	controller: DictationController;
 	transport: MockTransport;
@@ -138,7 +151,7 @@ function build(
 	drainCount: () => number;
 	reportError: ReturnType<typeof vi.fn>;
 } {
-	const transport = createMockTransport();
+	const transport = createMockTransport(transportOpts);
 	const whisper = createMockSttProvider();
 	const eventBus = new EventBus();
 	let drainCount = 0;
@@ -249,6 +262,27 @@ describe('DictationController', () => {
 			// The gated turnComplete=true content drained on re-entry to agent mode.
 			expect(transport.__content).toHaveLength(2);
 			expect(transport.__content[1]?.turnComplete).toBe(true);
+		});
+
+		it('sendLiveText outside agent mode returns false and sends nothing', async () => {
+			const { controller, transport } = build({ transcriptionMode: 'transcription' });
+			expect(transport.sendLiveText?.([{ role: 'user', text: 'gated' }])).toBe(false);
+			expect(transport.__liveText).toHaveLength(0);
+			// Not queued: re-entering agent mode sends nothing either.
+			await controller.exitTranscriptionMode();
+			expect(transport.__liveText).toHaveLength(0);
+		});
+
+		it('sendLiveText in agent mode passes through to the raw method', () => {
+			const { transport } = build();
+			const turns = [{ role: 'user' as const, text: 'hello' }];
+			expect(transport.sendLiveText?.(turns)).toBe(true);
+			expect(transport.__liveText).toEqual([turns]);
+		});
+
+		it('leaves a transport without sendLiveText without one', () => {
+			const { transport } = build({}, {}, { liveText: false });
+			expect(transport.sendLiveText).toBeUndefined();
 		});
 	});
 

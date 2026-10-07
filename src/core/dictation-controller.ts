@@ -29,7 +29,8 @@ export interface DictationControllerConfig {
  */
 export interface DictationControllerDeps {
 	/** LLM transport — quiesce/unquiesce/clearAudio for cross-provider mode flips,
-	 *  and the `sendToolResult` / `sendContent` instances the controller wraps. */
+	 *  and the `sendToolResult` / `sendContent` / `sendLiveText` instances the
+	 *  controller wraps. */
 	transport: LLMTransport;
 	/** Audio router — `drainTransitionBufferToWhisper()` flushes the buffered
 	 *  transition frames on entry to transcription mode. Reached through a getter
@@ -46,9 +47,9 @@ export interface DictationControllerDeps {
  * Owns the transcription/dictation subsystem as one cohesive unit: the
  * `internalMode` state machine, the dictation buffer, the Whisper provider
  * lifecycle, and the §3.5 "no response.create while not in agent mode"
- * invariant (enforced by the `sendToolResult` / `sendContent` interception
- * wrappers it installs on the transport, plus the pending-work queues drained
- * on re-entry to agent mode).
+ * invariant (enforced by the `sendToolResult` / `sendContent` / `sendLiveText`
+ * interception wrappers it installs on the transport, plus the pending-work
+ * queues drained on re-entry to agent mode).
  *
  * `internalMode` lives here and is exposed via {@link mode} / {@link isAgentMode}.
  * Every reader (AudioRouter `getMode`, TtsPipeline / TransportReconnector
@@ -134,6 +135,17 @@ export class DictationController {
 			originalSendContent(turns, turnComplete);
 		};
 		this._rawSendContent = originalSendContent;
+
+		// Live text always asks for a response, so outside agent mode it returns
+		// false and sends nothing. Unlike sendContent it is not queued: the false
+		// result already tells the caller the text was not delivered.
+		const originalSendLiveText = this.deps.transport.sendLiveText?.bind(this.deps.transport);
+		if (originalSendLiveText) {
+			this.deps.transport.sendLiveText = (turns: ContentTurn[]) => {
+				if (this.internalMode !== 'agent') return false;
+				return originalSendLiveText(turns);
+			};
+		}
 
 		// Wire the transcription-mode Whisper provider (§Phase 3). Independent
 		// from sttProvider — must be a distinct instance.

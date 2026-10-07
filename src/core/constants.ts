@@ -7,8 +7,18 @@ export const DEFAULT_EXTRACTION_TIMEOUT_MS = 30_000;
 /** Default timeout for Gemini Live API connect/setupComplete (ms). */
 export const DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
 
-/** Default timeout for reconnection (disconnect + connect) (ms). */
+/** Default force-kill delay for a transport reconnect (ms). When it expires the
+ *  transport clears its session field; it does not bound the incumbent's close
+ *  or the redial. */
 export const DEFAULT_RECONNECT_TIMEOUT_MS = 45_000;
+
+/** Session-level deadline for one automatic reconnect attempt (ms). Past it the
+ *  reconnector abandons the attempt and closes the session with
+ *  `reconnect_failed`, so a reconnect whose dial or setup never settles cannot
+ *  leave the session in RECONNECTING. Shorter than, and distinct from, the
+ *  transport's own {@link DEFAULT_RECONNECT_TIMEOUT_MS} force-kill. Internal: the
+ *  public contract is `VoiceSession.RECONNECT_DEADLINE_MS`. */
+export const DEFAULT_RECONNECT_DEADLINE_MS = 30_000;
 
 /** Default model-silence watchdog after the user's turn ends (ms). A silent
  *  stall (socket open, no model output) past this forces a reconnect.

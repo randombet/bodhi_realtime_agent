@@ -11,6 +11,22 @@ export { AudioBuffer } from './audio-buffer.js';
 export { CartesiaTTSProvider } from './cartesia-tts-provider.js';
 export type { CartesiaTTSConfig } from './cartesia-tts-provider.js';
 export { ClientSenderAdapter } from './client-sender-adapter.js';
+export {
+	CLOSE_CODE_CLIENT_BUSY,
+	CLOSE_CODE_SUPERSEDED_BY_TAKEOVER,
+	CLOSE_CODE_VERIFIER_PREEMPTED,
+	CLOSE_REASON_CLIENT_BUSY,
+	CLOSE_REASON_SUPERSEDED_BY_TAKEOVER,
+	CLOSE_REASON_VERIFIER_PREEMPTED,
+	ClientTransport,
+} from './client-transport.js';
+export type {
+	ClientConnectionRole,
+	ClientTransportCallbacks,
+	ClientTransportOptions,
+} from './client-transport.js';
+export { bestEnvelopeLag, EchoGuard, envelopePearson } from './echo-guard.js';
+export type { EchoCheckResult, EchoEnvEntry, EchoGuardConfig } from './echo-guard.js';
 export { ElevenLabsSTTProvider } from './elevenlabs-stt-provider.js';
 export type { ElevenLabsSTTConfig } from './elevenlabs-stt-provider.js';
 export { ElevenLabsTTSProvider } from './elevenlabs-tts-provider.js';
@@ -20,7 +36,11 @@ export type { HumeTTSConfig } from './hume-tts-provider.js';
 export { GeminiBatchSTTProvider } from './gemini-batch-stt-provider.js';
 export type { GeminiBatchSTTConfig } from './gemini-batch-stt-provider.js';
 export { GeminiLiveTransport } from './gemini-live-transport.js';
-export type { GeminiTransportCallbacks, GeminiTransportConfig } from './gemini-live-transport.js';
+export type {
+	GeminiTransportCallbacks,
+	GeminiTransportConfig,
+	LiveUsageMetadata,
+} from './gemini-live-transport.js';
 export type { LLMTransport } from '../types/transport.js';
 export { MultiClientTransport } from './multi-client-transport.js';
 export type { ConnectionContext, MultiClientTransportCallbacks } from './multi-client-transport.js';

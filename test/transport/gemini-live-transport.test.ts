@@ -1,13 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
+import { ValidationError } from '../../src/core/errors.js';
 import {
 	DEFAULT_GEMINI_LIVE_MODEL,
 	DEFAULT_GEMINI_REALTIME_INPUT_CONFIG,
 	GeminiLiveTransport,
+	type LiveUsageMetadata,
 	resolveGeminiRealtimeInputConfig,
 } from '../../src/transport/gemini-live-transport.js';
 import type { ToolDefinition } from '../../src/types/tool.js';
-import type { LLMTransport, RealtimeLLMUsageEvent } from '../../src/types/transport.js';
+import type {
+	ContentTurn,
+	LLMTransport,
+	RealtimeLLMUsageEvent,
+} from '../../src/types/transport.js';
 
 // Mock @google/genai
 let capturedConnectConfig: Record<string, unknown> = {};
@@ -259,6 +265,324 @@ describe('GeminiLiveTransport', () => {
 			const transport = new GeminiLiveTransport({ apiKey: 'test-key', connectTimeoutMs: 50 }, {});
 			await expect(transport.connect()).rejects.toThrow('timed out');
 		});
+
+		it(
+			'rejects with timeout when the SDK dial itself never settles (failed DNS/socket)',
+			{ timeout: 1000 },
+			async () => {
+				// live.connect()'s promise is resolve-only in the SDK — on a failed
+				// dial (getaddrinfo ENOTFOUND) it never settles, so the deadline must
+				// cover the dial, not just the setupComplete wait.
+				const { GoogleGenAI } = await import('@google/genai');
+				(GoogleGenAI as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => ({
+					live: {
+						connect: vi.fn(() => new Promise(() => {})),
+					},
+				}));
+
+				const transport = new GeminiLiveTransport({ apiKey: 'test-key', connectTimeoutMs: 50 }, {});
+				await expect(transport.connect()).rejects.toThrow('timed out');
+			},
+		);
+
+		it('a superseded dial closing late does not fire the live onClose callback', async () => {
+			// Real-SDK shape: closing a session fires that dial's onclose. A dial
+			// abandoned by timeout is closed when it finally resolves; that stale
+			// close must not reach the session's handleTransportClose, which would
+			// mistake it for the CURRENT connection and tear down a healthy
+			// replacement.
+			const { GoogleGenAI } = await import('@google/genai');
+			let resolveDial1!: (s: unknown) => void;
+			let dial1Callbacks!: Record<string, (...args: unknown[]) => void>;
+			const connectFn = vi.fn();
+			(GoogleGenAI as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => ({
+				live: { connect: connectFn },
+			}));
+			connectFn
+				.mockImplementationOnce((params: Record<string, unknown>) => {
+					dial1Callbacks = params.callbacks as typeof dial1Callbacks;
+					return new Promise((resolve) => {
+						resolveDial1 = resolve;
+					});
+				})
+				// Dial 2 behaves like a healthy socket: session + its own setupComplete.
+				.mockImplementationOnce(async (params: Record<string, unknown>) => {
+					const cbs = params.callbacks as Record<string, (...args: unknown[]) => void>;
+					setTimeout(() => cbs.onmessage?.({ setupComplete: { sessionId: 'live_sid' } }), 1);
+					return mockSession;
+				});
+
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key', connectTimeoutMs: 50 }, {});
+			const onCloseSpy = vi.fn();
+			transport.onClose = onCloseSpy;
+
+			// Dial 1 times out.
+			await expect(transport.connect()).rejects.toThrow('timed out');
+
+			// Dial 2 succeeds (default mock: resolves + fires setupComplete).
+			await transport.connect();
+			expect(transport.isConnected).toBe(true);
+
+			// Dial 1's socket finally opens; the transport closes the orphan and
+			// the SDK fires dial 1's onclose — as the real websocket would.
+			const dial1Session = {
+				close: vi.fn(() => dial1Callbacks.onclose?.({ code: 1000, reason: 'stale' })),
+			};
+			resolveDial1(dial1Session);
+			await new Promise((r) => setTimeout(r, 10));
+
+			expect(dial1Session.close).toHaveBeenCalled();
+			expect(onCloseSpy).not.toHaveBeenCalled();
+		});
+
+		it(
+			"a superseded dial's setupComplete cannot satisfy the current dial's setup wait",
+			{ timeout: 1000 },
+			async () => {
+				// setupResolver is per-connect state; a stale dial's late
+				// setupComplete must not resolve the replacement dial's wait.
+				const { GoogleGenAI } = await import('@google/genai');
+				let dial1Callbacks!: Record<string, (...args: unknown[]) => void>;
+				const connectFn = vi.fn();
+				(GoogleGenAI as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => ({
+					live: { connect: connectFn },
+				}));
+				connectFn
+					.mockImplementationOnce((params: Record<string, unknown>) => {
+						dial1Callbacks = params.callbacks as typeof dial1Callbacks;
+						return new Promise(() => {});
+					})
+					// Dial 2 resolves a session but its own setupComplete never fires.
+					.mockImplementationOnce(async () => mockSession);
+
+				const transport = new GeminiLiveTransport(
+					{ apiKey: 'test-key', connectTimeoutMs: 100 },
+					{},
+				);
+				await expect(transport.connect()).rejects.toThrow('timed out');
+
+				const secondDial = transport.connect();
+				// The stale dial's socket delivers a setupComplete mid-wait.
+				dial1Callbacks.onmessage?.({ setupComplete: { sessionId: 'stale_sid' } });
+
+				// Dial 2 must still time out — the stale ack proves nothing about it.
+				await expect(secondDial).rejects.toThrow('timed out');
+			},
+		);
+
+		it('socket close before setupComplete rejects connect() within 20 ms with "closed before setupComplete"', async () => {
+			// The socket dies mid-dial (the SDK's resolve-only connect promise never
+			// settles): connect() must fail on the close, not wait out the 30 s
+			// default deadline.
+			const { GoogleGenAI } = await import('@google/genai');
+			let closedAt = 0;
+			(GoogleGenAI as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => ({
+				live: {
+					connect: vi.fn((params: Record<string, unknown>) => {
+						const cbs = params.callbacks as Record<string, (...args: unknown[]) => void>;
+						setTimeout(() => {
+							closedAt = Date.now();
+							cbs.onclose?.({ code: 1006, reason: 'abnormal' });
+						}, 1);
+						return new Promise(() => {});
+					}),
+				},
+			}));
+
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			const onCloseSpy = vi.fn();
+			transport.onClose = onCloseSpy;
+
+			await expect(transport.connect()).rejects.toThrow(
+				'Gemini socket closed before setupComplete (code=1006)',
+			);
+			expect(Date.now() - closedAt).toBeLessThan(20);
+			expect(transport.isConnected).toBe(false);
+			// The property-form onClose still observes the setup-failure close.
+			expect(onCloseSpy).toHaveBeenCalledWith(1006, 'abnormal');
+		});
+	});
+
+	describe('context window compression', () => {
+		function cwc() {
+			return (capturedConnectConfig.config as Record<string, unknown>).contextWindowCompression as
+				| { triggerTokens?: string; slidingWindow?: { targetTokens?: string } }
+				| undefined;
+		}
+
+		it('is absent entirely when no compressionConfig is supplied', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			expect(cwc()).toBeUndefined();
+		});
+
+		it('sends both thresholds as strings — the API types them as int64-over-JSON', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', compressionConfig: { triggerTokens: 32000, targetTokens: 16000 } },
+				{},
+			);
+			await transport.connect();
+			expect(cwc()).toEqual({ triggerTokens: '32000', slidingWindow: { targetTokens: '16000' } });
+		});
+
+		// An empty object is the documented way to take the server's own tuning
+		// (trigger 80% of the model limit, target half) instead of inventing one.
+		it('enables compression with server defaults when no thresholds are given', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key', compressionConfig: {} }, {});
+			await transport.connect();
+			const c = cwc();
+			expect(c).toBeDefined();
+			expect(c).toEqual({ slidingWindow: {} });
+			// Omission must be real absence: an explicit undefined would serialize
+			// as a null threshold and defeat the server default.
+			expect(Object.hasOwn(c as object, 'triggerTokens')).toBe(false);
+			expect(Object.hasOwn((c as { slidingWindow: object }).slidingWindow, 'targetTokens')).toBe(
+				false,
+			);
+		});
+
+		it('omits only the threshold that was not supplied', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', compressionConfig: { triggerTokens: 20000 } },
+				{},
+			);
+			await transport.connect();
+			expect(cwc()).toEqual({ triggerTokens: '20000', slidingWindow: {} });
+		});
+	});
+
+	describe('media resolution', () => {
+		it('passes mediaResolution through to the connect config', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', mediaResolution: 'MEDIA_RESOLUTION_LOW' },
+				{},
+			);
+			await transport.connect();
+			const cfg = capturedConnectConfig.config as Record<string, unknown>;
+			expect(cfg.mediaResolution).toBe('MEDIA_RESOLUTION_LOW');
+		});
+
+		it('omits mediaResolution entirely when not configured — server default applies', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			const cfg = capturedConnectConfig.config as Record<string, unknown>;
+			expect(Object.hasOwn(cfg, 'mediaResolution')).toBe(false);
+		});
+	});
+
+	describe('realtimeInputConfig: false', () => {
+		function sentRealtimeInputConfig(): boolean {
+			return Object.hasOwn(capturedConnectConfig.config as object, 'realtimeInputConfig');
+		}
+
+		it('emits no realtimeInputConfig key at all', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', realtimeInputConfig: false },
+				{},
+			);
+			await transport.connect();
+			expect(sentRealtimeInputConfig()).toBe(false);
+		});
+
+		it('stays absent when reconnect() dials again from the retained config', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', realtimeInputConfig: false },
+				{},
+			);
+			await transport.connect();
+			capturedConnectConfig = {};
+			await transport.reconnect();
+			expect(capturedConnectConfig.config).toBeDefined();
+			expect(sentRealtimeInputConfig()).toBe(false);
+		});
+
+		it('stays absent when transferSession() dials again from the retained config', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', realtimeInputConfig: false },
+				{},
+			);
+			await transport.connect();
+			capturedConnectConfig = {};
+			await transport.transferSession({ instructions: 'Next agent' });
+			expect(capturedConnectConfig.config).toBeDefined();
+			expect(sentRealtimeInputConfig()).toBe(false);
+		});
+	});
+
+	describe('vadConfig', () => {
+		function sentRealtimeInputConfig(): unknown {
+			return (capturedConnectConfig.config as Record<string, unknown>).realtimeInputConfig;
+		}
+
+		it('maps verbatim to automaticActivityDetection with no framework defaults merged', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', vadConfig: { silenceDurationMs: 200 } },
+				{},
+			);
+			await transport.connect();
+			expect(sentRealtimeInputConfig()).toEqual({
+				automaticActivityDetection: { silenceDurationMs: 200 },
+			});
+			const aad = (sentRealtimeInputConfig() as { automaticActivityDetection: object })
+				.automaticActivityDetection;
+			expect(Object.hasOwn(aad, 'endOfSpeechSensitivity')).toBe(false);
+		});
+
+		it('sends an empty automaticActivityDetection for an empty vadConfig', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key', vadConfig: {} }, {});
+			await transport.connect();
+			expect(sentRealtimeInputConfig()).toEqual({ automaticActivityDetection: {} });
+		});
+
+		it('passes disabled: true through', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', vadConfig: { disabled: true } },
+				{},
+			);
+			await transport.connect();
+			expect(sentRealtimeInputConfig()).toEqual({
+				automaticActivityDetection: { disabled: true },
+			});
+		});
+
+		it('keeps zero-valued durations on the wire', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', vadConfig: { silenceDurationMs: 0, prefixPaddingMs: 0 } },
+				{},
+			);
+			await transport.connect();
+			expect(sentRealtimeInputConfig()).toEqual({
+				automaticActivityDetection: { silenceDurationMs: 0, prefixPaddingMs: 0 },
+			});
+		});
+
+		it('throws ValidationError when realtimeInputConfig is also supplied', () => {
+			expect(
+				() =>
+					new GeminiLiveTransport(
+						{
+							apiKey: 'test-key',
+							realtimeInputConfig: { automaticActivityDetection: { silenceDurationMs: 500 } },
+							vadConfig: { silenceDurationMs: 200 },
+						},
+						{},
+					),
+			).toThrow(ValidationError);
+		});
+
+		it('throws ValidationError when realtimeInputConfig: false is also supplied', () => {
+			expect(
+				() =>
+					new GeminiLiveTransport(
+						{
+							apiKey: 'test-key',
+							realtimeInputConfig: false,
+							vadConfig: { silenceDurationMs: 200 },
+						},
+						{},
+					),
+			).toThrow(ValidationError);
+		});
 	});
 
 	describe('sendAudio', () => {
@@ -310,6 +634,32 @@ describe('GeminiLiveTransport', () => {
 			expect(mockSession.sendToolResponse).toHaveBeenCalledWith({
 				functionResponses: [{ id: 'fc_1', name: 'search', response: { results: [] } }],
 			});
+		});
+
+		it('sanitizes each response for the protobuf Struct wire type', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			transport.sendToolResponse([
+				{
+					id: 'fc_1',
+					name: 'search',
+					response: { skip: undefined, count: 10n, ratio: Number.NaN },
+				},
+				{ id: 'fc_2', name: 'noop' },
+			]);
+
+			expect(mockSession.sendToolResponse).toHaveBeenCalledWith({
+				functionResponses: [
+					{ id: 'fc_1', name: 'search', response: { count: '10', ratio: 'NaN' } },
+					{ id: 'fc_2', name: 'noop' },
+				],
+			});
+			const sent = mockSession.sendToolResponse.mock.calls[0]?.[0] as {
+				functionResponses: Array<{ response?: Record<string, unknown> }>;
+			};
+			expect(sent.functionResponses[0]?.response).not.toHaveProperty('skip');
+			expect(sent.functionResponses[1]).not.toHaveProperty('response');
 		});
 	});
 
@@ -548,6 +898,1105 @@ describe('GeminiLiveTransport', () => {
 			await transport.disconnect();
 			expect(transport.isConnected).toBe(false);
 			expect(mockSession.close).toHaveBeenCalled();
+		});
+	});
+
+	describe('dial generation fence', () => {
+		type Cbs = Record<string, (...args: unknown[]) => void>;
+
+		/** A fake SDK session whose close() is controlled by the test. */
+		function fakeSession(close: () => unknown = () => {}) {
+			return {
+				sendRealtimeInput: vi.fn(),
+				sendToolResponse: vi.fn(),
+				sendClientContent: vi.fn(),
+				close: vi.fn(close),
+			};
+		}
+
+		/** Deferred close: `close()` stays pending until `release()`. */
+		function slowClose() {
+			let release: () => void = () => {};
+			const pending = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			return { close: () => pending, release: () => release() };
+		}
+
+		/** Route this test's GeminiLiveTransport through `connectFn`. */
+		async function useConnect(connectFn: ReturnType<typeof vi.fn>): Promise<void> {
+			const { GoogleGenAI } = await import('@google/genai');
+			(GoogleGenAI as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => ({
+				live: { connect: connectFn },
+			}));
+		}
+
+		/** A dial that resolves `session` and then acks setup. */
+		function healthyDial(session: unknown) {
+			return async (params: Record<string, unknown>) => {
+				const cbs = params.callbacks as Cbs;
+				setTimeout(() => cbs.onmessage?.({ setupComplete: { sessionId: 'sid' } }), 1);
+				return session;
+			};
+		}
+
+		it('`currentDialGen` is 1 after a successful first `connect()`, 2 after a first dial that fails; `currentTransportGeneration` advances only on setup-ok', async () => {
+			const healthy = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			expect(healthy.currentDialGen).toBe(0);
+			expect(healthy.currentTransportGeneration).toBe(0);
+			await healthy.connect();
+			expect(healthy.currentDialGen).toBe(1);
+			expect(healthy.currentTransportGeneration).toBe(1);
+
+			await useConnect(vi.fn(() => new Promise(() => {})));
+			const failing = new GeminiLiveTransport({ apiKey: 'test-key', connectTimeoutMs: 20 }, {});
+			await expect(failing.connect()).rejects.toThrow('timed out');
+			expect(failing.currentDialGen).toBe(2);
+			expect(failing.currentTransportGeneration).toBe(0);
+		});
+
+		it("a superseded dial whose setup deadline expires after the replacement dial became active leaves the replacement's session installed", async () => {
+			const stale = fakeSession();
+			const replacement = fakeSession();
+			const connectFn = vi
+				.fn()
+				// Dial 1 resolves its session, but its setupComplete never arrives.
+				.mockImplementationOnce(async () => stale)
+				.mockImplementationOnce(healthyDial(replacement));
+			await useConnect(connectFn);
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key', connectTimeoutMs: 50 }, {});
+
+			const firstDial = transport.connect();
+			// Dial 1's session is installed while it waits for setup.
+			await new Promise((r) => setTimeout(r, 0));
+			expect(transport.isConnected).toBe(true);
+
+			// A newer dial supersedes it and completes setup well inside the deadline.
+			await transport.connect();
+			expect(transport.isConnected).toBe(true);
+
+			// Dial 1's setup deadline expires only now, after the replacement is active.
+			await expect(firstDial).rejects.toThrow('timed out');
+			await new Promise((r) => setTimeout(r, 0));
+
+			// The abandoned dial closes its own session and leaves the shared field alone.
+			expect(stale.close).toHaveBeenCalledTimes(1);
+			expect(replacement.close).not.toHaveBeenCalled();
+			expect(transport.isConnected).toBe(true);
+			transport.sendAudio('AA==');
+			expect(replacement.sendRealtimeInput).toHaveBeenCalledTimes(1);
+			expect(stale.sendRealtimeInput).not.toHaveBeenCalled();
+		});
+
+		it('force-kill timer does not null a session established by a newer dial', async () => {
+			const incumbent = fakeSession(() => new Promise(() => {})); // close() hangs
+			const replacement = fakeSession();
+			const connectFn = vi
+				.fn()
+				.mockImplementationOnce(healthyDial(incumbent))
+				.mockImplementationOnce(healthyDial(replacement));
+			await useConnect(connectFn);
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key', reconnectTimeoutMs: 30 }, {});
+			await transport.connect();
+
+			// reconnect() is stuck in disconnect() awaiting the hung close; its
+			// force-kill timer (30 ms) is pending.
+			void transport.reconnect();
+			// A newer dial establishes the replacement meanwhile.
+			await transport.connect();
+			expect(transport.isConnected).toBe(true);
+
+			await new Promise((r) => setTimeout(r, 60)); // the force-kill timer fires
+			expect(transport.isConnected).toBe(true);
+			transport.sendAudio('AA==');
+			expect(replacement.sendRealtimeInput).toHaveBeenCalledTimes(1);
+		});
+
+		it('disconnect() does not null a session replaced while close() was in flight', async () => {
+			const gate = slowClose();
+			const incumbent = fakeSession(gate.close);
+			const replacement = fakeSession();
+			const connectFn = vi
+				.fn()
+				.mockImplementationOnce(healthyDial(incumbent))
+				.mockImplementationOnce(healthyDial(replacement));
+			await useConnect(connectFn);
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			const closing = transport.disconnect();
+			// Detached synchronously, before the close completes.
+			expect(transport.isConnected).toBe(false);
+			await transport.connect();
+
+			gate.release();
+			await closing;
+
+			expect(transport.isConnected).toBe(true);
+			transport.sendAudio('AA==');
+			expect(replacement.sendRealtimeInput).toHaveBeenCalledTimes(1);
+			expect(incumbent.sendRealtimeInput).not.toHaveBeenCalled();
+		});
+
+		it('abortIncumbent() while disconnect() is still awaiting a hanging close resolves `forced` after its 5 s bound, not `closed` at once, and a replacement session installed afterwards is untouched', async () => {
+			const incumbent = fakeSession(() => new Promise(() => {})); // close() hangs
+			const replacement = fakeSession();
+			const connectFn = vi
+				.fn()
+				.mockImplementationOnce(healthyDial(incumbent))
+				.mockImplementationOnce(healthyDial(replacement));
+			await useConnect(connectFn);
+			vi.useFakeTimers();
+			try {
+				const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+				const connecting = transport.connect();
+				await vi.advanceTimersByTimeAsync(1); // setupComplete
+				await connecting;
+
+				// disconnect() detaches the incumbent at once and then awaits its close.
+				void transport.disconnect();
+				expect(incumbent.close).toHaveBeenCalledTimes(1);
+				expect(transport.isConnected).toBe(false);
+
+				let outcome: 'closed' | 'forced' | undefined;
+				void transport.abortIncumbent().then((result) => {
+					outcome = result;
+				});
+				await vi.advanceTimersByTimeAsync(0);
+				expect(outcome).toBeUndefined();
+				await vi.advanceTimersByTimeAsync(4_999);
+				expect(outcome).toBeUndefined();
+				await vi.advanceTimersByTimeAsync(1);
+				expect(outcome).toBe('forced');
+
+				const redialing = transport.connect();
+				await vi.advanceTimersByTimeAsync(1); // setupComplete
+				await redialing;
+				await vi.advanceTimersByTimeAsync(60_000);
+
+				expect(transport.isConnected).toBe(true);
+				expect(replacement.close).not.toHaveBeenCalled();
+				expect(incumbent.close).toHaveBeenCalledTimes(1);
+				transport.sendAudio('AA==');
+				expect(replacement.sendRealtimeInput).toHaveBeenCalledTimes(1);
+				expect(incumbent.sendRealtimeInput).not.toHaveBeenCalled();
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it('abortIncumbent() during a slow incumbent close prevents the dial and closes a late-resolving session', async () => {
+			const gate = slowClose();
+			const incumbent = fakeSession(gate.close);
+			const late = fakeSession();
+			let resolveLateDial: (s: unknown) => void = () => {};
+			const connectFn = vi
+				.fn()
+				.mockImplementationOnce(healthyDial(incumbent))
+				.mockImplementationOnce(
+					() =>
+						new Promise((resolve) => {
+							resolveLateDial = resolve;
+						}),
+				);
+			await useConnect(connectFn);
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			// (1) reconnect() is awaiting the incumbent's slow close when the
+			// incumbent is aborted: once the close completes it must not dial.
+			const reconnecting = transport.reconnect();
+			expect(incumbent.close).toHaveBeenCalledTimes(1);
+			// The abort bounds that in-flight close, so it settles with the close.
+			const aborting = transport.abortIncumbent();
+			gate.release();
+			await expect(aborting).resolves.toBe('closed');
+			await reconnecting;
+			expect(connectFn).toHaveBeenCalledTimes(1);
+			expect(transport.isConnected).toBe(false);
+
+			// (2) A dial still pending when the incumbent is aborted closes its own
+			// session when it resolves late, and never installs it.
+			const dialing = transport.connect();
+			expect(connectFn).toHaveBeenCalledTimes(2);
+			await expect(transport.abortIncumbent()).resolves.toBe('closed');
+			resolveLateDial(late);
+			await expect(dialing).rejects.toThrow('superseded');
+			await new Promise((r) => setTimeout(r, 0));
+			expect(late.close).toHaveBeenCalledTimes(1);
+			expect(transport.isConnected).toBe(false);
+		});
+
+		it('abortIncumbent resolves `closed` and the next connect omits `sessionResumption.handle`', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', sessionResumption: { handle: 'h_seed' } },
+				{},
+			);
+			await transport.connect();
+			expect((capturedConnectConfig.config as Record<string, unknown>).sessionResumption).toEqual({
+				handle: 'h_seed',
+			});
+			const cbs = capturedConnectConfig.callbacks as Cbs;
+			cbs.onmessage({ sessionResumptionUpdate: { newHandle: 'h_server', resumable: true } });
+			const genBefore = transport.currentDialGen;
+
+			await expect(transport.abortIncumbent()).resolves.toBe('closed');
+			expect(mockSession.close).toHaveBeenCalledTimes(1);
+			expect(transport.isConnected).toBe(false);
+			expect(transport.currentDialGen).toBe(genBefore + 1);
+
+			await transport.connect();
+			expect((capturedConnectConfig.config as Record<string, unknown>).sessionResumption).toEqual(
+				{},
+			);
+		});
+
+		it('clearResumption() leaves the connection untouched and the next dial omits `sessionResumption.handle`', async () => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', sessionResumption: { handle: 'h_seed' } },
+				{},
+			);
+			await transport.connect();
+			const cbs = capturedConnectConfig.callbacks as Cbs;
+			cbs.onmessage({ sessionResumptionUpdate: { newHandle: 'h_server', resumable: true } });
+			const genBefore = transport.currentDialGen;
+
+			transport.clearResumption();
+			expect(transport.isConnected).toBe(true);
+			expect(mockSession.close).not.toHaveBeenCalled();
+			expect(transport.currentDialGen).toBe(genBefore);
+
+			await transport.disconnect();
+			await transport.connect();
+			expect((capturedConnectConfig.config as Record<string, unknown>).sessionResumption).toEqual(
+				{},
+			);
+		});
+
+		it('abortIncumbent resolves `forced` when close throws', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			mockSession.close.mockImplementationOnce(() => {
+				throw new Error('close failed');
+			});
+
+			await expect(transport.abortIncumbent()).resolves.toBe('forced');
+			expect(transport.isConnected).toBe(false);
+		});
+	});
+
+	describe('connection lifecycle events', () => {
+		type Ev = { kind: string; connectAttemptId: string } & Record<string, unknown>;
+
+		it('a clean connect emits attempt (handleSupplied=false) then setup-ok with the generation', async () => {
+			const events: Ev[] = [];
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key' },
+				{
+					onConnectionLifecycle: (e) => events.push(e as Ev),
+				},
+			);
+			await transport.connect();
+
+			expect(events.map((e) => e.kind)).toEqual(['attempt', 'setup-ok']);
+			expect(events[0].handleSupplied).toBe(false);
+			expect(events[1].transportGeneration).toBe(1);
+			expect(events[0].connectAttemptId).toBe(events[1].connectAttemptId);
+			expect(transport.currentTransportGeneration).toBe(1);
+		});
+
+		it('a dial with a stored resumption handle reports handleSupplied=true (sessionResumption and legacy resumptionHandle)', async () => {
+			const viaSessionResumption: Ev[] = [];
+			await new GeminiLiveTransport(
+				{ apiKey: 'test-key', sessionResumption: { handle: 'handle_1' } },
+				{ onConnectionLifecycle: (e) => viaSessionResumption.push(e as Ev) },
+			).connect();
+			expect(viaSessionResumption[0]).toMatchObject({ kind: 'attempt', handleSupplied: true });
+
+			const viaLegacy: Ev[] = [];
+			await new GeminiLiveTransport(
+				{ apiKey: 'test-key', resumptionHandle: 'handle_2' },
+				{ onConnectionLifecycle: (e) => viaLegacy.push(e as Ev) },
+			).connect();
+			expect(viaLegacy[0]).toMatchObject({ kind: 'attempt', handleSupplied: true });
+
+			// The privacy opt-out sends no handle, so the attempt supplies none.
+			const optedOut: Ev[] = [];
+			await new GeminiLiveTransport(
+				{ apiKey: 'test-key', sessionResumption: false, resumptionHandle: 'handle_3' },
+				{ onConnectionLifecycle: (e) => optedOut.push(e as Ev) },
+			).connect();
+			expect(optedOut[0]).toMatchObject({ kind: 'attempt', handleSupplied: false });
+		});
+
+		it('a close after setup is generation-close carrying the generation', async () => {
+			const events: Ev[] = [];
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key' },
+				{
+					onConnectionLifecycle: (e) => events.push(e as Ev),
+				},
+			);
+			await transport.connect();
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (e?: unknown) => void>;
+			cbs.onclose({ code: 1011, reason: 'internal error' });
+
+			const last = events.at(-1) as Ev;
+			expect(last.kind).toBe('generation-close');
+			expect(last.connectAttemptId).toBe('att_1');
+			expect(last.transportGeneration).toBe(1);
+			expect(last.code).toBe(1011);
+			expect(last.reason).toBe('internal error');
+		});
+
+		it('a socket that dies BEFORE setupComplete emits attempt-close (no generation) then setup-failed', async () => {
+			// The dial resolves a session but setupComplete never arrives; the
+			// socket closes, which rejects connect() at once.
+			const { GoogleGenAI } = await import('@google/genai');
+			let dialCallbacks!: Record<string, (...args: unknown[]) => void>;
+			const connectFn = vi.fn().mockImplementationOnce(async (params: Record<string, unknown>) => {
+				dialCallbacks = params.callbacks as typeof dialCallbacks;
+				return mockSession;
+			});
+			(GoogleGenAI as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => ({
+				live: { connect: connectFn },
+			}));
+
+			const events: Ev[] = [];
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', connectTimeoutMs: 1000 },
+				{
+					onConnectionLifecycle: (e) => events.push(e as Ev),
+				},
+			);
+			const pending = transport.connect();
+			await new Promise((r) => setTimeout(r, 5));
+			dialCallbacks.onclose?.({ code: 1006, reason: 'died during setup' });
+			await expect(pending).rejects.toThrow('closed before setupComplete');
+
+			const kinds = events.map((e) => e.kind);
+			expect(kinds).toEqual(['attempt', 'attempt-close', 'setup-failed']);
+			const close = events[1];
+			expect(close.code).toBe(1006);
+			expect(Object.hasOwn(close, 'transportGeneration')).toBe(false);
+			// Both events describe one attempt — correlated by id, not by guesswork.
+			expect(close.connectAttemptId).toBe(events[0].connectAttemptId);
+			expect(events[2].connectAttemptId).toBe(events[0].connectAttemptId);
+			expect(events[2].reason).toContain('closed before setupComplete');
+			expect(transport.currentTransportGeneration).toBe(0);
+		});
+
+		it('a superseded dial emits no setup-failed — stale-dial fencing covers failures too', async () => {
+			const { GoogleGenAI } = await import('@google/genai');
+			const connectFn = vi.fn();
+			(GoogleGenAI as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => ({
+				live: { connect: connectFn },
+			}));
+			connectFn
+				// Dial 1 never resolves; dial 2 is healthy.
+				.mockImplementationOnce(() => new Promise(() => {}))
+				.mockImplementationOnce(async (params: Record<string, unknown>) => {
+					const cbs = params.callbacks as Record<string, (...args: unknown[]) => void>;
+					setTimeout(() => cbs.onmessage?.({ setupComplete: { sessionId: 'sid_2' } }), 1);
+					return mockSession;
+				});
+
+			const events: Ev[] = [];
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', connectTimeoutMs: 200 },
+				{
+					onConnectionLifecycle: (e) => events.push(e as Ev),
+				},
+			);
+			const first = transport.connect();
+			first.catch(() => {}); // outcome asserted below; silence unhandled-rejection
+			await new Promise((r) => setTimeout(r, 5));
+			await transport.connect(); // supersedes dial 1
+			await expect(first).rejects.toThrow('timed out');
+
+			const kinds = events.map((e) => `${e.kind}:${e.connectAttemptId}`);
+			expect(kinds).toEqual(['attempt:att_1', 'attempt:att_2', 'setup-ok:att_2']);
+		});
+
+		it('reconnect() emits generation-close for the socket it closes locally, exactly once', async () => {
+			const events: Ev[] = [];
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key' },
+				{
+					onConnectionLifecycle: (e) => events.push(e as Ev),
+				},
+			);
+			await transport.connect();
+			const firstCbs = capturedConnectConfig.callbacks as Record<string, (e?: unknown) => void>;
+			await transport.reconnect({ resumptionHandle: undefined, conversationHistory: [] });
+			// The closed socket's own onclose lands late: fenced, never a second close.
+			firstCbs.onclose({ code: 1000, reason: 'late' });
+
+			const closes = events.filter((e) => e.kind === 'generation-close');
+			expect(closes).toHaveLength(1);
+			expect(closes[0]).toMatchObject({
+				connectAttemptId: 'att_1',
+				transportGeneration: 1,
+				code: 1000,
+				reason: 'local disconnect',
+			});
+			// The reconnect's own lineage continues: attempt + setup-ok for att_2.
+			expect(events.map((e) => e.kind)).toEqual([
+				'attempt',
+				'setup-ok',
+				'generation-close',
+				'attempt',
+				'setup-ok',
+			]);
+			expect(events[4]).toMatchObject({ connectAttemptId: 'att_2', transportGeneration: 2 });
+		});
+
+		it('a socket close landing while disconnect() awaits close() is not a second generation-close', async () => {
+			// Real-SDK shape: close() fires this dial's onclose before the next dial
+			// advances the fence, so only the ledger's once-per-attempt rule stops a
+			// duplicate after the local disconnect.
+			const { GoogleGenAI } = await import('@google/genai');
+			let dial1Callbacks!: Record<string, (...args: unknown[]) => void>;
+			const dial1Session = {
+				...mockSession,
+				close: vi.fn(() => dial1Callbacks.onclose?.({ code: 1000, reason: 'closed by client' })),
+			};
+			const connectFn = vi
+				.fn()
+				.mockImplementationOnce(async (params: Record<string, unknown>) => {
+					dial1Callbacks = params.callbacks as typeof dial1Callbacks;
+					setTimeout(() => dial1Callbacks.onmessage?.({ setupComplete: { sessionId: 's1' } }), 1);
+					return dial1Session;
+				})
+				.mockImplementationOnce(async (params: Record<string, unknown>) => {
+					const cbs = params.callbacks as Record<string, (...args: unknown[]) => void>;
+					setTimeout(() => cbs.onmessage?.({ setupComplete: { sessionId: 's2' } }), 1);
+					return mockSession;
+				});
+			(GoogleGenAI as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => ({
+				live: { connect: connectFn },
+			}));
+
+			const events: Ev[] = [];
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key' },
+				{ onConnectionLifecycle: (e) => events.push(e as Ev) },
+			);
+			await transport.connect();
+			await transport.reconnect({ resumptionHandle: undefined, conversationHistory: [] });
+
+			expect(dial1Session.close).toHaveBeenCalledTimes(1);
+			expect(events.map((e) => `${e.kind}:${e.connectAttemptId}`)).toEqual([
+				'attempt:att_1',
+				'setup-ok:att_1',
+				'generation-close:att_1',
+				'attempt:att_2',
+				'setup-ok:att_2',
+			]);
+			expect(events[2]).toMatchObject({ code: 1000, reason: 'local disconnect' });
+		});
+
+		it('setup-failed fires after the dial fence advanced: an observer that redials is not superseded', async () => {
+			const { GoogleGenAI } = await import('@google/genai');
+			let dial1Callbacks!: Record<string, (...args: unknown[]) => void>;
+			const connectFn = vi
+				.fn()
+				// Dial 1 resolves a session whose setupComplete never arrives.
+				.mockImplementationOnce(async (params: Record<string, unknown>) => {
+					dial1Callbacks = params.callbacks as typeof dial1Callbacks;
+					return mockSession;
+				})
+				.mockImplementationOnce(async (params: Record<string, unknown>) => {
+					const cbs = params.callbacks as Record<string, (...args: unknown[]) => void>;
+					setTimeout(() => cbs.onmessage?.({ setupComplete: { sessionId: 's2' } }), 1);
+					return mockSession;
+				});
+			(GoogleGenAI as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => ({
+				live: { connect: connectFn },
+			}));
+
+			const events: Ev[] = [];
+			let redial: Promise<void> | undefined;
+			let connectedDuringSetupFailed: boolean | undefined;
+			const transport: GeminiLiveTransport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', connectTimeoutMs: 1000 },
+				{
+					onConnectionLifecycle: (e) => {
+						events.push(e as Ev);
+						if (e.kind === 'setup-failed') {
+							connectedDuringSetupFailed = transport.isConnected;
+							redial = transport.connect();
+						}
+					},
+				},
+			);
+			const pending = transport.connect();
+			await new Promise((r) => setTimeout(r, 5));
+			dial1Callbacks.onclose?.({ code: 1006, reason: 'died during setup' });
+			await expect(pending).rejects.toThrow('closed before setupComplete');
+
+			expect(connectedDuringSetupFailed).toBe(false);
+			await expect(redial).resolves.toBeUndefined();
+			expect(transport.isConnected).toBe(true);
+			expect(events.map((e) => `${e.kind}:${e.connectAttemptId}`)).toEqual([
+				'attempt:att_1',
+				'attempt-close:att_1',
+				'setup-failed:att_1',
+				'attempt:att_3',
+				'setup-ok:att_3',
+			]);
+		});
+
+		it('abortIncumbent() emits no local generation-close (only disconnect() does)', async () => {
+			const events: Ev[] = [];
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key' },
+				{ onConnectionLifecycle: (e) => events.push(e as Ev) },
+			);
+			await transport.connect();
+			await expect(transport.abortIncumbent()).resolves.toBe('closed');
+
+			expect(events.map((e) => e.kind)).toEqual(['attempt', 'setup-ok']);
+		});
+
+		it('a throwing observer cannot interrupt the connection state machine', async () => {
+			// A throwing attempt observer must not prevent dialing; a throwing
+			// setup-ok observer must not fake a timeout; a throwing close observer
+			// must not keep disconnect() from closing the socket.
+			const seen: string[] = [];
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key' },
+				{
+					onConnectionLifecycle: (e) => {
+						seen.push(e.kind);
+						throw new Error(`observer failed on ${e.kind}`);
+					},
+				},
+			);
+			transport.onConnectionLifecycle = () => {
+				throw new Error('property-form observer failed');
+			};
+
+			await transport.connect(); // resolves despite attempt+setup-ok throwing
+			expect(transport.isConnected).toBe(true);
+			expect(transport.currentTransportGeneration).toBe(1);
+
+			await transport.disconnect(); // completes despite generation-close throwing
+			expect(mockSession.close).toHaveBeenCalled();
+			expect(transport.isConnected).toBe(false);
+
+			expect(seen).toEqual(['attempt', 'setup-ok', 'generation-close']);
+		});
+
+		it('property-form callback fires too — the path VoiceSession wires', async () => {
+			const events: Ev[] = [];
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			transport.onConnectionLifecycle = (e) => events.push(e as Ev);
+			await transport.connect();
+			expect(events.map((e) => e.kind)).toEqual(['attempt', 'setup-ok']);
+		});
+
+		it('a setup-ok observer already reads the minted generation from the transport', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			const read: number[] = [];
+			transport.onConnectionLifecycle = (e) => {
+				if (e.kind === 'setup-ok') {
+					read.push(
+						transport.currentTransportGeneration,
+						transport.getDiagnostics().transportGeneration,
+					);
+				}
+			};
+			await transport.connect();
+			expect(read).toEqual([1, 1]);
+		});
+	});
+
+	describe('usage metadata', () => {
+		async function connectWith(onUsageMetadata: ReturnType<typeof vi.fn>) {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, { onUsageMetadata });
+			await transport.connect();
+			return capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+		}
+		const USAGE = { promptTokenCount: 4096, totalTokenCount: 4200 };
+
+		it('dispatches usage metadata on its own', async () => {
+			const onUsageMetadata = vi.fn();
+			const cbs = await connectWith(onUsageMetadata);
+			cbs.onmessage({ usageMetadata: USAGE });
+			expect(onUsageMetadata).toHaveBeenCalledWith(USAGE);
+		});
+
+		// The reason usage is read before the dispatch branches: every branch below
+		// returns, so a branch of its own would miss the common co-occurring cases.
+		it('dispatches usage metadata riding along with serverContent', async () => {
+			const onUsageMetadata = vi.fn();
+			const onAudioOutput = vi.fn();
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key' },
+				{ onUsageMetadata, onAudioOutput },
+			);
+			await transport.connect();
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({
+				usageMetadata: USAGE,
+				serverContent: { modelTurn: { parts: [{ inlineData: { data: 'audio_b64' } }] } },
+			});
+			expect(onUsageMetadata).toHaveBeenCalledWith(USAGE);
+			expect(onAudioOutput).toHaveBeenCalledWith('audio_b64');
+		});
+
+		it('dispatches usage metadata riding along with a tool call', async () => {
+			const onUsageMetadata = vi.fn();
+			const onToolCall = vi.fn();
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key' },
+				{ onUsageMetadata, onToolCall },
+			);
+			await transport.connect();
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({
+				usageMetadata: USAGE,
+				toolCall: { functionCalls: [{ id: 'fc_1', name: 'search', args: { query: 'x' } }] },
+			});
+			expect(onUsageMetadata).toHaveBeenCalledWith(USAGE);
+			expect(onToolCall).toHaveBeenCalled();
+		});
+
+		it('dispatches usage metadata riding along with goAway', async () => {
+			const onUsageMetadata = vi.fn();
+			const onGoAway = vi.fn();
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key' },
+				{ onUsageMetadata, onGoAway },
+			);
+			await transport.connect();
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({ usageMetadata: USAGE, goAway: { timeLeft: '50s' } });
+			expect(onUsageMetadata).toHaveBeenCalledWith(USAGE);
+			expect(onGoAway).toHaveBeenCalledWith('50s');
+		});
+
+		it('carries the per-modality breakdown through unchanged', async () => {
+			const onUsageMetadata = vi.fn();
+			const cbs = await connectWith(onUsageMetadata);
+			const detailed = {
+				promptTokenCount: 9000,
+				promptTokensDetails: [
+					{ modality: 'AUDIO', tokenCount: 7000 },
+					{ modality: 'TEXT', tokenCount: 2000 },
+				],
+			};
+			cbs.onmessage({ usageMetadata: detailed });
+			expect(onUsageMetadata).toHaveBeenCalledWith(detailed);
+		});
+
+		it('does not fire when the message carries no usage', async () => {
+			const onUsageMetadata = vi.fn();
+			const cbs = await connectWith(onUsageMetadata);
+			cbs.onmessage({ serverContent: { turnComplete: true } });
+			expect(onUsageMetadata).not.toHaveBeenCalled();
+		});
+
+		// VoiceSession constructs the transport with an EMPTY callbacks object and
+		// wires property callbacks afterwards, so a constructor-only callback would
+		// be unreachable from the library's main consumer.
+		it('dispatches to the property callback, which is how VoiceSession wires events', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			const seen: LiveUsageMetadata[] = [];
+			transport.onUsageMetadata = (u) => seen.push(u);
+
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({ usageMetadata: USAGE });
+
+			expect(seen).toEqual([USAGE]);
+		});
+
+		it('carries fields beyond the common two — cache and tool-use counts included', async () => {
+			const onUsageMetadata = vi.fn();
+			const cbs = await connectWith(onUsageMetadata);
+			const full = {
+				promptTokenCount: 1000,
+				cachedContentTokenCount: 400,
+				toolUsePromptTokenCount: 50,
+				thoughtsTokenCount: 25,
+				totalTokenCount: 1500,
+			};
+			cbs.onmessage({ usageMetadata: full });
+			expect(onUsageMetadata).toHaveBeenCalledWith(full);
+		});
+
+		it('a throwing observer does not suppress the co-occurring turn', async () => {
+			const onAudioOutput = vi.fn();
+			const onGoAway = vi.fn();
+			const onUsageMetadata = vi.fn(() => {
+				throw new Error('metrics failed');
+			});
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key' },
+				{ onAudioOutput, onGoAway, onUsageMetadata },
+			);
+			await transport.connect();
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+
+			// ONE message carrying usage AND the payload it rides with.
+			cbs.onmessage({
+				usageMetadata: USAGE,
+				serverContent: { modelTurn: { parts: [{ inlineData: { data: 'AUDIO' } }] } },
+			});
+			cbs.onmessage({ usageMetadata: USAGE, goAway: { timeLeft: '30s' } });
+
+			expect(onUsageMetadata).toHaveBeenCalledTimes(2);
+			expect(onAudioOutput).toHaveBeenCalledWith('AUDIO');
+			expect(onGoAway).toHaveBeenCalledWith('30s');
+		});
+
+		it('a throwing property-form observer is isolated too', async () => {
+			const onAudioOutput = vi.fn();
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, { onAudioOutput });
+			await transport.connect();
+			transport.onUsageMetadata = () => {
+				throw new Error('metrics failed');
+			};
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+
+			cbs.onmessage({
+				usageMetadata: USAGE,
+				serverContent: { modelTurn: { parts: [{ inlineData: { data: 'AUDIO' } }] } },
+			});
+
+			expect(onAudioOutput).toHaveBeenCalledWith('AUDIO');
+		});
+
+		it('a throwing `onRealtimeLLMUsage` observer does not suppress audio on the same message', async () => {
+			const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			const onAudioOutput = vi.fn();
+			transport.onAudioOutput = onAudioOutput;
+			transport.onRealtimeLLMUsage = () => {
+				throw new Error('observer failed');
+			};
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+
+			expect(() =>
+				cbs.onmessage({
+					usageMetadata: { promptTokenCount: 7, responseTokenCount: 1, totalTokenCount: 8 },
+					serverContent: { modelTurn: { parts: [{ inlineData: { data: 'AA==' } }] } },
+				}),
+			).not.toThrow();
+			expect(onAudioOutput).toHaveBeenCalledTimes(1);
+			expect(onAudioOutput).toHaveBeenCalledWith('AA==');
+			expect(warn).toHaveBeenCalledWith(
+				expect.stringContaining('onRealtimeLLMUsage observer threw'),
+				expect.any(Error),
+			);
+			warn.mockRestore();
+		});
+
+		it('a throwing observer on `turnComplete` still fires `onTurnComplete` and closes the server turn', async () => {
+			const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			const onTurnComplete = vi.fn();
+			const onModelTurnStart = vi.fn();
+			transport.onTurnComplete = onTurnComplete;
+			transport.onModelTurnStart = onModelTurnStart;
+			const phases: string[] = [];
+			transport.onRealtimeLLMUsage = (u) => {
+				phases.push(u.phase);
+				throw new Error('observer failed');
+			};
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+
+			cbs.onmessage({
+				usageMetadata: USAGE,
+				serverContent: { modelTurn: { parts: [{ inlineData: { data: 'AA==' } }] } },
+			});
+			expect(transport.getActiveServerTurnId()).toBe(1);
+
+			// The cached usage's final event throws inside the turnComplete branch.
+			expect(() => cbs.onmessage({ serverContent: { turnComplete: true } })).not.toThrow();
+			expect(phases).toEqual(['update', 'final']);
+			expect(onTurnComplete).toHaveBeenCalledTimes(1);
+			expect(onTurnComplete).toHaveBeenCalledWith(1);
+			expect(transport.getActiveServerTurnId()).toBeUndefined();
+
+			// The turn really closed: the next model output opens server turn 2.
+			cbs.onmessage({
+				serverContent: { modelTurn: { parts: [{ inlineData: { data: 'AA==' } }] } },
+			});
+			expect(onModelTurnStart).toHaveBeenCalledTimes(2);
+			expect(transport.getActiveServerTurnId()).toBe(2);
+			// The cached usage was consumed: no stale final on the next turnComplete.
+			cbs.onmessage({ serverContent: { turnComplete: true } });
+			expect(phases).toEqual(['update', 'final']);
+			expect(warn).toHaveBeenCalledTimes(2);
+			warn.mockRestore();
+		});
+
+		it('raw and normalized usage both fire for one message', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			const raw: LiveUsageMetadata[] = [];
+			const normalized: RealtimeLLMUsageEvent[] = [];
+			transport.onUsageMetadata = (u) => raw.push(u);
+			transport.onRealtimeLLMUsage = (u) => normalized.push(u);
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+
+			const usage = { promptTokenCount: 4096, responseTokenCount: 104, totalTokenCount: 4200 };
+			cbs.onmessage({ usageMetadata: usage });
+
+			expect(raw).toEqual([usage]);
+			expect(normalized).toHaveLength(1);
+			expect(normalized[0]).toMatchObject({
+				provider: 'gemini_live',
+				phase: 'update',
+				inputTokens: 4096,
+				outputTokens: 104,
+				totalTokens: 4200,
+				providerRaw: usage,
+			});
+		});
+	});
+
+	describe('upstream diagnostics', () => {
+		const B64 = 'AAAA'.repeat(30); // 120 b64 chars -> 90 raw bytes
+
+		it('counts a queued audio send with split raw/wire byte accounting', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			transport.sendAudio(B64);
+
+			const a = transport.getDiagnostics().upstream.audio;
+			expect(a.attempted).toBe(1);
+			expect(a.queued).toBe(1);
+			expect(a.attemptedRawBytes).toBe(90);
+			expect(a.attemptedWireBytesEstimate).toBe(120);
+			expect(a.queuedRawBytes).toBe(90);
+			expect(a.lastQueuedAt).not.toBeNull();
+			expect(a.lastThrewAt).toBeNull();
+		});
+
+		it('a send with no session is attempted+skipped, never queued', () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			transport.sendAudio(B64); // never connected
+
+			const a = transport.getDiagnostics().upstream.audio;
+			expect(a.attempted).toBe(1);
+			expect(a.skippedNoSession).toBe(1);
+			expect(a.queued).toBe(0);
+			expect(a.lastSkippedAt).not.toBeNull();
+		});
+
+		it('both text APIs land in the text slot; empty text is skippedEmpty', async () => {
+			// A live model, so generation-triggering sendContent takes the realtime
+			// text path, where empty text is not sent.
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', model: 'gemini-3.1-flash-live-preview' },
+				{},
+			);
+			await transport.connect();
+			transport.sendContent([{ role: 'user', text: 'hello' }]);
+			transport.sendClientContent([{ role: 'user', parts: [{ text: 'world' }] }]);
+			transport.sendContent([{ role: 'user', text: 'quiet' }], false); // clientContent path
+			transport.sendContent([{ role: 'user', text: '' }]);
+
+			const t = transport.getDiagnostics().upstream.text;
+			expect(t.attempted).toBe(4);
+			expect(t.queued).toBe(3);
+			expect(t.skippedEmpty).toBe(1);
+			// UTF-8 bytes for text: 'hello' + 'world' + 'quiet'
+			expect(t.queuedRawBytes).toBe(15);
+			expect(mockSession.sendRealtimeInput).toHaveBeenCalledTimes(1);
+			expect(mockSession.sendClientContent).toHaveBeenCalledTimes(2);
+		});
+
+		it('sendFile slots by kind: image->video, audio/*->audio, other->unsupportedMime', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			transport.sendFile(B64, 'image/jpeg');
+			transport.sendFile(B64, 'audio/wav');
+			transport.sendFile(B64, 'application/pdf');
+			warnSpy.mockRestore();
+
+			const d = transport.getDiagnostics().upstream;
+			expect(d.audio.queued).toBe(1);
+			expect(d.audio.queuedRawBytes).toBe(90);
+			// The pdf is attempted on the video slot but has no realtime slot: it is
+			// skipped as unsupportedMime, never queued.
+			expect(d.video.attempted).toBe(2);
+			expect(d.video.queued).toBe(1);
+			expect(d.video.unsupportedMime).toBe(1);
+			expect(d.video.lastSkippedAt).not.toBeNull();
+			expect(mockSession.sendRealtimeInput).toHaveBeenCalledTimes(2);
+			expect(mockSession.sendClientContent).not.toHaveBeenCalled();
+		});
+
+		it('sendInlineFile slots by kind and sends every type inline: no unsupportedMime', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			transport.sendInlineFile(B64, 'image/jpeg');
+			transport.sendInlineFile(B64, 'audio/wav');
+			transport.sendInlineFile(B64, 'application/pdf');
+
+			const d = transport.getDiagnostics().upstream;
+			expect(d.audio.queued).toBe(1);
+			expect(d.video.attempted).toBe(2);
+			expect(d.video.queued).toBe(2);
+			expect(d.video.unsupportedMime).toBe(0);
+			expect(mockSession.sendClientContent).toHaveBeenCalledTimes(3);
+			expect(mockSession.sendRealtimeInput).not.toHaveBeenCalled();
+		});
+
+		it('a throwing send counts threw, rethrows, and never counts queued', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			mockSession.sendRealtimeInput.mockImplementationOnce(() => {
+				throw new Error('socket write failed');
+			});
+
+			expect(() => transport.sendAudio(B64)).toThrow('socket write failed');
+			const a = transport.getDiagnostics().upstream.audio;
+			expect(a.attempted).toBe(1);
+			expect(a.threw).toBe(1);
+			expect(a.queued).toBe(0);
+			expect(a.lastThrewAt).not.toBeNull();
+		});
+
+		it('counters reset on a new generation — a new socket starts at zero', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			transport.sendAudio(B64);
+			expect(transport.getDiagnostics().transportGeneration).toBe(1);
+			expect(transport.getDiagnostics().upstream.audio.queued).toBe(1);
+
+			// A new connection's setupComplete is the generation boundary.
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({ setupComplete: { sessionId: 'sid_2' } });
+
+			const d = transport.getDiagnostics();
+			expect(d.transportGeneration).toBe(2);
+			expect(transport.currentTransportGeneration).toBe(2);
+			expect(d.upstream.audio.queued).toBe(0);
+			expect(d.upstream.audio.lastQueuedAt).toBeNull();
+		});
+
+		it('reconnect replay traffic hits the counters: one text-slot send for the whole batch', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			await transport.reconnect({
+				resumptionHandle: undefined,
+				conversationHistory: [
+					{ type: 'text', role: 'user', text: 'earlier question' },
+					{ type: 'text', role: 'assistant', text: 'earlier answer' },
+					{ type: 'tool_call', id: 'tc_1', name: 'search', args: { query: 'x' } },
+				],
+			});
+
+			// Counters reset at the reconnect's setup, so what remains IS the replay:
+			// three items, one quiet clientContent batch, one text-slot send.
+			const d = transport.getDiagnostics().upstream;
+			expect(d.text.attempted).toBe(1);
+			expect(d.text.queued).toBe(1);
+			const toolCallText = '[Previous tool call: search({"query":"x"})]';
+			expect(d.text.queuedRawBytes).toBe(16 + 14 + toolCallText.length);
+			expect(d.text.queuedWireBytesEstimate).toBe(d.text.queuedRawBytes);
+			expect(d.audio.attempted).toBe(0);
+			expect(d.video.attempted).toBe(0);
+			expect(mockSession.sendRealtimeInput).not.toHaveBeenCalled();
+			expect(mockSession.sendClientContent).toHaveBeenCalledTimes(1);
+		});
+
+		it('a text + png + pdf replay stays one inline text-slot batch: no realtime send', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			await transport.reconnect({
+				resumptionHandle: undefined,
+				conversationHistory: [
+					{ type: 'text', role: 'user', text: 'hello' },
+					{ type: 'file', role: 'user', base64Data: B64, mimeType: 'image/png' },
+					{ type: 'file', role: 'user', base64Data: B64, mimeType: 'application/pdf' },
+				],
+			});
+
+			// History files are not routed through sendFile: the image and the pdf
+			// ride inline in the same clientContent batch as the text, so only the
+			// text slot moves. Inline data counts decoded bytes raw and base64
+			// characters on the wire, so the two byte totals differ here.
+			const d = transport.getDiagnostics().upstream;
+			expect(d.text.attempted).toBe(1);
+			expect(d.text.queued).toBe(1);
+			expect(d.text.queuedRawBytes).toBe(5 + 90 + 90);
+			expect(d.text.queuedWireBytesEstimate).toBe(5 + 120 + 120);
+			expect(d.audio.attempted).toBe(0);
+			expect(d.video.attempted).toBe(0);
+			expect(mockSession.sendRealtimeInput).not.toHaveBeenCalled();
+			expect(mockSession.sendClientContent).toHaveBeenCalledTimes(1);
+			const batch = mockSession.sendClientContent.mock.calls[0]?.[0] as { turns: unknown[] };
+			expect(batch.turns).toHaveLength(3);
+		});
+
+		it('a retained-turn replay counts on the audio slot', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			const turn = {
+				pcm: Buffer.alloc(640, 5),
+				sampleRateHz: 16000,
+				utteranceId: 1,
+				sealedAtMs: 0,
+			};
+
+			expect(transport.replayUserTurn(turn)).toBe(false); // not connected
+			let a = transport.getDiagnostics().upstream.audio;
+			expect(a.attempted).toBe(1);
+			expect(a.skippedNoSession).toBe(1);
+			expect(a.queued).toBe(0);
+
+			await transport.connect(); // setup resets the counters
+			expect(transport.replayUserTurn(turn)).toBe(true);
+			a = transport.getDiagnostics().upstream.audio;
+			expect(a.attempted).toBe(1);
+			expect(a.queued).toBe(1);
+			expect(a.queuedRawBytes).toBe(640);
+			expect(a.queuedWireBytesEstimate).toBe(turn.pcm.toString('base64').length);
+			expect(transport.getDiagnostics().upstream.text.attempted).toBe(0);
+		});
+
+		it('a send buffered during the wind-down window counts when the deferred send runs', async () => {
+			const model = 'gemini-3.1-flash-live-preview';
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key', model }, {});
+			await transport.connect({
+				auth: { type: 'api_key', apiKey: 'test-key' },
+				model,
+				responseModality: 'text',
+			});
+			transport.onTextOutput = () => {};
+			transport.onTextDone = () => {};
+			transport.onTurnComplete = () => {};
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage({ serverContent: { outputTranscription: { text: 'Hi.' } } });
+			cbs.onmessage({ serverContent: { generationComplete: true } });
+
+			transport.sendClientContent([{ role: 'user', parts: [{ text: 'directive' }] }], true);
+			expect(transport.getDiagnostics().upstream.text.attempted).toBe(0);
+
+			cbs.onmessage({ serverContent: { turnComplete: true } }); // flushes the buffer
+			const t = transport.getDiagnostics().upstream.text;
+			expect(t.attempted).toBe(1);
+			expect(t.queued).toBe(1);
+			expect(t.queuedRawBytes).toBe(9);
+		});
+
+		it('getDiagnostics returns a snapshot, not a live reference', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			const snap = transport.getDiagnostics();
+			transport.sendAudio(B64);
+			expect(snap.upstream.audio.attempted).toBe(0);
+			expect(transport.getDiagnostics().upstream.audio.attempted).toBe(1);
 		});
 	});
 
@@ -1081,22 +2530,221 @@ describe('GeminiLiveTransport', () => {
 		});
 	});
 
+	describe('sendLiveText', () => {
+		async function connectWindingDown() {
+			const model = 'gemini-3.1-flash-live-preview';
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key', model }, {});
+			await transport.connect({
+				auth: { type: 'api_key', apiKey: 'test-key' },
+				model,
+				responseModality: 'text',
+			});
+			transport.onTextOutput = () => {};
+			transport.onTextDone = () => {};
+			transport.onTurnComplete = () => {};
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			// An early-completed text-mode turn opens the wind-down window.
+			cbs.onmessage({ serverContent: { outputTranscription: { text: 'Hi.' } } });
+			cbs.onmessage({ serverContent: { generationComplete: true } });
+			mockSession.sendRealtimeInput.mockClear();
+			return { transport, cbs };
+		}
+
+		it('concatenates multi-turn text with role prefixes on the default model and returns true', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			const sent = transport.sendLiveText([
+				{ role: 'user', text: 'hello' },
+				{ role: 'assistant', text: 'hi there' },
+			]);
+
+			expect(sent).toBe(true);
+			expect(mockSession.sendRealtimeInput).toHaveBeenCalledWith({
+				text: 'user: hello\nmodel: hi there',
+			});
+			expect(mockSession.sendClientContent).not.toHaveBeenCalled();
+		});
+
+		it('sends a single turn without a role prefix', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			expect(transport.sendLiveText([{ role: 'user', text: 'hello' }])).toBe(true);
+
+			expect(mockSession.sendRealtimeInput).toHaveBeenCalledWith({ text: 'hello' });
+		});
+
+		it('skips empty text and returns false', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			expect(transport.sendLiveText([{ role: 'user', text: '' }])).toBe(false);
+			expect(transport.sendLiveText([])).toBe(false);
+
+			expect(mockSession.sendRealtimeInput).not.toHaveBeenCalled();
+			expect(transport.getDiagnostics().upstream.text.skippedEmpty).toBe(2);
+		});
+
+		it('returns false when there is no session', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+
+			expect(transport.sendLiveText([{ role: 'user', text: 'hello' }])).toBe(false);
+
+			expect(mockSession.sendRealtimeInput).not.toHaveBeenCalled();
+		});
+
+		it('buffered during wind-down returns true and is flushed on turnComplete', async () => {
+			const { transport, cbs } = await connectWindingDown();
+
+			expect(transport.sendLiveText([{ role: 'user', text: 'next' }])).toBe(true);
+			expect(mockSession.sendRealtimeInput).not.toHaveBeenCalled();
+
+			cbs.onmessage({ serverContent: { turnComplete: true } });
+			expect(mockSession.sendRealtimeInput).toHaveBeenCalledWith({ text: 'next' });
+		});
+
+		describe('buffered sends re-enter a guard installed on the instance', () => {
+			// Wrap the instance methods the way DictationController does: outside
+			// agent mode live text returns false and response-triggering content
+			// is held back.
+			function installGuard(transport: GeminiLiveTransport) {
+				const guard = { agentMode: true };
+				const rawSendLiveText = transport.sendLiveText.bind(transport);
+				const rawSendContent = transport.sendContent.bind(transport);
+				transport.sendLiveText = (turns: ContentTurn[]) =>
+					guard.agentMode ? rawSendLiveText(turns) : false;
+				transport.sendContent = (turns: ContentTurn[], turnComplete?: boolean) => {
+					if (turnComplete === true && !guard.agentMode) return;
+					rawSendContent(turns, turnComplete);
+				};
+				return guard;
+			}
+
+			it('drops both buffered sends when the guard is off at flush', async () => {
+				const { transport, cbs } = await connectWindingDown();
+				const guard = installGuard(transport);
+
+				expect(transport.sendLiveText([{ role: 'user', text: 'live' }])).toBe(true);
+				transport.sendContent([{ role: 'user', text: 'content' }], true);
+				guard.agentMode = false;
+				cbs.onmessage({ serverContent: { turnComplete: true } });
+
+				expect(mockSession.sendRealtimeInput).not.toHaveBeenCalled();
+				expect(mockSession.sendClientContent).not.toHaveBeenCalled();
+			});
+
+			it('delivers both buffered sends when the guard is on at flush', async () => {
+				const { transport, cbs } = await connectWindingDown();
+				installGuard(transport);
+
+				expect(transport.sendLiveText([{ role: 'user', text: 'live' }])).toBe(true);
+				transport.sendContent([{ role: 'user', text: 'content' }], true);
+				expect(mockSession.sendRealtimeInput).not.toHaveBeenCalled();
+				cbs.onmessage({ serverContent: { turnComplete: true } });
+
+				expect(mockSession.sendRealtimeInput).toHaveBeenCalledTimes(2);
+				expect(mockSession.sendRealtimeInput).toHaveBeenNthCalledWith(1, { text: 'live' });
+				expect(mockSession.sendRealtimeInput).toHaveBeenNthCalledWith(2, { text: 'content' });
+			});
+		});
+
+		it('a dispatch that throws returns false rather than throwing', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			mockSession.sendRealtimeInput.mockImplementationOnce(() => {
+				throw new Error('socket write failed');
+			});
+
+			expect(transport.sendLiveText([{ role: 'user', text: 'hello' }])).toBe(false);
+
+			expect(transport.getDiagnostics().upstream.text.threw).toBe(1);
+			expect(warnSpy).toHaveBeenCalled();
+			warnSpy.mockRestore();
+		});
+	});
+
 	describe('sendFile', () => {
-		it('wraps in inlineData format', async () => {
+		it('routes image/* to sendRealtimeInput({video})', async () => {
 			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
 			await transport.connect();
 
 			transport.sendFile('base64imgdata', 'image/png');
 
+			expect(mockSession.sendRealtimeInput).toHaveBeenCalledWith({
+				video: { data: 'base64imgdata', mimeType: 'image/png' },
+			});
+			expect(mockSession.sendClientContent).not.toHaveBeenCalled();
+		});
+
+		it('routes audio/* to sendRealtimeInput({audio})', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			transport.sendFile('base64audiodata', 'audio/mp3');
+
+			expect(mockSession.sendRealtimeInput).toHaveBeenCalledWith({
+				audio: { data: 'base64audiodata', mimeType: 'audio/mp3' },
+			});
+			expect(mockSession.sendClientContent).not.toHaveBeenCalled();
+		});
+
+		it('warns, sends nothing and counts one unsupportedMime for other types', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+			transport.sendFile('base64pdfdata', 'application/pdf');
+
+			expect(mockSession.sendRealtimeInput).not.toHaveBeenCalled();
+			expect(mockSession.sendClientContent).not.toHaveBeenCalled();
+			expect(warnSpy).toHaveBeenCalledWith(
+				expect.stringContaining('unsupported mimeType "application/pdf"'),
+			);
+			expect(transport.getDiagnostics().upstream.video.unsupportedMime).toBe(1);
+			warnSpy.mockRestore();
+		});
+	});
+
+	describe('sendInlineFile', () => {
+		it('sends clientContent inlineData with turnComplete false', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			transport.sendInlineFile('base64pdfdata', 'application/pdf');
+
 			expect(mockSession.sendClientContent).toHaveBeenCalledWith({
 				turns: [
 					{
 						role: 'user',
-						parts: [{ inlineData: { data: 'base64imgdata', mimeType: 'image/png' } }],
+						parts: [{ inlineData: { data: 'base64pdfdata', mimeType: 'application/pdf' } }],
 					},
 				],
 				turnComplete: false,
 			});
+			expect(mockSession.sendRealtimeInput).not.toHaveBeenCalled();
+		});
+
+		it('a file without mimeType does not throw and is sent inline as received, on the video slot', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			// A client file_upload frame is unchecked input, so the mimeType can be missing.
+			const sendUntyped = transport.sendInlineFile.bind(transport) as (
+				base64Data: string,
+				mimeType: string | undefined,
+			) => void;
+			expect(() => sendUntyped('YWJj', undefined)).not.toThrow();
+
+			expect(mockSession.sendClientContent).toHaveBeenCalledWith({
+				turns: [{ role: 'user', parts: [{ inlineData: { data: 'YWJj', mimeType: undefined } }] }],
+				turnComplete: false,
+			});
+			const d = transport.getDiagnostics().upstream;
+			expect(d.video.queued).toBe(1);
+			expect(d.audio.attempted).toBe(0);
+			expect(mockSession.sendRealtimeInput).not.toHaveBeenCalled();
 		});
 	});
 
@@ -1131,6 +2779,63 @@ describe('GeminiLiveTransport', () => {
 			expect(mockSession.sendToolResponse).toHaveBeenCalledWith({
 				functionResponses: [{ id: 'fc_2', name: 'ask_openclaw', response: { result: 'done' } }],
 			});
+		});
+
+		it('sanitizes nested undefined, bigint and non-finite numbers recursively', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			transport.sendToolResult({
+				id: 'fc_3',
+				name: 'search',
+				result: {
+					a: undefined,
+					b: { n: 10n, x: Number.POSITIVE_INFINITY, arr: [Number.NaN, undefined] },
+				},
+				scheduling: 'when_idle',
+			});
+
+			const sent = mockSession.sendToolResponse.mock.calls[0]?.[0] as {
+				functionResponses: Array<{ response: Record<string, unknown> }>;
+			};
+			const response = sent.functionResponses[0]?.response;
+			expect(response).toEqual({ b: { n: '10', x: 'Infinity', arr: ['NaN', null] } });
+			expect(response).not.toHaveProperty('a');
+		});
+
+		it('a tool result containing a Date reaches sendToolResponse as the ISO string, and nested values keep the existing sanitizer rules', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+
+			const when = new Date('2026-09-23T12:34:56.789Z');
+			transport.sendToolResult({
+				id: 'fc_4',
+				name: 'schedule',
+				result: {
+					when,
+					slots: [when, undefined],
+					custom: {
+						toJSON: () => ({ at: when, skip: undefined, count: 10n, ratio: Number.NaN }),
+					},
+					hidden: { toJSON: () => undefined },
+				},
+				scheduling: 'when_idle',
+			});
+			transport.sendToolResult({ id: 'fc_5', name: 'now', result: when, scheduling: 'when_idle' });
+
+			const iso = '2026-09-23T12:34:56.789Z';
+			const calls = mockSession.sendToolResponse.mock.calls as Array<
+				[{ functionResponses: Array<{ response: Record<string, unknown> }> }]
+			>;
+			const response = calls[0]?.[0].functionResponses[0]?.response;
+			expect(response).toEqual({
+				when: iso,
+				slots: [iso, null],
+				custom: { at: iso, count: '10', ratio: 'NaN' },
+			});
+			expect(response?.custom).not.toHaveProperty('skip');
+			expect(response).not.toHaveProperty('hidden');
+			expect(calls[1]?.[0].functionResponses[0]?.response).toEqual({ result: iso });
 		});
 	});
 
@@ -1195,6 +2900,47 @@ describe('GeminiLiveTransport', () => {
 			const replayPayload = mockSession.sendClientContent.mock.calls[0][0];
 			expect(JSON.stringify(replayPayload)).not.toContain('functionCall');
 			expect(JSON.stringify(replayPayload)).not.toContain('functionResponse');
+		});
+
+		it('replays text and files in history order in one quiet batch, every file inline', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			mockSession.sendClientContent.mockClear();
+
+			await transport.transferSession(
+				{ instructions: 'New agent', tools: [] },
+				{
+					conversationHistory: [
+						{ type: 'text', role: 'user', text: 'look at this image' },
+						{ type: 'file', role: 'user', base64Data: 'cG5n', mimeType: 'image/png' },
+						{ type: 'text', role: 'assistant', text: 'a cat' },
+						{ type: 'file', role: 'user', base64Data: 'd2F2', mimeType: 'audio/wav' },
+						{ type: 'text', role: 'user', text: 'and this document' },
+						{ type: 'file', role: 'user', base64Data: 'cGRm', mimeType: 'application/pdf' },
+					],
+				},
+			);
+
+			// Image, audio and document alike stay inline in their positions, so
+			// replay never goes through the realtime media slots.
+			expect(mockSession.sendClientContent).toHaveBeenCalledTimes(1);
+			expect(mockSession.sendClientContent).toHaveBeenCalledWith({
+				turns: [
+					{ role: 'user', parts: [{ text: 'look at this image' }] },
+					{ role: 'user', parts: [{ inlineData: { data: 'cG5n', mimeType: 'image/png' } }] },
+					{ role: 'model', parts: [{ text: 'a cat' }] },
+					{ role: 'user', parts: [{ inlineData: { data: 'd2F2', mimeType: 'audio/wav' } }] },
+					{ role: 'user', parts: [{ text: 'and this document' }] },
+					{ role: 'user', parts: [{ inlineData: { data: 'cGRm', mimeType: 'application/pdf' } }] },
+				],
+				turnComplete: false,
+			});
+			expect(mockSession.sendRealtimeInput).not.toHaveBeenCalled();
+			const d = transport.getDiagnostics().upstream;
+			expect(d.text.queued).toBe(1);
+			expect(d.video.queued).toBe(0);
+			expect(d.audio.queued).toBe(0);
+			expect(d.video.unsupportedMime).toBe(0);
 		});
 
 		it('skips transfer history replay when resuming an existing Gemini session', async () => {
@@ -1401,6 +3147,266 @@ describe('GeminiLiveTransport', () => {
 		});
 	});
 
+	// A generation is one model answer, the unit a consumer builds per-answer
+	// state on; it can outlive the server turn, because the tool call that
+	// finishes an answer may arrive after turnComplete. These assert the paired
+	// start/end TRACE, not only a count.
+	describe('generation lifecycle', () => {
+		const AUDIO = { serverContent: { modelTurn: { parts: [{ inlineData: { data: 'AAAA' } }] } } };
+		const TOOL_CALL = {
+			toolCall: { functionCalls: [{ id: 'fc_1', name: 'get_weather', args: { city: 'Boston' } }] },
+		};
+		const TURN_COMPLETE = { serverContent: { turnComplete: true } };
+		const GEN_COMPLETE = { serverContent: { generationComplete: true } };
+		const INTERRUPTED = { serverContent: { interrupted: true } };
+
+		/** Connect a transport (audio mode unless `text`) and record its generation trace. */
+		async function traced(mode: 'audio' | 'text' = 'audio') {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect(
+				mode === 'text'
+					? {
+							auth: { type: 'api_key', apiKey: 'test-key' },
+							model: 'gemini-3.1-flash-live-preview',
+							responseModality: 'text',
+						}
+					: undefined,
+			);
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			const lifecycle: string[] = [];
+			const modelTurnStart = vi.fn();
+			transport.onModelTurnStart = modelTurnStart;
+			transport.onGenerationStart = (id) => lifecycle.push(`start:${id}`);
+			transport.onGenerationEnd = (id, reason) => lifecycle.push(`end:${id}:${reason}`);
+			transport.onTextOutput = () => {};
+			transport.onTextDone = () => {};
+			transport.onTurnComplete = () => {};
+			const fire = (...msgs: unknown[]) => {
+				for (const msg of msgs) cbs.onmessage(msg);
+			};
+			return { transport, fire, lifecycle, modelTurnStart };
+		}
+
+		it('audio → turnComplete → toolCall fires onModelTurnStart once and leaves gen_0 draining', async () => {
+			const { fire, lifecycle, modelTurnStart } = await traced();
+			fire(AUDIO, TURN_COMPLETE, TOOL_CALL);
+			expect(modelTurnStart).toHaveBeenCalledOnce();
+			expect(lifecycle).toEqual(['start:gen_0']);
+		});
+
+		it('the answer built from the tool result is gen_1, after gen_0 ends superseded', async () => {
+			const { fire, lifecycle, modelTurnStart } = await traced();
+			fire(AUDIO, TURN_COMPLETE, TOOL_CALL, AUDIO);
+			expect(lifecycle).toEqual(['start:gen_0', 'end:gen_0:superseded', 'start:gen_1']);
+			expect(modelTurnStart.mock.calls).toEqual([['gen_0'], ['gen_1']]);
+		});
+
+		it('generationComplete ends the generation; the next output opens a new one', async () => {
+			const { fire, lifecycle } = await traced();
+			fire(AUDIO, GEN_COMPLETE, TURN_COMPLETE, TOOL_CALL);
+			expect(lifecycle).toEqual(['start:gen_0', 'end:gen_0:generationComplete', 'start:gen_1']);
+		});
+
+		it('an interrupt ends the generation; a following toolCall opens a new one', async () => {
+			const { fire, lifecycle } = await traced();
+			fire(AUDIO, INTERRUPTED, TOOL_CALL);
+			expect(lifecycle).toEqual(['start:gen_0', 'end:gen_0:interrupted', 'start:gen_1']);
+		});
+
+		it('three plain turns without generationComplete are three generations, each closed superseded', async () => {
+			const { fire, lifecycle, modelTurnStart } = await traced();
+			fire(AUDIO, TURN_COMPLETE, AUDIO, TURN_COMPLETE, AUDIO, TURN_COMPLETE);
+			expect(lifecycle).toEqual([
+				'start:gen_0',
+				'end:gen_0:superseded',
+				'start:gen_1',
+				'end:gen_1:superseded',
+				'start:gen_2',
+			]);
+			expect(modelTurnStart).toHaveBeenCalledTimes(3);
+		});
+
+		it('a duplicate generationComplete or interrupted ends the generation once and does not wedge it', async () => {
+			const { fire, lifecycle } = await traced();
+			fire(AUDIO, GEN_COMPLETE, GEN_COMPLETE, INTERRUPTED, TURN_COMPLETE, AUDIO);
+			expect(lifecycle).toEqual(['start:gen_0', 'end:gen_0:generationComplete', 'start:gen_1']);
+		});
+
+		for (const mode of ['audio', 'text'] as const) {
+			it(`trailing parts after generationComplete inside the open server turn do not reopen (${mode} mode)`, async () => {
+				const { fire, lifecycle, modelTurnStart } = await traced(mode);
+				fire(
+					AUDIO,
+					{ serverContent: { outputTranscription: { text: 'Hello.' } } },
+					GEN_COMPLETE,
+					AUDIO,
+					AUDIO,
+				);
+				expect(modelTurnStart).toHaveBeenCalledOnce();
+				expect(lifecycle).toEqual(['start:gen_0', 'end:gen_0:generationComplete']);
+				// Once that server turn closes, the next output is a new generation.
+				fire(TURN_COMPLETE, AUDIO);
+				expect(modelTurnStart).toHaveBeenCalledTimes(2);
+				expect(lifecycle).toEqual(['start:gen_0', 'end:gen_0:generationComplete', 'start:gen_1']);
+			});
+
+			it(`trailing parts after interrupted inside the open server turn do not reopen (${mode} mode)`, async () => {
+				const { fire, lifecycle, modelTurnStart } = await traced(mode);
+				fire(AUDIO, INTERRUPTED, AUDIO, AUDIO);
+				expect(modelTurnStart).toHaveBeenCalledOnce();
+				expect(lifecycle).toEqual(['start:gen_0', 'end:gen_0:interrupted']);
+				fire(TURN_COMPLETE, AUDIO);
+				expect(modelTurnStart).toHaveBeenCalledTimes(2);
+				expect(lifecycle).toEqual(['start:gen_0', 'end:gen_0:interrupted', 'start:gen_1']);
+			});
+		}
+
+		it('onGenerationComplete fires in every mode, before the text-mode early turn end', async () => {
+			const audio = await traced();
+			const audioComplete = vi.fn();
+			audio.transport.onGenerationComplete = audioComplete;
+			audio.fire(GEN_COMPLETE);
+			expect(audioComplete).toHaveBeenCalledOnce();
+
+			const text = await traced('text');
+			const order: string[] = [];
+			text.transport.onGenerationEnd = (id, reason) => order.push(`end:${id}:${reason}`);
+			text.transport.onGenerationComplete = () => order.push('generationComplete');
+			text.transport.onTextDone = () => order.push('textDone');
+			text.transport.onTurnComplete = () => order.push('turnComplete');
+			text.fire({ serverContent: { outputTranscription: { text: 'Hi.' } } }, AUDIO, GEN_COMPLETE);
+			expect(order).toEqual([
+				'end:gen_0:generationComplete',
+				'generationComplete',
+				'textDone',
+				'turnComplete',
+			]);
+		});
+
+		it('disconnect() ends an open generation with disconnected, and the next connection starts fresh', async () => {
+			const { transport, fire, lifecycle, modelTurnStart } = await traced();
+			const connectedAtEnd: boolean[] = [];
+			const recordEnd = transport.onGenerationEnd;
+			transport.onGenerationEnd = (id, reason) => {
+				connectedAtEnd.push(transport.isConnected);
+				recordEnd?.(id, reason);
+			};
+			fire(AUDIO, TURN_COMPLETE); // draining
+			await transport.disconnect();
+			expect(lifecycle).toEqual(['start:gen_0', 'end:gen_0:disconnected']);
+			// The end is reported once the session is already detached.
+			expect(connectedAtEnd).toEqual([false]);
+			await transport.disconnect(); // nothing open: no second end
+			expect(lifecycle).toHaveLength(2);
+
+			await transport.connect();
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+			cbs.onmessage(TOOL_CALL);
+			expect(modelTurnStart.mock.calls).toEqual([['gen_0'], ['gen_1']]);
+			expect(lifecycle).toEqual(['start:gen_0', 'end:gen_0:disconnected', 'start:gen_1']);
+		});
+
+		it('abortIncumbent() ends an open generation with disconnected', async () => {
+			const { transport, fire, lifecycle } = await traced();
+			fire(AUDIO);
+			await expect(transport.abortIncumbent()).resolves.toBe('closed');
+			expect(lifecycle).toEqual(['start:gen_0', 'end:gen_0:disconnected']);
+		});
+
+		it('a throwing onGenerationEnd does not stop disconnect() from closing the session', async () => {
+			const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			const { transport, fire } = await traced();
+			transport.onGenerationEnd = () => {
+				throw new Error('observer failed');
+			};
+			fire(AUDIO); // gen_0 open: disconnect() ends it with `disconnected`
+
+			await expect(transport.disconnect()).resolves.toBeUndefined();
+			expect(mockSession.close).toHaveBeenCalledOnce();
+			expect(transport.isConnected).toBe(false);
+			expect(warn).toHaveBeenCalledWith(
+				expect.stringContaining('onGenerationEnd observer threw'),
+				expect.any(Error),
+			);
+			warn.mockRestore();
+		});
+
+		it('throwing generation observers do not suppress dispatch on the same message', async () => {
+			const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			const boom = () => {
+				throw new Error('observer failed');
+			};
+			const ctor = {
+				onModelTurnStart: vi.fn(boom),
+				onGenerationStart: vi.fn(boom),
+				onGenerationComplete: vi.fn(boom),
+			};
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, ctor);
+			const onModelTurnStart = vi.fn(boom);
+			const onGenerationStart = vi.fn(boom);
+			const onGenerationEnd = vi.fn(boom);
+			const onAudioOutput = vi.fn();
+			const onTurnComplete = vi.fn();
+			transport.onModelTurnStart = onModelTurnStart;
+			transport.onGenerationStart = onGenerationStart;
+			transport.onGenerationEnd = onGenerationEnd;
+			transport.onGenerationComplete = boom;
+			transport.onAudioOutput = onAudioOutput;
+			transport.onTurnComplete = onTurnComplete;
+			await transport.connect();
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+
+			expect(() => cbs.onmessage(AUDIO)).not.toThrow();
+			// Every observer ran, each isolated from the one before it.
+			expect(ctor.onModelTurnStart).toHaveBeenCalledWith('gen_0');
+			expect(onModelTurnStart).toHaveBeenCalledWith('gen_0');
+			expect(ctor.onGenerationStart).toHaveBeenCalledWith('gen_0');
+			expect(onGenerationStart).toHaveBeenCalledWith('gen_0');
+			expect(onAudioOutput).toHaveBeenCalledWith('AAAA');
+
+			expect(() => cbs.onmessage(GEN_COMPLETE)).not.toThrow();
+			expect(onGenerationEnd).toHaveBeenCalledWith('gen_0', 'generationComplete');
+			expect(ctor.onGenerationComplete).toHaveBeenCalledOnce();
+
+			expect(() => cbs.onmessage(TURN_COMPLETE)).not.toThrow();
+			expect(onTurnComplete).toHaveBeenCalledTimes(1);
+			for (const label of [
+				'onModelTurnStart',
+				'onGenerationStart',
+				'onGenerationEnd',
+				'onGenerationComplete',
+			]) {
+				expect(warn).toHaveBeenCalledWith(
+					expect.stringContaining(`${label} observer threw`),
+					expect.any(Error),
+				);
+			}
+			warn.mockRestore();
+		});
+
+		it('onModelTurnStart and the generation callbacks receive the id, on both callback forms', async () => {
+			const ctor = {
+				onModelTurnStart: vi.fn(),
+				onGenerationStart: vi.fn(),
+				onGenerationEnd: vi.fn(),
+				onGenerationComplete: vi.fn(),
+			};
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, ctor);
+			const onModelTurnStart = vi.fn();
+			transport.onModelTurnStart = onModelTurnStart;
+			await transport.connect();
+			const cbs = capturedConnectConfig.callbacks as Record<string, (msg: unknown) => void>;
+
+			cbs.onmessage(TOOL_CALL);
+			cbs.onmessage(GEN_COMPLETE);
+			expect(ctor.onModelTurnStart).toHaveBeenCalledWith('gen_0');
+			expect(onModelTurnStart).toHaveBeenCalledWith('gen_0');
+			expect(ctor.onGenerationStart).toHaveBeenCalledWith('gen_0');
+			expect(ctor.onGenerationEnd).toHaveBeenCalledWith('gen_0', 'generationComplete');
+			expect(ctor.onGenerationComplete).toHaveBeenCalledOnce();
+		});
+	});
+
 	// P2: sessionResumption refactor.
 	describe('sessionResumption (P2)', () => {
 		it('sessionResumption: false omits the field from connectConfig', async () => {
@@ -1517,6 +3523,10 @@ describe('resolveGeminiRealtimeInputConfig', () => {
 			(result as { automaticActivityDetection: { endOfSpeechSensitivity: string } })
 				.automaticActivityDetection.endOfSpeechSensitivity,
 		).toBe('END_SENSITIVITY_HIGH');
+	});
+
+	it('returns undefined for false — the opt-out applies no default', () => {
+		expect(resolveGeminiRealtimeInputConfig(false)).toBeUndefined();
 	});
 
 	it('deep-merges partial automaticActivityDetection — user fields win, defaults fill in', () => {

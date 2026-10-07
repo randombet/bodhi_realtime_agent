@@ -1,5 +1,6 @@
 import { resamplePcm } from '../audio/resample.js';
 import { encodePcmToMulaw } from '../telephony/audio-codec.js';
+import type { EchoGuard } from '../transport/echo-guard.js';
 import type { LLMTransport, STTProvider } from '../types/transport.js';
 import { VAD_FRAME } from './client-vad-detector.js';
 import type { ClientVadDetector } from './client-vad-detector.js';
@@ -29,10 +30,17 @@ export interface AudioRouterDeps {
 	/** Inbound client PCM sample rate (what `handleFromClient` receives). */
 	clientAudioInputRate: number;
 	getSttProvider: () => STTProvider | undefined;
+	/** Observation-only second transcriber, fed the same raw client PCM as
+	 *  `getSttProvider` on the agent path, after the greeting-grace gate. */
+	getShadowSttProvider?: () => { feedAudio(base64Pcm: string): void } | undefined;
 	getWhisperProvider: () => STTProvider | undefined;
 	isSessionActive: () => boolean;
 	/** True when a direct-RTC audio plane is live — websocket frames are ignored. */
 	isRtcAudioReady: () => boolean;
+	/** Optional acoustic echo suppressor. A frame it flags as the assistant's
+	 *  own playback echoed back is dropped before the VAD, as if never
+	 *  received: no VAD, ledger, transport, STT or shadow feed. */
+	echoGuard?: Pick<EchoGuard, 'check' | 'enabled'>;
 	getMode: () => InternalTranscriptionMode;
 	/** Drop outbound transport + STT audio during the greeting-grace window. */
 	shouldDropOutbound: () => boolean;
@@ -76,6 +84,11 @@ export class AudioRouter {
 	handleFromClient(data: Buffer, source: 'websocket' | 'rtc' = 'websocket'): void {
 		if (source === 'websocket' && this.d.isRtcAudioReady()) return;
 		if (!this.d.isSessionActive()) return;
+		// Echo of the assistant's own playback is dropped before the VAD: echo
+		// reaching the client VAD is what fires false barge-ins. The guard's
+		// own suppressedCount is the only record of the drop.
+		const echoGuard = this.d.echoGuard;
+		if (echoGuard?.enabled && echoGuard.check(data, this.d.clientAudioInputRate).suppress) return;
 
 		const flags = this.d.vad.process(data);
 		if (flags & VAD_FRAME.SEGMENT_STARTED) {
@@ -221,6 +234,8 @@ export class AudioRouter {
 				stt.feedAudio(encodePcmToMulaw(stt8k).toString('base64'));
 			}
 		}
+		// Shadow transcription hears exactly what a PCM sttProvider would.
+		this.d.getShadowSttProvider?.()?.feedAudio(data.toString('base64'));
 	}
 
 	/** Forward a PCM frame to the whisper provider (resampled to its 24 kHz). */

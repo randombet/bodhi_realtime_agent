@@ -1631,6 +1631,17 @@ describe('OpenAIRealtimeTransport — Phase 1 features (gpt-realtime-2)', () => 
 			expect(session.audio.input.noise_reduction).toBeNull();
 		});
 
+		it('forwards a Record<string, unknown> noise reduction config unchanged in session.update', async () => {
+			const noiseReduction: Record<string, unknown> = { type: 'near_field', strength: 0.4 };
+			setup({ apiKey: 'test', model: 'gpt-realtime-2', noiseReduction });
+			// biome-ignore lint/suspicious/noExplicitAny: send the connect-time session.update
+			const internals = transport as any;
+			await internals.sendSessionUpdateAndWait(internals.buildSessionConfig());
+			const update = mockRt.sent.find((m) => m.type === 'session.update');
+			const session = update?.session as { audio: { input: Record<string, unknown> } };
+			expect(session.audio.input.noise_reduction).toEqual({ type: 'near_field', strength: 0.4 });
+		});
+
 		it('G.711 mu-law: input rate = 8000, bitDepth = 8, encoding = pcmu', () => {
 			setup({
 				apiKey: 'test',

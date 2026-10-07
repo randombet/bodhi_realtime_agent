@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { BackgroundNotificationQueue } from '../../src/core/background-notification-queue.js';
+import { SessionError } from '../../src/core/errors.js';
+import { ActorNotificationSink, LegacyNotificationSink } from '../../src/core/notification-sink.js';
 
 function makeTurns(text: string) {
 	return [{ role: 'user', parts: [{ text }] }];
@@ -171,6 +173,135 @@ describe('BackgroundNotificationQueue', () => {
 			expect(sendContent).toHaveBeenNthCalledWith(1, makeTurns('first'), true);
 			expect(sendContent).toHaveBeenNthCalledWith(2, makeTurns('second'), true);
 			expect(sendContent).toHaveBeenNthCalledWith(3, makeTurns('third'), true);
+		});
+	});
+
+	describe('setHeld', () => {
+		it('held sendOrQueue queues (front for high priority), onTurnComplete does not flush while held, and the next turn after release flushes', () => {
+			const sendContent = vi.fn();
+			// A truncation transport would deliver high priority at once when unheld.
+			const q = new BackgroundNotificationQueue(sendContent, vi.fn(), true);
+
+			q.setHeld(true);
+			// The model is idle, yet nothing is delivered while held.
+			q.sendOrQueue(makeTurns('normal1'), true);
+			q.sendOrQueue(makeTurns('urgent'), true, { priority: 'high' });
+			q.sendOrQueue(makeTurns('normal2'), true);
+			expect(sendContent).not.toHaveBeenCalled();
+
+			q.onTurnComplete();
+			expect(sendContent).not.toHaveBeenCalled();
+
+			q.setHeld(false);
+			expect(sendContent).not.toHaveBeenCalled(); // release alone flushes nothing
+
+			q.onTurnComplete(); // urgent (queued at the front)
+			q.onTurnComplete(); // normal1
+			q.onTurnComplete(); // normal2
+			expect(sendContent).toHaveBeenCalledTimes(3);
+			expect(sendContent).toHaveBeenNthCalledWith(1, makeTurns('urgent'), true);
+			expect(sendContent).toHaveBeenNthCalledWith(2, makeTurns('normal1'), true);
+			expect(sendContent).toHaveBeenNthCalledWith(3, makeTurns('normal2'), true);
+
+			// Released: an idle model receives the next notification at once.
+			q.sendOrQueue(makeTurns('later'), true);
+			expect(sendContent).toHaveBeenLastCalledWith(makeTurns('later'), true);
+		});
+
+		it('the legacy sink holds its queue; the actor sink setHeld throws SessionError', () => {
+			const sendContent = vi.fn();
+			const legacy = new LegacyNotificationSink(
+				new BackgroundNotificationQueue(sendContent, vi.fn()),
+			);
+			legacy.setHeld(true);
+			legacy.publish('SYSTEM', 'done', 'normal');
+			expect(sendContent).not.toHaveBeenCalled();
+			legacy.setHeld(false);
+			legacy.turnComplete();
+			expect(sendContent).toHaveBeenCalledTimes(1);
+
+			const tell = vi.fn();
+			const actor = new ActorNotificationSink(tell);
+			expect(() => actor.setHeld(true)).toThrow(SessionError);
+			expect(() => actor.setHeld(false)).toThrow(SessionError);
+			expect(tell).not.toHaveBeenCalled();
+		});
+	});
+
+	describe('deduplication', () => {
+		it('prevents duplicate notifications for the same toolCallId', () => {
+			const sendContent = vi.fn();
+			const log = vi.fn();
+			const q = new BackgroundNotificationQueue(sendContent, log);
+
+			// Send two notifications with the same toolCallId
+			q.sendOrQueue(makeTurns('first notification'), true, { toolCallId: 'tool-123' });
+			q.sendOrQueue(makeTurns('duplicate notification'), true, { toolCallId: 'tool-123' });
+
+			// Should only send the first one
+			expect(sendContent).toHaveBeenCalledTimes(1);
+			expect(sendContent).toHaveBeenCalledWith(makeTurns('first notification'), true);
+			expect(log).toHaveBeenCalledWith(
+				expect.stringContaining('Skipping duplicate notification for tool call tool-123'),
+			);
+		});
+
+		it('prevents duplicates when first is queued and second arrives while idle', () => {
+			const sendContent = vi.fn();
+			const log = vi.fn();
+			const q = new BackgroundNotificationQueue(sendContent, log);
+
+			// First notification is queued (audio is being generated)
+			q.markAudioReceived();
+			q.sendOrQueue(makeTurns('queued notification'), true, { toolCallId: 'tool-456' });
+			expect(sendContent).not.toHaveBeenCalled();
+
+			// Second notification arrives after audio ends (race condition scenario)
+			q.onTurnComplete();
+			expect(sendContent).toHaveBeenCalledTimes(1);
+
+			// Try to send duplicate - should be blocked
+			q.sendOrQueue(makeTurns('duplicate after flush'), true, { toolCallId: 'tool-456' });
+			expect(sendContent).toHaveBeenCalledTimes(1); // Still only 1 call
+			expect(log).toHaveBeenCalledWith(
+				expect.stringContaining('Skipping duplicate notification for tool call tool-456'),
+			);
+		});
+
+		it('allows notifications with different toolCallIds', () => {
+			const sendContent = vi.fn();
+			const q = new BackgroundNotificationQueue(sendContent, vi.fn());
+
+			q.sendOrQueue(makeTurns('first task'), true, { toolCallId: 'tool-1' });
+			q.sendOrQueue(makeTurns('second task'), true, { toolCallId: 'tool-2' });
+
+			expect(sendContent).toHaveBeenCalledTimes(2);
+			expect(sendContent).toHaveBeenNthCalledWith(1, makeTurns('first task'), true);
+			expect(sendContent).toHaveBeenNthCalledWith(2, makeTurns('second task'), true);
+		});
+
+		it('allows notifications without toolCallId (backwards compatibility)', () => {
+			const sendContent = vi.fn();
+			const q = new BackgroundNotificationQueue(sendContent, vi.fn());
+
+			q.sendOrQueue(makeTurns('notification 1'), true);
+			q.sendOrQueue(makeTurns('notification 2'), true);
+
+			// Without toolCallId, both should be sent
+			expect(sendContent).toHaveBeenCalledTimes(2);
+		});
+
+		it('clears deduplication state on clear()', () => {
+			const sendContent = vi.fn();
+			const q = new BackgroundNotificationQueue(sendContent, vi.fn());
+
+			q.sendOrQueue(makeTurns('first'), true, { toolCallId: 'tool-789' });
+			q.clear();
+
+			// After clear, should allow the same toolCallId again
+			q.sendOrQueue(makeTurns('after clear'), true, { toolCallId: 'tool-789' });
+
+			expect(sendContent).toHaveBeenCalledTimes(2);
 		});
 	});
 });

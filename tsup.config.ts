@@ -1,15 +1,25 @@
 import { defineConfig } from 'tsup';
 
+/** Entries published through `exports`; only these get declaration files. */
+const publicEntries = {
+	index: 'src/index.ts',
+	// Optional observability subpaths — kept out of the core entry so importing
+	// nothing pulls nothing.
+	'observability/index': 'src/observability/index.ts',
+	'observability/opentelemetry': 'src/observability/opentelemetry.ts',
+};
+
 export default defineConfig({
 	entry: {
-		index: 'src/index.ts',
-		// Optional observability subpaths — kept out of the core entry so importing
-		// nothing pulls nothing.
-		'observability/index': 'src/observability/index.ts',
-		'observability/opentelemetry': 'src/observability/opentelemetry.ts',
+		...publicEntries,
+		// The werift + @evan/opus RTC engine. Internal: reached only through the
+		// package's private `#direct-rtc` import, never referenced statically by the
+		// root entry (it is loaded on first use), so `bodhi-realtime-agent` bundles
+		// without native dependencies.
+		'direct-rtc/index': 'src/direct-rtc/index.ts',
 	},
 	format: ['esm', 'cjs'],
-	dts: true,
+	dts: { entry: publicEntries },
 	sourcemap: true,
 	clean: true,
 	outDir: 'dist',

@@ -280,6 +280,21 @@ turn's E2E correctly includes the tool execution time. `onTurnLatency` fires on
 the tracker's drain tick, asynchronously ≈ one macrotask after the turn
 finalizes.
 
+::: warning Upgrading from a build that timed the response instead
+Some earlier builds measured `totalE2EMs` from the first assistant audio to the
+provider's turn completion, that is, how long the answer took to produce, and
+kept the field name so it could later carry the full stop-to-first-audio
+measurement. Here it carries that measurement, under the same name. If you
+store, print or alert on the value:
+
+- it is the user's wait from the end of their speech to the first assistant
+  audio, not the duration of the answer;
+- `onTurnLatency` fires only for turns with a user-speech anchor: a greeting or
+  a text-injected turn produces audio but no sample, where the older
+  measurement reported one;
+- an interrupted turn that produced audio still reports its sample.
+:::
+
 ## Anatomy of a barge-in
 
 Barge-in metrics anchor on **detection → cancel actuation**, *not* on speech
@@ -409,7 +424,14 @@ const session = new VoiceSession({
 The transport layer contributes two uniform timing callbacks, wired identically
 across Gemini, OpenAI, and Qwen:
 
-- `onModelTurnStart` — provider began **any** response (audio or tool call)
+- `onModelTurnStart` — provider began a response (its first audio, text or
+  tool call). On Gemini it fires once per **generation** (one model answer),
+  not once per provider turn: a tool call that arrives after `turnComplete` is
+  the tail of the answer already underway and does not fire it again. The
+  session publishes each Gemini generation as a `generation.start` /
+  `generation.end` pair; on every transport it publishes `turn.start` at most
+  once per framework turn, and only for a turn that receives a model start (a
+  turn born from a bare `turnComplete` or a bare interrupt gets none)
 - `onFirstAudioChunk` — first audio chunk of the response, once per response
   (the stop-to-first-audio anchor; re-arms when a new response begins)
 - `onUserSpeechStopped` — provider server-VAD end-of-speech
