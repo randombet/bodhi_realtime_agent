@@ -1,4 +1,5 @@
 import {
+	type FunctionResponseScheduling,
 	GoogleGenAI,
 	type LiveServerMessage,
 	type RealtimeInputConfig,
@@ -7,7 +8,7 @@ import {
 } from '@google/genai';
 import { DEFAULT_CONNECT_TIMEOUT_MS, DEFAULT_RECONNECT_TIMEOUT_MS } from '../core/constants.js';
 import { ValidationError } from '../core/errors.js';
-import type { ToolDefinition } from '../types/tool.js';
+import type { FunctionBehavior, ToolDefinition } from '../types/tool.js';
 import type {
 	AudioFormatSpec,
 	ConnectionLifecycleEvent,
@@ -44,6 +45,18 @@ function warnLegacyResumptionHandleOnce(): void {
 			'use sessionResumption: { handle } instead. Will be removed in a future release.',
 	);
 }
+
+/** Framework scheduling hint to Gemini's `FunctionResponseScheduling`. `immediate` sends none,
+ *  leaving Gemini's own default for a non-blocking response. */
+const GEMINI_SCHEDULING: Record<
+	NonNullable<TransportToolResult['scheduling']>,
+	FunctionResponseScheduling | undefined
+> = {
+	immediate: undefined,
+	when_idle: 'WHEN_IDLE' as FunctionResponseScheduling,
+	interrupt: 'INTERRUPT' as FunctionResponseScheduling,
+	silent: 'SILENT' as FunctionResponseScheduling,
+};
 
 /**
  * Recursively sanitize a tool result so it conforms to `google.protobuf.Struct`,
@@ -201,6 +214,9 @@ export interface GeminiTransportConfig {
 	 *  realtime-input image this transport sends; realtime input has no
 	 *  per-send override. Omitted → server default. */
 	mediaResolution?: GeminiMediaResolution;
+	/** Default `behavior` written on every function declaration that does not set its own.
+	 *  Unset sends no `behavior`, so the model's default applies. */
+	functionBehavior?: FunctionBehavior;
 	/** Enable Gemini's built-in Google Search grounding. */
 	googleSearch?: boolean;
 	/** Enable server-side transcription of user audio input (default: true). */
@@ -366,6 +382,13 @@ export class GeminiLiveTransport implements LLMTransport {
 	 *  that close settles so `abortIncumbent()` can still bound it. Only the call
 	 *  that recorded it clears it. */
 	private pendingDisconnectClose: Promise<void> | null = null;
+	/** Behavior of the declarations sent on the last dial; staged tool updates apply only on reconnect. */
+	private liveBehaviors: {
+		byTool: Map<string, FunctionBehavior | undefined>;
+		fallback?: FunctionBehavior;
+	} = {
+		byTool: new Map(),
+	};
 	/** Upstream send counters for the current generation; reset on `setupComplete`. */
 	private upstream: UpstreamCounters = freshUpstreamCounters();
 	/** Attempt/generation identity, fed this transport's `dialGen` (the fence in
@@ -623,8 +646,16 @@ export class GeminiLiveTransport implements LLMTransport {
 		if (this.config.googleSearch) {
 			toolEntries.push({ googleSearch: {} });
 		}
+		this.liveBehaviors = {
+			byTool: new Map((this.config.tools ?? []).map((t) => [t.name, t.behavior])),
+			fallback: this.config.functionBehavior,
+		};
 		if (this.config.tools?.length) {
-			toolEntries.push({ functionDeclarations: this.config.tools.map(toolToDeclaration) });
+			toolEntries.push({
+				functionDeclarations: this.config.tools.map((tool) =>
+					toolToDeclaration(tool, this.config.functionBehavior),
+				),
+			});
 		}
 		if (toolEntries.length > 0) {
 			connectConfig.tools = toolEntries;
@@ -1188,12 +1219,20 @@ export class GeminiLiveTransport implements LLMTransport {
 	sendToolResult(result: TransportToolResult): void {
 		if (!this.session) return;
 		if (this.bufferIfWindingDown(() => this.sendToolResult(result))) return;
+		// Gemini honours `scheduling` only on a NON_BLOCKING function, so it is sent only for a tool
+		// declared that way on the connected session; every other result keeps the plain wire format.
+		const behavior = this.liveBehaviors.byTool.get(result.name) ?? this.liveBehaviors.fallback;
+		const scheduling =
+			behavior === 'NON_BLOCKING' && result.scheduling
+				? GEMINI_SCHEDULING[result.scheduling]
+				: undefined;
 		this.session.sendToolResponse({
 			functionResponses: [
 				{
 					id: result.id,
 					name: result.name,
 					response: sanitizeForStruct(result.result),
+					...(scheduling && { scheduling }),
 				},
 			],
 		});
@@ -1834,11 +1873,17 @@ export class GeminiLiveTransport implements LLMTransport {
 	}
 }
 
-/** Convert a ToolDefinition to a Gemini function declaration (name + description + JSON Schema). */
-function toolToDeclaration(tool: ToolDefinition): Record<string, unknown> {
+/** Convert a ToolDefinition to a Gemini function declaration (name + description + JSON Schema),
+ *  with `behavior` when the tool or the transport sets one. */
+export function toolToDeclaration(
+	tool: ToolDefinition,
+	fallbackBehavior?: FunctionBehavior,
+): Record<string, unknown> {
+	const behavior = tool.behavior ?? fallbackBehavior;
 	return {
 		name: tool.name,
 		description: tool.description,
 		parameters: zodToJsonSchema(tool.parameters),
+		...(behavior && { behavior }),
 	};
 }

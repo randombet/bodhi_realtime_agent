@@ -5,6 +5,9 @@ import type { z } from 'zod';
  * - `inline`: Executed synchronously — Gemini waits for the result before continuing.
  * - `background`: Handed off to a subagent — Gemini continues speaking while it runs.
  */
+/** Gemini Live `FunctionDeclaration.behavior`. */
+export type FunctionBehavior = 'BLOCKING' | 'NON_BLOCKING';
+
 export type ToolExecution = 'inline' | 'background';
 
 /**
@@ -32,6 +35,11 @@ export interface ToolDefinition {
 	scheduling?: 'immediate' | 'when_idle' | 'silent' | 'interrupt';
 	/** For background tools: message sent to Gemini immediately so it can acknowledge the request. */
 	pendingMessage?: string;
+	/** Gemini Live function-call behavior for this tool. `'NON_BLOCKING'` lets the model keep
+	 *  talking while the call runs; `'BLOCKING'` makes it wait for the result. Unset falls back
+	 *  to the transport's `functionBehavior`, and if that is unset too, to the model's own default
+	 *  (blocking on 3.1 Flash Live, non-blocking on 3.8 Live). Ignored by non-Gemini transports. */
+	behavior?: FunctionBehavior;
 	/** Execution timeout in milliseconds (default 30 000). */
 	timeout?: number;
 	/** Execute the tool with validated arguments and an abort-aware context. */

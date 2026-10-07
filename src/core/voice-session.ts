@@ -53,7 +53,7 @@ import type {
 	AudioOutputObserver,
 } from '../types/session-seams.js';
 import type { SessionEndReason } from '../types/session.js';
-import type { ToolDefinition } from '../types/tool.js';
+import type { FunctionBehavior, ToolDefinition } from '../types/tool.js';
 import type {
 	ConnectionLifecycleEvent,
 	ContentTurn,
@@ -445,6 +445,9 @@ export interface VoiceSessionConfig {
 	 *  model limit, target half of it), and `{}` enables compression with both
 	 *  defaults. */
 	compressionConfig?: GeminiCompressionConfig;
+	/** Gemini Live default function-call `behavior` for every tool that does not set its own
+	 *  (see `ToolDefinition.behavior`). Unset leaves the model's default in place. */
+	functionBehavior?: FunctionBehavior;
 	/** Enable server-side transcription of user audio input (default: true).
 	 *  Has no effect when sttProvider is set (built-in is disabled automatically).
 	 *  Use false to disable all input transcription for privacy or cost control. */
@@ -1321,6 +1324,7 @@ export class VoiceSession {
 					googleSearch: initialForLive?.googleSearch,
 					speechConfig: config.speechConfig,
 					compressionConfig: config.compressionConfig,
+					functionBehavior: config.functionBehavior,
 					mediaResolution: config.mediaResolution,
 					inputAudioTranscription: inputTranscription,
 					realtimeInputConfig: this.resolvedRealtimeInputConfig,
