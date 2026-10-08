@@ -77,7 +77,7 @@ import {
 } from './constants.js';
 import { ConversationContext } from './conversation-context.js';
 import { ConversationHistoryWriter } from './conversation-history-writer.js';
-import { DictationController } from './dictation-controller.js';
+import { DictationController, type DictationTranscriptEvent } from './dictation-controller.js';
 import { DirectiveManager } from './directive-manager.js';
 import { SessionError, ValidationError } from './errors.js';
 import { EventBus } from './event-bus.js';
@@ -4636,6 +4636,12 @@ export class VoiceSession {
 	/** Discard buffered dictation without injecting it. */
 	clearDictationBuffer(): void {
 		this.dictation.clearDictationBuffer();
+	}
+
+	/** Observe transcription-mode transcripts without taking over the whisper
+	 *  provider's callbacks. Finals are buffered first; returns an unsubscribe. */
+	onDictationTranscript(listener: (event: DictationTranscriptEvent) => void): () => void {
+		return this.dictation.onTranscript(listener);
 	}
 
 	/** Inject the dictation buffer as a user message into the agent's

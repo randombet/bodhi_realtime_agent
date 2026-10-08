@@ -7,6 +7,14 @@ import type {
 import type { InternalTranscriptionMode } from './audio-router.js';
 import type { EventBus } from './event-bus.js';
 
+/** One transcript from the transcription-mode provider, as seen by subscribers. */
+export interface DictationTranscriptEvent {
+	text: string;
+	/** True for an interim hypothesis; false for a final line (already in the dictation buffer). */
+	partial: boolean;
+	turnId?: number;
+}
+
 /** Caller-supplied dictation config (read at construction). */
 export interface DictationControllerConfig {
 	/** The transcription-mode Whisper provider. MUST be a distinct instance from
@@ -67,6 +75,7 @@ export class DictationController {
 	private internalMode: InternalTranscriptionMode = 'agent';
 	private readonly whisperProvider?: STTProvider;
 	private dictationBuffer: string[] = [];
+	private readonly transcriptListeners = new Set<(event: DictationTranscriptEvent) => void>();
 
 	/** Tool results that arrived while not in 'agent' mode. Flushed in order on
 	 *  re-entry. Prevents response.create from leaking during transcription mode. */
@@ -170,11 +179,14 @@ export class DictationController {
 			// Whisper transcripts feed the dictation buffer ONLY — never the
 			// TranscriptManager / ConversationContext path (that would
 			// auto-inject and violate the "never auto-inject" guarantee).
-			this.whisperProvider.onTranscript = (text) => {
-				if (text) this.dictationBuffer.push(text);
+			this.whisperProvider.onTranscript = (text, turnId) => {
+				if (!text) return;
+				this.dictationBuffer.push(text);
+				this.emitTranscript({ text, partial: false, turnId });
 			};
-			// Partials are not surfaced here today; subscribers wanting live
-			// dictation preview can wire onPartialTranscript directly.
+			this.whisperProvider.onPartialTranscript = (text) => {
+				if (text) this.emitTranscript({ text, partial: true });
+			};
 		}
 		// Honour an initial transcriptionMode='transcription' by setting the
 		// internal mode now. The actual whisper.start() happens lazily on
@@ -220,6 +232,29 @@ export class DictationController {
 						err instanceof Error ? err : new Error(String(err)),
 					);
 				}
+			}
+		}
+	}
+
+	/** Subscribe to transcription-mode transcripts (partials and finals); returns an unsubscribe. */
+	onTranscript(listener: (event: DictationTranscriptEvent) => void): () => void {
+		this.transcriptListeners.add(listener);
+		return () => {
+			this.transcriptListeners.delete(listener);
+		};
+	}
+
+	// Finals that land while stopping (the provider's drain) still belong to the run being exited.
+	private emitTranscript(event: DictationTranscriptEvent): void {
+		if (this.internalMode === 'agent') return;
+		for (const listener of [...this.transcriptListeners]) {
+			try {
+				listener(event);
+			} catch (err) {
+				this.deps.reportError(
+					'dictation-transcript-listener',
+					err instanceof Error ? err : new Error(String(err)),
+				);
 			}
 		}
 	}

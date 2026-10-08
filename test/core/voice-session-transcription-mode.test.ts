@@ -340,6 +340,23 @@ describe('VoiceSession — Phase 3 transcription mode', () => {
 	});
 
 	describe('dictation buffer + injection', () => {
+		it('onDictationTranscript observes transcripts without replacing the provider callback', async () => {
+			const t = createMockTransport();
+			const whisper = createMockSttProvider();
+			session = buildSession({ transport: t, whisperProvider: whisper });
+			const texts: string[] = [];
+			const off = session.onDictationTranscript((e) =>
+				texts.push(`${e.partial ? '~' : ''}${e.text}`),
+			);
+			await session.setTranscriptionMode('transcription');
+			whisper.onPartialTranscript?.('min');
+			whisper.__triggerTranscript('minutes');
+			off();
+			whisper.__triggerTranscript('after');
+			expect(texts).toEqual(['~min', 'minutes']);
+			expect(session.getDictationBuffer()).toBe('minutes after');
+		});
+
 		it('dictation transcripts append; getDictationBuffer joins with spaces', () => {
 			const t = createMockTransport();
 			const whisper = createMockSttProvider();
