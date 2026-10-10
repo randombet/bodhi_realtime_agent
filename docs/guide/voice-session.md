@@ -306,8 +306,8 @@ Nothing else does. `close()` finalizes a parked session as usual.
 `code`/`detail` carry the transport close code and reason or the error text
 when known.
 
-`'hold'` requires legacy orchestration: combining it with
-`orchestrationMode: 'actor'` throws a `ValidationError` at construction.
+`'hold'` works in both orchestration modes. In actor mode the dial window
+holds `NotificationActor` delivery with `notification.set_held`.
 
 ### Redialing with `recoverUpstream()`
 
@@ -414,14 +414,77 @@ connection and returns whether the session held one.
 ### Capabilities
 
 Gate host recovery on `getRecoveryCapabilities()`, not on method presence. It
-returns `RECOVERY_CAPABILITIES` (every flag `true`) for a legacy-orchestration
-session with `upstreamLossPolicy: 'hold'` on a transport that implements the
-recovery primitives (the built-in Gemini transport). Under `'close'`, in actor
-mode, or on another transport, `recoverUpstream`, `reconnectBoundary` and
+returns `RECOVERY_CAPABILITIES` (every flag `true`) for a session with
+`upstreamLossPolicy: 'hold'` on a transport that implements the
+recovery primitives (the built-in Gemini transport). Under `'close'` or on another
+transport, `recoverUpstream`, `reconnectBoundary` and
 `syntheticHold` are `false`, `turnStartPublication` is `true`, and
 `transportGenerations` says whether the transport reports its generation
-counters. In actor mode `recoverUpstream()` throws and `parkUpstream()`
+counters. Under `'close'` `recoverUpstream()` throws and `parkUpstream()`
 rejects with a `SessionError`.
+
+### Letting the session decide when to redial
+
+`upstreamRecovery` moves the when-to-redial decisions into the session, so a
+host does not have to build timers around `recoverUpstream()` and
+`parkUpstream()`. It requires `upstreamLossPolicy: 'hold'` (any other policy
+throws a `ValidationError` at construction) and works in both orchestration
+modes.
+
+```ts
+const session = new VoiceSession({
+  // ...
+  upstreamLossPolicy: 'hold',
+  upstreamRecovery: {
+    onFatal: ({ category, until }) => notifyUser(category, until),
+    onRecovered: () => notifyUser('recovered'),
+  },
+});
+```
+
+| Behaviour | Option (default) |
+|---|---|
+| A remote close or failed setup redials a parked session after 1 s, 2 s, 4 s, ... ±20% jitter; a connection that lived `redialStableMs` resets the ladder | `redialBaseMs` (1000), `redialCapMs` (60000), `redialStableMs` (30000) |
+| A park by the reconnector (not one the host asked for) is redialed | `parkRedialDelayMs` (1500) |
+| A non-retryable close (quota, depleted credits, invalid key, unknown model) blocks every dial; reaching `ACTIVE` clears it | `fatalBackoffMs` (300000), `classifyClose` (`classifyGeminiClose`) |
+| A dial stuck in `CONNECTING` is replaced | `stuckConnectingMs` (120000; `0` off; at least 60000) |
+| A backstop tick redials a parked session, more than a minute after the last dial | `healthTickMs` (30000; `0` off) |
+| With nobody there, the upstream is parked; the next attach redials it | `idleParkMs` (60000; `0` off) |
+| A connected session whose model stays silent after the user spoke is redialed (see below) | `activeSilence` (off) |
+
+Every redial needs someone there to talk to: an attached client, or
+`isLive()` for a session fed without one (a phone call through
+`feedAudioFromClient`). `holdSyntheticUntilFreshSpeech` holds the greeting and
+injected context of those redials until the user speaks.
+
+While a fatal backoff is pending and the session is `RECONNECTING`, a client
+attach adds no dial of its own and the reconnector leaves recovery to the
+policy, as `suppressClientAutoActions` would.
+
+#### Active silence
+
+With `activeSilence: { requiredTicks?: number }`, a session that is connected
+but silent is redialed: the user spoke, microphone audio keeps arriving, the
+model has produced nothing for 15 s, no foreground tool is running, the
+session is not dictating, and this held for `requiredTicks` consecutive
+health ticks (default 3). The redial (`reason: 'active-silence'`) injects no
+context and holds synthetic output until the user speaks. At most three
+attempts per episode, 60 s apart; a model response on the current connection
+ends the episode. When the attempts are spent the client receives
+
+```json
+{ "type": "voice-stalled", "version": 1, "voiceSessionId": "...", "clientEpoch": 1,
+  "stalledAttemptEpoch": 3, "episodeAttempts": 3,
+  "reason": "active-silence-attempts-exhausted", "enteredAtUnixMs": 0 }
+```
+
+and may answer with `voice.retryUpstream` (`version`, `voiceSessionId`,
+`clientEpoch`, `stalledAttemptEpoch`, `requestId`, no other keys), which
+starts one more attempt and is acknowledged with `voice.retryUpstream.ack`
+(`disposition`: `accepted`, `stale` or `not-terminal`; a duplicate
+`requestId` gets the original ack and no second dial). The session handles
+this command itself; it does not reach `onClientCommand`. While active
+silence owns a recovery, the ladder and the health tick stand down.
 
 ## Resetting the conversation context
 

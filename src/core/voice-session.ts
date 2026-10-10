@@ -116,6 +116,10 @@ import { TtsPipeline } from './tts-pipeline.js';
 import { TurnLatencyTracker } from './turn-latency-tracker.js';
 import { TurnManager } from './turn-manager.js';
 import type { Turn } from './turn.js';
+import {
+	type UpstreamRecoveryOptions,
+	UpstreamRecoveryPolicy,
+} from './upstream-recovery-policy.js';
 import { computeCacheHitRatio, deriveProviderItemId, deriveUsageSource } from './usage-helpers.js';
 import { UserTurnEvidenceLedger } from './user-turn-evidence.js';
 import type { SegmentEvidence } from './user-turn-evidence.js';
@@ -642,11 +646,18 @@ export interface VoiceSessionConfig {
 	 *
 	 * `'hold'` also enables host recovery (`recoverUpstream()`,
 	 * `parkUpstream()`, see `getRecoveryCapabilities()`), which `'close'`
-	 * rejects with a `SessionError`. `'hold'` requires legacy orchestration:
-	 * combining it with `orchestrationMode: 'actor'` throws a
-	 * `ValidationError` at construction.
+	 * rejects with a `SessionError`. Both orchestration modes support it.
 	 */
 	upstreamLossPolicy?: 'close' | 'hold';
+	/**
+	 * Decide when to redial a lost upstream inside the session: a redial
+	 * ladder with backoff, a fatal-close backoff, replacement of a dial stuck
+	 * in CONNECTING, a backstop health tick and an idle park. See
+	 * `upstream-recovery-policy.ts`. Requires `upstreamLossPolicy: 'hold'`;
+	 * works in both orchestration modes. Omitted, the host decides when to call
+	 * `recoverUpstream()` and `parkUpstream()` itself.
+	 */
+	upstreamRecovery?: UpstreamRecoveryOptions;
 	/** Optional per-session artifact registry for cross-tool binary sharing (images, documents). */
 	artifactRegistry?: {
 		store(
@@ -818,6 +829,9 @@ export class VoiceSession {
 	/** Host-driven upstream recovery: `recoverUpstream`, `parkUpstream` and
 	 *  the recovery boundary. See `host-recovery.ts`. */
 	private hostRecovery!: HostRecoveryController;
+	/** When to redial: built from `config.upstreamRecovery`, absent otherwise.
+	 *  See `upstream-recovery-policy.ts`. */
+	private upstreamRecovery: UpstreamRecoveryPolicy | null = null;
 	/** Per-session single-flight FIFO chaining direct-user-input bodies
 	 *  (`handleTextInput`, `injectTranscript`, `injectDictationBuffer`). Each
 	 *  body awaits `cancelResponse({ waitForDone: true })` then finalizes any
@@ -998,12 +1012,9 @@ export class VoiceSession {
 	private static readonly MIN_PLAYBACK_RATE = MIN_PLAYBACK_RATE;
 
 	constructor(config: VoiceSessionConfig) {
-		// Parking a lost upstream is legacy-orchestration only: the actor runtime
-		// runs its own retry loop, which must never contend with a held session.
-		if (config.orchestrationMode === 'actor' && config.upstreamLossPolicy === 'hold') {
+		if (config.upstreamRecovery && config.upstreamLossPolicy !== 'hold') {
 			throw new ValidationError(
-				"VoiceSession: upstreamLossPolicy 'hold' requires legacy orchestration; " +
-					"orchestrationMode 'actor' supports only 'close'.",
+				"VoiceSession: upstreamRecovery requires upstreamLossPolicy 'hold'",
 			);
 		}
 		// Checked before the dictation controller configures the whisper provider:
@@ -1116,8 +1127,8 @@ export class VoiceSession {
 				this.runtimeOrchestrator?.runtime.tell(type, payload, to),
 			);
 		}
-		// The hold drives notification delivery through the sink: legacy only,
-		// since the actor sink refuses to hold.
+		// The hold drives notification delivery through the sink: the legacy
+		// queue or, in actor mode, `notification.set_held` to NotificationActor.
 		this.hold = new SyntheticOutputHold({
 			setNotificationsHeld: (held) => this.notificationSink.setHeld(held),
 			drainNotifications: () => this.drainNotificationsWhenIdle(),
@@ -1805,7 +1816,6 @@ export class VoiceSession {
 			fence: this.fence,
 			getSessionId: () => this.config.sessionId,
 			upstreamLossPolicy: config.upstreamLossPolicy ?? 'close',
-			actorMode: this._isActorMode,
 			dialTransport: async () => {
 				await this.dialTransport();
 			},
@@ -1829,6 +1839,52 @@ export class VoiceSession {
 			injectRecentContext: (origin) => this.injectRecentContext(origin),
 			reportError: (component, error) => this.reportError(component, error),
 			log: (msg) => this.log(msg),
+		});
+		if (config.upstreamRecovery) this.buildUpstreamRecovery(config.upstreamRecovery);
+	}
+
+	/** The redial policy: fed the transport's lifecycle events, the session's
+	 *  state changes and client attach edges; dials through `hostRecovery`. */
+	private buildUpstreamRecovery(options: UpstreamRecoveryOptions): void {
+		const policy = new UpstreamRecoveryPolicy(
+			{
+				sessionId: this.config.sessionId,
+				getState: () => this.sessionManager.state,
+				isClientConnected: () => this._clientConnected,
+				recoverUpstream: (args) => this.hostRecovery.recoverUpstream(args),
+				parkUpstream: (reason) => this.hostRecovery.parkUpstream(reason),
+				sendJsonToClient: (msg) => this.sendHostFrame(msg as HostClientFrame),
+				log: (msg) => this.log(msg),
+			},
+			options,
+		);
+		this.upstreamRecovery = policy;
+		const prevLifecycle = this.transport.onConnectionLifecycle;
+		this.transport.onConnectionLifecycle = (event) => {
+			try {
+				prevLifecycle?.(event);
+			} catch (e) {
+				this.log(`pre-attached onConnectionLifecycle threw: ${(e as Error).message}`);
+			}
+			policy.onLifecycle(event);
+		};
+		const bus = this.eventBus;
+		bus.subscribe('session.stateChange', (e) => policy.onStateChange(e.toState));
+		bus.subscribe('session.upstreamLost', (e) => policy.onUpstreamLost(e.reason));
+		bus.subscribe('turn.start', (e) => policy.noteModelTurnStart(e.transportGeneration));
+		bus.subscribe('turn.end', () => policy.noteModelTurnEnd());
+		bus.subscribe('session.transcription_mode_changed', (e) =>
+			policy.noteDictation(e.mode === 'transcription'),
+		);
+		// Background tools answer later through a notification: only a
+		// foreground (inline) tool means the model is busy, not silent.
+		bus.subscribe('tool.call', (e) => {
+			const tool = this.agentRouter.activeAgent.tools.find((t) => t.name === e.toolName);
+			if (tool?.execution !== 'background') policy.noteToolCall(e.toolCallId);
+		});
+		bus.subscribe('tool.result', (e) => policy.noteToolSettled(e.toolCallId));
+		this.userTurnEvidence.observeTerminal((ev) => {
+			if (ev.outcome === 'completed' && ev.voicedFrames > 0) policy.noteUserSpeech();
 		});
 	}
 
@@ -1979,7 +2035,14 @@ export class VoiceSession {
 			getArtifactRegistry: () => this.config.artifactRegistry,
 			handleTextInput: (text) => this.handleTextInput(text),
 			onClientJson: config.onClientJson,
-			onClientCommand: config.onClientCommand,
+			// With an upstream-recovery policy, its client commands
+			// (`voice.retryUpstream`) are handled here and not forwarded.
+			onClientCommand: config.upstreamRecovery
+				? (message) => {
+						if (this.upstreamRecovery?.handleClientCommand(message) === true) return;
+						config.onClientCommand?.(message);
+					}
+				: config.onClientCommand,
 			reportError: (context, error) => this.reportError(context, error),
 			log: (msg) => this.log(msg),
 		});
@@ -2022,7 +2085,9 @@ export class VoiceSession {
 				// Exhaustion policy, and the host-owned recovery gate it enables
 				// under 'hold'.
 				upstreamLossPolicy: config.upstreamLossPolicy ?? 'close',
-				hostOwnsRecovery: () => this.config.suppressClientAutoActions?.() === true,
+				hostOwnsRecovery: () =>
+					this.config.suppressClientAutoActions?.() === true ||
+					this.upstreamRecovery?.suppressAttachRedial() === true,
 				// H2: gate-aware drain + candidate-wide replay freshness.
 				drainBufferedInbound: (reason) => this.drainCapturedInboundFrames(reason),
 				isCandidateReplayEligible: (retained) => {
@@ -2819,6 +2884,7 @@ export class VoiceSession {
 		}
 
 		await this.clientTransport.start();
+		this.upstreamRecovery?.start();
 		this.log('Connecting to LLM transport...');
 		this.sessionManager.transitionTo('CONNECTING');
 		// recoverUpstream() during CONNECTING strands this dial and dials the
@@ -3094,6 +3160,7 @@ export class VoiceSession {
 		} catch (err) {
 			this.log(`close: reconnector.dispose threw: ${String(err)}`);
 		}
+		this.upstreamRecovery?.dispose();
 		try {
 			this.hostRecovery.dispose();
 		} catch (err) {
@@ -4076,6 +4143,7 @@ export class VoiceSession {
 		this._clientConnected = true;
 		this.clientInputReady = false;
 		const generation = ++this.clientConnectionGeneration;
+		this.upstreamRecovery?.onClientConnected();
 		// Greeting interrupt grace: a fresh browser tab / RTC audio context
 		// typically means a cold AEC. Reset the window so the next first
 		// audio chunk re-arms cleanly. Leaving any prior session's grace
@@ -4134,7 +4202,9 @@ export class VoiceSession {
 	private clientAutoActionsSuppressed(): boolean {
 		let suppressed: boolean;
 		try {
-			suppressed = this.config.suppressClientAutoActions?.() === true;
+			suppressed =
+				this.config.suppressClientAutoActions?.() === true ||
+				this.upstreamRecovery?.suppressAttachRedial() === true;
 		} catch (e) {
 			this.log(
 				`Host client auto-action gate threw (treated as not suppressed): ${e instanceof Error ? e.message : String(e)}`,
@@ -4214,6 +4284,7 @@ export class VoiceSession {
 		this.clientInputReady = false;
 		this.pendingClientJson = [];
 		this.clientConnectionGeneration++;
+		this.upstreamRecovery?.onClientDisconnected();
 		this.safeEmitHook('onClientDisconnected', () => this.config.onClientDisconnected?.());
 	}
 
@@ -4235,6 +4306,7 @@ export class VoiceSession {
 	 *  client WebSocket, the direct RTC audio plane and `feedAudioFromClient`.
 	 *  Input observers see the frame before the audio router gates it. */
 	private ingestClientAudio(data: Buffer, source: 'websocket' | 'rtc'): void {
+		this.upstreamRecovery?.noteMicFrame();
 		if (this.audioInputObservers.size > 0) {
 			this.notifyAudioObservers(this.audioInputObservers, 'audio-input-observer', data, {
 				source,
@@ -4328,10 +4400,10 @@ export class VoiceSession {
 
 	/**
 	 * What this session's recovery surface supports. `RECOVERY_CAPABILITIES`
-	 * (everything) for a legacy-orchestration session with
+	 * (everything) for a session with
 	 * `upstreamLossPolicy: 'hold'` on a transport with `abortIncumbent`,
 	 * `currentDialGen` and `currentTransportGeneration` (the Gemini transport).
-	 * Otherwise, under policy `'close'`, in actor mode or on another transport,
+	 * Otherwise, under policy `'close'` or on another transport,
 	 * `recoverUpstream`, `reconnectBoundary` and `syntheticHold` are `false`,
 	 * `turnStartPublication` is `true` and `transportGenerations` reports the
 	 * transport's generation counters. Gate host recovery on this.
@@ -4389,7 +4461,7 @@ export class VoiceSession {
 	 * `detail`), then disconnects the transport. Nothing redials it until
 	 * `recoverUpstream()`, which a client attach also calls unless
 	 * `suppressClientAutoActions` returns `true`. Rejects with `SessionError`
-	 * in actor mode, under `upstreamLossPolicy: 'close'`, while closing, and
+	 * under `upstreamLossPolicy: 'close'`, while closing, and
 	 * outside ACTIVE, RECONNECTING and UPSTREAM_LOST.
 	 */
 	parkUpstream(reason: string): Promise<void> {

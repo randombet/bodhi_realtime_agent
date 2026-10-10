@@ -208,7 +208,7 @@ describe('BackgroundNotificationQueue', () => {
 			expect(sendContent).toHaveBeenLastCalledWith(makeTurns('later'), true);
 		});
 
-		it('the legacy sink holds its queue; the actor sink setHeld throws SessionError', () => {
+		it('the legacy sink holds its queue; the actor sink tells NotificationActor', () => {
 			const sendContent = vi.fn();
 			const legacy = new LegacyNotificationSink(
 				new BackgroundNotificationQueue(sendContent, vi.fn()),
@@ -222,9 +222,12 @@ describe('BackgroundNotificationQueue', () => {
 
 			const tell = vi.fn();
 			const actor = new ActorNotificationSink(tell);
-			expect(() => actor.setHeld(true)).toThrow(SessionError);
-			expect(() => actor.setHeld(false)).toThrow(SessionError);
-			expect(tell).not.toHaveBeenCalled();
+			actor.setHeld(true);
+			actor.setHeld(false);
+			expect(tell.mock.calls).toEqual([
+				['notification.set_held', { held: true }, 'notification'],
+				['notification.set_held', { held: false }, 'notification'],
+			]);
 		});
 	});
 

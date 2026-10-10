@@ -2810,7 +2810,7 @@ describe('VoiceSession', () => {
 				await new Promise<void>((resolve) => probe.close(() => resolve()));
 			});
 
-			it("orchestrationMode 'actor' with upstreamLossPolicy 'hold' throws ValidationError at construction", () => {
+			it("orchestrationMode 'actor' accepts both upstreamLossPolicy values", () => {
 				const config: VoiceSessionConfig = {
 					sessionId: 'sess_actor_hold',
 					userId: 'user_1',
@@ -2821,10 +2821,8 @@ describe('VoiceSession', () => {
 					model: mockModel,
 					orchestrationMode: 'actor',
 				};
-				expect(() => new VoiceSession({ ...config, upstreamLossPolicy: 'hold' })).toThrow(
-					ValidationError,
-				);
-				// The default policy stays available in actor mode.
+				const held = new VoiceSession({ ...config, upstreamLossPolicy: 'hold' });
+				expect(held.getRecoveryCapabilities().recoverUpstream).toBe(true);
 				session = new VoiceSession({ ...config, upstreamLossPolicy: 'close' });
 				expect(session.sessionManager.state).toBe('CREATED');
 			});

@@ -66,6 +66,14 @@ export type {
 	RecoverUpstreamResult,
 	RecoveryCapabilities,
 } from './host-recovery.js';
+export { classifyGeminiClose } from './upstream-recovery-policy.js';
+export { parseRetryUpstreamCommand } from './active-silence-recovery.js';
+export type { RetryUpstreamCommand } from './active-silence-recovery.js';
+export type {
+	CloseClassifier,
+	FatalClose,
+	UpstreamRecoveryOptions,
+} from './upstream-recovery-policy.js';
 
 export type { DictationTranscriptEvent } from './dictation-controller.js';
 export { VoiceSession } from './voice-session.js';

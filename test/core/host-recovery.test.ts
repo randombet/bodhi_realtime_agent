@@ -1551,21 +1551,96 @@ describe('host recovery (legacy mode)', () => {
 		expect(() => session?.recoverUpstream(recoverArgs())).toThrow(SessionError);
 	});
 
-	it("in actor mode 'hold' is rejected at construction and recovery is unavailable", async () => {
+	it("in actor mode 'hold' parks a failed first dial, recoverUpstream reaches ACTIVE, and parkUpstream parks it again", async () => {
 		const stub = createRecoveryTransport();
-		expect(() =>
-			createRecoverySession(stub, { orchestrationMode: 'actor', upstreamLossPolicy: 'hold' }),
-		).toThrow(ValidationError);
+		stub.failNextDial(new Error('getaddrinfo ENOTFOUND'));
+		session = createRecoverySession(stub, {
+			orchestrationMode: 'actor',
+			upstreamLossPolicy: 'hold',
+		});
+		expect(session.getRecoveryCapabilities().recoverUpstream).toBe(true);
+		expect(session.getRecoveryCapabilities().syntheticHold).toBe(true);
 
+		await expect(session.start()).rejects.toThrow('ENOTFOUND');
+		expect(session.sessionManager.state).toBe('UPSTREAM_LOST');
+
+		const r = session.recoverUpstream(recoverArgs({ reason: 'human-retry' }));
+		await r.activated;
+		expect(session.sessionManager.state).toBe('ACTIVE');
+		expect(stub.transport.currentDialGen).toBe(r.attemptEpoch);
+
+		await session.parkUpstream('idle');
+		expect(session.sessionManager.state).toBe('UPSTREAM_LOST');
+	});
+
+	it.each(['legacy', 'actor'] as const)(
+		'%s mode: with upstreamRecovery, a failed first dial parks and the policy redials it to ACTIVE on its own',
+		async (orchestrationMode) => {
+			const stub = createRecoveryTransport();
+			stub.failNextDial(new Error('getaddrinfo ENOTFOUND'));
+			session = new VoiceSession({
+				sessionId: 'sess_recover',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createAgent()],
+				initialAgent: 'main',
+				model: mockModel,
+				transport: stub.transport,
+				orchestrationMode,
+				upstreamLossPolicy: 'hold',
+				upstreamRecovery: {
+					isLive: () => true,
+					parkRedialDelayMs: 10,
+					healthTickMs: 0,
+					idleParkMs: 0,
+				},
+				clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+				log: () => {},
+			});
+			const reached = new Promise<void>((resolve) => {
+				session?.eventBus.subscribe('session.stateChange', (e) => {
+					if (e.toState === 'ACTIVE') resolve();
+				});
+			});
+			await expect(session.start()).rejects.toThrow('ENOTFOUND');
+			expect(session.sessionManager.state).toBe('UPSTREAM_LOST');
+			await reached;
+			expect(session.sessionManager.state).toBe('ACTIVE');
+			expect(stub.connect).toHaveBeenCalledTimes(2);
+		},
+	);
+
+	it("in actor mode under 'close' recovery is unavailable", async () => {
+		const stub = createRecoveryTransport();
 		session = createRecoverySession(stub, {
 			orchestrationMode: 'actor',
 			upstreamLossPolicy: 'close',
 		});
 		expect(session.getRecoveryCapabilities().recoverUpstream).toBe(false);
-		expect(session.getRecoveryCapabilities().syntheticHold).toBe(false);
-		expect(() => session?.recoverUpstream(recoverArgs())).toThrow(SessionError);
-		expect(() => session?.recoverUpstream(recoverArgs())).toThrow("orchestrationMode 'actor'");
+		expect(() => session?.recoverUpstream(recoverArgs())).toThrow(
+			"requires upstreamLossPolicy 'hold'",
+		);
 		await expect(session.parkUpstream('idle')).rejects.toThrow(SessionError);
+	});
+
+	it("upstreamRecovery without upstreamLossPolicy 'hold' is rejected at construction", () => {
+		const stub = createRecoveryTransport();
+		expect(
+			() =>
+				new VoiceSession({
+					sessionId: 'sess_recover',
+					userId: 'user_1',
+					apiKey: 'test-key',
+					agents: [createAgent()],
+					initialAgent: 'main',
+					model: mockModel,
+					transport: stub.transport,
+					upstreamLossPolicy: 'close',
+					upstreamRecovery: {},
+					clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+					log: () => {},
+				}),
+		).toThrow(ValidationError);
 	});
 
 	it.each([

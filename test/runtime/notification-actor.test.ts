@@ -588,3 +588,45 @@ describe('NotificationActor — onStop', () => {
 		expect(delivered(sends)).toHaveLength(0);
 	});
 });
+
+describe('NotificationActor — held delivery (notification.set_held)', () => {
+	it('queues every publish while held, high priority first, and delivers nothing on turn complete', async () => {
+		const { actor, sends } = makeActor();
+		await subscribe(actor, 'transport');
+
+		await tell(actor, 'notification.set_held', { held: true });
+		await publish(actor, 'SYSTEM', 'first');
+		await publish(actor, 'SYSTEM', 'urgent', { priority: 'high' });
+		await tell(actor, 'notification.turn_complete', {});
+
+		expect(delivered(sends)).toHaveLength(0);
+	});
+
+	it('after release, each turn complete delivers one, in queue order', async () => {
+		const { actor, sends } = makeActor();
+		await subscribe(actor, 'transport');
+
+		await tell(actor, 'notification.set_held', { held: true });
+		await publish(actor, 'SYSTEM', 'first');
+		await publish(actor, 'SYSTEM', 'urgent', { priority: 'high' });
+		await tell(actor, 'notification.set_held', { held: false });
+		expect(delivered(sends)).toHaveLength(0);
+
+		await tell(actor, 'notification.turn_complete', {});
+		await tell(actor, 'notification.turn_complete', {});
+
+		const texts = delivered(sends).map((s) => (s.payload as { text: string }).text);
+		expect(texts).toEqual(['urgent', 'first']);
+	});
+
+	it('an idle publish after release is delivered immediately', async () => {
+		const { actor, sends } = makeActor();
+		await subscribe(actor, 'transport');
+
+		await tell(actor, 'notification.set_held', { held: true });
+		await tell(actor, 'notification.set_held', { held: false });
+		await publish(actor, 'SYSTEM', 'hello');
+
+		expect(delivered(sends)).toHaveLength(1);
+	});
+});

@@ -352,6 +352,18 @@ export interface NotificationClear {
 }
 
 /**
+ * Hold or release notification delivery. While held, every publish is queued
+ * (high priority at the front) and turn completions deliver nothing; a host
+ * recovery holds delivery for its dial window, when no connection can carry
+ * output. Releasing delivers nothing by itself: the next
+ * `notification.turn_complete` delivers one, as usual.
+ */
+export interface NotificationSetHeld {
+	type: 'notification.set_held';
+	held: boolean;
+}
+
+/**
  * Outbound fan-out envelope to every matching subscriber. TransportActor's
  * handler translates this into `adapter.sendContent` with the wrapped
  * "[label]: text" form; other subscribers (observability, UI) consume the
@@ -444,6 +456,7 @@ export type RuntimeMessage =
 	| NotificationTurnComplete
 	| NotificationResetAudio
 	| NotificationClear
+	| NotificationSetHeld
 	| NotificationDelivered
 	// Timeouts
 	| SubagentTimeout
