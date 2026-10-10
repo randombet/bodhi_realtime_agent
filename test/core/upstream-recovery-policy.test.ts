@@ -477,6 +477,40 @@ describe('UpstreamRecoveryPolicy', () => {
 		});
 	});
 
+	describe('actor follow-ups', () => {
+		it('a client-less (isLive) session that was idle-parked redials once it is live again', async () => {
+			let live = false;
+			const { policy, world, recoverUpstream } = makePolicy({
+				isLive: () => live,
+				idleParkMs: 60_000,
+				healthTickMs: 30_000,
+			});
+			world.client = false;
+			policy.start();
+			await vi.advanceTimersByTimeAsync(60_000);
+			policy.onUpstreamLost('host-parked');
+			world.state = 'UPSTREAM_LOST';
+			await vi.advanceTimersByTimeAsync(120_000);
+			expect(recoverUpstream).not.toHaveBeenCalled();
+			live = true;
+			await vi.advanceTimersByTimeAsync(30_000);
+			expect(recoverUpstream).toHaveBeenCalledTimes(1);
+			policy.dispose();
+		});
+
+		it('an idle check that finds the session still dialing looks again, so it is parked once up', async () => {
+			const { policy, world, parkUpstream } = makePolicy({ idleParkMs: 60_000 });
+			world.client = false;
+			world.state = 'CONNECTING';
+			policy.onClientDisconnected();
+			await vi.advanceTimersByTimeAsync(60_000);
+			expect(parkUpstream).not.toHaveBeenCalled();
+			world.state = 'ACTIVE';
+			await vi.advanceTimersByTimeAsync(60_000);
+			expect(parkUpstream).toHaveBeenCalledWith('idle');
+		});
+	});
+
 	it('dispose stops every timer', () => {
 		const { policy, world, recoverUpstream, parkUpstream } = makePolicy({
 			healthTickMs: 30_000,

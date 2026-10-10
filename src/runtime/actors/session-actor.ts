@@ -59,6 +59,14 @@ export class SessionActor implements Actor {
 		 * tests) to suppress fan-out.
 		 */
 		private backgroundAgentHostId?: ActorId,
+		/**
+		 * `upstreamLossPolicy: 'hold'`: the session's TransportReconnector and host
+		 * recovery own every redial, and a lost upstream is not a session end. A
+		 * transport close or error then only marks the session reconnecting: no
+		 * reconnect timers of its own, no agent stop; the next `session_ready`
+		 * fans out `session.reconnected`. Agents stop on session close.
+		 */
+		private readonly upstreamHeld = false,
 	) {
 		this.id = id;
 		this.reconnectPolicy = {
@@ -188,6 +196,11 @@ export class SessionActor implements Actor {
 		error: string;
 		recoverable: boolean;
 	}): void {
+		if (this.upstreamHeld) {
+			// Before the first activation the phase stays, so that activation still fans out `session.connected`.
+			if (this.phase === 'active' || this.phase === 'transferring') this.phase = 'reconnecting';
+			return;
+		}
 		if (p.recoverable && this.phase === 'active') {
 			this.phase = 'reconnecting';
 			this.reconnectAttempt = 0;
@@ -199,6 +212,11 @@ export class SessionActor implements Actor {
 	}
 
 	private handleTransportClosed(reason?: string): void {
+		if (this.upstreamHeld) {
+			// Before the first activation the phase stays, so that activation still fans out `session.connected`.
+			if (this.phase === 'active' || this.phase === 'transferring') this.phase = 'reconnecting';
+			return;
+		}
 		this.phase = 'closed';
 		this.clearTimers();
 		// Fan-out copy: BackgroundAgentHostActor stops registered agents.

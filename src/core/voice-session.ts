@@ -653,8 +653,10 @@ export interface VoiceSessionConfig {
 	 * Decide when to redial a lost upstream inside the session: a redial
 	 * ladder with backoff, a fatal-close backoff, replacement of a dial stuck
 	 * in CONNECTING, a backstop health tick and an idle park. See
-	 * `upstream-recovery-policy.ts`. Requires `upstreamLossPolicy: 'hold'`;
-	 * works in both orchestration modes. Omitted, the host decides when to call
+	 * `upstream-recovery-policy.ts`. Requires `upstreamLossPolicy: 'hold'` and a
+	 * transport with the recovery primitives (the Gemini transport); otherwise
+	 * a `ValidationError` at construction. Works in both orchestration modes.
+	 * Omitted, the host decides when to call
 	 * `recoverUpstream()` and `parkUpstream()` itself.
 	 */
 	upstreamRecovery?: UpstreamRecoveryOptions;
@@ -1543,6 +1545,7 @@ export class VoiceSession {
 				// Placed by its capture, not its arrival: a capture committed on a
 				// connection a host recovery abandoned is not fresh user evidence.
 				const captureStale = this.fence.isSttCaptureStale(turnId);
+				if (text.trim() && !captureStale) this.upstreamRecovery?.noteUserSpeech();
 				// A reserved user message for this turn is waiting on exactly this
 				// transcript — resolve it even though the turn has already finalized
 				// (and regardless of the stale cutoff, since the reservation, not the
@@ -1595,6 +1598,7 @@ export class VoiceSession {
 			this.transport.onInputTranscription = (text) => {
 				// The provider heard the user: fresh evidence.
 				this.hold.release('input-transcription');
+				if (text.trim()) this.upstreamRecovery?.noteUserSpeech();
 				// Liveness: the provider is transcribing the committed turn, so a
 				// response is in the pipeline — extend the response watchdog (capped)
 				// instead of letting it force a reconnect under an active turn.
@@ -1610,6 +1614,7 @@ export class VoiceSession {
 			// No external STT — use transport built-in transcription
 			this.transport.onInputTranscription = (text) => {
 				this.hold.release('input-transcription'); // fresh evidence (see above)
+				if (text.trim()) this.upstreamRecovery?.noteUserSpeech();
 				this.reconnector.notifyProviderActivity(); // liveness (see above)
 				this.logInputTranscriptionLatency(text, 'provider');
 				this.shadowStt?.noteLiveTranscript(text);
@@ -1846,6 +1851,12 @@ export class VoiceSession {
 	/** The redial policy: fed the transport's lifecycle events, the session's
 	 *  state changes and client attach edges; dials through `hostRecovery`. */
 	private buildUpstreamRecovery(options: UpstreamRecoveryOptions): void {
+		// A park the session could never redial is worse than no policy: refuse it up front.
+		if (!this.hostRecovery.getRecoveryCapabilities().recoverUpstream) {
+			throw new ValidationError(
+				'VoiceSession: upstreamRecovery needs a transport with the recovery primitives (abortIncumbent, currentDialGen, currentTransportGeneration), such as the Gemini transport',
+			);
+		}
 		const policy = new UpstreamRecoveryPolicy(
 			{
 				sessionId: this.config.sessionId,
@@ -1883,9 +1894,6 @@ export class VoiceSession {
 			if (tool?.execution !== 'background') policy.noteToolCall(e.toolCallId);
 		});
 		bus.subscribe('tool.result', (e) => policy.noteToolSettled(e.toolCallId));
-		this.userTurnEvidence.observeTerminal((ev) => {
-			if (ev.outcome === 'completed' && ev.voicedFrames > 0) policy.noteUserSpeech();
-		});
 	}
 
 	private buildClientChannelAndGating(config: VoiceSessionConfig): void {
@@ -2176,6 +2184,7 @@ export class VoiceSession {
 
 			this.runtimeOrchestrator = new RuntimeOrchestrator({
 				adapter: new GeminiTransportAdapter(this.transport),
+				upstreamLossHeld: config.upstreamLossPolicy === 'hold',
 				tools: this.runtimeToolRegistry,
 				inlineExecutor: {
 					execute: async (call) => {

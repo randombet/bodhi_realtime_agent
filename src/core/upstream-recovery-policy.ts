@@ -5,7 +5,8 @@
  * how a session redials (`recoverUpstream()`) and parks (`parkUpstream()`);
  * this policy owns when, so a host no longer re-implements the same timers,
  * gates and classifiers around those two calls. It needs
- * `upstreamLossPolicy: 'hold'` and works in both orchestration modes.
+ * `upstreamLossPolicy: 'hold'` and a transport with the recovery primitives
+ * (the Gemini transport), and works in both orchestration modes.
  *
  * What it does:
  * - **Redial ladder**: a terminal loss (a remote `generation-close`, or
@@ -123,7 +124,10 @@ interface PatternRule {
 	category: string;
 }
 
-/** Non-retryable Gemini Live close reasons. Anything else is retryable. */
+/** Non-retryable Gemini Live close reasons. Anything else is retryable. Broad on purpose (a bare
+ *  404, 401/403, `deprecated`): each match only delays redial by `fatalBackoffMs`, so a false
+ *  positive costs minutes, while a missed fatal close redials a dead key forever. Hosts with their
+ *  own wording pass `classifyClose`. */
 const GEMINI_FATAL_PATTERNS: readonly PatternRule[] = [
 	{
 		rx: /prepayment.{0,20}credits.{0,20}depleted|prepayment.{0,20}depleted/i,
@@ -181,6 +185,8 @@ export class UpstreamRecoveryPolicy {
 	private connectingSince = 0;
 	/** The session is parked because the host asked: no dial until an attach. */
 	private hostParked = false;
+	/** `isLive()` at the last health tick: a client-less session has no attach to un-park it. */
+	private wasLive = false;
 	private dialTimer: ReturnType<typeof setTimeout> | null = null;
 	private idleTimer: ReturnType<typeof setTimeout> | null = null;
 	private tickTimer: ReturnType<typeof setInterval> | null = null;
@@ -341,7 +347,7 @@ export class UpstreamRecoveryPolicy {
 		this.armIdlePark();
 	}
 
-	/** The user spoke: a completed, voiced input segment. */
+	/** The user spoke: recognized input (a transcription with text), never a voiced segment alone, which room noise produces. */
 	noteUserSpeech(): void {
 		this.activeSilence?.noteSpeech();
 	}
@@ -388,6 +394,9 @@ export class UpstreamRecoveryPolicy {
 		const now = this.now();
 		const state = this.deps.getState();
 		const live = this.hasAudience();
+		// A client-less session (isLive) idle-parked has no attach to redial it: becoming live again does.
+		if (this.options.isLive && live && !this.wasLive && this.hostParked) this.hostParked = false;
+		this.wasLive = live;
 		const owned = this.activeSilence?.ownsRecovery === true;
 		if (
 			!owned &&
@@ -521,7 +530,11 @@ export class UpstreamRecoveryPolicy {
 	private async parkIdle(): Promise<void> {
 		if (this.disposed || this.hasAudience()) return;
 		const state = this.deps.getState();
-		if (state !== 'ACTIVE' && state !== 'RECONNECTING') return;
+		if (state !== 'ACTIVE' && state !== 'RECONNECTING') {
+			// Still dialing: look again later, so a session that comes up with nobody there is parked.
+			if (state === 'CONNECTING') this.armIdlePark();
+			return;
+		}
 		this.deps.log('[UpstreamRecovery] nobody there; parking the upstream until a client attaches');
 		try {
 			await this.deps.parkUpstream('idle');

@@ -1610,6 +1610,59 @@ describe('host recovery (legacy mode)', () => {
 		},
 	);
 
+	it('actor mode under hold: a BackgroundAgent survives an idle park and a 1006 close, each redialed, and stops only on session close', async () => {
+		const stub = createRecoveryTransport();
+		// The real transport's disconnect() fires the socket's own close.
+		const realDisconnect = stub.transport.disconnect.bind(stub.transport);
+		stub.transport.disconnect = async () => {
+			await realDisconnect();
+			stub.transport.onClose?.(1000, 'local disconnect');
+		};
+		const events: string[] = [];
+		session = new VoiceSession({
+			sessionId: 'sess_recover',
+			userId: 'user_1',
+			apiKey: 'test-key',
+			agents: [createAgent()],
+			initialAgent: 'main',
+			model: mockModel,
+			transport: stub.transport,
+			orchestrationMode: 'actor',
+			upstreamLossPolicy: 'hold',
+			backgroundAgents: [
+				{
+					name: 'probe',
+					onStart: () => {
+						events.push('start');
+					},
+					onStop: (reason) => {
+						events.push(`stop:${reason}`);
+					},
+					onReconnect: () => {
+						events.push('reconnect');
+					},
+				},
+			],
+			clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			log: () => {},
+		});
+		await session.start();
+		await vi.waitFor(() => expect(events).toEqual(['start']));
+
+		await session.parkUpstream('idle');
+		expect(session.sessionManager.state).toBe('UPSTREAM_LOST');
+		await session.recoverUpstream(recoverArgs({ reason: 'human-retry' })).activated;
+		await vi.waitFor(() => expect(events).toEqual(['start', 'reconnect']));
+
+		// A provider close the reconnector cannot resume (the stub has no handle) parks the session.
+		stub.transport.onClose?.(1006, 'abnormal');
+		await vi.waitFor(() => expect(session?.sessionManager.state).toBe('UPSTREAM_LOST'));
+		await session.recoverUpstream(recoverArgs({ reason: 'human-retry' })).activated;
+		await vi.waitFor(() => expect(events).toEqual(['start', 'reconnect', 'reconnect']));
+		await session.close('normal');
+		await vi.waitFor(() => expect(events.some((e) => e.startsWith('stop'))).toBe(true));
+	});
+
 	it("in actor mode under 'close' recovery is unavailable", async () => {
 		const stub = createRecoveryTransport();
 		session = createRecoverySession(stub, {
@@ -1621,6 +1674,53 @@ describe('host recovery (legacy mode)', () => {
 			"requires upstreamLossPolicy 'hold'",
 		);
 		await expect(session.parkUpstream('idle')).rejects.toThrow(SessionError);
+	});
+
+	it('active silence hears the user only through recognized input: a transcription with text, not an empty one', () => {
+		const stub = createRecoveryTransport();
+		session = new VoiceSession({
+			sessionId: 'sess_recover',
+			userId: 'user_1',
+			apiKey: 'test-key',
+			agents: [createAgent()],
+			initialAgent: 'main',
+			model: mockModel,
+			transport: stub.transport,
+			orchestrationMode: 'actor',
+			upstreamLossPolicy: 'hold',
+			upstreamRecovery: { activeSilence: {}, healthTickMs: 0, idleParkMs: 0 },
+			clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			log: () => {},
+		});
+		const policy = (session as unknown as { upstreamRecovery: { noteUserSpeech(): void } })
+			.upstreamRecovery;
+		const heard = vi.spyOn(policy, 'noteUserSpeech');
+		stub.transport.onInputTranscription?.('   ');
+		expect(heard).not.toHaveBeenCalled();
+		stub.transport.onInputTranscription?.('what is the weather');
+		expect(heard).toHaveBeenCalledTimes(1);
+	});
+
+	it('upstreamRecovery on a transport without the recovery primitives is rejected at construction', () => {
+		const stub = createRecoveryTransport();
+		(stub.transport as { abortIncumbent?: unknown }).abortIncumbent = undefined;
+		expect(
+			() =>
+				new VoiceSession({
+					sessionId: 'sess_recover',
+					userId: 'user_1',
+					apiKey: 'test-key',
+					agents: [createAgent()],
+					initialAgent: 'main',
+					model: mockModel,
+					transport: stub.transport,
+					orchestrationMode: 'actor',
+					upstreamLossPolicy: 'hold',
+					upstreamRecovery: {},
+					clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+					log: () => {},
+				}),
+		).toThrow(/recovery primitives/);
 	});
 
 	it("upstreamRecovery without upstreamLossPolicy 'hold' is rejected at construction", () => {

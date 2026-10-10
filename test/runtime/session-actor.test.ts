@@ -466,3 +466,69 @@ describe('SessionActor', () => {
 		});
 	});
 });
+
+describe('SessionActor under upstreamLossPolicy hold', () => {
+	beforeEach(() => vi.useFakeTimers());
+	afterEach(() => vi.useRealTimers());
+
+	function held() {
+		const messages: SentMessage[] = [];
+		const send = (type: string, payload: unknown, to: string) =>
+			messages.push({ type, payload, to });
+		const actor = new SessionActor(
+			'session',
+			send,
+			'transport',
+			undefined,
+			'background-agents',
+			true,
+		);
+		return { actor, messages };
+	}
+	const tell = (actor: SessionActor, type: string, payload: unknown = {}) =>
+		actor.onMessage(createEnvelope(type as never, payload, 'session'));
+
+	it('a transport close is not a session end: agents are not stopped, and the next ready is a reconnect', async () => {
+		const { actor, messages } = held();
+		await tell(actor, 'transport.session_ready');
+		await tell(actor, 'transport.closed', { reason: 'local disconnect' });
+		expect(actor.currentPhase).toBe('reconnecting');
+		expect(messages.filter((m) => m.type === 'transport.closed')).toHaveLength(0);
+		await tell(actor, 'transport.session_ready');
+		expect(actor.currentPhase).toBe('active');
+		expect(messages.filter((m) => m.to === 'background-agents').map((m) => m.type)).toEqual([
+			'session.connected',
+			'session.reconnected',
+		]);
+	});
+
+	it('schedules no reconnect of its own, on any error', async () => {
+		const { actor, messages } = held();
+		await tell(actor, 'transport.session_ready');
+		await tell(actor, 'transport.error', { error: 'x', recoverable: true });
+		await tell(actor, 'transport.error', { error: 'y', recoverable: false });
+		vi.advanceTimersByTime(120_000);
+		expect(messages.filter((m) => m.type === 'transport.trigger_generation')).toHaveLength(0);
+		expect(actor.currentPhase).toBe('reconnecting');
+	});
+
+	it('a failed first dial keeps the phase, so the first activation is still a connect', async () => {
+		const { actor, messages } = held();
+		await tell(actor, 'transport.closed', { reason: 'closed before setup' });
+		expect(actor.currentPhase).toBe('created');
+		await tell(actor, 'transport.session_ready');
+		expect(messages.filter((m) => m.to === 'background-agents').map((m) => m.type)).toEqual([
+			'session.connected',
+		]);
+	});
+
+	it('a session close still stops the agents', async () => {
+		const { actor, messages } = held();
+		await tell(actor, 'transport.session_ready');
+		await tell(actor, 'session.close_requested', { reason: 'user_hangup' });
+		expect(actor.currentPhase).toBe('closed');
+		expect(
+			messages.some((m) => m.type === 'session.close_requested' && m.to === 'background-agents'),
+		).toBe(true);
+	});
+});
