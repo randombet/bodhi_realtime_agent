@@ -307,7 +307,11 @@ Nothing else does. `close()` finalizes a parked session as usual.
 when known.
 
 `'hold'` works in both orchestration modes. In actor mode the dial window
-holds `NotificationActor` delivery with `notification.set_held`.
+holds `NotificationActor` delivery with `notification.set_held`, and a lost
+upstream is not a session end: background agents are not stopped by a park
+or a provider close, they get `onReconnect` when the session is active again,
+and they stop on `close()`. The reconnector and host recovery are the only
+redialers (the actor runtime schedules no retries of its own).
 
 ### Redialing with `recoverUpstream()`
 
@@ -427,9 +431,10 @@ rejects with a `SessionError`.
 
 `upstreamRecovery` moves the when-to-redial decisions into the session, so a
 host does not have to build timers around `recoverUpstream()` and
-`parkUpstream()`. It requires `upstreamLossPolicy: 'hold'` (any other policy
-throws a `ValidationError` at construction) and works in both orchestration
-modes.
+`parkUpstream()`. It requires `upstreamLossPolicy: 'hold'` and a transport
+with the recovery primitives, today the Gemini transport (otherwise a
+`ValidationError` at construction: a park nothing could redial is refused up
+front), and works in both orchestration modes.
 
 ```ts
 const session = new VoiceSession({
@@ -467,7 +472,8 @@ would.
 #### Active silence
 
 With `activeSilence: { requiredTicks?: number }`, a session that is connected
-but silent is redialed: the user spoke, microphone audio keeps arriving, the
+but silent is redialed: the user spoke (their words were transcribed; a voiced
+segment alone, which room noise produces, does not count), microphone audio keeps arriving, the
 model has produced nothing for 15 s, no foreground tool is running, the
 session is not dictating, and this held for `requiredTicks` consecutive
 health ticks (default 3). The redial (`reason: 'active-silence'`) injects no

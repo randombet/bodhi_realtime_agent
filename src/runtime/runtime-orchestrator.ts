@@ -49,6 +49,8 @@ export interface OrchestratorConfig {
 	initialAgent?: string;
 	/** Reconnect backoff policy. */
 	reconnectPolicy?: Partial<ReconnectPolicy>;
+	/** `upstreamLossPolicy: 'hold'`: a lost upstream is not a session end (see SessionActor). */
+	upstreamLossHeld?: boolean;
 	/** Agent lifecycle hooks. */
 	hooks?: MainAgentHooks;
 	/** Optional transfer callback used by ToolRouterActor for transfer_to_agent. */
@@ -167,6 +169,7 @@ export class RuntimeOrchestrator {
 			'transport',
 			config.reconnectPolicy,
 			'background-agents',
+			config.upstreamLossHeld === true,
 		);
 		// NotificationActor: actor-mode home of the legacy
 		// BackgroundNotificationQueue. Started immediately after SessionActor so
