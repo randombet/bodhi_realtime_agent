@@ -8,21 +8,28 @@ import type { SessionState } from '../../src/types/session.js';
 
 function makePolicy(options: UpstreamRecoveryOptions = {}) {
 	const world = { state: 'ACTIVE' as SessionState, client: true };
-	const recoverUpstream = vi.fn();
+	const recoverUpstream = vi.fn(() => ({
+		attemptEpoch: 1,
+		activated: Promise.resolve(),
+		incumbentClosed: Promise.resolve('closed' as const),
+	}));
 	const parkUpstream = vi.fn(async () => {});
+	const sendJsonToClient = vi.fn();
 	const policy = new UpstreamRecoveryPolicy(
 		{
+			sessionId: 'sess_1',
 			getState: () => world.state,
 			isClientConnected: () => world.client,
 			recoverUpstream,
 			parkUpstream,
+			sendJsonToClient,
 			log: () => {},
 			now: () => Date.now(),
 			random: () => 0.5, // no jitter
 		},
 		{ healthTickMs: 0, idleParkMs: 0, ...options },
 	);
-	return { policy, world, recoverUpstream, parkUpstream };
+	return { policy, world, recoverUpstream, parkUpstream, sendJsonToClient };
 }
 
 const remoteClose = (code = 1011, reason = 'internal error') =>
@@ -53,7 +60,11 @@ describe('UpstreamRecoveryPolicy', () => {
 			expect(recoverUpstream).not.toHaveBeenCalled();
 			vi.advanceTimersByTime(1);
 			expect(recoverUpstream).toHaveBeenCalledTimes(1);
-			expect(recoverUpstream).toHaveBeenCalledWith('human-retry');
+			expect(recoverUpstream).toHaveBeenCalledWith({
+				reason: 'human-retry',
+				skipContextInjection: false,
+				holdSyntheticUntilFreshSpeech: false,
+			});
 
 			policy.onLifecycle({ kind: 'attempt', connectAttemptId: 'att_2', handleSupplied: false });
 			policy.onLifecycle({ kind: 'setup-failed', connectAttemptId: 'att_2', reason: 'refused' });
@@ -255,6 +266,118 @@ describe('UpstreamRecoveryPolicy', () => {
 			policy.onClientDisconnected();
 			await vi.advanceTimersByTimeAsync(60_000);
 			expect(parkUpstream).not.toHaveBeenCalled();
+		});
+	});
+
+	describe('redial after a park', () => {
+		it('a reconnector park redials after parkRedialDelayMs; a host park does not', () => {
+			const { policy, world, recoverUpstream } = makePolicy({ parkRedialDelayMs: 1_500 });
+			world.state = 'UPSTREAM_LOST';
+			policy.onUpstreamLost('reconnect-exhausted');
+			vi.advanceTimersByTime(1_499);
+			expect(recoverUpstream).not.toHaveBeenCalled();
+			vi.advanceTimersByTime(1);
+			expect(recoverUpstream).toHaveBeenCalledTimes(1);
+
+			policy.onUpstreamLost('host-parked');
+			vi.advanceTimersByTime(120_000);
+			policy.tick();
+			expect(recoverUpstream).toHaveBeenCalledTimes(1);
+		});
+
+		it('a park inside a fatal backoff waits for it to end', () => {
+			const { policy, world, recoverUpstream } = makePolicy({ fatalBackoffMs: 300_000 });
+			policy.onLifecycle(remoteClose(1011, 'quota exceeded'));
+			world.state = 'UPSTREAM_LOST';
+			policy.onUpstreamLost('reconnect-exhausted');
+			vi.advanceTimersByTime(299_000);
+			expect(recoverUpstream).not.toHaveBeenCalled();
+			vi.advanceTimersByTime(1_200);
+			expect(recoverUpstream).toHaveBeenCalledTimes(1);
+		});
+	});
+
+	describe('isLive', () => {
+		it('replaces the client check, so a session without a client (a call) redials while live', () => {
+			let live = true;
+			const { policy, world, recoverUpstream } = makePolicy({
+				isLive: () => live,
+				holdSyntheticUntilFreshSpeech: true,
+			});
+			world.client = false;
+			world.state = 'UPSTREAM_LOST';
+			policy.onUpstreamLost('reconnect-exhausted');
+			vi.advanceTimersByTime(1_500);
+			expect(recoverUpstream).toHaveBeenCalledWith(
+				expect.objectContaining({ holdSyntheticUntilFreshSpeech: true }),
+			);
+
+			live = false;
+			policy.onUpstreamLost('recover-upstream-failed');
+			vi.advanceTimersByTime(60_000);
+			expect(recoverUpstream).toHaveBeenCalledTimes(1);
+		});
+
+		it('a throwing isLive reads as not live', () => {
+			const { policy, world, recoverUpstream } = makePolicy({
+				isLive: () => {
+					throw new Error('boom');
+				},
+			});
+			world.state = 'UPSTREAM_LOST';
+			policy.onUpstreamLost('reconnect-exhausted');
+			vi.advanceTimersByTime(10_000);
+			expect(recoverUpstream).not.toHaveBeenCalled();
+		});
+	});
+
+	describe('active silence', () => {
+		function silentTicks(policy: UpstreamRecoveryPolicy, n: number) {
+			for (let i = 0; i < n; i++) {
+				vi.advanceTimersByTime(30_000);
+				policy.noteMicFrame();
+				policy.tick();
+			}
+		}
+
+		it('is off unless configured, and handles voice.retryUpstream only when on', () => {
+			const off = makePolicy();
+			off.policy.onClientConnected();
+			off.policy.onLifecycle({
+				kind: 'setup-ok',
+				connectAttemptId: 'att_1',
+				transportGeneration: 1,
+			});
+			off.policy.noteUserSpeech();
+			silentTicks(off.policy, 6);
+			expect(off.recoverUpstream).not.toHaveBeenCalled();
+			expect(off.policy.handleClientCommand({ type: 'voice.retryUpstream' })).toBe(false);
+
+			const on = makePolicy({ activeSilence: {} });
+			expect(on.policy.handleClientCommand({ type: 'voice.retryUpstream' })).toBe(true);
+		});
+
+		it('redials a silent session and, while it owns the recovery, the ladder and health tick stand down', () => {
+			const { policy, world, recoverUpstream } = makePolicy({
+				activeSilence: { requiredTicks: 3 },
+			});
+			policy.onClientConnected();
+			policy.onLifecycle({ kind: 'setup-ok', connectAttemptId: 'att_1', transportGeneration: 1 });
+			vi.advanceTimersByTime(1_000);
+			policy.noteUserSpeech();
+			silentTicks(policy, 3);
+			expect(recoverUpstream).toHaveBeenCalledTimes(1);
+			expect(recoverUpstream).toHaveBeenLastCalledWith(
+				expect.objectContaining({ reason: 'active-silence' }),
+			);
+
+			// Its dial fails and parks: the ladder and the tick leave it to active silence.
+			world.state = 'UPSTREAM_LOST';
+			policy.onLifecycle({ kind: 'setup-failed', connectAttemptId: 'att_2' });
+			policy.onUpstreamLost('recover-upstream-failed');
+			vi.advanceTimersByTime(30_000);
+			policy.tick();
+			expect(recoverUpstream).toHaveBeenCalledTimes(1);
 		});
 	});
 

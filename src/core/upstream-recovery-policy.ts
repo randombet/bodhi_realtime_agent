@@ -13,26 +13,36 @@
  *   and jittered ±20%. A `setup-ok` resets the ladder only once that
  *   connection proved stable (no close for 30 s), so a connection that dies
  *   every few seconds keeps backing off. A dial fires only while the session
- *   is parked in `UPSTREAM_LOST` with a client attached.
+ *   is parked in `UPSTREAM_LOST` and someone is there to talk to (an attached
+ *   client, or `isLive()` for a session without one, such as a phone call).
+ * - **Redial after a park**: when the reconnector gives up and parks the
+ *   session, a dial follows after `parkRedialDelayMs`, or later if the ladder
+ *   or a fatal backoff says so. A park the host asked for is left alone.
  * - **Fatal backoff**: a close the classifier calls non-retryable (quota,
  *   depleted credits, invalid key, unknown model) blocks every dial for
  *   `fatalBackoffMs`; reaching `ACTIVE` clears it.
- * - **Stuck dial**: a session in `CONNECTING` for `stuckConnectingMs` with a
- *   client attached has its dial replaced by `recoverUpstream()`.
- * - **Health tick**: every `healthTickMs`, a parked session with a client
- *   attached is redialed if the ladder missed it (at most once a minute).
- * - **Idle park**: with no client attached for `idleParkMs`, the upstream is
- *   parked; the next client attach redials it (the session's attach path).
+ * - **Stuck dial**: a session in `CONNECTING` for `stuckConnectingMs` with
+ *   someone there has its dial replaced by `recoverUpstream()`.
+ * - **Health tick**: every `healthTickMs`, a parked session with someone there
+ *   is redialed if the ladder missed it (at most once a minute).
+ * - **Idle park**: with nobody there for `idleParkMs`, the upstream is parked;
+ *   the next client attach redials it (the session's attach path).
  * - **Attach gate**: while a fatal backoff is pending and the reconnector is
  *   already redialing, a client attach does not add a dial of its own.
+ * - **Active silence** (opt-in, `activeSilence`): a connected session whose
+ *   model stays silent after the user spoke is redialed; see
+ *   `active-silence-recovery.ts`. While it owns a recovery, the ladder and the
+ *   health tick stand down.
  *
  * Presentation stays with the host: `onFatal` and `onRecovered` report the
- * edges, and the host decides what the user sees.
+ * edges, and the host decides what the user sees. Active silence speaks its
+ * own client protocol (`voice-stalled`, `voice.retryUpstream`).
  */
 
 import type { SessionState } from '../types/session.js';
 import type { ConnectionLifecycleEvent } from '../types/transport.js';
-import type { RecoverUpstreamArgs } from './host-recovery.js';
+import { ActiveSilenceRecovery, DEFAULT_ACTIVE_SILENCE_TICKS } from './active-silence-recovery.js';
+import type { RecoverUpstreamArgs, RecoverUpstreamResult } from './host-recovery.js';
 
 /** A close the policy treats as non-retryable, and why. */
 export interface FatalClose {
@@ -56,20 +66,34 @@ export interface UpstreamRecoveryOptions {
 	/** How long a connection must live after `setup-ok` to reset the ladder.
 	 *  Default 30000 ms. */
 	redialStableMs?: number;
+	/** Delay from a reconnector park to its redial, giving the session's own
+	 *  close handling time to settle. Default 1500 ms. */
+	parkRedialDelayMs?: number;
+	/** Whether someone is there to talk to. Default: a client is attached. A
+	 *  session fed without a client (a phone call through
+	 *  `feedAudioFromClient`) passes its own, such as "the call is up". */
+	isLive?: () => boolean;
+	/** Ladder, park and health-tick redials hold synthetic output (greeting,
+	 *  injected context) until the user is heard. Default `false`. */
+	holdSyntheticUntilFreshSpeech?: boolean;
 	/** How long a fatal close blocks dialing. Default 300000 ms (5 min). */
 	fatalBackoffMs?: number;
 	/** Close classifier. Default {@link classifyGeminiClose}. */
 	classifyClose?: CloseClassifier;
-	/** How long a client-attached session may stay in `CONNECTING` before its
-	 *  dial is replaced. Default 120000 ms; `0` disables; a positive value
+	/** How long a session may stay in `CONNECTING`, with someone there, before
+	 *  its dial is replaced. Default 120000 ms; `0` disables; a positive value
 	 *  below 60000 ms is raised to 60000 ms, twice the dial deadline. */
 	stuckConnectingMs?: number;
 	/** Health tick period. Default 30000 ms; `0` disables the tick (and with it
-	 *  the stuck-dial check and the backstop redial). */
+	 *  the stuck-dial check, the backstop redial and active silence). */
 	healthTickMs?: number;
-	/** Park the upstream after this long with no client attached. Default
-	 *  60000 ms; `0` disables. */
+	/** Park the upstream after this long with nobody there. Default 60000 ms;
+	 *  `0` disables. */
 	idleParkMs?: number;
+	/** Redial a connected session whose model stays silent after the user
+	 *  spoke. `requiredTicks` consecutive qualifying health ticks (default 3)
+	 *  start a redial. Omitted: off. */
+	activeSilence?: { requiredTicks?: number };
 	/** A fatal close started a backoff. */
 	onFatal?: (close: FatalClose & { until: number }) => void;
 	/** The session reached `ACTIVE` after a fatal close was reported. */
@@ -77,12 +101,14 @@ export interface UpstreamRecoveryOptions {
 }
 
 export interface UpstreamRecoveryDeps {
+	sessionId: string;
 	getState(): SessionState;
 	isClientConnected(): boolean;
-	/** `VoiceSession.recoverUpstream()`; a synchronous throw is logged. */
-	recoverUpstream(reason: RecoverUpstreamArgs['reason']): void;
+	/** `VoiceSession.recoverUpstream()`. */
+	recoverUpstream(args: RecoverUpstreamArgs): RecoverUpstreamResult;
 	/** `VoiceSession.parkUpstream()`. */
 	parkUpstream(reason: string): Promise<void>;
+	sendJsonToClient(message: Record<string, unknown>): void;
 	log(message: string): void;
 	now?: () => number;
 	random?: () => number;
@@ -133,6 +159,7 @@ export class UpstreamRecoveryPolicy {
 	private readonly baseMs: number;
 	private readonly capMs: number;
 	private readonly stableMs: number;
+	private readonly parkRedialDelayMs: number;
 	private readonly fatalBackoffMs: number;
 	private readonly stuckConnectingMs: number;
 	private readonly healthTickMs: number;
@@ -140,6 +167,7 @@ export class UpstreamRecoveryPolicy {
 	private readonly classify: CloseClassifier;
 	private readonly now: () => number;
 	private readonly random: () => number;
+	private readonly activeSilence: ActiveSilenceRecovery | null;
 
 	/** Consecutive unstable or failed connections: the ladder index. */
 	private failures = 0;
@@ -151,6 +179,8 @@ export class UpstreamRecoveryPolicy {
 	private fatalReported = false;
 	private lastDialAt = 0;
 	private connectingSince = 0;
+	/** The session is parked because the host asked: no dial until an attach. */
+	private hostParked = false;
 	private dialTimer: ReturnType<typeof setTimeout> | null = null;
 	private idleTimer: ReturnType<typeof setTimeout> | null = null;
 	private tickTimer: ReturnType<typeof setInterval> | null = null;
@@ -163,6 +193,7 @@ export class UpstreamRecoveryPolicy {
 		this.baseMs = options.redialBaseMs ?? 1_000;
 		this.capMs = options.redialCapMs ?? 60_000;
 		this.stableMs = options.redialStableMs ?? 30_000;
+		this.parkRedialDelayMs = options.parkRedialDelayMs ?? 1_500;
 		this.fatalBackoffMs = options.fatalBackoffMs ?? 300_000;
 		const stuck = options.stuckConnectingMs ?? 120_000;
 		this.stuckConnectingMs = stuck > 0 ? Math.max(stuck, MIN_STUCK_CONNECTING_MS) : 0;
@@ -171,15 +202,27 @@ export class UpstreamRecoveryPolicy {
 		this.classify = options.classifyClose ?? classifyGeminiClose;
 		this.now = deps.now ?? Date.now;
 		this.random = deps.random ?? Math.random;
+		this.activeSilence = options.activeSilence
+			? new ActiveSilenceRecovery(
+					{
+						voiceSessionId: deps.sessionId,
+						recoverUpstream: (args) => deps.recoverUpstream(args),
+						sendJsonToClient: (m) => deps.sendJsonToClient(m),
+						log: (m) => deps.log(m),
+						now: this.now,
+					},
+					options.activeSilence.requiredTicks ?? DEFAULT_ACTIVE_SILENCE_TICKS,
+				)
+			: null;
 	}
 
-	/** Start the health tick and, with no client attached yet, the idle clock. */
+	/** Start the health tick and, with nobody there yet, the idle clock. */
 	start(): void {
 		if (this.disposed) return;
 		if (this.healthTickMs > 0 && !this.tickTimer) {
 			this.tickTimer = setInterval(() => this.tick(), this.healthTickMs);
 		}
-		if (!this.deps.isClientConnected()) this.armIdlePark();
+		if (!this.hasAudience()) this.armIdlePark();
 	}
 
 	dispose(): void {
@@ -188,6 +231,7 @@ export class UpstreamRecoveryPolicy {
 		this.clearIdleTimer();
 		if (this.tickTimer) clearInterval(this.tickTimer);
 		this.tickTimer = null;
+		this.activeSilence?.stop();
 	}
 
 	/** Whether a fatal backoff blocks dialing now. */
@@ -204,9 +248,12 @@ export class UpstreamRecoveryPolicy {
 		return this.deps.getState() === 'RECONNECTING' && this.inFatalBackoff();
 	}
 
+	// --- Feeds ---
+
 	/** A transport connection-lifecycle event. */
 	onLifecycle(ev: ConnectionLifecycleEvent): void {
 		if (this.disposed) return;
+		this.activeSilence?.handleLifecycle(ev);
 		const now = this.now();
 		switch (ev.kind) {
 			case 'attempt':
@@ -237,8 +284,7 @@ export class UpstreamRecoveryPolicy {
 				const fatal = this.classify(code, ev.reason);
 				if (fatal) this.noteFatal(fatal);
 				this.failures = prior + 1;
-				this.nextDialAt = Math.max(now + this.backoffDelayMs(this.failures), this.fatalUntil);
-				this.armDialTimer(this.nextDialAt - now);
+				this.scheduleDial(now + this.backoffDelayMs(this.failures));
 				return;
 			}
 		}
@@ -253,32 +299,94 @@ export class UpstreamRecoveryPolicy {
 			this.connectingSince = 0;
 		}
 		if (state !== 'ACTIVE') return;
-		this.fatalUntil = 0;
+		this.hostParked = false;
+		if (this.fatalUntil > 0) {
+			this.fatalUntil = 0;
+			this.activeSilence?.handleFatalBackoffCleared();
+		}
 		if (this.fatalReported) {
 			this.fatalReported = false;
 			this.safe('onRecovered', () => this.options.onRecovered?.());
 		}
 	}
 
+	/** The session parked in `UPSTREAM_LOST` (`session.upstreamLost`). */
+	onUpstreamLost(reason: string): void {
+		if (this.disposed) return;
+		if (reason === 'host-parked') {
+			this.hostParked = true;
+			this.clearDialTimer();
+			this.nextDialAt = 0;
+			return;
+		}
+		this.hostParked = false;
+		this.scheduleDial(Math.max(this.nextDialAt, this.now() + this.parkRedialDelayMs));
+	}
+
 	onClientConnected(): void {
 		this.clearIdleTimer();
+		this.activeSilence?.handleClientConnected();
 	}
 
 	onClientDisconnected(): void {
+		this.activeSilence?.handleClientDisconnected();
 		this.armIdlePark();
 	}
 
-	/** One health tick: replace a stuck dial, then the backstop redial. */
+	/** The user spoke: a completed, voiced input segment. */
+	noteUserSpeech(): void {
+		this.activeSilence?.noteSpeech();
+	}
+
+	/** A microphone frame arrived. */
+	noteMicFrame(): void {
+		this.activeSilence?.noteMicFrame();
+	}
+
+	/** The model started a turn. */
+	noteModelTurnStart(transportGeneration?: number): void {
+		this.activeSilence?.noteModelEvent(transportGeneration);
+	}
+
+	/** The model finished a turn. */
+	noteModelTurnEnd(): void {
+		this.activeSilence?.noteResponse();
+	}
+
+	/** A foreground tool started. */
+	noteToolCall(toolCallId: string): void {
+		this.activeSilence?.noteToolCall(toolCallId);
+	}
+
+	noteToolSettled(toolCallId: string): void {
+		this.activeSilence?.noteToolSettled(toolCallId);
+	}
+
+	/** The session switched between agent mode and dictation. */
+	noteDictation(active: boolean): void {
+		this.activeSilence?.noteMeetingMode(active);
+	}
+
+	/** A client command. Returns `true` when the policy handled it (a
+	 *  `voice.retryUpstream` with active silence on). */
+	handleClientCommand(msg: Record<string, unknown>): boolean {
+		return this.activeSilence?.handleClientCommand(msg) ?? false;
+	}
+
+	/** One health tick: replace a stuck dial, the backstop redial, then the
+	 *  active-silence tick. */
 	tick(): void {
 		if (this.disposed) return;
 		const now = this.now();
 		const state = this.deps.getState();
-		const client = this.deps.isClientConnected();
+		const live = this.hasAudience();
+		const owned = this.activeSilence?.ownsRecovery === true;
 		if (
+			!owned &&
 			state === 'CONNECTING' &&
 			this.stuckConnectingMs > 0 &&
 			this.connectingSince > 0 &&
-			client &&
+			live &&
 			now - this.connectingSince > this.stuckConnectingMs &&
 			now - this.lastDialAt > BACKSTOP_MIN_INTERVAL_MS &&
 			!this.inFatalBackoff()
@@ -287,23 +395,36 @@ export class UpstreamRecoveryPolicy {
 			this.deps.log(`[UpstreamRecovery] stuck in CONNECTING for ${stuckForS}s; replacing the dial`);
 			this.connectingSince = 0;
 			this.dial('stuck-connecting');
-			return;
-		}
-		if (
+		} else if (
+			!owned &&
+			!this.hostParked &&
 			state === 'UPSTREAM_LOST' &&
-			client &&
+			live &&
 			now >= this.nextDialAt &&
 			now - this.lastDialAt > BACKSTOP_MIN_INTERVAL_MS &&
 			!this.inFatalBackoff()
 		) {
-			this.deps.log(
-				'[UpstreamRecovery] health tick: parked session with a client attached; redialing',
-			);
+			this.deps.log('[UpstreamRecovery] health tick: parked session with someone there; redialing');
 			this.dial('health-tick');
 		}
+		this.activeSilence?.tick(state);
 	}
 
 	// --- Internals ---
+
+	private hasAudience(): boolean {
+		if (this.options.isLive) {
+			try {
+				return this.options.isLive();
+			} catch (err) {
+				this.deps.log(
+					`[UpstreamRecovery] isLive threw (treated as not live): ${err instanceof Error ? err.message : String(err)}`,
+				);
+				return false;
+			}
+		}
+		return this.deps.isClientConnected();
+	}
 
 	private backoffDelayMs(failures: number): number {
 		const base = Math.min(this.capMs, this.baseMs * 2 ** Math.max(0, failures - 1));
@@ -316,7 +437,14 @@ export class UpstreamRecoveryPolicy {
 		this.deps.log(
 			`[UpstreamRecovery] fatal close (${fatal.category}); no dial for ${Math.round(this.fatalBackoffMs / 1000)}s`,
 		);
+		this.activeSilence?.handleFatalBackoff(this.fatalUntil);
 		this.safe('onFatal', () => this.options.onFatal?.({ ...fatal, until: this.fatalUntil }));
+	}
+
+	/** Schedule the next ladder dial at `at`, or later if a fatal backoff says so. */
+	private scheduleDial(at: number): void {
+		this.nextDialAt = Math.max(at, this.fatalUntil);
+		this.armDialTimer(this.nextDialAt - this.now());
 	}
 
 	private armDialTimer(delayMs: number): void {
@@ -329,9 +457,10 @@ export class UpstreamRecoveryPolicy {
 		if (this.disposed) return;
 		const now = this.now();
 		if (this.nextDialAt === 0 || now < this.nextDialAt) return;
-		if (this.deps.getState() !== 'UPSTREAM_LOST' || !this.deps.isClientConnected()) {
-			// Not parked, or nobody to talk to: the next lifecycle event, an
-			// attach or the health tick takes over.
+		if (this.activeSilence?.ownsRecovery === true || this.hostParked) return;
+		if (this.deps.getState() !== 'UPSTREAM_LOST' || !this.hasAudience()) {
+			// Not parked, or nobody to talk to: the next park, an attach or the
+			// health tick takes over.
 			return;
 		}
 		if (this.inFatalBackoff()) {
@@ -346,7 +475,17 @@ export class UpstreamRecoveryPolicy {
 		this.lastDialAt = this.now();
 		this.clearDialTimer();
 		try {
-			this.deps.recoverUpstream('human-retry');
+			this.deps
+				.recoverUpstream({
+					reason: 'human-retry',
+					skipContextInjection: false,
+					holdSyntheticUntilFreshSpeech: this.options.holdSyntheticUntilFreshSpeech ?? false,
+				})
+				.activated.catch((err: unknown) =>
+					this.deps.log(
+						`[UpstreamRecovery] ${origin}: recovery did not activate: ${err instanceof Error ? err.message : String(err)}`,
+					),
+				);
 		} catch (err) {
 			this.deps.log(
 				`[UpstreamRecovery] ${origin}: recoverUpstream threw: ${err instanceof Error ? err.message : String(err)}`,
@@ -364,10 +503,10 @@ export class UpstreamRecoveryPolicy {
 	}
 
 	private async parkIdle(): Promise<void> {
-		if (this.disposed || this.deps.isClientConnected()) return;
+		if (this.disposed || this.hasAudience()) return;
 		const state = this.deps.getState();
 		if (state !== 'ACTIVE' && state !== 'RECONNECTING') return;
-		this.deps.log('[UpstreamRecovery] no client attached; parking the upstream until one attaches');
+		this.deps.log('[UpstreamRecovery] nobody there; parking the upstream until a client attaches');
 		try {
 			await this.deps.parkUpstream('idle');
 		} catch (err) {

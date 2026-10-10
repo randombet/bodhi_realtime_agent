@@ -67,6 +67,8 @@ export type {
 	RecoveryCapabilities,
 } from './host-recovery.js';
 export { classifyGeminiClose } from './upstream-recovery-policy.js';
+export { parseRetryUpstreamCommand } from './active-silence-recovery.js';
+export type { RetryUpstreamCommand } from './active-silence-recovery.js';
 export type {
 	CloseClassifier,
 	FatalClose,

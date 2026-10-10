@@ -1573,6 +1573,43 @@ describe('host recovery (legacy mode)', () => {
 		expect(session.sessionManager.state).toBe('UPSTREAM_LOST');
 	});
 
+	it.each(['legacy', 'actor'] as const)(
+		'%s mode: with upstreamRecovery, a failed first dial parks and the policy redials it to ACTIVE on its own',
+		async (orchestrationMode) => {
+			const stub = createRecoveryTransport();
+			stub.failNextDial(new Error('getaddrinfo ENOTFOUND'));
+			session = new VoiceSession({
+				sessionId: 'sess_recover',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createAgent()],
+				initialAgent: 'main',
+				model: mockModel,
+				transport: stub.transport,
+				orchestrationMode,
+				upstreamLossPolicy: 'hold',
+				upstreamRecovery: {
+					isLive: () => true,
+					parkRedialDelayMs: 10,
+					healthTickMs: 0,
+					idleParkMs: 0,
+				},
+				clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+				log: () => {},
+			});
+			const reached = new Promise<void>((resolve) => {
+				session?.eventBus.subscribe('session.stateChange', (e) => {
+					if (e.toState === 'ACTIVE') resolve();
+				});
+			});
+			await expect(session.start()).rejects.toThrow('ENOTFOUND');
+			expect(session.sessionManager.state).toBe('UPSTREAM_LOST');
+			await reached;
+			expect(session.sessionManager.state).toBe('ACTIVE');
+			expect(stub.connect).toHaveBeenCalledTimes(2);
+		},
+	);
+
 	it("in actor mode under 'close' recovery is unavailable", async () => {
 		const stub = createRecoveryTransport();
 		session = createRecoverySession(stub, {

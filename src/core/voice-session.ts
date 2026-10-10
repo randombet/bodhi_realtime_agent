@@ -1848,22 +1848,12 @@ export class VoiceSession {
 	private buildUpstreamRecovery(options: UpstreamRecoveryOptions): void {
 		const policy = new UpstreamRecoveryPolicy(
 			{
+				sessionId: this.config.sessionId,
 				getState: () => this.sessionManager.state,
 				isClientConnected: () => this._clientConnected,
-				recoverUpstream: (reason) => {
-					this.hostRecovery
-						.recoverUpstream({
-							reason,
-							skipContextInjection: false,
-							holdSyntheticUntilFreshSpeech: false,
-						})
-						.activated.catch((err: unknown) =>
-							this.log(
-								`[UpstreamRecovery] recoverUpstream did not activate: ${err instanceof Error ? err.message : String(err)}`,
-							),
-						);
-				},
+				recoverUpstream: (args) => this.hostRecovery.recoverUpstream(args),
 				parkUpstream: (reason) => this.hostRecovery.parkUpstream(reason),
+				sendJsonToClient: (msg) => this.sendHostFrame(msg as HostClientFrame),
 				log: (msg) => this.log(msg),
 			},
 			options,
@@ -1878,7 +1868,24 @@ export class VoiceSession {
 			}
 			policy.onLifecycle(event);
 		};
-		this.eventBus.subscribe('session.stateChange', (e) => policy.onStateChange(e.toState));
+		const bus = this.eventBus;
+		bus.subscribe('session.stateChange', (e) => policy.onStateChange(e.toState));
+		bus.subscribe('session.upstreamLost', (e) => policy.onUpstreamLost(e.reason));
+		bus.subscribe('turn.start', (e) => policy.noteModelTurnStart(e.transportGeneration));
+		bus.subscribe('turn.end', () => policy.noteModelTurnEnd());
+		bus.subscribe('session.transcription_mode_changed', (e) =>
+			policy.noteDictation(e.mode === 'transcription'),
+		);
+		// Background tools answer later through a notification: only a
+		// foreground (inline) tool means the model is busy, not silent.
+		bus.subscribe('tool.call', (e) => {
+			const tool = this.agentRouter.activeAgent.tools.find((t) => t.name === e.toolName);
+			if (tool?.execution !== 'background') policy.noteToolCall(e.toolCallId);
+		});
+		bus.subscribe('tool.result', (e) => policy.noteToolSettled(e.toolCallId));
+		this.userTurnEvidence.observeTerminal((ev) => {
+			if (ev.outcome === 'completed' && ev.voicedFrames > 0) policy.noteUserSpeech();
+		});
 	}
 
 	private buildClientChannelAndGating(config: VoiceSessionConfig): void {
@@ -2028,7 +2035,14 @@ export class VoiceSession {
 			getArtifactRegistry: () => this.config.artifactRegistry,
 			handleTextInput: (text) => this.handleTextInput(text),
 			onClientJson: config.onClientJson,
-			onClientCommand: config.onClientCommand,
+			// With an upstream-recovery policy, its client commands
+			// (`voice.retryUpstream`) are handled here and not forwarded.
+			onClientCommand: config.upstreamRecovery
+				? (message) => {
+						if (this.upstreamRecovery?.handleClientCommand(message) === true) return;
+						config.onClientCommand?.(message);
+					}
+				: config.onClientCommand,
 			reportError: (context, error) => this.reportError(context, error),
 			log: (msg) => this.log(msg),
 		});
@@ -4292,6 +4306,7 @@ export class VoiceSession {
 	 *  client WebSocket, the direct RTC audio plane and `feedAudioFromClient`.
 	 *  Input observers see the frame before the audio router gates it. */
 	private ingestClientAudio(data: Buffer, source: 'websocket' | 'rtc'): void {
+		this.upstreamRecovery?.noteMicFrame();
 		if (this.audioInputObservers.size > 0) {
 			this.notifyAudioObservers(this.audioInputObservers, 'audio-input-observer', data, {
 				source,
