@@ -430,6 +430,37 @@ describe('UpstreamRecoveryPolicy', () => {
 			expect(policy.suppressAttachRedial()).toBe(true);
 		});
 
+		it('a ladder timer that fires before the clock reaches its deadline still dials', () => {
+			let skew = 0;
+			const world = { state: 'UPSTREAM_LOST' as SessionState, client: true };
+			const recoverUpstream = vi.fn(() => ({
+				attemptEpoch: 1,
+				activated: Promise.resolve(),
+				incumbentClosed: Promise.resolve('closed' as const),
+			}));
+			const policy = new UpstreamRecoveryPolicy(
+				{
+					sessionId: 's',
+					getState: () => world.state,
+					isClientConnected: () => world.client,
+					recoverUpstream,
+					parkUpstream: async () => {},
+					sendJsonToClient: () => {},
+					log: () => {},
+					now: () => Date.now() - skew,
+					random: () => 0.5,
+				},
+				{ healthTickMs: 0, idleParkMs: 0 },
+			);
+			policy.onUpstreamLost('reconnect-exhausted');
+			skew = 2; // the clock lags the timer by 2 ms when it fires
+			vi.advanceTimersByTime(1_500);
+			expect(recoverUpstream).not.toHaveBeenCalled();
+			skew = 0;
+			vi.advanceTimersByTime(2);
+			expect(recoverUpstream).toHaveBeenCalledTimes(1);
+		});
+
 		it('a refused stuck-dial replacement keeps its clock, so the next tick tries again', () => {
 			const { policy, world, recoverUpstream } = makePolicy({ stuckConnectingMs: 120_000 });
 			recoverUpstream.mockImplementationOnce(() => {

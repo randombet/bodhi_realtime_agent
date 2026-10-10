@@ -464,7 +464,12 @@ export class UpstreamRecoveryPolicy {
 		this.dialTimer = null;
 		if (this.disposed) return;
 		const now = this.now();
-		if (this.nextDialAt === 0 || now < this.nextDialAt) return;
+		if (this.nextDialAt === 0) return;
+		// A timer can fire a little before the clock reaches its deadline: wait out the rest.
+		if (now < this.nextDialAt) {
+			this.armDialTimer(this.nextDialAt - now);
+			return;
+		}
 		if (this.activeSilence?.ownsRecovery === true || this.hostParked) return;
 		if (this.deps.getState() !== 'UPSTREAM_LOST' || !this.hasAudience()) {
 			// Not parked, or nobody to talk to: the next park, an attach or the
