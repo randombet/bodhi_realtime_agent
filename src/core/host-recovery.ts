@@ -34,7 +34,7 @@ export interface RecoveryCapabilities {
 	syntheticHold: boolean;
 }
 
-/** The full descriptor: what a legacy-orchestration session with
+/** The full descriptor: what a session with
  *  `upstreamLossPolicy: 'hold'` and the native Gemini transport supports. */
 export const RECOVERY_CAPABILITIES: RecoveryCapabilities = Object.freeze({
 	version: 1,
@@ -316,8 +316,6 @@ export interface HostRecoveryControllerDeps {
 	fence: DialGenerationFence;
 	getSessionId(): string;
 	upstreamLossPolicy: 'close' | 'hold';
-	/** `orchestrationMode: 'actor'`: host recovery is unavailable. */
-	actorMode: boolean;
 	/** Dial the transport exactly as `start()` does. */
 	dialTransport(): Promise<void>;
 	/** Flush the transcript buffers. */
@@ -367,8 +365,8 @@ const RECOVERABLE_STATES: readonly SessionState[] = [
 const PARKABLE_STATES: readonly SessionState[] = ['ACTIVE', 'RECONNECTING', 'UPSTREAM_LOST'];
 
 /**
- * Runs host-driven upstream recovery for a legacy-orchestration session with
- * `upstreamLossPolicy: 'hold'`. The session never enters CLOSED: a recovery
+ * Runs host-driven upstream recovery for a session with
+ * `upstreamLossPolicy: 'hold'`, in either orchestration mode. The session never enters CLOSED: a recovery
  * goes from CONNECTING, ACTIVE, RECONNECTING or UPSTREAM_LOST to RECONNECTING
  * and, once the replacement dial is set up, to ACTIVE. From CONNECTING it
  * strands the first dial of `start()`, still pending, and dials the
@@ -403,7 +401,7 @@ export class HostRecoveryController {
 	}
 
 	/** What this session supports: the full descriptor with the native
-	 *  transport under policy `'hold'` in legacy orchestration, otherwise one
+	 *  transport under policy `'hold'`, otherwise one
 	 *  degraded shape in which nothing recovery-related can engage. */
 	getRecoveryCapabilities(): RecoveryCapabilities {
 		if (this.canRecover()) return RECOVERY_CAPABILITIES;
@@ -558,8 +556,7 @@ export class HostRecoveryController {
 	 * disconnect the transport. Automatic recovery is cancelled, and a host
 	 * recovery in flight is superseded: its `activated` rejects and its dial,
 	 * if it completes, is disconnected. Only `recoverUpstream()` redials.
-	 * Rejects with `SessionError` in actor mode, under policy `'close'`, while
-	 * closing, and outside ACTIVE, RECONNECTING and UPSTREAM_LOST.
+	 * Rejects with `SessionError` under policy `'close'`, while closing, and outside ACTIVE, RECONNECTING and UPSTREAM_LOST.
 	 */
 	async parkUpstream(reason: string): Promise<void> {
 		this.assertHostRecovery('parkUpstream');
@@ -785,11 +782,7 @@ export class HostRecoveryController {
 	}
 
 	private canRecover(): boolean {
-		return (
-			!this.deps.actorMode &&
-			this.deps.upstreamLossPolicy === 'hold' &&
-			this.hasRecoveryPrimitives()
-		);
+		return this.deps.upstreamLossPolicy === 'hold' && this.hasRecoveryPrimitives();
 	}
 
 	private hasGenerationCounters(): boolean {
@@ -802,11 +795,6 @@ export class HostRecoveryController {
 	}
 
 	private assertHostRecovery(method: string): void {
-		if (this.deps.actorMode) {
-			throw new SessionError(
-				`${method}() is not supported with orchestrationMode 'actor'; host recovery requires legacy orchestration`,
-			);
-		}
 		if (this.deps.upstreamLossPolicy !== 'hold') {
 			throw new SessionError(`${method}() requires upstreamLossPolicy 'hold'`);
 		}

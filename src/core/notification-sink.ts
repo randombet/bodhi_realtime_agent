@@ -1,5 +1,4 @@
 import type { BackgroundNotificationQueue } from './background-notification-queue.js';
-import { SessionError } from './errors.js';
 
 /** Delivery priority for a published notification. */
 export type NotificationPriority = 'normal' | 'high';
@@ -99,11 +98,7 @@ export class ActorNotificationSink implements NotificationSink {
 		this.tell('notification.publish', { label, text, priority }, 'notification');
 	}
 
-	/** Holding notification delivery is a legacy-orchestration feature; the
-	 *  actor back-end has no hold. */
-	setHeld(_held: boolean): void {
-		throw new SessionError(
-			'Notification hold is not supported with orchestrationMode "actor"; it requires legacy orchestration',
-		);
+	setHeld(held: boolean): void {
+		this.tell('notification.set_held', { held }, 'notification');
 	}
 }

@@ -21,6 +21,7 @@ import type {
 	NotificationDelivered,
 	NotificationFilter,
 	NotificationPublish,
+	NotificationSetHeld,
 	NotificationSubscribe,
 	NotificationUnsubscribe,
 	RuntimeMessage,
@@ -99,6 +100,8 @@ export class NotificationActor implements Actor {
 	private readonly messageTruncation: boolean;
 	private audioReceived = false;
 	private interrupted = false;
+	/** Delivery held by `notification.set_held` (a host recovery's dial window). */
+	private held = false;
 	private queue: QueuedNotification[] = [];
 	private subscribers = new Map<ActorId, NotificationFilter | undefined>();
 
@@ -159,6 +162,11 @@ export class NotificationActor implements Actor {
 				this.audioReceived = false;
 				break;
 			}
+			case 'notification.set_held': {
+				const p = msg.payload as Omit<NotificationSetHeld, 'type'>;
+				this.held = p.held;
+				break;
+			}
 			case 'notification.clear': {
 				const p = msg.payload as Omit<NotificationClear, 'type'>;
 				this.log(`notification.clear (${p.reason}); ${this.queue.length} dropped`);
@@ -203,6 +211,13 @@ export class NotificationActor implements Actor {
 			}
 		}
 
+		// Held (no connection can carry output): queue, high priority first.
+		if (this.held) {
+			if (n.priority === 'high') this.queue.unshift(n);
+			else this.queue.push(n);
+			return;
+		}
+
 		// Idle: deliver immediately.
 		if (!this.audioReceived) {
 			this.deliver(n);
@@ -224,6 +239,7 @@ export class NotificationActor implements Actor {
 	}
 
 	private flushOne(): void {
+		if (this.held) return;
 		const n = this.queue.shift();
 		if (n) this.deliver(n);
 	}

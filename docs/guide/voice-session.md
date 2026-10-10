@@ -306,8 +306,8 @@ Nothing else does. `close()` finalizes a parked session as usual.
 `code`/`detail` carry the transport close code and reason or the error text
 when known.
 
-`'hold'` requires legacy orchestration: combining it with
-`orchestrationMode: 'actor'` throws a `ValidationError` at construction.
+`'hold'` works in both orchestration modes. In actor mode the dial window
+holds `NotificationActor` delivery with `notification.set_held`.
 
 ### Redialing with `recoverUpstream()`
 
@@ -414,14 +414,45 @@ connection and returns whether the session held one.
 ### Capabilities
 
 Gate host recovery on `getRecoveryCapabilities()`, not on method presence. It
-returns `RECOVERY_CAPABILITIES` (every flag `true`) for a legacy-orchestration
-session with `upstreamLossPolicy: 'hold'` on a transport that implements the
-recovery primitives (the built-in Gemini transport). Under `'close'`, in actor
-mode, or on another transport, `recoverUpstream`, `reconnectBoundary` and
+returns `RECOVERY_CAPABILITIES` (every flag `true`) for a session with
+`upstreamLossPolicy: 'hold'` on a transport that implements the
+recovery primitives (the built-in Gemini transport). Under `'close'` or on another
+transport, `recoverUpstream`, `reconnectBoundary` and
 `syntheticHold` are `false`, `turnStartPublication` is `true`, and
 `transportGenerations` says whether the transport reports its generation
-counters. In actor mode `recoverUpstream()` throws and `parkUpstream()`
+counters. Under `'close'` `recoverUpstream()` throws and `parkUpstream()`
 rejects with a `SessionError`.
+
+### Letting the session decide when to redial
+
+`upstreamRecovery` moves the when-to-redial decisions into the session, so a
+host does not have to build timers around `recoverUpstream()` and
+`parkUpstream()`. It requires `upstreamLossPolicy: 'hold'` (any other policy
+throws a `ValidationError` at construction) and works in both orchestration
+modes.
+
+```ts
+const session = new VoiceSession({
+  // ...
+  upstreamLossPolicy: 'hold',
+  upstreamRecovery: {
+    onFatal: ({ category, until }) => notifyUser(category, until),
+    onRecovered: () => notifyUser('recovered'),
+  },
+});
+```
+
+| Behaviour | Option (default) |
+|---|---|
+| A remote close or failed setup redials a parked session with a client attached after 1 s, 2 s, 4 s, ... ±20% jitter; a connection that lived `redialStableMs` resets the ladder | `redialBaseMs` (1000), `redialCapMs` (60000), `redialStableMs` (30000) |
+| A non-retryable close (quota, depleted credits, invalid key, unknown model) blocks every dial; reaching `ACTIVE` clears it | `fatalBackoffMs` (300000), `classifyClose` (`classifyGeminiClose`) |
+| A dial stuck in `CONNECTING` with a client attached is replaced | `stuckConnectingMs` (120000; `0` off; at least 60000) |
+| A backstop tick redials a parked session with a client attached, more than a minute after the last dial | `healthTickMs` (30000; `0` off) |
+| With no client attached, the upstream is parked; the next attach redials it | `idleParkMs` (60000; `0` off) |
+
+While a fatal backoff is pending and the session is `RECONNECTING`, a client
+attach adds no dial of its own and the reconnector leaves recovery to the
+policy, as `suppressClientAutoActions` would.
 
 ## Resetting the conversation context
 
