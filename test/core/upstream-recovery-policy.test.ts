@@ -4,6 +4,7 @@ import {
 	UpstreamRecoveryPolicy,
 	classifyGeminiClose,
 } from '../../src/core/upstream-recovery-policy.js';
+import { ConnectionLifecycleLedger } from '../../src/transport/connection-lifecycle-ledger.js';
 import type { SessionState } from '../../src/types/session.js';
 
 function makePolicy(options: UpstreamRecoveryOptions = {}) {
@@ -378,6 +379,70 @@ describe('UpstreamRecoveryPolicy', () => {
 			vi.advanceTimersByTime(30_000);
 			policy.tick();
 			expect(recoverUpstream).toHaveBeenCalledTimes(1);
+		});
+	});
+
+	describe('review fixes', () => {
+		it('a fatal close before setupComplete starts the backoff: the reason is only on attempt-close', () => {
+			const onFatal = vi.fn();
+			const { policy, world, recoverUpstream } = makePolicy({ fatalBackoffMs: 300_000, onFatal });
+			world.state = 'UPSTREAM_LOST';
+			// The transport's order for a close before setup: attempt-close, then setup-failed.
+			const ledger = new ConnectionLifecycleLedger((ev) => policy.onLifecycle(ev));
+			ledger.beginAttempt(1, false);
+			ledger.socketClosed(1007, 'API key not valid. Please pass a valid API key.');
+			ledger.setupFailed('Gemini socket closed before setupComplete (code=1007)');
+			expect(onFatal).toHaveBeenCalledTimes(1);
+			expect(onFatal).toHaveBeenCalledWith(
+				expect.objectContaining({ category: 'auth_invalid', code: 1007 }),
+			);
+			expect(policy.inFatalBackoff()).toBe(true);
+			vi.advanceTimersByTime(299_000);
+			expect(recoverUpstream).not.toHaveBeenCalled();
+			vi.advanceTimersByTime(1_200);
+			expect(recoverUpstream).toHaveBeenCalledTimes(1);
+		});
+
+		it('a retryable close before setup still redials on the ladder', () => {
+			const { policy, world, recoverUpstream } = makePolicy();
+			world.state = 'UPSTREAM_LOST';
+			const ledger = new ConnectionLifecycleLedger((ev) => policy.onLifecycle(ev));
+			ledger.beginAttempt(1, false);
+			ledger.socketClosed(1006, 'abnormal');
+			ledger.setupFailed('Gemini socket closed before setupComplete (code=1006): abnormal');
+			expect(policy.inFatalBackoff()).toBe(false);
+			vi.advanceTimersByTime(1_000);
+			expect(recoverUpstream).toHaveBeenCalledTimes(1);
+		});
+
+		it('while active silence owns a recovery, a client attach and the reconnector stand down', () => {
+			const { policy } = makePolicy({ activeSilence: { requiredTicks: 3 } });
+			expect(policy.suppressAttachRedial()).toBe(false);
+			policy.onClientConnected();
+			policy.onLifecycle({ kind: 'setup-ok', connectAttemptId: 'att_1', transportGeneration: 1 });
+			vi.advanceTimersByTime(1_000);
+			policy.noteUserSpeech();
+			for (let i = 0; i < 3; i++) {
+				vi.advanceTimersByTime(30_000);
+				policy.noteMicFrame();
+				policy.tick();
+			}
+			expect(policy.suppressAttachRedial()).toBe(true);
+		});
+
+		it('a refused stuck-dial replacement keeps its clock, so the next tick tries again', () => {
+			const { policy, world, recoverUpstream } = makePolicy({ stuckConnectingMs: 120_000 });
+			recoverUpstream.mockImplementationOnce(() => {
+				throw new Error('refused');
+			});
+			world.state = 'CONNECTING';
+			policy.onStateChange('CONNECTING');
+			vi.advanceTimersByTime(120_001);
+			policy.tick();
+			expect(recoverUpstream).toHaveBeenCalledTimes(1);
+			vi.advanceTimersByTime(60_001);
+			policy.tick();
+			expect(recoverUpstream).toHaveBeenCalledTimes(2);
 		});
 	});
 

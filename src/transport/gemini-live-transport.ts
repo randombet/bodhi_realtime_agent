@@ -740,7 +740,11 @@ export class GeminiLiveTransport implements LLMTransport {
 					const code = e?.code;
 					const reason = e?.reason;
 					if (!setupDone) {
-						failSetup(new Error(`Gemini socket closed before setupComplete (code=${code})`));
+						failSetup(
+							new Error(
+								`Gemini socket closed before setupComplete (code=${code})${reason ? `: ${reason}` : ''}`,
+							),
+						);
 					}
 					this.lifecycle.socketClosed(code, reason);
 					this.callbacks.onClose?.(code, reason);

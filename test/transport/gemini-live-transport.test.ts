@@ -432,7 +432,7 @@ describe('GeminiLiveTransport', () => {
 			transport.onClose = onCloseSpy;
 
 			await expect(transport.connect()).rejects.toThrow(
-				'Gemini socket closed before setupComplete (code=1006)',
+				'Gemini socket closed before setupComplete (code=1006): abnormal',
 			);
 			expect(Date.now() - closedAt).toBeLessThan(20);
 			expect(transport.isConnected).toBe(false);
