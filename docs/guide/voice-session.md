@@ -457,9 +457,12 @@ Every redial needs someone there to talk to: an attached client, or
 `feedAudioFromClient`). `holdSyntheticUntilFreshSpeech` holds the greeting and
 injected context of those redials until the user speaks.
 
-While a fatal backoff is pending and the session is `RECONNECTING`, a client
-attach adds no dial of its own and the reconnector leaves recovery to the
-policy, as `suppressClientAutoActions` would.
+A fatal close is recognised before setup completes too: its reason arrives on
+the `attempt-close` lifecycle event, so the backoff starts there. While a
+fatal backoff is pending and the session is `RECONNECTING`, or while active
+silence owns a recovery, a client attach adds no dial of its own and the
+reconnector leaves recovery to the policy, as `suppressClientAutoActions`
+would.
 
 #### Active silence
 

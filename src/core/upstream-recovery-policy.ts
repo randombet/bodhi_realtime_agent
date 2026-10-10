@@ -240,11 +240,14 @@ export class UpstreamRecoveryPolicy {
 	}
 
 	/**
-	 * The attach gate: `true` while a fatal backoff is pending and the
-	 * reconnector is already redialing, so a client attach adds no dial of its
-	 * own. A parked session still redials on attach.
+	 * The attach gate: `true` while active silence owns a recovery (its attempt
+	 * budget decides every dial), or while a fatal backoff is pending and the
+	 * reconnector is already redialing. A client attach then adds no dial of its
+	 * own, and the reconnector parks instead of redialing. Otherwise a parked
+	 * session redials on attach.
 	 */
 	suppressAttachRedial(): boolean {
+		if (this.activeSilence?.ownsRecovery === true) return true;
 		return this.deps.getState() === 'RECONNECTING' && this.inFatalBackoff();
 	}
 
@@ -268,9 +271,14 @@ export class UpstreamRecoveryPolicy {
 				this.nextDialAt = 0;
 				this.clearDialTimer();
 				return;
-			case 'attempt-close':
-				// The failed-dial verdict is the `setup-failed` that follows.
+			case 'attempt-close': {
+				// A close before setupComplete: only this event carries the provider's reason (the
+				// `setup-failed` that follows does not), so a fatal one starts the backoff here and
+				// the `setup-failed` schedules its dial after it.
+				const fatal = this.classify(ev.code, ev.reason);
+				if (fatal) this.noteFatal(fatal);
 				return;
+			}
 			case 'setup-failed':
 			case 'generation-close': {
 				const stable = this.setupOkAt > 0 && now - this.setupOkAt >= this.stableMs;
@@ -393,8 +401,8 @@ export class UpstreamRecoveryPolicy {
 		) {
 			const stuckForS = Math.round((now - this.connectingSince) / 1000);
 			this.deps.log(`[UpstreamRecovery] stuck in CONNECTING for ${stuckForS}s; replacing the dial`);
-			this.connectingSince = 0;
-			this.dial('stuck-connecting');
+			// A replacement that is refused keeps the clock, so the next tick tries again.
+			if (this.dial('stuck-connecting')) this.connectingSince = 0;
 		} else if (
 			!owned &&
 			!this.hostParked &&
@@ -456,7 +464,12 @@ export class UpstreamRecoveryPolicy {
 		this.dialTimer = null;
 		if (this.disposed) return;
 		const now = this.now();
-		if (this.nextDialAt === 0 || now < this.nextDialAt) return;
+		if (this.nextDialAt === 0) return;
+		// A timer can fire a little before the clock reaches its deadline: wait out the rest.
+		if (now < this.nextDialAt) {
+			this.armDialTimer(this.nextDialAt - now);
+			return;
+		}
 		if (this.activeSilence?.ownsRecovery === true || this.hostParked) return;
 		if (this.deps.getState() !== 'UPSTREAM_LOST' || !this.hasAudience()) {
 			// Not parked, or nobody to talk to: the next park, an attach or the
@@ -470,7 +483,8 @@ export class UpstreamRecoveryPolicy {
 		this.dial('redial-ladder');
 	}
 
-	private dial(origin: string): void {
+	/** Redial; `false` when `recoverUpstream()` refused synchronously. */
+	private dial(origin: string): boolean {
 		this.nextDialAt = 0;
 		this.lastDialAt = this.now();
 		this.clearDialTimer();
@@ -486,10 +500,12 @@ export class UpstreamRecoveryPolicy {
 						`[UpstreamRecovery] ${origin}: recovery did not activate: ${err instanceof Error ? err.message : String(err)}`,
 					),
 				);
+			return true;
 		} catch (err) {
 			this.deps.log(
 				`[UpstreamRecovery] ${origin}: recoverUpstream threw: ${err instanceof Error ? err.message : String(err)}`,
 			);
+			return false;
 		}
 	}
 
