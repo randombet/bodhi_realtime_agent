@@ -1068,34 +1068,69 @@ describe('host recovery (legacy mode)', () => {
 		expect(stubTexts(stub).some((t) => t.includes('reconnected'))).toBe(false);
 	});
 
-	it('skipContextInjection: false injects quiet recent context after activation; the fresh-speech hold suppresses it', async () => {
+	it('skipContextInjection: false replays the whole conversation (summary first) into the replacement after activation; the fresh-speech hold suppresses it', async () => {
 		const stub = createRecoveryTransport();
+		const replayHistory = vi.fn();
+		stub.transport.replayHistory = replayHistory;
 		const lines: string[] = [];
 		session = createRecoverySession(stub, { log: (l) => lines.push(l) });
 		await session.start();
-		session.conversationContext.addUserMessage('what is the weather');
-		session.conversationContext.addAssistantMessage('sunny');
+		// Older than the last ten lines and already summarized: the ten-line injection lost both.
+		session.conversationContext.addUserMessage('my friend Lily is allergic to peanuts');
+		session.conversationContext.addAssistantMessage('noted');
+		session.conversationContext.markCheckpoint();
+		session.conversationContext.setSummary(
+			'The user said their friend Lily is allergic to peanuts.',
+		);
+		for (let i = 1; i <= 12; i++) {
+			session.conversationContext.addUserMessage(`question ${i}`);
+			session.conversationContext.addAssistantMessage(`answer ${i}`);
+		}
 
 		const pending = session.recoverUpstream(recoverArgs({ skipContextInjection: false }));
-		expect(stubTexts(stub).some((t) => t.includes('reconnected'))).toBe(false); // not before activation
+		expect(replayHistory).not.toHaveBeenCalled(); // not before activation
 		await pending.activated;
-		const injected = stub.sendContent.mock.calls.filter((c) =>
-			(c[0] as Array<{ text: string }>).some((t) => t.text.includes('You just reconnected.')),
+		expect(replayHistory).toHaveBeenCalledTimes(1);
+		const items = replayHistory.mock.calls[0][0] as Array<{
+			type: string;
+			role: string;
+			text: string;
+		}>;
+		expect(items[0]).toEqual({
+			type: 'text',
+			role: 'user',
+			text: '[Context summary]: The user said their friend Lily is allergic to peanuts.',
+		});
+		expect(items.slice(1).map((i) => i.text)).toEqual(
+			Array.from({ length: 12 }, (_, k) => [`question ${k + 1}`, `answer ${k + 1}`]).flat(),
 		);
-		expect(injected).toHaveLength(1);
-		const [turns, turnComplete] = injected[0] as [Array<{ text: string }>, boolean];
-		expect(turnComplete).toBe(false); // quiet: no response requested
-		expect(turns[0].text).toContain('user: what is the weather\nassistant: sunny');
+		// No ten-line digest, no "wait silently" lead: the model is not told a mode.
+		expect(stubTexts(stub).some((t) => t.includes('reconnected'))).toBe(false);
+		expect(
+			lines.some((l) =>
+				l.includes('Replayed the conversation into the replacement connection (25 items)'),
+			),
+		).toBe(true);
 
-		// Under the fresh-speech hold the same injection is suppressed.
-		stub.sendContent.mockClear();
+		// Under the fresh-speech hold the replay is suppressed, like every synthetic send.
+		replayHistory.mockClear();
 		const held = session.recoverUpstream(
 			recoverArgs({ skipContextInjection: false, holdSyntheticUntilFreshSpeech: true }),
 		);
 		await held.activated;
 		expect(session.isSyntheticHoldActive()).toBe(true);
-		expect(stubTexts(stub).some((t) => t.includes('reconnected'))).toBe(false);
+		expect(replayHistory).not.toHaveBeenCalled();
 		expect(lines.some((l) => l.includes('suppressed gemini-reconnect-context'))).toBe(true);
+	});
+
+	it('skipContextInjection: false with nothing to replay sends nothing', async () => {
+		const stub = createRecoveryTransport();
+		const replayHistory = vi.fn();
+		stub.transport.replayHistory = replayHistory;
+		session = createRecoverySession(stub);
+		await session.start();
+		await session.recoverUpstream(recoverArgs({ skipContextInjection: false })).activated;
+		expect(replayHistory).not.toHaveBeenCalled();
 	});
 
 	it('is single-flight for a boundary subscriber and a generation.end subscriber that re-enter, with one dial', async () => {
@@ -2320,6 +2355,10 @@ describe('host recovery (legacy mode)', () => {
 			const stub = createRecoveryTransport();
 			const onError = vi.fn();
 			session = createRecoverySession(stub, { hooks: { onError } });
+			const replayHistory = vi.fn(() => {
+				throw new Error('replay boom');
+			});
+			stub.transport.replayHistory = replayHistory;
 			await session.start();
 			session.conversationContext.addUserMessage('what is the weather');
 			const dial = stub.holdNextDial();
@@ -2335,12 +2374,12 @@ describe('host recovery (legacy mode)', () => {
 			expect(onError).toHaveBeenCalledWith(
 				expect.objectContaining({ component: 'recover-upstream' }),
 			);
-			// Both the drain and the injection were attempted.
+			// Both the drain and the replay were attempted.
 			const attempted = stub.sendContent.mock.calls.flatMap((c) =>
 				(c[0] as Array<{ text: string }>).map((t) => t.text),
 			);
 			expect(attempted.some((t) => t.includes('job finished'))).toBe(true);
-			expect(attempted.some((t) => t.includes('You just reconnected.'))).toBe(true);
+			expect(replayHistory).toHaveBeenCalledTimes(1);
 
 			stub.sendContent.mockReset();
 			const again = session.recoverUpstream(recoverArgs());

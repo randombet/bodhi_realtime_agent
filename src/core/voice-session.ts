@@ -1841,7 +1841,7 @@ export class VoiceSession {
 				this._pendingResponseOrigin = null;
 			},
 			clearRetainedUtterances: () => this.utteranceRetainer?.clearAll(),
-			injectRecentContext: (origin) => this.injectRecentContext(origin),
+			replayConversation: () => this.replayConversationToReplacement(),
 			reportError: (component, error) => this.reportError(component, error),
 			log: (msg) => this.log(msg),
 		});
@@ -4900,6 +4900,28 @@ export class VoiceSession {
 	 *  items, 150 characters each, as context for a connection that starts
 	 *  without the server-side conversation. Suppressed (logged) while synthetic
 	 *  output is held; nothing is sent when there is no conversation yet. */
+	/**
+	 * A replacement connection is a fresh upstream session with no server-side
+	 * context. Replay the conversation into it the way a reconnect without a
+	 * resumption handle does: the summary, then every live item, as one quiet
+	 * batch that requests no response. Hold-gated like every synthetic send.
+	 * The last ten lines (`injectRecentContext`) lost everything older and
+	 * everything summarized, and their "wait silently" lead was taken as a mode.
+	 */
+	private replayConversationToReplacement(): void {
+		const items = this.conversationContext.toReplayContent({ log: (m) => this.log(m) });
+		if (items.length === 0) return;
+		if (!this.hold.gate('gemini-reconnect-context')) return;
+		if (!this.transport.replayHistory) {
+			this.log(
+				'Replacement connection: the transport has no replayHistory; the conversation is not restored',
+			);
+			return;
+		}
+		this.transport.replayHistory(items);
+		this.log(`Replayed the conversation into the replacement connection (${items.length} items)`);
+	}
+
 	private injectRecentContext(
 		origin: 'gemini-reconnect-context' | 'client-reconnect-context',
 	): void {

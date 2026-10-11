@@ -1886,8 +1886,13 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	 *  per transport instance. */
 	private _truncationReplayWarned = false;
 
-	// ES-private (`#`) so the optional public `LLMTransport.replayHistory?` member does not collide;
-	// reconnect recovery calls this directly (unguarded). Public initial-connect wrapper deferred.
+	/** Replay a conversation into the live session: the host's initial history, and the
+	 *  conversation of a replacement connection. */
+	replayHistory(items: readonly ReplayItem[]): void {
+		this.#replayHistory([...items]);
+	}
+
+	// ES-private (`#`): reconnect recovery calls this directly (unguarded).
 	#replayHistory(items: ReplayItem[]): void {
 		if (!this.rt) return;
 		const rt = this.rt;

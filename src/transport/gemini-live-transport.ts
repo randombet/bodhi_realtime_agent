@@ -1433,10 +1433,15 @@ export class GeminiLiveTransport implements LLMTransport {
 		}
 	}
 
+	/** Replay a conversation into the live session as one quiet client-content batch (no response
+	 *  requested): the host's initial history, and the conversation of a replacement connection. */
+	replayHistory(items: readonly ReplayItem[]): void {
+		this.#replayHistory([...items]);
+	}
+
 	/** Convert ReplayItem[] to Gemini Content format and send as client content.
-	 *  ES-private (`#`) so the optional public `LLMTransport.replayHistory?` interface member does
-	 *  not collide; reconnect/transfer recovery calls this directly (unguarded, may run per session).
-	 *  A public initial-connect wrapper is deferred (see design-composer-resume-history.md). */
+	 *  ES-private (`#`) so the public `replayHistory` can guard differently later; reconnect/transfer
+	 *  recovery calls this directly (unguarded, may run per session). */
 	#replayHistory(items: ReplayItem[]): void {
 		if (!this.session || items.length === 0) return;
 		const turns: Array<{ role: string; parts: Array<Record<string, unknown>> }> = [];

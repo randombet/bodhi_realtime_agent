@@ -218,7 +218,7 @@ After the client is configured, an attach acts on the session state:
 | State at attach | What the attach does |
 |-----------------|----------------------|
 | `ACTIVE` | Sends the agent's greeting, if it has one, once per attached client under `reattachGreeting: 'per-client'` (the default). Under `'until-first-turn'` it greets only while no turn has completed; after that, with `reattachContextReplay: true`, it injects the last ten user and assistant messages as quiet context instead (no response is requested, and nothing is injected while synthetic output is held). |
-| `UPSTREAM_LOST` | Redials with `recoverUpstream({ reason: 'human-retry', skipContextInjection: false, holdSyntheticUntilFreshSpeech: false })`: a fresh dial without the resumption handle, no greeting, and quiet recent context once the session is `ACTIVE` again. A failed dial parks the session again. |
+| `UPSTREAM_LOST` | Redials with `recoverUpstream({ reason: 'human-retry', skipContextInjection: false, holdSyntheticUntilFreshSpeech: false })`: a fresh dial without the resumption handle, no greeting, and the conversation replayed into it once the session is `ACTIVE` again. A failed dial parks the session again. |
 | Any other state | Nothing more. A client attached before the first setup completes is greeted, under the same policy, when it does. |
 
 `suppressClientAutoActions` is read once per attach, after `session.config`
@@ -386,9 +386,11 @@ It returns `{ attemptEpoch, activated, incumbentClosed }`:
 - **`incumbentClosed`** settles with `'closed'` or `'forced'` once the abandoned
   connection's close completes or times out; it never rejects.
 
-On activation no greeting is sent. With `skipContextInjection: false` the last
-ten user and assistant messages are injected as quiet context (no response is
-requested); with `true` nothing is injected. Notifications that arrive during
+On activation no greeting is sent. With `skipContextInjection: false` the
+conversation is replayed into the replacement connection (the summary, then
+every live item, as one quiet batch; no response is requested), as a reconnect
+without a resumption handle does: a fresh upstream session has no server-side
+context. With `true` nothing is replayed. Notifications that arrive during
 the dial are held and one is delivered on activation when the model is idle.
 
 With `holdSyntheticUntilFreshSpeech: true`, framework-generated output (the

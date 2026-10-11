@@ -108,6 +108,28 @@ describe('GeminiLiveTransport', () => {
 			});
 		});
 
+		it('replayHistory sends the whole history as one quiet clientContent batch, the summary first', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			mockSession.sendClientContent.mockClear();
+			transport.replayHistory([
+				{ type: 'text', role: 'user', text: '[Context summary]: Lily is allergic to peanuts.' },
+				{ type: 'text', role: 'user', text: 'what should I bring?' },
+				{ type: 'text', role: 'assistant', text: 'a lemon cake' },
+			]);
+			expect(mockSession.sendClientContent).toHaveBeenCalledTimes(1);
+			const { turns, turnComplete } = mockSession.sendClientContent.mock.calls[0][0] as {
+				turns: Array<{ role: string; parts: Array<{ text: string }> }>;
+				turnComplete: boolean;
+			};
+			expect(turnComplete).toBe(false);
+			expect(turns.map((t) => [t.role, t.parts[0].text])).toEqual([
+				['user', '[Context summary]: Lily is allergic to peanuts.'],
+				['user', 'what should I bring?'],
+				['model', 'a lemon cake'],
+			]);
+		});
+
 		it('replayUserTurn returns false when not connected', () => {
 			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
 			expect(
