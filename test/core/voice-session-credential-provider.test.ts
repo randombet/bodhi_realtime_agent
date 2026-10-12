@@ -404,6 +404,71 @@ describe('VoiceSession with a credentialProvider', () => {
 		]);
 	});
 
+	describe('with upstreamRecovery under hold (the voice lane)', () => {
+		async function startLane(failSecond: Error) {
+			const setups: GeminiLiveSetup[] = [];
+			const provider: GeminiCredentialProvider = async (setup) => {
+				setups.push(setup);
+				if (setups.length === 2) throw failSecond;
+				const lifetimeMs = setups.length === 1 ? 250 : 30 * 60_000;
+				return { apiKey: `auth_tokens/t${setups.length}`, expiresAtMs: Date.now() + lifetimeMs };
+			};
+			const transport = new GeminiLiveTransport(
+				{ credentialProvider: provider, connectTimeoutMs: 100, minCredentialLifetimeMs: 0 },
+				{},
+			);
+			const onFatal = vi.fn();
+			const states: string[] = [];
+			session = new VoiceSession({
+				sessionId: 'sess_lane',
+				userId: 'u',
+				apiKey: 'unused-with-an-injected-transport',
+				transport,
+				agents: agents(),
+				initialAgent: 'main',
+				clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+				model: mockModel,
+				upstreamLossPolicy: 'hold',
+				upstreamRecovery: {
+					isLive: () => true,
+					parkRedialDelayMs: 10,
+					healthTickMs: 0,
+					idleParkMs: 0,
+					onFatal,
+				},
+			});
+			session.eventBus.subscribe('session.stateChange', (e) => states.push(e.toState));
+			await session.start();
+			await settle();
+			sendHandle('handle-1');
+			await settle(300); // the first credential expires
+			return { setups, onFatal, states, s: session };
+		}
+
+		it('a transient token-service error at expiry is retried on the handle, never parked', async () => {
+			const { setups, states, s } = await startLane(new Error('token service 503'));
+			await settle(1_200);
+			expect(setups.map((x) => x.config.sessionResumption)).toEqual([
+				{},
+				{ handle: 'handle-1' },
+				{ handle: 'handle-1' },
+			]);
+			expect(s.sessionManager.state).toBe('ACTIVE');
+			expect(states).not.toContain('UPSTREAM_LOST');
+		});
+
+		it('a permanent one parks the session and starts the fatal backoff: nothing redials', async () => {
+			const permanent = Object.assign(new Error('owner has no voice key'), { retryable: false });
+			const { setups, onFatal, s } = await startLane(permanent);
+			await settle(1_500);
+			expect(s.sessionManager.state).toBe('UPSTREAM_LOST');
+			expect(setups).toHaveLength(2);
+			expect(onFatal).toHaveBeenCalledWith(
+				expect.objectContaining({ category: 'credential_permanent' }),
+			);
+		});
+	});
+
 	it('closing during the first credential fetch aborts it, and nothing dials', async () => {
 		let signal: AbortSignal | undefined;
 		const provider: GeminiCredentialProvider = (_setup, s) => {

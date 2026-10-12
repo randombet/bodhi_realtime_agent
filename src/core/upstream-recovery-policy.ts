@@ -20,8 +20,9 @@
  *   session, a dial follows after `parkRedialDelayMs`, or later if the ladder
  *   or a fatal backoff says so. A park the host asked for is left alone.
  * - **Fatal backoff**: a close the classifier calls non-retryable (quota,
- *   depleted credits, invalid key, unknown model) blocks every dial for
- *   `fatalBackoffMs`; reaching `ACTIVE` clears it.
+ *   depleted credits, invalid key, unknown model), or a credential-provider
+ *   failure the provider marked permanent (`ConnectFailure.retryable: false`),
+ *   blocks every dial for `fatalBackoffMs`; reaching `ACTIVE` clears it.
  * - **Stuck dial**: a session in `CONNECTING` for `stuckConnectingMs` with
  *   someone there has its dial replaced by `recoverUpstream()`.
  * - **Health tick**: every `healthTickMs`, a parked session with someone there
@@ -154,6 +155,17 @@ export const classifyGeminiClose: CloseClassifier = (code, reason) => {
 	return rule ? { category: rule.category, code, reason: text } : null;
 };
 
+/** A pre-setup failure the credential provider marked permanent
+ *  (`ConnectFailure.retryable: false`): fatal whatever its text says. The
+ *  provider's own text stays out of the report, since a host logs `onFatal`. */
+function permanentCredentialFailure(ev: ConnectionLifecycleEvent): FatalClose | null {
+	if (ev.kind !== 'attempt-close' || ev.failure?.retryable !== false) return null;
+	return {
+		category: 'credential_permanent',
+		reason: 'credential provider marked its failure permanent',
+	};
+}
+
 /** bodhi's own `disconnect()` emits exactly this close; it is not a loss. */
 function isLocalDisconnect(ev: ConnectionLifecycleEvent): boolean {
 	return ev.kind === 'generation-close' && ev.code === 1000 && ev.reason === 'local disconnect';
@@ -281,7 +293,7 @@ export class UpstreamRecoveryPolicy {
 				// A close before setupComplete: only this event carries the provider's reason (the
 				// `setup-failed` that follows does not), so a fatal one starts the backoff here and
 				// the `setup-failed` schedules its dial after it.
-				const fatal = this.classify(ev.code, ev.reason);
+				const fatal = this.classify(ev.code, ev.reason) ?? permanentCredentialFailure(ev);
 				if (fatal) this.noteFatal(fatal);
 				return;
 			}

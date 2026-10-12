@@ -180,8 +180,13 @@ const session = new VoiceSession({
   `upstreamLossPolicy` decide. A provider
   that knows its failure is permanent (no key for this owner, access revoked)
   rejects with an error whose `retryable` property is `false`; the session then
-  gives up at once, and the failure carries `retryable: false`. The rejection
-  of `connect()` carries the attempt's failure as `connectFailure`
+  gives up at once, and the failure carries `retryable: false`. With
+  `upstreamRecovery`, such a failure also starts its fatal backoff
+  (`fatalBackoffMs`, category `credential_permanent`), so the parked session is
+  not redialed until it ends. The policy's close classifier reads the failure's
+  message as well, so keep an HTTP 401, 403 or 404, or a quota, out of a
+  transient error's message, or it is treated as fatal too. The rejection of
+  `connect()` carries the attempt's failure as `connectFailure`
   (`ConnectFailureError`).
 
 `credentialProvider` applies to the built-in transport. With an injected

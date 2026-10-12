@@ -234,7 +234,10 @@ export interface GeminiCredential {
  * secret-bearing URL or response body. A `VoiceSession` retries an automatic
  * reconnect whose provider failed through its reconnect budget; reject with an
  * error whose `retryable` property is `false` when the failure is permanent
- * (no key for this owner, access revoked) and the session gives up at once.
+ * (no key for this owner, access revoked) and the session gives up at once
+ * (with `upstreamRecovery`, whose fatal backoff then holds off its redials).
+ * `upstreamRecovery`'s close classifier also reads the failure's message, so
+ * a transient error should not name an HTTP 401, 403 or 404 or a quota.
  */
 export type GeminiCredentialProvider = (
 	setup: GeminiLiveSetup,
