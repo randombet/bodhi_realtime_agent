@@ -426,6 +426,15 @@ interface CredentialAttempt {
 	expiresAtMs?: number;
 }
 
+/** `disconnect()`'s hold on a credential-provider connect until its
+ *  setupComplete. */
+interface PendingSetup {
+	/** Fence the connect off, report its failure, and fail its setup wait. */
+	retire(): void;
+	/** The dial generation `retire()` left, when it was the one to advance it. */
+	retiredGen?: number;
+}
+
 /** HTTP status of a refused WebSocket upgrade, from the `ws` error message. */
 function upgradeStatus(message: string | undefined): number | undefined {
 	const match = /Unexpected server response: (\d{3})/.exec(message ?? '');
@@ -527,8 +536,8 @@ export class GeminiLiveTransport implements LLMTransport {
 	private credentialFetch: AbortController | null = null;
 	/** Retires the latest credential-provider connect until its setupComplete
 	 *  arrives, so `disconnect()` retires it at any stage: fetching, dialing, or
-	 *  opened and waiting for setup. `gen` is that connect's dial generation. */
-	private pendingSetup: { gen: number; retire: () => void } | null = null;
+	 *  opened and waiting for setup. */
+	private pendingSetup: PendingSetup | null = null;
 	/** The expiry timer of the current dial's credential. */
 	private credentialExpiry: { gen: number; timer: ReturnType<typeof setTimeout> } | null = null;
 	/** Resolves when setupComplete fires — used to make connect() await Gemini readiness. */
@@ -947,27 +956,34 @@ export class GeminiLiveTransport implements LLMTransport {
 		// is synchronous: the fence advances and the failure is reported before
 		// disconnect() first awaits, so a credential resolved a microtask earlier
 		// is never dialed, a reconnect() can tell this retirement from a newer
-		// owner's, and the failure is reported before any next attempt begins.
-		const pending = provider
-			? {
-					gen,
-					retire: () => {
-						let error = new Error('Gemini transport disconnected before setupComplete');
-						if (gen === this.dialGen) {
-							this.dialGen++;
-							if (attempt.stage === 'provider') {
-								this.cancelCredentialFetch('Gemini transport disconnected');
-								error = this.credentialFailed(attempt, new Error('Gemini transport disconnected'));
-							}
+		// owner's (`retiredGen`), and the failure is reported before any next
+		// attempt begins.
+		let pending: PendingSetup | null = null;
+		if (provider) {
+			const hold: PendingSetup = {
+				retire: () => {
+					let error = new Error('Gemini transport disconnected before setupComplete');
+					if (gen === this.dialGen) {
+						const retiredGen = ++this.dialGen;
+						hold.retiredGen = retiredGen;
+						if (attempt.stage === 'provider') {
+							this.cancelCredentialFetch('Gemini transport disconnected');
+							error = this.credentialFailed(attempt, new Error('Gemini transport disconnected'));
+						}
+						// Unless an attempt-close observer dialed anew: the ledger's attempt
+						// is then that dial's, as when a provider failure reaches the catch below.
+						if (this.dialGen === retiredGen) {
 							this.lifecycle.setupFailed(
 								error.message,
 								attempt.failure ?? stageFailure(attempt, error.message),
 							);
 						}
-						failSetup(error);
-					},
-				}
-			: null;
+					}
+					failSetup(error);
+				},
+			};
+			pending = hold;
+		}
 		this.pendingSetup = pending;
 		const dial = provider
 			? this.dialWithCredential(provider, gen, model, connectConfig, callbacks, timeoutMs, attempt)
@@ -1182,15 +1198,16 @@ export class GeminiLiveTransport implements LLMTransport {
 		}, timeoutMs);
 
 		try {
-			// disconnect() advances the generation once itself when it retires a
-			// credential-provider connect still before setupComplete: that advance is
-			// this reconnect's own. Without a provider there is none.
-			const ownGen = this.pendingSetup?.gen === timerGen ? timerGen + 1 : timerGen;
+			// disconnect() advances the generation itself when it retires a
+			// credential-provider connect still before setupComplete: that advance,
+			// and only that one, is this reconnect's own. Without a provider there
+			// is none.
+			const hold = this.pendingSetup;
 			await this.disconnect();
 			// The incumbent was aborted (or a newer dial started) while its close was
 			// in flight: whoever advanced the generation owns what comes next, so
 			// this reconnect must not dial.
-			if (this.dialGen !== ownGen) return;
+			if (this.dialGen !== (hold?.retiredGen ?? timerGen)) return;
 
 			// Honor the privacy/ZDR opt-out FIRST: if the caller configured
 			// sessionResumption: false, no incoming handle (constructor, state,
@@ -1286,17 +1303,20 @@ export class GeminiLiveTransport implements LLMTransport {
 	}
 
 	async disconnect(): Promise<void> {
-		// Detach before awaiting: a newer dial can install a replacement session
-		// while close() is in flight, and it must survive this call untouched —
-		// nothing below touches `this.session` once the close completes.
-		const incumbent = this.detachSession();
 		// A credential-provider connect still before setupComplete is for a
 		// connection nobody wants now (a session closing during its dial): it is
-		// retired here, before the first await — its fetch aborted, or its socket
-		// closed the moment it opens (the dial's own failure path). Without a
+		// retired below, before the first await — its fetch aborted, or its
+		// socket closed the moment it opens (the dial's own failure path). Taken
+		// before detaching, so a connect a generation-end observer starts inside
+		// detachSession() is a newer owner this call leaves alone. Without a
 		// provider a pending dial is left as before.
 		const pending = this.pendingSetup;
 		this.pendingSetup = null;
+		// Detach before awaiting: a newer dial can install a replacement session
+		// while close() is in flight, and it must survive this call untouched —
+		// nothing below touches `this.session` once the close completes. Before
+		// retiring, so the retired attempt's setup-failed sees it detached.
+		const incumbent = this.detachSession();
 		pending?.retire();
 		if (!incumbent) return;
 		// The socket's own onclose usually lands after the next dial has advanced
