@@ -497,10 +497,16 @@ export type ConnectionLifecycleEvent =
  *    credential the transport refuses. `error` is what it threw.
  *  - `dial`: the socket never opened (a refused upgrade, a reset, the deadline).
  *  - `session`: the socket opened and closed, or timed out, before
- *    `setupComplete`, for example when Gemini refused the token or the setup. */
+ *    `setupComplete`, for example when Gemini refused the token or the setup.
+ *
+ *  Do not log `message`, `reason` or `error` verbatim. They carry what the
+ *  provider threw and what the server said, which can include a token
+ *  endpoint's URL or response body, or a credential. `source`, `code`,
+ *  `status` and `retryable` carry no provider text. */
 export interface ConnectFailure {
 	source: 'provider' | 'dial' | 'session';
-	/** The provider's error message, the timeout, or the close description. */
+	/** The provider's error message, the timeout, or the close description.
+	 *  May contain provider-supplied text (see above). */
 	message: string;
 	/** WebSocket close code, when the socket closed. */
 	code?: number;
@@ -508,7 +514,8 @@ export interface ConnectFailure {
 	reason?: string;
 	/** HTTP status of a refused WebSocket upgrade, when the SDK reported one. */
 	status?: number;
-	/** What the credential provider threw or aborted with (`source: 'provider'`). */
+	/** What the credential provider threw or aborted with (`source: 'provider'`),
+	 *  as thrown: it holds whatever the provider put in it. */
 	error?: unknown;
 	/** `false` when the provider marked its error as permanent (it threw an
 	 *  error whose `retryable` property is `false`): a session does not retry
@@ -836,7 +843,9 @@ export interface LLMTransport {
 
 	// --- Optional diagnostics (only on supporting transports; GeminiLiveTransport) ---
 	/** Connection-lifecycle facts (attempt / setup / close), correlated by
-	 *  `connectAttemptId`. */
+	 *  `connectAttemptId`. An event's `failure` (and an `attempt-close`
+	 *  `reason` for a provider failure) may hold provider-supplied text: see
+	 *  {@link ConnectFailure} before logging it. */
 	onConnectionLifecycle?: (event: ConnectionLifecycleEvent) => void;
 	/** Snapshot of the upstream send counters and the current transport
 	 *  generation. Absent on transports that do not count sends. */

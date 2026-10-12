@@ -337,7 +337,8 @@ export interface VoiceSessionOptions {
 	 *  lineages without inferring them from log lines. Fires only on transports
 	 *  that report lifecycle (the Gemini Live transport); on a transport that
 	 *  declares neither this nor `onUsageMetadata`, a warning is logged at
-	 *  construction. */
+	 *  construction. With a `credentialProvider`, an event's `failure` may hold
+	 *  provider-supplied text and errors: see `ConnectFailure` before logging it. */
 	onConnectionLifecycle?: (event: ConnectionLifecycleEvent) => void;
 	/** Server-reported token accounting, the provider's raw payload, once per
 	 *  message that carries it. `promptTokenCount` is the standing prompt size —

@@ -183,7 +183,12 @@ export function resolveGeminiRealtimeInputConfig(
  *  `live.connect`. Built once per connect as the JSON the SDK sends (a value
  *  JSON cannot carry, such as a function, is dropped, as it is on the wire)
  *  and deep-frozen, so a credential locked to it (a Gemini ephemeral token with
- *  `liveConnectConstraints`) locks what is actually sent. */
+ *  `liveConnectConstraints`) locks what is actually sent.
+ *
+ *  It holds secrets: `config.sessionResumption.handle`, when present, is a
+ *  bearer secret that resumes the conversation under any key, and
+ *  `config.systemInstruction` is the full instruction, with whatever the
+ *  application put in it. */
 export interface GeminiLiveSetup {
 	readonly model: string;
 	readonly config: Readonly<LiveConnectConfig>;
@@ -216,6 +221,20 @@ export interface GeminiCredential {
  * out, `abortIncumbent()` retired it, a newer `connect()` superseded it, or
  * `disconnect()` ran while it fetched. A credential that arrives after
  * cancellation is dropped unused.
+ *
+ * `setup` includes the conversation's resumption handle (a bearer secret: it
+ * resumes the conversation under any key) and the full system instruction.
+ * Send it only to whatever mints the credential, and do not log or persist it.
+ *
+ * A rejection fails the connect, and what it carries travels: its message
+ * becomes part of the connect's error (which a `VoiceSession` reports through
+ * `onError` and in `session.upstreamLost`'s `detail`) and of
+ * `ConnectFailure.message`, and the error itself is `ConnectFailure.error` on
+ * the lifecycle events. Throw errors that are safe to log, with no token,
+ * secret-bearing URL or response body. A `VoiceSession` retries an automatic
+ * reconnect whose provider failed through its reconnect budget; reject with an
+ * error whose `retryable` property is `false` when the failure is permanent
+ * (no key for this owner, access revoked) and the session gives up at once.
  */
 export type GeminiCredentialProvider = (
 	setup: GeminiLiveSetup,
@@ -355,7 +374,9 @@ export interface GeminiTransportCallbacks {
 	onCredentialExpiry?(): void;
 	/** New session resumption handle available. */
 	onResumptionUpdate?(handle: string, resumable: boolean): void;
-	/** Connection-lifecycle facts (attempt / setup / close). */
+	/** Connection-lifecycle facts (attempt / setup / close). With a
+	 *  `credentialProvider`, a `failure` may hold provider-supplied text: see
+	 *  `ConnectFailure` before logging it. */
 	onConnectionLifecycle?(event: ConnectionLifecycleEvent): void;
 	/** Server-reported token accounting. Fires on EVERY message carrying it,
 	 *  including ones that also carry serverContent, a tool call, or goAway. */

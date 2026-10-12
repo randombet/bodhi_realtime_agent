@@ -114,6 +114,17 @@ const session = new VoiceSession({
 });
 ```
 
+- **What the provider sees:** `setup` includes the conversation's resumption
+  handle when there is one, a bearer secret that resumes the conversation under
+  any key, and the full system instruction. Send it only to whatever mints the
+  credential, and do not log or persist it.
+- **What to log:** what a provider rejects with is passed on. Its message is
+  part of `failure.message` and of the connect's error, which the session
+  reports through `onError` and in the `detail` of `session.upstreamLost`; the
+  error itself is `failure.error` on the lifecycle events. Throw errors that
+  are safe to log (no token, no URL that carries one, no response body). When
+  logging a `failure`, log its `source`, `code`, `status` and `retryable`, not
+  its `message`, `reason` or `error`.
 - **Every connect calls it:** the first dial, GoAway and close reconnects,
   `recoverUpstream()` (including the client-attach redial of a parked session),
   agent transfers, and the next connect after a tool or instruction change. Each
@@ -121,9 +132,10 @@ const session = new VoiceSession({
   API selected explicitly (`vertexai: false`, `enterprise: false`), so
   `GOOGLE_GENAI_USE_VERTEXAI` and `GOOGLE_GENAI_USE_ENTERPRISE` do not apply. No
   client is built from a static key.
-- **One final setup:** `setup` is built once per connect and deep-frozen, and
-  `live.connect` receives a copy equal to it, so a token locked to `setup`
-  locks what is sent.
+- **One final setup:** `setup` is built once per connect as the JSON the SDK
+  sends (a value JSON cannot carry, such as a function, is dropped, as on the
+  wire) and deep-frozen, and `live.connect` receives a copy equal to it, so a
+  token locked to `setup` locks what is sent.
 - **One deadline:** the transport's `connectTimeoutMs` (30 seconds by default)
   covers the fetch, the dial and `setupComplete` together. The fetch may use at
   most half of it; then `signal` aborts and the connect fails. `signal` also
@@ -164,8 +176,8 @@ const session = new VoiceSession({
   is refused before `setupComplete`, the session does not give up on that one
   error. It dials again through the reconnect budget below: after 1, 2 and 4
   seconds, with the same resumption handle (or none, for a rotation without
-  one) and a new credential each time.
-  Only when the budget is spent does `upstreamLossPolicy` decide. A provider
+  one) and a new credential each time. Only when the budget is spent does
+  `upstreamLossPolicy` decide. A provider
   that knows its failure is permanent (no key for this owner, access revoked)
   rejects with an error whose `retryable` property is `false`; the session then
   gives up at once, and the failure carries `retryable: false`. The rejection
