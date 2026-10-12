@@ -569,6 +569,28 @@ describe('GeminiLiveTransport credentialProvider', () => {
 			expect(transport.isConnected).toBe(false);
 		});
 
+		it('a credential that resolves just as the session disconnects is never dialed', async () => {
+			const transport = providerTransport(() => {
+				const credential = Promise.resolve({
+					apiKey: 'auth_tokens/t1',
+					expiresAtMs: Date.now() + 60_000,
+				});
+				// Disconnected once the credential has resolved, a microtask before the
+				// transport's continuation runs: aborting the fetch can no longer fail it.
+				void credential.then(() => {}).then(() => transport.disconnect());
+				return credential;
+			});
+			const events = recordLifecycle(transport);
+			await expect(transport.connect()).rejects.toThrow(
+				'Gemini credential provider failed: Gemini transport disconnected',
+			);
+			await new Promise((r) => setTimeout(r, 5));
+			expect(sdk.clientOptions).toEqual([]);
+			expect(dials()).toEqual([]);
+			expect(events.map((e) => e.kind)).toEqual(['attempt', 'attempt-close', 'setup-failed']);
+			expect(transport.isConnected).toBe(false);
+		});
+
 		it('disconnect() past the fetch, before the socket opens, fails that connect and closes a late open at once', async () => {
 			sdk.mode = 'manual';
 			const { provider } = tokenProvider();
@@ -608,7 +630,12 @@ describe('GeminiLiveTransport credentialProvider', () => {
 			const transport = providerTransport(provider);
 			const expired = vi.fn();
 			transport.onCredentialExpiry = expired;
-			const events = recordLifecycle(transport);
+			const events: ConnectionLifecycleEvent[] = [];
+			let connectedAtFailure: boolean | undefined;
+			transport.onConnectionLifecycle = (e) => {
+				events.push(e);
+				if (e.kind === 'setup-failed') connectedAtFailure = transport.isConnected;
+			};
 			const connecting = transport.connect();
 			connecting.catch(() => {});
 			await vi.advanceTimersByTimeAsync(0);
@@ -620,6 +647,8 @@ describe('GeminiLiveTransport credentialProvider', () => {
 			await transport.disconnect();
 			const message = 'Gemini transport disconnected before setupComplete';
 			await expect(connecting).rejects.toThrow(message);
+			// Detached before the failure is reported, as for any other setup failure.
+			expect(connectedAtFailure).toBe(false);
 			expect(dial.session.close).toHaveBeenCalled();
 			expect(events.at(-1)).toEqual({
 				kind: 'setup-failed',
@@ -636,6 +665,27 @@ describe('GeminiLiveTransport credentialProvider', () => {
 			await vi.advanceTimersByTimeAsync(60 * 60_000);
 			expect(expired).not.toHaveBeenCalled();
 			expect(vi.getTimerCount()).toBe(0);
+		});
+
+		it('disconnect() after abortIncumbent() retired the dial reports nothing more for it', async () => {
+			sdk.mode = 'manual';
+			const { provider } = tokenProvider();
+			const transport = providerTransport(provider);
+			const events = recordLifecycle(transport);
+			const connecting = transport.connect();
+			connecting.catch(() => {});
+			await vi.waitFor(() => expect(dials()).toHaveLength(1));
+
+			await transport.abortIncumbent();
+			await transport.disconnect();
+			await expect(connecting).rejects.toThrow('before setupComplete');
+			expect(events.map((e) => e.kind)).toEqual(['attempt']);
+
+			const dial = lastDial();
+			dial.open();
+			await new Promise((r) => setTimeout(r, 0));
+			expect(dial.session.close).toHaveBeenCalledTimes(1);
+			expect(transport.isConnected).toBe(false);
 		});
 
 		it('a disconnect() from a setup-ok observer closes the set-up connection; it does not fail the connect', async () => {
@@ -677,6 +727,41 @@ describe('GeminiLiveTransport credentialProvider', () => {
 			await new Promise((r) => setTimeout(r, 0));
 			expect(stale.session.close).toHaveBeenCalledTimes(1);
 			expect(transport.isConnected).toBe(true);
+		});
+
+		it('reconnect() after the socket opened, before setupComplete, retires it and dials a replacement', async () => {
+			sdk.mode = 'manual';
+			const { provider } = tokenProvider();
+			const transport = providerTransport(provider);
+			const events = recordLifecycle(transport);
+			const first = transport.connect();
+			first.catch(() => {});
+			await vi.waitFor(() => expect(dials()).toHaveLength(1));
+			const stale = lastDial();
+			stale.open();
+			await vi.waitFor(() => expect(transport.isConnected).toBe(true));
+
+			const reconnecting = transport.reconnect();
+			await vi.waitFor(() => expect(dials()).toHaveLength(2));
+			lastDial().open();
+			lastDial().setup();
+			await reconnecting;
+			await expect(first).rejects.toThrow('Gemini transport disconnected before setupComplete');
+			expect(stale.session.close).toHaveBeenCalled();
+			expect(transport.isConnected).toBe(true);
+			expect(sdk.clientOptions.map((o) => o.apiKey)).toEqual(['auth_tokens/t1', 'auth_tokens/t2']);
+			// The retired attempt's failure is its own, reported before the next attempt.
+			expect(events.map((e) => [e.kind, e.connectAttemptId])).toEqual([
+				['attempt', 'att_1'],
+				['setup-failed', 'att_1'],
+				['attempt', 'att_3'],
+				['setup-ok', 'att_3'],
+			]);
+
+			stale.setup();
+			stale.close(1000, '');
+			expect(transport.isConnected).toBe(true);
+			expect(events).toHaveLength(4);
 		});
 
 		it('a newer connect() supersedes a fetch in flight', async () => {
