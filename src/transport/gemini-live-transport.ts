@@ -153,7 +153,7 @@ export const DEFAULT_GEMINI_REALTIME_INPUT_CONFIG: GeminiRealtimeInputConfig = {
 };
 
 /** Current default Gemini Live model for bidiGenerateContent sessions. */
-export const DEFAULT_GEMINI_LIVE_MODEL = 'gemini-3.1-flash-live-preview';
+export const DEFAULT_GEMINI_LIVE_MODEL = 'gemini-3.8-live';
 
 /**
  * `behavior` declared on a function whose tool sets none, when the transport's
@@ -289,7 +289,7 @@ const DEFAULT_MIN_CREDENTIAL_LIFETIME_MS = 60_000;
 
 /** The Gemini transport's options apart from its credential. */
 export interface GeminiTransportOptions {
-	/** Gemini model name (default: "gemini-3.1-flash-live-preview"). */
+	/** Gemini model name (default: {@link DEFAULT_GEMINI_LIVE_MODEL}, "gemini-3.8-live"). */
 	model?: string;
 	/** System instruction sent to the model at connection time. */
 	systemInstruction?: string;
@@ -1607,7 +1607,8 @@ export class GeminiLiveTransport implements LLMTransport {
 	// --- LLMTransport methods ---
 
 	private shouldUseRealtimeTextForContent(): boolean {
-		const model = this.config.model ?? '';
+		// The model this connection dials: an unset one is the default, a 3.x Live model.
+		const model = this.config.model ?? DEFAULT_GEMINI_LIVE_MODEL;
 		return (
 			/^gemini-3(?:\.\d+)?-.*live/i.test(model) ||
 			/^gemini-2\.5-.*(?:live|native-audio)/i.test(model)

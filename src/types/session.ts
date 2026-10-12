@@ -55,7 +55,7 @@ export interface SessionConfig {
 	sessionId: string;
 	/** User identifier for this session. */
 	userId: string;
-	/** Gemini model to use (e.g. "gemini-3.1-flash-live-preview"). */
+	/** Gemini model to use (e.g. "gemini-3.8-live"). */
 	geminiModel?: string;
 	/** Name of the agent to activate when the session starts. */
 	initialAgent: string;

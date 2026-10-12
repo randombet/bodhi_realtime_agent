@@ -460,7 +460,7 @@ export interface VoiceSessionOptions {
 	 *  restores the legacy raw base64 send (rollback); gate-aware discard
 	 *  semantics are unaffected by this flag. */
 	normalizeDrainedInboundAudio?: boolean;
-	/** LLM model name (e.g. "gemini-3.1-flash-live-preview"). */
+	/** Gemini Live model name (default: `DEFAULT_GEMINI_LIVE_MODEL`, "gemini-3.8-live"). */
 	geminiModel?: string;
 	/** Vercel AI SDK model for subagent text generation. */
 	model: LanguageModelV1;

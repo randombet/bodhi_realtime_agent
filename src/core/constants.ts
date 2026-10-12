@@ -25,7 +25,10 @@ export const DEFAULT_RECONNECT_DEADLINE_MS = 30_000;
  *  `<= 0` disables the watchdog. Lowered from 8_000 to recover stalls faster;
  *  must stay above worst-case legitimate first-token latency (observed:
  *  ~1.3–2.8 s normal, ~2.2 s grounded on gemini-3.1-flash-live-preview —
- *  but ~6 s grounded on the older native-audio model). */
+ *  but ~6 s grounded on the older native-audio model). gemini-3.8-live, the
+ *  default Live model, answers sooner: ~0.6 s median from the end of speech to
+ *  first audio, ~0.8 s after a BLOCKING tool's response (2026-09-28); its
+ *  grounded latency has not been measured. */
 export const DEFAULT_RESPONSE_WATCHDOG_MS = 5_000;
 
 /** Max age of a retained user utterance eligible for watchdog-stall recovery

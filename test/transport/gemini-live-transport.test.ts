@@ -79,6 +79,14 @@ describe('GeminiLiveTransport', () => {
 			expect(config.inputAudioTranscription).toEqual({});
 		});
 
+		it('dials gemini-3.8-live when no model is set', async () => {
+			// The other tests read the constant; this one pins its value.
+			expect(DEFAULT_GEMINI_LIVE_MODEL).toBe('gemini-3.8-live');
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			await transport.connect();
+			expect(capturedConnectConfig.model).toBe('gemini-3.8-live');
+		});
+
 		it('replayUserTurn sends inline audio clientContent with an explicit turnComplete', async () => {
 			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
 			await transport.connect();
@@ -2131,21 +2139,24 @@ describe('GeminiLiveTransport', () => {
 			);
 		});
 
-		it('uses AUDIO + outputAudioTranscription in text mode for Gemini 3.x live models', async () => {
-			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
-			await transport.connect({
-				auth: { type: 'api_key', apiKey: 'test-key' },
-				model: 'gemini-3.1-flash-live-preview',
-				responseModality: 'text',
-			});
+		it.each(['gemini-3.1-flash-live-preview', 'gemini-3.8-live'])(
+			'uses AUDIO + outputAudioTranscription in text mode for Gemini 3.x live models (%s)',
+			async (model) => {
+				const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+				await transport.connect({
+					auth: { type: 'api_key', apiKey: 'test-key' },
+					model,
+					responseModality: 'text',
+				});
 
-			expect(capturedConnectConfig.config).toEqual(
-				expect.objectContaining({
-					responseModalities: ['AUDIO'],
-					outputAudioTranscription: {},
-				}),
-			);
-		});
+				expect(capturedConnectConfig.config).toEqual(
+					expect.objectContaining({
+						responseModalities: ['AUDIO'],
+						outputAudioTranscription: {},
+					}),
+				);
+			},
+		);
 
 		it('fires onTextOutput for text parts in modelTurn', async () => {
 			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
@@ -2520,7 +2531,12 @@ describe('GeminiLiveTransport', () => {
 
 	describe('sendContent', () => {
 		it('converts ContentTurn to Gemini format', async () => {
-			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			// A half-cascade model, outside the families that take generating text as
+			// realtime input; an unset model dials the 3.x default, which does.
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', model: 'gemini-live-2.5-flash-preview' },
+				{},
+			);
 			await transport.connect();
 
 			transport.sendContent([
@@ -2549,21 +2565,32 @@ describe('GeminiLiveTransport', () => {
 			});
 		});
 
-		it('uses realtime text for generation-triggering content on Gemini 3 live models', async () => {
-			const transport = new GeminiLiveTransport(
-				{ apiKey: 'test-key', model: 'gemini-3.1-flash-live-preview' },
-				{},
-			);
+		it.each(['gemini-3.1-flash-live-preview', 'gemini-3.8-live'])(
+			'uses realtime text for generation-triggering content on Gemini 3 live models (%s)',
+			async (model) => {
+				const transport = new GeminiLiveTransport({ apiKey: 'test-key', model }, {});
+				await transport.connect();
+
+				transport.sendContent([
+					{ role: 'user', text: ' Say hello. ' },
+					{ role: 'user', text: 'Ask one question.' },
+				]);
+
+				expect(mockSession.sendRealtimeInput).toHaveBeenCalledWith({
+					text: 'Say hello.\n\nAsk one question.',
+				});
+				expect(mockSession.sendClientContent).not.toHaveBeenCalled();
+			},
+		);
+
+		it('uses realtime text when no model is set, since the transport then dials the 3.x default', async () => {
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
 			await transport.connect();
+			expect(capturedConnectConfig.model).toBe(DEFAULT_GEMINI_LIVE_MODEL);
 
-			transport.sendContent([
-				{ role: 'user', text: ' Say hello. ' },
-				{ role: 'user', text: 'Ask one question.' },
-			]);
+			transport.sendContent([{ role: 'user', text: 'Say hello.' }]);
 
-			expect(mockSession.sendRealtimeInput).toHaveBeenCalledWith({
-				text: 'Say hello.\n\nAsk one question.',
-			});
+			expect(mockSession.sendRealtimeInput).toHaveBeenCalledWith({ text: 'Say hello.' });
 			expect(mockSession.sendClientContent).not.toHaveBeenCalled();
 		});
 
@@ -2580,21 +2607,21 @@ describe('GeminiLiveTransport', () => {
 			expect(mockSession.sendClientContent).not.toHaveBeenCalled();
 		});
 
-		it('keeps non-generating content on clientContent for Gemini 3 live models', async () => {
-			const transport = new GeminiLiveTransport(
-				{ apiKey: 'test-key', model: 'gemini-3.1-flash-live-preview' },
-				{},
-			);
-			await transport.connect();
+		it.each(['gemini-3.1-flash-live-preview', 'gemini-3.8-live', undefined])(
+			'keeps non-generating content on clientContent for Gemini 3 live models (%s)',
+			async (model) => {
+				const transport = new GeminiLiveTransport({ apiKey: 'test-key', model }, {});
+				await transport.connect();
 
-			transport.sendContent([{ role: 'user', text: 'prefill context' }], false);
+				transport.sendContent([{ role: 'user', text: 'prefill context' }], false);
 
-			expect(mockSession.sendRealtimeInput).not.toHaveBeenCalled();
-			expect(mockSession.sendClientContent).toHaveBeenCalledWith({
-				turns: [{ role: 'user', parts: [{ text: 'prefill context' }] }],
-				turnComplete: false,
-			});
-		});
+				expect(mockSession.sendRealtimeInput).not.toHaveBeenCalled();
+				expect(mockSession.sendClientContent).toHaveBeenCalledWith({
+					turns: [{ role: 'user', parts: [{ text: 'prefill context' }] }],
+					turnComplete: false,
+				});
+			},
+		);
 	});
 
 	describe('sendLiveText', () => {

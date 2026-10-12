@@ -13,7 +13,7 @@
  *   GEMINI_API_KEY    - Required: Google AI Studio API key
  *   PORT              - WebSocket port (default: 9900)
  *   HOST              - Bind address (default: 0.0.0.0)
- *   GEMINI_LIVE_MODEL - Live model id (default: gemini-3.1-flash-live-preview)
+ *   GEMINI_LIVE_MODEL - Live model id (default: DEFAULT_GEMINI_LIVE_MODEL, gemini-3.8-live)
  *   GEMINI_VOICE      - TTS voice (default: Puck)
  *   TRANSCRIPT_DIR    - Directory for per-session WhatsApp-style markdown
  *                       transcripts (default: ./transcripts)
@@ -26,6 +26,7 @@ import 'dotenv/config';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { MarkdownConversationHistoryStore } from '../../src/core/markdown-conversation-history-store.js';
 import { VoiceSession } from '../../src/core/voice-session.js';
+import { DEFAULT_GEMINI_LIVE_MODEL } from '../../src/transport/gemini-live-transport.js';
 import { loadInterviewDocuments } from './lib/interview-documents.js';
 import { createInterviewState, ensurePreparedWithFallback } from './lib/interview-state.js';
 import { createInterviewerAgent } from './lib/interviewer-agent.js';
@@ -54,7 +55,7 @@ const SESSION_ID = `interviewer_${Date.now()}`;
 // Where the WhatsApp-style markdown transcript for each session is written.
 // Each session lands as `{TRANSCRIPT_DIR}/{sessionId}.md`.
 const TRANSCRIPT_DIR = process.env.TRANSCRIPT_DIR || './transcripts';
-const LIVE_MODEL = process.env.GEMINI_LIVE_MODEL || 'gemini-3.1-flash-live-preview';
+const LIVE_MODEL = process.env.GEMINI_LIVE_MODEL || DEFAULT_GEMINI_LIVE_MODEL;
 const REASONING_MODEL = process.env.INTERVIEWER_REASONING_MODEL || 'gemini-2.5-flash';
 /** Planner / decision `generateObject` model (edit here or wire your own `LanguageModelV1`). */
 const SUBAGENT_GEMINI_MODEL_ID = 'gemini-3.5-flash';
