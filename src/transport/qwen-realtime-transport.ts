@@ -657,8 +657,13 @@ export class QwenRealtimeTransport implements LLMTransport {
 		return session;
 	}
 
-	// ES-private (`#`) so the optional public `LLMTransport.replayHistory?` member does not collide;
-	// reconnect recovery calls this directly (unguarded). Public initial-connect wrapper deferred.
+	/** Replay a conversation into the live session: the host's initial history, and the
+	 *  conversation of a replacement connection. */
+	replayHistory(items: readonly ReplayItem[]): void {
+		this.#replayHistory([...items]);
+	}
+
+	// ES-private (`#`): reconnect recovery calls this directly (unguarded).
 	#replayHistory(history: ReplayItem[]): void {
 		for (const item of history) {
 			if (item.type === 'text') {

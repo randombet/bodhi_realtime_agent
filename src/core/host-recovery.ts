@@ -48,8 +48,9 @@ export const RECOVERY_CAPABILITIES: RecoveryCapabilities = Object.freeze({
 /** Arguments of `VoiceSession.recoverUpstream()`. */
 export interface RecoverUpstreamArgs {
 	reason: 'active-silence' | 'human-retry' | 'fatal-backoff-clear';
-	/** `false` injects the recent conversation as quiet context once the
-	 *  replacement connection is active; `true` injects nothing. */
+	/** `false` replays the conversation (its summary, then every live item)
+	 *  into the replacement connection once it is active: a fresh upstream
+	 *  session has no server-side context. `true` replays nothing. */
 	skipContextInjection: boolean;
 	/** Hold synthetic output (greeting, directives, notifications, injected
 	 *  context) until the user is heard again. */
@@ -329,8 +330,10 @@ export interface HostRecoveryControllerDeps {
 	clearGreetingState(): void;
 	/** Drop retained user audio (the watchdog replay candidate). */
 	clearRetainedUtterances(): void;
-	/** Inject the recent conversation as quiet context, hold-gated. */
-	injectRecentContext(origin: 'gemini-reconnect-context'): void;
+	/** Replay the conversation into the replacement connection, quiet and hold-gated.
+	 *  `attemptEpoch` names the recovery being activated, so a replacement whose setup
+	 *  already seeded the conversation (`initialHistory`) is not given it twice. */
+	replayConversation(attemptEpoch: number): void;
 	reportError(component: string, error: Error): void;
 	log(message: string): void;
 }
@@ -387,6 +390,12 @@ const PARKABLE_STATES: readonly SessionState[] = ['ACTIVE', 'RECONNECTING', 'UPS
  */
 export class HostRecoveryController {
 	private inFlight: RecoveryAttempt | null = null;
+
+	/** The `attemptEpoch` of the recovery in flight, or `null`: the connection
+	 *  setting up right now, if any, is that recovery's replacement. */
+	get inFlightAttemptEpoch(): number | null {
+		return this.inFlight?.result.attemptEpoch ?? null;
+	}
 	private disposed = false;
 	private replacedFirstDial = false;
 
@@ -593,8 +602,8 @@ export class HostRecoveryController {
 	 * failed dial fails the recovery ({@link failAttempt}). Otherwise the
 	 * session activates: ACTIVE, a fresh reconnect budget, the dial window
 	 * released (which runs one notification drain when the model is idle and
-	 * no fresh-speech hold remains), then quiet recent context unless
-	 * `skipContextInjection`. A throw in the drain or the injection is
+	 * no fresh-speech hold remains), then the conversation replayed unless
+	 * `skipContextInjection`. A throw in the drain or the replay is
 	 * reported and skips neither the other nor the settlement of `activated`.
 	 * A park or a `close()` from code the activation reaches (a subscriber of
 	 * the ACTIVE transition, the drain, the injection) stops it
@@ -637,12 +646,12 @@ export class HostRecoveryController {
 		try {
 			this.runGuarded('notification drain on activation', () => hold.releaseDialWindow());
 			if (!attempt.args.skipContextInjection) {
-				this.runGuarded('context injection on activation', () =>
-					this.deps.injectRecentContext('gemini-reconnect-context'),
+				this.runGuarded('conversation replay on activation', () =>
+					this.deps.replayConversation(epoch),
 				);
 			}
 		} finally {
-			// A park or a close from the drain or the injection: `activated` rejects.
+			// A park or a close from the drain or the replay: `activated` rejects.
 			if (!this.stopIfSuperseded(attempt)) {
 				this.inFlight = null;
 				this.deps.log(`recoverUpstream: attempt ${epoch} active`);

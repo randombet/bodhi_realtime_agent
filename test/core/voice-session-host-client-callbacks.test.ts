@@ -24,7 +24,6 @@ const mockModel = { modelId: 'test-model' } as unknown as LanguageModelV1;
 
 const GREETING = '[System: Greet the user warmly.]';
 const CLIENT_REPLAY = 'The client reconnected.';
-const UPSTREAM_REPLAY = 'You just reconnected.';
 
 interface StubTransport {
 	transport: LLMTransport;
@@ -639,9 +638,11 @@ describe('VoiceSession host client callbacks', () => {
 			expect(session.sessionManager.state).toBe('CLOSED');
 		});
 
-		it('an UPSTREAM_LOST attach dials fresh, does not greet, and injects quiet context after activation', async () => {
+		it('an UPSTREAM_LOST attach dials fresh, does not greet, and replays the conversation after activation', async () => {
 			const lines: string[] = [];
 			const stub = createStubTransport();
+			const replayHistory = vi.fn();
+			stub.transport.replayHistory = replayHistory;
 			session = createSession(stub, {
 				upstreamLossPolicy: 'hold',
 				log: (l) => lines.push(l),
@@ -669,13 +670,12 @@ describe('VoiceSession host client callbacks', () => {
 			await vi.waitFor(() => expect(s.sessionManager.state).toBe('ACTIVE'));
 			expect(stub.connect).toHaveBeenCalledTimes(2);
 			expect(greetingCount(stub)).toBe(0);
-			const injected = stub.sendContent.mock.calls.filter((c) =>
-				(c[0] as Array<{ text: string }>).some((t) => t.text.includes(UPSTREAM_REPLAY)),
-			);
-			expect(injected).toHaveLength(1);
-			const [turns, turnComplete] = injected[0] as [Array<{ text: string }>, boolean];
-			expect(turnComplete).toBe(false);
-			expect(turns[0].text).toContain('user: what is the weather\nassistant: sunny');
+			expect(replayHistory).toHaveBeenCalledTimes(1);
+			expect(replayHistory).toHaveBeenCalledWith([
+				{ type: 'text', role: 'user', text: 'what is the weather' },
+				{ type: 'text', role: 'assistant', text: 'sunny' },
+			]);
+			expect(sentTexts(stub).some((t) => t.includes('reconnected'))).toBe(false);
 		});
 	});
 });
