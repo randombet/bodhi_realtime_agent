@@ -121,6 +121,7 @@ function makeHarness(opts: {
 	isSyntheticHeld?: TransportReconnectorDeps['isSyntheticHeld'];
 	upstreamLossPolicy?: TransportReconnectorDeps['upstreamLossPolicy'];
 	hostOwnsRecovery?: TransportReconnectorDeps['hostOwnsRecovery'];
+	onFreshSessionBoundary?: TransportReconnectorDeps['onFreshSessionBoundary'];
 	reconnectDeadlineMs?: number;
 }): Harness {
 	const sm = fakeSessionManager(
@@ -151,6 +152,7 @@ function makeHarness(opts: {
 		isSyntheticHeld: opts.isSyntheticHeld,
 		upstreamLossPolicy: opts.upstreamLossPolicy ?? 'close',
 		hostOwnsRecovery: opts.hostOwnsRecovery,
+		onFreshSessionBoundary: opts.onFreshSessionBoundary,
 	};
 	const reconnector = new TransportReconnector(
 		deps,
@@ -895,6 +897,88 @@ describe('TransportReconnector', () => {
 
 			expect(dialedHandles(h.transport)).toEqual(['handle-1', 'handle-1']);
 			expect(clearResumption).not.toHaveBeenCalled();
+		});
+
+		it('without a resumption handle crosses the fresh-session boundary once, while ACTIVE and before any dial; its retries do not cross it again', async () => {
+			const order: string[] = [];
+			const reconnect = vi
+				.fn()
+				.mockImplementationOnce(async () => {
+					order.push('dial');
+					throw connectFailed();
+				})
+				.mockImplementation(async () => {
+					order.push('dial');
+				});
+			const h: Harness = makeHarness({
+				handle: null,
+				transport: fakeTransport({ reconnect }),
+				onFreshSessionBoundary: (reason) => order.push(`boundary:${reason}:${h.sm.state}`),
+			});
+			h.sm.transitionTo.mockImplementation((s: SessionState) => {
+				order.push(`to:${s}`);
+				h.sm._setState(s);
+			});
+
+			h.reconnector.handleCredentialExpiry();
+			await vi.advanceTimersByTimeAsync(1_000);
+			await vi.runAllTimersAsync();
+
+			expect(order).toEqual([
+				'boundary:credential-expiry:ACTIVE',
+				'to:RECONNECTING',
+				'dial',
+				'dial',
+				'to:ACTIVE',
+			]);
+		});
+
+		it('never crosses the boundary when the rotation or a GoAway resumes, or a GoAway finds no handle', async () => {
+			const onFreshSessionBoundary = vi.fn();
+			const h = makeHarness({ onFreshSessionBoundary });
+			h.reconnector.handleCredentialExpiry();
+			await vi.runAllTimersAsync();
+			h.reconnector.handleGoAway('10s');
+			await vi.runAllTimersAsync();
+			expect(dialedHandles(h.transport)).toEqual(['handle-1', 'handle-1']);
+
+			const noHandle = makeHarness({ handle: null, onFreshSessionBoundary });
+			noHandle.reconnector.handleGoAway('10s');
+			expect(noHandle.transport.reconnect).not.toHaveBeenCalled();
+
+			expect(onFreshSessionBoundary).not.toHaveBeenCalled();
+		});
+
+		it('a boundary that ends the session stops the rotation: nothing buffers or dials', async () => {
+			const h: Harness = makeHarness({
+				handle: null,
+				onFreshSessionBoundary: () => h.sm._setState('CLOSED'),
+			});
+
+			h.reconnector.handleCredentialExpiry();
+			await vi.runAllTimersAsync();
+
+			expect(h.sm.transitionTo).not.toHaveBeenCalled();
+			expect(h.clientTransport.startBuffering).not.toHaveBeenCalled();
+			expect(h.transport.reconnect).not.toHaveBeenCalled();
+		});
+
+		it('a boundary that throws is logged, and the rotation goes on', async () => {
+			const h = makeHarness({
+				handle: null,
+				onFreshSessionBoundary: () => {
+					throw new Error('subscriber failed');
+				},
+			});
+
+			h.reconnector.handleCredentialExpiry();
+			await vi.runAllTimersAsync();
+
+			expect(h.log).toHaveBeenCalledWith(
+				'Fresh-session boundary threw (rotation continues): subscriber failed',
+			);
+			expect(dialedHandles(h.transport)).toEqual([undefined]);
+			expect(h.sm.state).toBe('ACTIVE');
 		});
 	});
 

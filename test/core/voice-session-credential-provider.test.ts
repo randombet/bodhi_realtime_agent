@@ -455,6 +455,109 @@ describe('VoiceSession with a credentialProvider', () => {
 		);
 	});
 
+	describe('a turn and a tool call in flight when the credential expires', () => {
+		/** A session on an injected provider transport whose first credential
+		 *  expires after 250 ms, with a tool that completes when the test says. */
+		async function startMidTurn(opts: { handle?: string } = {}) {
+			const turnEvents: string[] = [];
+			const eventsAtRedial: string[][] = [];
+			let calls = 0;
+			const provider: GeminiCredentialProvider = async () => {
+				calls++;
+				if (calls === 2) eventsAtRedial.push([...turnEvents]);
+				const lifetimeMs = calls === 1 ? 250 : 30 * 60_000;
+				return { apiKey: `auth_tokens/t${calls}`, expiresAtMs: Date.now() + lifetimeMs };
+			};
+			const transport = new GeminiLiveTransport(
+				{ credentialProvider: provider, connectTimeoutMs: 100, minCredentialLifetimeMs: 0 },
+				{},
+			);
+			const pending = new Map<string, (value: unknown) => void>();
+			session = new VoiceSession({
+				sessionId: 'sess_expiry_mid_turn',
+				userId: 'u',
+				apiKey: 'unused-with-an-injected-transport',
+				transport,
+				agents: [
+					{
+						name: 'main',
+						instructions: 'You are the main agent.',
+						tools: [
+							{
+								name: 'slow_lookup',
+								description: 'A lookup that completes when the test says so.',
+								parameters: z.object({}),
+								execution: 'inline',
+								execute: (_args, ctx) =>
+									new Promise((resolve) => pending.set(ctx.toolCallId, resolve)),
+							},
+						],
+					},
+				],
+				initialAgent: 'main',
+				clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+				model: mockModel,
+				upstreamLossPolicy: 'hold',
+			});
+			session.eventBus.subscribe('turn.interrupted', (e) =>
+				turnEvents.push(`interrupted:${e.turnId}`),
+			);
+			session.eventBus.subscribe('turn.end', (e) => turnEvents.push(`end:${e.turnId}`));
+			await session.start();
+			await settle();
+			if (opts.handle) sendHandle(opts.handle);
+			const first = lastDial();
+			const callTool = (dial: Dial, id: string) =>
+				dial.params.callbacks.onmessage?.({
+					toolCall: { functionCalls: [{ id, name: 'slow_lookup', args: {} }] },
+				});
+			first.params.callbacks.onmessage?.({
+				serverContent: { modelTurn: { parts: [{ text: 'Let me look that up.' }] } },
+			});
+			callTool(first, 'call_old');
+			await vi.waitFor(() => expect(pending.has('call_old')).toBe(true));
+			await settle(300); // the first credential expires and the session rotates
+			const finish = async (id: string) => {
+				await vi.waitFor(() => expect(pending.has(id)).toBe(true));
+				pending.get(id)?.({ ok: id });
+				await settle(10);
+			};
+			const sentIds = (dial: Dial) =>
+				(
+					dial.session as unknown as { sendToolResponse: ReturnType<typeof vi.fn> }
+				).sendToolResponse.mock.calls.map(
+					(c) => (c[0] as { functionResponses: Array<{ id: string }> }).functionResponses[0]?.id,
+				);
+			return { first, turnEvents, eventsAtRedial, callTool, finish, sentIds };
+		}
+
+		it('a fresh rotation ends the turn as interrupted before it redials, and drops the result of a call the new session never issued', async () => {
+			const { turnEvents, eventsAtRedial, callTool, finish, sentIds } = await startMidTurn();
+			expect(session?.sessionManager.state).toBe('ACTIVE');
+			expect(dials()).toHaveLength(2);
+			expect(eventsAtRedial).toEqual([['interrupted:turn_1', 'end:turn_1']]);
+
+			const fresh = lastDial();
+			await finish('call_old');
+			callTool(fresh, 'call_new');
+			await finish('call_new');
+
+			expect(sentIds(fresh)).toEqual(['call_new']);
+			expect(turnEvents).toEqual(['interrupted:turn_1', 'end:turn_1']);
+		});
+
+		it('a rotation that resumes on a handle keeps the turn, and the resumed session gets the result', async () => {
+			const { turnEvents, finish, sentIds } = await startMidTurn({ handle: 'handle-1' });
+			expect(dials()).toHaveLength(2);
+			expect(lastDial().params.config.sessionResumption).toEqual({ handle: 'handle-1' });
+
+			await finish('call_old');
+
+			expect(sentIds(lastDial())).toEqual(['call_old']);
+			expect(turnEvents).toEqual([]);
+		});
+	});
+
 	describe('with upstreamRecovery under hold (the voice lane)', () => {
 		async function startLane(failSecond: Error) {
 			const setups: GeminiLiveSetup[] = [];

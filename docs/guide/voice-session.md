@@ -158,7 +158,12 @@ const session = new VoiceSession({
   as an agent transfer does. A handle given to the transport's constructor
   (`sessionResumption: { handle }`) that no server update has replaced yet
   counts as none here: the session never saw it, so the rotation drops it
-  rather than resume from it. This rotation is planned, not a loss: it spends
+  rather than resume from it. The new server session never saw the old
+  connection's turn or tool calls, so before that fresh dial the session
+  crosses the boundary `recoverUpstream()` crosses: the active turn ends as
+  interrupted (`turn.interrupted`, then `turn.end`), and results for tool calls
+  the old connection issued are dropped instead of sent to the new session. A
+  rotation that resumes on a handle keeps both. This rotation is planned, not a loss: it spends
   none of the reconnect budget, and the old connection's close is reported as
   a local disconnect (`1000 'local disconnect'`), which `upstreamRecovery`
   does not count. In any other state the transport closes the connection

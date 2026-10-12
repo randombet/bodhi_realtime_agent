@@ -192,14 +192,16 @@ export class SyntheticOutputHold {
 
 /**
  * Drops work that belongs to a provider connection a host recovery has
- * abandoned: tool results for calls the old connection issued, and external
+ * abandoned, or a credential-expiry rotation to a fresh server session has
+ * replaced: tool results for calls the old connection issued, and external
  * STT captures committed on it.
  *
  * Tool calls and STT commits are stamped with the transport's dial
  * generation (`currentDialGen`). {@link markBoundary} records the generation
  * of the connection a host recovery is about to abandon; a stamp at or below
- * it is stale. Automatic reconnects never mark a boundary, so across them
- * tool results and STT captures are delivered as before. Until a boundary is
+ * it is stale. Automatic reconnects that resume the server session never
+ * mark a boundary, so across them tool results and STT captures are
+ * delivered as before. Until a boundary is
  * marked nothing is stale, and on a transport without `currentDialGen`
  * nothing is stamped.
  *
@@ -248,7 +250,7 @@ export class DialGenerationFence {
 			return false;
 		}
 		this.log(
-			`Dropped tool result ${id}: its call was issued on dial ${issuedGen}, abandoned by a host recovery`,
+			`Dropped tool result ${id}: its call was issued on dial ${issuedGen}, abandoned at a reconnect boundary`,
 		);
 		return true;
 	}
@@ -281,8 +283,9 @@ export class DialGenerationFence {
 		return capturedGen <= this.boundaryGen;
 	}
 
-	/** Mark a host-recovery boundary: record the current dial generation,
-	 *  before the recovery aborts the connection and advances it, and the
+	/** Mark a reconnect boundary: record the current dial generation,
+	 *  before the connection is aborted or replaced and the generation
+	 *  advances, and the
 	 *  latest turn whose capture was stamped on it or earlier. */
 	markBoundary(): void {
 		const gen = this.transport.currentDialGen;
@@ -542,6 +545,27 @@ export class HostRecoveryController {
 		this.deps.log(
 			`Reconnect boundary (${reason}) before dial attempt ${attempt.result.attemptEpoch}`,
 		);
+		this.crossBoundary();
+	}
+
+	/**
+	 * The same boundary for an automatic reconnect to a fresh server session
+	 * outside a recovery: a credential-expiry rotation without a resumption
+	 * handle. Run while the old connection is still the incumbent. The new
+	 * server session never saw the old connection's turn or tool calls, so the
+	 * turn ends as interrupted and the fence drops results for those calls
+	 * instead of sending them to a session that never issued them. Publishes
+	 * no `session.reconnectBoundary`, which belongs to `recoverUpstream()`.
+	 */
+	crossFreshSessionBoundary(reason: string): void {
+		this.deps.log(`Fresh-session boundary (${reason})`);
+		this.crossBoundary();
+	}
+
+	/** The boundary's steps: flush the transcript, finalize the active turn as
+	 *  interrupted, discard the external STT provider's uncommitted audio,
+	 *  clear leftover greeting state, then mark the dial-generation fence. */
+	private crossBoundary(): void {
 		this.deps.flushTranscript();
 		this.deps.abandonActiveTurn();
 		this.deps.discardSttUtterance();

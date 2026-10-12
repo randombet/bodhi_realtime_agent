@@ -103,6 +103,14 @@ export interface TransportReconnectorDeps {
 	/** H2 drain-freshness: a candidate sealed before the latest drained
 	 *  speech is not replayable at ANY stage (escalate instead). */
 	isCandidateReplayEligible?(retained: RetainedUserTurn): boolean;
+	/** A credential-expiry rotation without a resumption handle is about to
+	 *  dial a fresh server session, which never saw the old connection's turn
+	 *  or tool calls. Called once, while the old connection is still the
+	 *  incumbent and before the session leaves ACTIVE, so the session crosses
+	 *  the same boundary a host recovery does: it finalizes the active turn as
+	 *  interrupted and drops the results of calls the old connection issued.
+	 *  A throw is logged and the rotation goes on. Optional. */
+	onFreshSessionBoundary?(reason: string): void;
 }
 
 /** Reconnect-window speech verdict driving the stage-2 replay decision. */
@@ -854,7 +862,9 @@ export class TransportReconnector {
 	 *  none issued yet, or the last update was not resumable): a fresh session
 	 *  that replays the conversation, as an agent transfer does. A handle only
 	 *  the transport holds (passed to its constructor, never reported to this
-	 *  session) is dropped, not resumed from. The rotation is
+	 *  session) is dropped, not resumed from. Before that fresh dial the
+	 *  session crosses a reconnect boundary ({@link TransportReconnectorDeps.onFreshSessionBoundary}).
+	 *  The rotation is
 	 *  the library's own, so it is never treated as a loss. When this does not
 	 *  reconnect (the session is not ACTIVE), the transport closes the
 	 *  connection and the close path takes over. */
@@ -885,6 +895,15 @@ export class TransportReconnector {
 		const handle = this.deps.sessionManager.resumptionHandle;
 		if (!handle && freshWithoutHandle) {
 			this.deps.log(`${what} without a resumption handle: reconnecting to a fresh session`);
+			try {
+				this.deps.onFreshSessionBoundary?.(reason);
+			} catch (e) {
+				this.deps.log(
+					`Fresh-session boundary threw (rotation continues): ${e instanceof Error ? e.message : String(e)}`,
+				);
+			}
+			// The boundary's observers may have closed or parked the session.
+			if (this._disposed || this.deps.sessionManager.state !== 'ACTIVE') return;
 		}
 		if (handle || freshWithoutHandle) {
 			this.deps.sessionManager.transitionTo('RECONNECTING');

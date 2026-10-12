@@ -2141,6 +2141,9 @@ export class VoiceSession {
 					const t = this.userTurnEvidence.lastDrainedSpeechAtMs;
 					return t === null || retained.sealedAtMs > t;
 				},
+				// A credential-expiry rotation to a fresh server session crosses
+				// the host-recovery boundary (built after this, hence the thunk).
+				onFreshSessionBoundary: (reason) => this.hostRecovery.crossFreshSessionBoundary(reason),
 				hostedReconnectSpeech: this.utteranceRetainer
 					? () => this.reconnectWindowSpeechVerdict()
 					: undefined,
@@ -4048,7 +4051,9 @@ export class VoiceSession {
 
 	/** The transport's credential for this connection expired: reconnect now,
 	 *  as for a GoAway, and without a resumption handle to a fresh session that
-	 *  replays the conversation. The transport closes the connection itself if
+	 *  replays the conversation, after a host-recovery boundary (the active turn
+	 *  ends as interrupted; results of the old connection's tool calls are
+	 *  dropped). The transport closes the connection itself if
 	 *  this does not start a reconnect (the session is not ACTIVE). */
 	private handleCredentialExpiry(): void {
 		this.eventBus.publish('session.reset', {
