@@ -156,6 +156,17 @@ const session = new VoiceSession({
   and closed before `setupComplete`, with its `code` and `reason`). A provider
   failure is reported as an `attempt-close` without a socket, then
   `setup-failed`. Without a provider, no event carries `meta` or `failure`.
+- **Retries:** when the provider fails during an automatic reconnect (GoAway,
+  credential expiry, a transport close or a watchdog stall), or the connection
+  is refused before `setupComplete`, the session does not give up on that one
+  error. It dials again through the reconnect budget below: after 1, 2 and 4
+  seconds, with the same resumption handle and a new credential each time.
+  Only when the budget is spent does `upstreamLossPolicy` decide. A provider
+  that knows its failure is permanent (no key for this owner, access revoked)
+  rejects with an error whose `retryable` property is `false`; the session then
+  gives up at once, and the failure carries `retryable: false`. The rejection
+  of `connect()` carries the attempt's failure as `connectFailure`
+  (`ConnectFailureError`).
 
 `credentialProvider` applies to the built-in transport. With an injected
 `transport`, pass it to the `GeminiLiveTransport` you construct instead.
@@ -336,7 +347,10 @@ surfaces, and client behavior.
 The provider connection (Leg 2) can drop while the client stays attached.
 `VoiceSession` first recovers on its own: a GoAway resumes at once with the
 session resumption handle, and a transport close or a response-watchdog stall
-starts up to three backed-off reconnects with that handle.
+starts up to three backed-off reconnects with that handle. With a
+`credentialProvider`, a reconnect of either kind that fails before setup is
+dialed again within those three attempts (see
+[Per-connection Gemini credentials](#per-connection-gemini-credentials)).
 `upstreamLossPolicy` decides what happens when this automatic recovery cannot
 continue (the attempts are spent, there is no resumption handle, or an attempt
 fails or times out):

@@ -93,6 +93,7 @@ export type {
 	AudioFormatSpec,
 	CacheConfigCommon,
 	ConnectFailure,
+	ConnectFailureError,
 	ConnectionLifecycleEvent,
 	ContentTurn,
 	LLMTransport,

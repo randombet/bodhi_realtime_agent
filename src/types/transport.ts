@@ -510,6 +510,21 @@ export interface ConnectFailure {
 	status?: number;
 	/** What the credential provider threw or aborted with (`source: 'provider'`). */
 	error?: unknown;
+	/** `false` when the provider marked its error as permanent (it threw an
+	 *  error whose `retryable` property is `false`): a session does not retry
+	 *  the connect. Absent otherwise, and a session may retry. */
+	retryable?: false;
+}
+
+/** What a transport's `connect()` or `reconnect()` rejects with when it can
+ *  describe why the attempt failed before setup (the Gemini transport with a
+ *  `credentialProvider`): the error also carries the attempt's
+ *  {@link ConnectFailure}, the one its lifecycle events reported. A
+ *  `VoiceSession` dials an automatic reconnect that failed this way again
+ *  through its reconnect budget, unless `connectFailure.retryable` is
+ *  `false`. */
+export interface ConnectFailureError extends Error {
+	connectFailure: ConnectFailure;
 }
 
 /** Point-in-time transport diagnostics; safe to sample on any tick. */

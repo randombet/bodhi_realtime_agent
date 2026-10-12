@@ -1,5 +1,11 @@
 import type { IClientChannel } from '../types/session-client.js';
-import type { LLMTransport, ReplayItem, RetainedUserTurn } from '../types/transport.js';
+import type {
+	ConnectFailure,
+	ConnectFailureError,
+	LLMTransport,
+	ReplayItem,
+	RetainedUserTurn,
+} from '../types/transport.js';
 import { DEFAULT_RECONNECT_DEADLINE_MS } from './constants.js';
 import type { EventBus } from './event-bus.js';
 import { decideOnGateReleased, decideOnWatchdogFire } from './policies/recovery.policy.js';
@@ -102,6 +108,20 @@ export interface TransportReconnectorDeps {
 /** Reconnect-window speech verdict driving the stage-2 replay decision. */
 export type ReconnectWindowSpeech = 'none' | 'local-drained-speech' | 'hosted-speech' | 'unknown';
 
+/** How one automatic reconnect dials and what it does once connected. */
+interface DialOptions {
+	drainReason: 'reconnect' | 'goaway';
+	elicit: boolean;
+}
+
+/** The {@link ConnectFailure} a reconnect's rejection carries
+ *  ({@link ConnectFailureError}), if any. */
+function connectFailureOf(err: unknown): ConnectFailure | undefined {
+	if (typeof err !== 'object' || err === null) return undefined;
+	const failure = (err as Partial<ConnectFailureError>).connectFailure;
+	return typeof failure === 'object' && failure !== null ? failure : undefined;
+}
+
 /** Test-only overrides; production constructs the reconnector without them. */
 export interface TransportReconnectorOptions {
 	/** Deadline for one reconnect attempt (ms); `<= 0` disables it. Defaults to
@@ -121,6 +141,12 @@ export interface TransportReconnectorOptions {
  *  - {@link handleGoAway} reconnects **immediately** with the resumption handle
  *    — no budget, no backoff — because Gemini's GoAway is a graceful,
  *    handle-bearing migration signal, not an error.
+ *
+ * An attempt of either kind that the transport says failed before setup
+ * ({@link ConnectFailureError}, such as a credential provider's transient
+ * error) is dialed again through the budgeted path, with the same handle,
+ * unless the failure is marked permanent; any other failed attempt ends
+ * automatic recovery at once.
  *
  * Both dial through {@link runReconnect}, which bounds each attempt by a
  * session-level deadline, so the session can never stay in RECONNECTING.
@@ -413,26 +439,11 @@ export class TransportReconnector {
 		}
 		const handle = this.deps.sessionManager.resumptionHandle;
 		if (handle && this.reconnectAttempts < TransportReconnector.MAX_RECONNECT_ATTEMPTS) {
-			const attempt = this.reconnectAttempts++;
-			const delay = TransportReconnector.RECONNECT_BACKOFF_MS[attempt] ?? 4000;
-			this.deps.log(
-				`Reconnect attempt ${attempt + 1}/${TransportReconnector.MAX_RECONNECT_ATTEMPTS} in ${delay}ms (reason=${reason})`,
-			);
 			this.deps.sessionManager.transitionTo('RECONNECTING');
 			this.deps.clientTransport.startBuffering();
 			this._clientBuffering = true;
 			this.deps.onReconnectWindowStart?.();
-			this._backoffTimer = setTimeout(() => {
-				this._backoffTimer = undefined;
-				// The session left RECONNECTING during the backoff (closed): no dial.
-				if (this.deps.sessionManager.state !== 'RECONNECTING') return;
-				// The host began owning recovery during the backoff: park, no dial.
-				if (this.isHostOwningRecovery()) {
-					this.parkUpstreamLost('host-owns-recovery', closeDetail);
-					return;
-				}
-				this.runReconnect(reason, handle, { drainReason: 'reconnect', elicit });
-			}, delay);
+			this.scheduleBudgetedDial(reason, handle, { drainReason: 'reconnect', elicit }, closeDetail);
 		} else {
 			if (this.reconnectAttempts >= TransportReconnector.MAX_RECONNECT_ATTEMPTS) {
 				this.deps.log(
@@ -441,6 +452,70 @@ export class TransportReconnector {
 			}
 			this.giveUp(handle ? 'reconnect-exhausted' : 'no-resumption-handle', closeDetail);
 		}
+	}
+
+	/** Spend one attempt of the budget: wait its backoff, then dial with
+	 *  `handle`. The session is already RECONNECTING with the reconnect window
+	 *  open; the caller checked that an attempt is left. */
+	private scheduleBudgetedDial(
+		reason: string,
+		handle: string,
+		opts: DialOptions,
+		closeDetail?: { code?: number; reason?: string },
+	): void {
+		const attempt = this.reconnectAttempts++;
+		const delay = TransportReconnector.RECONNECT_BACKOFF_MS[attempt] ?? 4000;
+		this.deps.log(
+			`Reconnect attempt ${attempt + 1}/${TransportReconnector.MAX_RECONNECT_ATTEMPTS} in ${delay}ms (reason=${reason})`,
+		);
+		this._backoffTimer = setTimeout(() => {
+			this._backoffTimer = undefined;
+			// The session left RECONNECTING during the backoff (closed): no dial.
+			if (this.deps.sessionManager.state !== 'RECONNECTING') return;
+			// The host began owning recovery during the backoff: park, no dial.
+			if (this.isHostOwningRecovery()) {
+				this.parkUpstreamLost('host-owns-recovery', closeDetail);
+				return;
+			}
+			this.runReconnect(reason, handle, opts);
+		}, delay);
+	}
+
+	/**
+	 * A dialed attempt failed before setup and the transport says how
+	 * ({@link ConnectFailureError}): for example the credential provider of a
+	 * GoAway or credential-expiry reconnect returned a transient error. Rather
+	 * than giving up on that one error, dial again through the budget, after its
+	 * backoff and with the same handle, as for a transport close; an exhausted
+	 * budget then gives up with `reconnect-exhausted`. Returns `false`, leaving
+	 * the failure to {@link failAttempt} as before, when the failure is marked
+	 * permanent (`retryable: false`), the session left RECONNECTING, or the
+	 * host owns recovery.
+	 */
+	private retryFailedAttempt(
+		reason: string,
+		handle: string,
+		opts: DialOptions,
+		err: unknown,
+	): boolean {
+		const failure = connectFailureOf(err);
+		if (!failure || failure.retryable === false) return false;
+		if (this.deps.sessionManager.state !== 'RECONNECTING' || this.isHostOwningRecovery()) {
+			return false;
+		}
+		// Only fields without provider text are logged (see ConnectFailure).
+		this.deps.log(
+			`Reconnect failed before setup (source=${failure.source}${failure.code != null ? ` code=${failure.code}` : ''}${failure.status != null ? ` status=${failure.status}` : ''})`,
+		);
+		if (this.reconnectAttempts >= TransportReconnector.MAX_RECONNECT_ATTEMPTS) {
+			this.deps.log(
+				`Reconnect limit reached (${TransportReconnector.MAX_RECONNECT_ATTEMPTS} attempts), giving up`,
+			);
+			this.failAttempt('reconnect-exhausted', err);
+			return true;
+		}
+		this.scheduleBudgetedDial(reason, handle, opts);
+		return true;
 	}
 
 	/** Exhaustion policy: automatic recovery cannot continue. Policy `'hold'`
@@ -570,16 +645,14 @@ export class TransportReconnector {
 	 * `transport.reconnect()` raced against the session-level deadline. The
 	 * attempt's token is captured here; every handler below no-ops once it is no
 	 * longer current. A result is applied only while the session is still
-	 * RECONNECTING; a rejection closes with `reconnect_failed`; the deadline (like
+	 * RECONNECTING; a rejection the transport describes as a pre-setup failure is
+	 * dialed again through the budget ({@link retryFailedAttempt}), and any other
+	 * ends automatic recovery per the exhaustion policy; the deadline (like
 	 * {@link dispose}) first aborts the transport incumbent, so the in-flight
 	 * reconnect continuation cannot dial after CLOSED and a late dial result is
 	 * closed rather than orphaned.
 	 */
-	private runReconnect(
-		reason: string,
-		handle: string,
-		opts: { drainReason: 'reconnect' | 'goaway'; elicit: boolean },
-	): void {
+	private runReconnect(reason: string, handle: string, opts: DialOptions): void {
 		const token = ++this._attemptToken;
 		this._attemptInFlight = true;
 		const deadlineMs = this.reconnectDeadlineMs;
@@ -632,6 +705,7 @@ export class TransportReconnector {
 			.catch((err) => {
 				if (token !== this._attemptToken) return;
 				this.settleAttempt();
+				if (this.retryFailedAttempt(reason, handle, opts, err)) return;
 				this.failAttempt('reconnect-failed', err);
 			});
 	}

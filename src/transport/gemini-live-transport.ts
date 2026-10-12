@@ -13,6 +13,7 @@ import type { FunctionBehavior, ToolDefinition } from '../types/tool.js';
 import type {
 	AudioFormatSpec,
 	ConnectFailure,
+	ConnectFailureError,
 	ConnectionLifecycleEvent,
 	ContentTurn,
 	GenerationEndReason,
@@ -1060,14 +1061,18 @@ export class GeminiLiveTransport implements LLMTransport {
 				this.dialGen++;
 				this.session = null;
 				const message = err instanceof Error ? err.message : String(err);
+				const failure = provider ? (attempt.failure ?? stageFailure(attempt, message)) : undefined;
 				// Fenced like every other stale-dial signal (a superseded dial's late
 				// failure would follow a newer attempt's setup-ok with a stale event),
 				// and emitted after the fence advanced, so an observer that redials
 				// from it starts a dial nothing supersedes.
-				this.lifecycle.setupFailed(
-					message,
-					provider ? (attempt.failure ?? stageFailure(attempt, message)) : undefined,
-				);
+				this.lifecycle.setupFailed(message, failure);
+				// The rejection carries what the events reported, so the owner can
+				// retry a transient failure (`ConnectFailureError`). Only this dial's
+				// own failure: a superseded or retired dial's rejection carries none.
+				if (failure && err instanceof Error) {
+					(err as ConnectFailureError).connectFailure = failure;
+				}
 			} else if (dialSession !== undefined && this.session === dialSession) {
 				this.session = null;
 			}
@@ -1161,10 +1166,16 @@ export class GeminiLiveTransport implements LLMTransport {
 	 *  rejects with. */
 	private credentialFailed(attempt: CredentialAttempt, err: unknown): Error {
 		const error = err instanceof Error ? err : new Error(String(err));
+		// A provider marks a permanent failure with `retryable: false` on what it throws.
+		const permanent =
+			typeof err === 'object' &&
+			err !== null &&
+			(err as { retryable?: unknown }).retryable === false;
 		const failure: ConnectFailure = {
 			source: 'provider',
 			message: `Gemini credential provider failed: ${error.message}`,
 			error: err,
+			...(permanent ? { retryable: false as const } : {}),
 		};
 		attempt.failure = failure;
 		this.lifecycle.closedBeforeDial(failure);

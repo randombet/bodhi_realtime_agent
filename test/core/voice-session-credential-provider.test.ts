@@ -305,6 +305,59 @@ describe('VoiceSession with a credentialProvider', () => {
 		expectEachDialUsedItsCredential(setups);
 	});
 
+	it('survives a token-service error at credential expiry: retried after the backoff on the same handle', async () => {
+		const setups: GeminiLiveSetup[] = [];
+		const provider: GeminiCredentialProvider = async (setup) => {
+			setups.push(setup);
+			if (setups.length === 2) throw new Error('token service 503');
+			// Only the first connection expires during the test.
+			const lifetimeMs = setups.length === 1 ? 250 : 30 * 60_000;
+			return { apiKey: `auth_tokens/t${setups.length}`, expiresAtMs: Date.now() + lifetimeMs };
+		};
+		const transport = new GeminiLiveTransport(
+			{ credentialProvider: provider, connectTimeoutMs: 100, minCredentialLifetimeMs: 0 },
+			{},
+		);
+		const lifecycle: ConnectionLifecycleEvent[] = [];
+		session = new VoiceSession({
+			sessionId: 'sess_expiry_retry',
+			userId: 'u',
+			apiKey: 'unused-with-an-injected-transport',
+			transport,
+			agents: agents(),
+			initialAgent: 'main',
+			clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			model: mockModel,
+			onConnectionLifecycle: (e) => lifecycle.push(e),
+		});
+		await session.start();
+		await settle();
+		sendHandle('handle-1');
+
+		await settle(300);
+		// The expiry's reconnect failed at its provider: the session waits out the
+		// backoff instead of closing (upstreamLossPolicy defaults to 'close').
+		expect(setups).toHaveLength(2);
+		expect(session.sessionManager.state).toBe('RECONNECTING');
+		expect(lifecycle.at(-1)).toMatchObject({
+			kind: 'setup-failed',
+			failure: { source: 'provider' },
+		});
+
+		await settle(1_000);
+		expect(setups).toHaveLength(3);
+		expect(setups.map((s) => s.config.sessionResumption)).toEqual([
+			{},
+			{ handle: 'handle-1' },
+			{ handle: 'handle-1' },
+		]);
+		expect(session.sessionManager.state).toBe('ACTIVE');
+		expect(dials().map((d) => d.clientOptions.apiKey)).toEqual([
+			'auth_tokens/t1',
+			'auth_tokens/t3',
+		]);
+	});
+
 	it('closing during the first credential fetch aborts it, and nothing dials', async () => {
 		let signal: AbortSignal | undefined;
 		const provider: GeminiCredentialProvider = (_setup, s) => {

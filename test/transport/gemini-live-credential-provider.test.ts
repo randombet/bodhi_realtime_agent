@@ -428,6 +428,47 @@ describe('GeminiLiveTransport credentialProvider', () => {
 			expect(transport.isConnected).toBe(false);
 		});
 
+		it('reject the connect with the failure its events reported, so an owner can retry it', async () => {
+			sdk.mode = 'manual';
+			let n = 0;
+			const permanent = Object.assign(new Error('owner has no voice key'), { retryable: false });
+			const transport = providerTransport(async () => {
+				n++;
+				if (n === 1) throw new Error('token service 503');
+				if (n === 2) throw permanent;
+				return { apiKey: `auth_tokens/t${n}`, expiresAtMs: Date.now() + 30 * 60_000 };
+			});
+			const events = recordLifecycle(transport);
+			const failureOf = (e: ConnectionLifecycleEvent | undefined) =>
+				(e as { failure?: unknown } | undefined)?.failure;
+
+			const transient = await transport.connect().catch((e: unknown) => e);
+			expect(transient).toMatchObject({
+				message: 'Gemini credential provider failed: token service 503',
+				connectFailure: { source: 'provider' },
+			});
+			expect((transient as { connectFailure: object }).connectFailure).toBe(
+				failureOf(events.at(-1)),
+			);
+			expect((transient as { connectFailure: object }).connectFailure).not.toHaveProperty(
+				'retryable',
+			);
+
+			const refused = await transport.connect().catch((e: unknown) => e);
+			expect(refused).toMatchObject({
+				connectFailure: { source: 'provider', retryable: false, error: permanent },
+			});
+			expect(failureOf(events.at(-1))).toMatchObject({ retryable: false });
+
+			const closing = transport.connect();
+			await vi.waitFor(() => expect(dials()).toHaveLength(1));
+			lastDial().open();
+			lastDial().close(1011, 'internal error');
+			await expect(closing).rejects.toMatchObject({
+				connectFailure: { source: 'session', code: 1011, reason: 'internal error' },
+			});
+		});
+
 		it('report a provider that throws synchronously the same way', async () => {
 			const transport = providerTransport(() => {
 				throw new Error('boom');
@@ -1308,6 +1349,7 @@ describe('GeminiLiveTransport without a credentialProvider', () => {
 		const connecting = transport.connect();
 		lastDial().close(1006, 'gone');
 		await expect(connecting).rejects.toThrow('closed before setupComplete');
+		await expect(connecting).rejects.not.toHaveProperty('connectFailure');
 		expect(events).toEqual([
 			{ kind: 'attempt', connectAttemptId: 'att_1', handleSupplied: false },
 			{ kind: 'attempt-close', connectAttemptId: 'att_1', code: 1006, reason: 'gone' },
