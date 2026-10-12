@@ -840,6 +840,86 @@ describe('GeminiLiveTransport credentialProvider', () => {
 			expect(transport.isConnected).toBe(true);
 		});
 
+		it('a disconnect() from an attempt observer retires that connect before its credential is requested', async () => {
+			const { provider } = tokenProvider();
+			const transport = providerTransport(provider);
+			const events: ConnectionLifecycleEvent[] = [];
+			transport.onConnectionLifecycle = (e) => {
+				events.push(e);
+				if (e.kind === 'attempt') void transport.disconnect();
+			};
+
+			await expect(transport.connect()).rejects.toThrow('before setupComplete');
+			await new Promise((r) => setTimeout(r, 5));
+			expect(provider).not.toHaveBeenCalled();
+			expect(dials()).toEqual([]);
+			expect(transport.isConnected).toBe(false);
+			expect(events.map((e) => [e.kind, e.connectAttemptId])).toEqual([
+				['attempt', 'att_1'],
+				['attempt-close', 'att_1'],
+				['setup-failed', 'att_1'],
+			]);
+		});
+
+		it('a connect() from an attempt observer keeps its hold and its fetch: the older call requests nothing', async () => {
+			sdk.mode = 'manual';
+			const { provider, calls } = tokenProvider();
+			const transport = providerTransport(provider);
+			let newer: Promise<void> | undefined;
+			let started = false;
+			transport.onConnectionLifecycle = (e) => {
+				if (e.kind === 'attempt' && !started) {
+					started = true;
+					newer = transport.connect();
+					newer.catch(() => {});
+				}
+			};
+			const older = transport.connect();
+			await expect(older).rejects.toThrow('superseded');
+			await vi.waitFor(() => expect(dials()).toHaveLength(1));
+			expect(provider).toHaveBeenCalledTimes(1);
+			expect(calls[0]?.signal.aborted).toBe(false);
+
+			// The newer connect is the one disconnect() retires.
+			await transport.disconnect();
+			expect(calls[0]?.signal.aborted).toBe(false);
+			await expect(newer).rejects.toThrow('Gemini transport disconnected before setupComplete');
+			const dial = lastDial();
+			dial.open();
+			await new Promise((r) => setTimeout(r, 0));
+			expect(dial.session.close).toHaveBeenCalledTimes(1);
+			dial.setup();
+			expect(transport.isConnected).toBe(false);
+		});
+
+		it("a connect() from the provider's abort listener during disconnect() gets no close of the retired attempt", async () => {
+			let calls = 0;
+			let redial: Promise<void> | undefined;
+			const transport = providerTransport(async (_setup, signal) => {
+				calls += 1;
+				if (calls === 1) {
+					signal.addEventListener('abort', () => {
+						redial = transport.connect();
+					});
+					return new Promise<GeminiCredential>(() => {});
+				}
+				return { apiKey: 'auth_tokens/t2', expiresAtMs: Date.now() + 60_000 };
+			});
+			const events = recordLifecycle(transport);
+			const first = transport.connect();
+			first.catch(() => {});
+
+			await transport.disconnect();
+			await expect(first).rejects.toThrow('before setupComplete');
+			await expect(redial).resolves.toBeUndefined();
+			expect(events.map((e) => [e.kind, e.connectAttemptId])).toEqual([
+				['attempt', 'att_1'],
+				['attempt', 'att_3'],
+				['setup-ok', 'att_3'],
+			]);
+			expect(transport.isConnected).toBe(true);
+		});
+
 		it('a newer connect() supersedes a fetch in flight', async () => {
 			const signals: AbortSignal[] = [];
 			let first = true;

@@ -911,10 +911,50 @@ export class GeminiLiveTransport implements LLMTransport {
 		this.cancelCredentialFetch('Gemini dial superseded before setupComplete');
 		this.clearCredentialExpiry();
 		const gen = ++this.dialGen;
-		this.lifecycle.beginAttempt(gen, handleSupplied);
 		// Where a credential-provider attempt is, so a failure can say where it
 		// failed (`ConnectFailure.source`); unused without a provider.
 		const attempt: CredentialAttempt = { stage: 'provider' };
+		const provider = this.credentialProvider;
+		// disconnect()'s hold on this connect until its setupComplete. Retiring it
+		// is synchronous: the fence advances and the failure is reported before
+		// disconnect() first awaits, so a credential resolved a microtask earlier
+		// is never dialed, a reconnect() can tell this retirement from a newer
+		// owner's (`retiredGen`), and the failure is reported before any next
+		// attempt begins. Published before the `attempt` event, whose observers
+		// may already disconnect() or connect() anew.
+		let pending: PendingSetup | null = null;
+		if (provider) {
+			const hold: PendingSetup = {
+				retire: () => {
+					let error = new Error('Gemini transport disconnected before setupComplete');
+					if (gen === this.dialGen) {
+						const retiredGen = ++this.dialGen;
+						hold.retiredGen = retiredGen;
+						// Each step below runs observers (the provider's abort listeners,
+						// then lifecycle observers) that may dial anew. Once one has, the
+						// ledger's attempt is that dial's and this one reports nothing more,
+						// as when a provider failure reaches the catch below.
+						const reporting = () => this.dialGen === retiredGen;
+						if (attempt.stage === 'provider') {
+							this.cancelCredentialFetch('Gemini transport disconnected');
+							if (reporting()) {
+								error = this.credentialFailed(attempt, new Error('Gemini transport disconnected'));
+							}
+						}
+						if (reporting()) {
+							this.lifecycle.setupFailed(
+								error.message,
+								attempt.failure ?? stageFailure(attempt, error.message),
+							);
+						}
+					}
+					failSetup(error);
+				},
+			};
+			pending = hold;
+		}
+		this.pendingSetup = pending;
+		this.lifecycle.beginAttempt(gen, handleSupplied);
 		const callbacks = {
 			onopen: () => {
 				attempt.stage = 'session';
@@ -951,40 +991,6 @@ export class GeminiLiveTransport implements LLMTransport {
 				if (this.onClose) this.onClose(code, reason);
 			},
 		};
-		const provider = this.credentialProvider;
-		// disconnect()'s hold on this connect until its setupComplete. Retiring it
-		// is synchronous: the fence advances and the failure is reported before
-		// disconnect() first awaits, so a credential resolved a microtask earlier
-		// is never dialed, a reconnect() can tell this retirement from a newer
-		// owner's (`retiredGen`), and the failure is reported before any next
-		// attempt begins.
-		let pending: PendingSetup | null = null;
-		if (provider) {
-			const hold: PendingSetup = {
-				retire: () => {
-					let error = new Error('Gemini transport disconnected before setupComplete');
-					if (gen === this.dialGen) {
-						const retiredGen = ++this.dialGen;
-						hold.retiredGen = retiredGen;
-						if (attempt.stage === 'provider') {
-							this.cancelCredentialFetch('Gemini transport disconnected');
-							error = this.credentialFailed(attempt, new Error('Gemini transport disconnected'));
-						}
-						// Unless an attempt-close observer dialed anew: the ledger's attempt
-						// is then that dial's, as when a provider failure reaches the catch below.
-						if (this.dialGen === retiredGen) {
-							this.lifecycle.setupFailed(
-								error.message,
-								attempt.failure ?? stageFailure(attempt, error.message),
-							);
-						}
-					}
-					failSetup(error);
-				},
-			};
-			pending = hold;
-		}
-		this.pendingSetup = pending;
 		const dial = provider
 			? this.dialWithCredential(provider, gen, model, connectConfig, callbacks, timeoutMs, attempt)
 			: (this.ai as GoogleGenAI).live.connect({ model, config: connectConfig, callbacks });
@@ -1051,6 +1057,10 @@ export class GeminiLiveTransport implements LLMTransport {
 		timeoutMs: number,
 		attempt: CredentialAttempt,
 	): Promise<Session> {
+		// Retired before its fetch began (an `attempt` observer disconnected or
+		// dialed anew): no credential is requested, and the fetch slot stays the
+		// newer dial's.
+		if (gen !== this.dialGen) throw new Error('Gemini dial superseded before setupComplete');
 		// A copy, so freezing it never freezes caller-owned objects the config
 		// references (realtimeInputConfig, the default VAD constant).
 		const setup: GeminiLiveSetup = deepFreeze({
