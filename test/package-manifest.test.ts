@@ -29,6 +29,7 @@ interface Manifest {
 	readonly scripts: Readonly<Record<string, string>>;
 	readonly exports: Readonly<Record<string, ExportsTarget>>;
 	readonly imports?: Readonly<Record<string, ImportsTarget>>;
+	readonly dependencies: Readonly<Record<string, string>>;
 }
 
 const manifest = JSON.parse(
@@ -64,6 +65,17 @@ describe('package manifest', () => {
 		expect(target?.import, '#direct-rtc import').toMatch(/^\.\/dist\/direct-rtc\/.+\.js$/);
 		expect(target?.require, '#direct-rtc require').toMatch(/^\.\/dist\/direct-rtc\/.+\.cjs$/);
 		expect(Object.keys(manifest.exports)).not.toContain('./direct-rtc');
+	});
+
+	it('requires an @google/genai whose client takes the explicit enterprise option', () => {
+		// The credential provider's per-connection client passes `enterprise: false`
+		// (GeminiLiveTransport), which the SDK's types have only from 1.52.0 on: a
+		// consumer resolving an older version could not compile the transport.
+		const range = manifest.dependencies['@google/genai'];
+		const floor = /^\^(\d+)\.(\d+)\.(\d+)$/.exec(range ?? '');
+		expect(floor, `@google/genai range ${range}`).not.toBeNull();
+		const [major, minor] = [Number(floor?.[1]), Number(floor?.[2])];
+		expect(major === 1 && minor >= 52, `@google/genai range ${range}`).toBe(true);
 	});
 
 	it('runs the packed-consumer gate from prepublishOnly', () => {
