@@ -161,12 +161,23 @@ export const DEFAULT_GEMINI_LIVE_MODEL = 'gemini-3.8-live';
  * declaration carries no `behavior`: gemini-3.1-flash-live-preview calls
  * functions synchronously only, while gemini-3.8-live runs a call NON_BLOCKING
  * and ends the model turn right after the toolCall, before the result exists.
- * Declaring BLOCKING keeps `execution: 'inline'` meaning what it says (the
+ * Declaring BLOCKING keeps `execution: 'inline'` meaning what it says: the
  * model waits for the result, and a call and the answer spoken from it are one
- * turn) on every model. Set `functionBehavior: 'NON_BLOCKING'`, or `behavior`
- * on a tool, to opt into asynchronous calls.
+ * turn. Set `functionBehavior: 'NON_BLOCKING'`, or `behavior` on a tool, to opt
+ * into asynchronous calls.
  */
 export const DEFAULT_FUNCTION_BEHAVIOR: FunctionBehavior = 'BLOCKING';
+
+/** Whether a model gets {@link DEFAULT_FUNCTION_BEHAVIOR} when neither the tool
+ *  nor the transport declares one. Only gemini-3.8 Live models do: they are the
+ *  ones measured to run an undeclared call asynchronously. Every other model —
+ *  gemini-3.1-flash-live-preview, the 2.5 native-audio models the examples pick
+ *  — keeps the server's own default, which is the behavior they were tested on;
+ *  an invalid behavior closes the socket with 1007, so an unmeasured model is
+ *  never sent one on our initiative. */
+export function defaultsToBlockingBehavior(model: string): boolean {
+	return /^gemini-3\.8(?:[-.]|$)/.test(model);
+}
 
 /**
  * Deep-merges a user-supplied realtimeInputConfig over
@@ -324,8 +335,10 @@ export interface GeminiTransportOptions {
 	 *  per-send override. Omitted → server default. */
 	mediaResolution?: GeminiMediaResolution;
 	/** Default `behavior` written on every function declaration that does not set its own.
-	 *  Unset means `'BLOCKING'` ({@link DEFAULT_FUNCTION_BEHAVIOR}), on every model: the
-	 *  model's own default differs between Live models, so it is never left to it. */
+	 *  Unset means `'BLOCKING'` ({@link DEFAULT_FUNCTION_BEHAVIOR}) on gemini-3.8 Live
+	 *  models, whose own default is asynchronous; on every other model it sends no
+	 *  `behavior`, leaving the server default those models were measured with
+	 *  ({@link defaultsToBlockingBehavior}). */
 	functionBehavior?: FunctionBehavior;
 	/** Enable Gemini's built-in Google Search grounding. */
 	googleSearch?: boolean;
@@ -921,7 +934,9 @@ export class GeminiLiveTransport implements LLMTransport {
 		if (this.config.googleSearch) {
 			toolEntries.push({ googleSearch: {} });
 		}
-		const fallbackBehavior = this.config.functionBehavior ?? DEFAULT_FUNCTION_BEHAVIOR;
+		const fallbackBehavior =
+			this.config.functionBehavior ??
+			(defaultsToBlockingBehavior(model) ? DEFAULT_FUNCTION_BEHAVIOR : undefined);
 		this.liveBehaviors = {
 			byTool: new Map((this.config.tools ?? []).map((t) => [t.name, t.behavior])),
 			fallback: fallbackBehavior,

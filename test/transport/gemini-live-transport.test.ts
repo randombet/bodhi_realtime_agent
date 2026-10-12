@@ -7,6 +7,7 @@ import {
 	DEFAULT_GEMINI_REALTIME_INPUT_CONFIG,
 	GeminiLiveTransport,
 	type LiveUsageMetadata,
+	defaultsToBlockingBehavior,
 	resolveGeminiRealtimeInputConfig,
 } from '../../src/transport/gemini-live-transport.js';
 import type { ToolDefinition } from '../../src/types/tool.js';
@@ -196,24 +197,56 @@ describe('GeminiLiveTransport', () => {
 			expect(tools[0].functionDeclarations[0].description).toBe('Search the web');
 		});
 
-		it.each(['gemini-3.1-flash-live-preview', 'gemini-3.8-live', undefined])(
+		const declarationOf = async (model: string | undefined) => {
+			const transport = new GeminiLiveTransport(
+				{ apiKey: 'test-key', model, tools: [createTestTool()] },
+				{},
+			);
+			await transport.connect();
+			const config = capturedConnectConfig.config as Record<string, unknown>;
+			const [entry] = config.tools as Array<{
+				functionDeclarations: Array<Record<string, unknown>>;
+			}>;
+			return entry.functionDeclarations[0];
+		};
+
+		// 3.8 Live runs an undeclared call NON_BLOCKING and ends the turn before the
+		// result exists, so it is declared BLOCKING. undefined is 3.8: it is the default.
+		it.each(['gemini-3.8-live', undefined])(
 			'declares BLOCKING when neither the tool nor the transport sets a behavior (model %s)',
 			async (model) => {
-				// 3.8 Live runs an undeclared call NON_BLOCKING and ends the turn before the
-				// result; the framework never leaves the choice to the model.
-				const transport = new GeminiLiveTransport(
-					{ apiKey: 'test-key', model, tools: [createTestTool()] },
-					{},
-				);
-				await transport.connect();
-				const config = capturedConnectConfig.config as Record<string, unknown>;
-				const [entry] = config.tools as Array<{
-					functionDeclarations: Array<Record<string, unknown>>;
-				}>;
 				expect(DEFAULT_FUNCTION_BEHAVIOR).toBe('BLOCKING');
-				expect(entry.functionDeclarations[0].behavior).toBe('BLOCKING');
+				expect(await declarationOf(model)).toHaveProperty('behavior', 'BLOCKING');
 			},
 		);
+
+		// Only 3.8 was measured. An invalid behavior closes the socket with 1007, so every
+		// other model keeps the server default it was tested on — no behavior is sent.
+		it.each(['gemini-3.1-flash-live-preview', 'gemini-2.5-flash-native-audio-preview-12-2025'])(
+			'sends no behavior on an unmeasured model (%s)',
+			async (model) => {
+				expect(defaultsToBlockingBehavior(model)).toBe(false);
+				expect(await declarationOf(model)).not.toHaveProperty('behavior');
+			},
+		);
+
+		it('still writes an explicit transport functionBehavior on an unmeasured model', async () => {
+			const transport = new GeminiLiveTransport(
+				{
+					apiKey: 'test-key',
+					model: 'gemini-2.5-flash-native-audio-preview-12-2025',
+					tools: [createTestTool()],
+					functionBehavior: 'BLOCKING',
+				},
+				{},
+			);
+			await transport.connect();
+			const config = capturedConnectConfig.config as Record<string, unknown>;
+			const [entry] = config.tools as Array<{
+				functionDeclarations: Array<Record<string, unknown>>;
+			}>;
+			expect(entry.functionDeclarations[0]).toHaveProperty('behavior', 'BLOCKING');
+		});
 
 		it('writes the transport functionBehavior on every declaration, and a tool can override it', async () => {
 			const blocking: ToolDefinition = {
