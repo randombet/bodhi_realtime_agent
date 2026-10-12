@@ -56,6 +56,8 @@ const sdk = vi.hoisted(() => ({
 	dials: [] as unknown[],
 	/** `auto`: open at once and set up on the next timer tick; `manual`: the test drives it. */
 	mode: 'auto' as 'auto' | 'manual',
+	/** When set, the next `live.connect` rejects with it. */
+	rejectNextConnect: null as unknown,
 }));
 
 vi.mock('@google/genai', () => ({
@@ -64,6 +66,11 @@ vi.mock('@google/genai', () => ({
 		return {
 			live: {
 				connect: vi.fn((params: Dial['params']) => {
+					if (sdk.rejectNextConnect) {
+						const rejection = sdk.rejectNextConnect;
+						sdk.rejectNextConnect = null;
+						return Promise.reject(rejection);
+					}
 					let resolve: (s: MockSession) => void = () => {};
 					const pending = new Promise<MockSession>((r) => {
 						resolve = r;
@@ -184,6 +191,7 @@ describe('GeminiLiveTransport credentialProvider', () => {
 		sdk.clientOptions.length = 0;
 		sdk.dials.length = 0;
 		sdk.mode = 'auto';
+		sdk.rejectNextConnect = null;
 	});
 	afterEach(() => {
 		vi.useRealTimers();
@@ -503,6 +511,36 @@ describe('GeminiLiveTransport credentialProvider', () => {
 			await expect(closing).rejects.toMatchObject({
 				connectFailure: { source: 'session', code: 1011, reason: 'internal error' },
 			});
+		});
+
+		it('a setup-failed observer that dials anew owns the retry: the failed connect carries no failure', async () => {
+			let n = 0;
+			const transport = providerTransport(async () => {
+				n++;
+				if (n === 1) throw new Error('token service 503');
+				return { apiKey: `auth_tokens/t${n}`, expiresAtMs: Date.now() + 30 * 60_000 };
+			});
+			let redial: Promise<void> | undefined;
+			transport.onConnectionLifecycle = (e) => {
+				if (e.kind === 'setup-failed' && !redial) redial = transport.connect();
+			};
+			const failed = await transport.connect().catch((e: unknown) => e);
+			expect(failed).toMatchObject({
+				message: 'Gemini credential provider failed: token service 503',
+			});
+			expect(failed).not.toHaveProperty('connectFailure');
+			await redial;
+			expect(transport.isConnected).toBe(true);
+		});
+
+		it('leave an error that cannot take the failure as it was thrown', async () => {
+			const { provider } = tokenProvider();
+			const transport = providerTransport(provider);
+			const events = recordLifecycle(transport);
+			const frozen = Object.freeze(new Error('sdk refused the setup'));
+			sdk.rejectNextConnect = frozen;
+			await expect(transport.connect()).rejects.toBe(frozen);
+			expect(events.at(-1)).toMatchObject({ kind: 'setup-failed', failure: { source: 'dial' } });
 		});
 
 		it('report a provider that throws synchronously the same way', async () => {

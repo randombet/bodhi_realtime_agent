@@ -1079,7 +1079,7 @@ export class GeminiLiveTransport implements LLMTransport {
 			}
 		} catch (err) {
 			if (gen === this.dialGen) {
-				this.dialGen++;
+				const failedGen = ++this.dialGen;
 				this.session = null;
 				const message = err instanceof Error ? err.message : String(err);
 				const failure = provider ? (attempt.failure ?? stageFailure(attempt, message)) : undefined;
@@ -1089,9 +1089,17 @@ export class GeminiLiveTransport implements LLMTransport {
 				// from it starts a dial nothing supersedes.
 				this.lifecycle.setupFailed(message, failure);
 				// The rejection carries what the events reported, so the owner can
-				// retry a transient failure (`ConnectFailureError`). Only this dial's
-				// own failure: a superseded or retired dial's rejection carries none.
-				if (failure && err instanceof Error) {
+				// retry a transient failure (`ConnectFailureError`). Only while this
+				// failure is the latest word: once a setup-failed observer has dialed
+				// anew, that dial is the retry, and a superseded or retired dial's
+				// rejection carries nothing. An error that cannot take the property
+				// is left as thrown.
+				if (
+					failure &&
+					this.dialGen === failedGen &&
+					err instanceof Error &&
+					Object.isExtensible(err)
+				) {
 					(err as ConnectFailureError).connectFailure = failure;
 				}
 			} else if (dialSession !== undefined && this.session === dialSession) {
