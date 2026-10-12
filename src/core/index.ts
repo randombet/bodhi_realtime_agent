@@ -81,4 +81,6 @@ export type {
 	InjectTextOptions,
 	VoiceSessionConfig,
 	VoiceSessionDiagnostics,
+	VoiceSessionOptions,
+	VoiceSessionProviderConfig,
 } from './voice-session.js';

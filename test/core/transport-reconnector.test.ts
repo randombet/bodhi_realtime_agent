@@ -7,7 +7,12 @@ import type {
 import { TransportReconnector } from '../../src/core/transport-reconnector.js';
 import { GeminiLiveTransport } from '../../src/transport/gemini-live-transport.js';
 import type { IClientChannel } from '../../src/types/session-client.js';
-import type { LLMTransport, ReplayItem } from '../../src/types/transport.js';
+import type {
+	ConnectFailure,
+	ConnectFailureError,
+	LLMTransport,
+	ReplayItem,
+} from '../../src/types/transport.js';
 
 type SessionState = ReconnectSessionManager['state'];
 
@@ -73,6 +78,22 @@ function fakeTransport(overrides: Partial<LLMTransport> = {}): LLMTransport {
 	} as unknown as LLMTransport;
 }
 
+/** What a provider transport's reconnect rejects with when its credential
+ *  provider failed (a `ConnectFailureError`). */
+function connectFailed(failure: Partial<ConnectFailure> = {}): ConnectFailureError {
+	const message = 'Gemini credential provider failed: token service 503';
+	return Object.assign(new Error(message), {
+		connectFailure: { source: 'provider' as const, message, ...failure },
+	});
+}
+
+/** The resumption handle each `transport.reconnect()` call carried. */
+function dialedHandles(transport: LLMTransport): unknown[] {
+	return (transport.reconnect as ReturnType<typeof vi.fn>).mock.calls.map(
+		(call) => (call[0] as { resumptionHandle?: string }).resumptionHandle,
+	);
+}
+
 interface Harness {
 	reconnector: TransportReconnector;
 	sm: ReturnType<typeof fakeSessionManager>;
@@ -100,6 +121,7 @@ function makeHarness(opts: {
 	isSyntheticHeld?: TransportReconnectorDeps['isSyntheticHeld'];
 	upstreamLossPolicy?: TransportReconnectorDeps['upstreamLossPolicy'];
 	hostOwnsRecovery?: TransportReconnectorDeps['hostOwnsRecovery'];
+	onFreshSessionBoundary?: TransportReconnectorDeps['onFreshSessionBoundary'];
 	reconnectDeadlineMs?: number;
 }): Harness {
 	const sm = fakeSessionManager(
@@ -130,6 +152,7 @@ function makeHarness(opts: {
 		isSyntheticHeld: opts.isSyntheticHeld,
 		upstreamLossPolicy: opts.upstreamLossPolicy ?? 'close',
 		hostOwnsRecovery: opts.hostOwnsRecovery,
+		onFreshSessionBoundary: opts.onFreshSessionBoundary,
 	};
 	const reconnector = new TransportReconnector(
 		deps,
@@ -545,6 +568,417 @@ describe('TransportReconnector', () => {
 				expect.objectContaining({ sessionId: 'sess_1' }),
 			);
 			expect(h.transport.reconnect).not.toHaveBeenCalled();
+		});
+	});
+
+	describe('a reconnect that failed before setup and says so (ConnectFailureError)', () => {
+		it('a transient credential failure at expiry is retried after the backoff with the same handle, and the session survives', async () => {
+			const reconnect = vi.fn().mockRejectedValueOnce(connectFailed()).mockResolvedValue(undefined);
+			const h = makeHarness({ transport: fakeTransport({ reconnect }) });
+
+			h.reconnector.handleCredentialExpiry();
+			await vi.advanceTimersByTimeAsync(0);
+			expect(reconnect).toHaveBeenCalledTimes(1);
+			expect(h.sm.state).toBe('RECONNECTING');
+			expect(h.sm.closeWithReason).not.toHaveBeenCalled();
+
+			await vi.advanceTimersByTimeAsync(999);
+			expect(reconnect).toHaveBeenCalledTimes(1);
+			await vi.advanceTimersByTimeAsync(1);
+			expect(reconnect).toHaveBeenCalledTimes(2);
+			await vi.runAllTimersAsync();
+
+			expect(dialedHandles(h.transport)).toEqual(['handle-1', 'handle-1']);
+			expect(h.sm.state).toBe('ACTIVE');
+			expect(h.sm.closeWithReason).not.toHaveBeenCalled();
+			expect(h.reportError).not.toHaveBeenCalled();
+			// One reconnect window across the retry: buffering opened and drained once.
+			expect(h.clientTransport.startBuffering).toHaveBeenCalledTimes(1);
+			expect(h.clientTransport.stopBuffering).toHaveBeenCalledTimes(1);
+		});
+
+		it("a GoAway reconnect's credential failure is retried the same way", async () => {
+			const reconnect = vi.fn().mockRejectedValueOnce(connectFailed()).mockResolvedValue(undefined);
+			const h = makeHarness({ transport: fakeTransport({ reconnect }) });
+			h.reconnector.handleGoAway('10s');
+			await vi.advanceTimersByTimeAsync(1_000);
+			await vi.runAllTimersAsync();
+			expect(dialedHandles(h.transport)).toEqual(['handle-1', 'handle-1']);
+			expect(h.sm.state).toBe('ACTIVE');
+		});
+
+		it('repeated failures spend the budget at 1 s, 2 s and 4 s, then the close policy closes the session', async () => {
+			const reconnect = vi.fn().mockRejectedValue(connectFailed());
+			const h = makeHarness({ transport: fakeTransport({ reconnect }) });
+
+			h.reconnector.handleCredentialExpiry();
+			await vi.advanceTimersByTimeAsync(0);
+			await vi.advanceTimersByTimeAsync(1_000);
+			expect(reconnect).toHaveBeenCalledTimes(2);
+			await vi.advanceTimersByTimeAsync(2_000);
+			expect(reconnect).toHaveBeenCalledTimes(3);
+			expect(h.sm.closeWithReason).not.toHaveBeenCalled();
+			await vi.advanceTimersByTimeAsync(4_000);
+			expect(reconnect).toHaveBeenCalledTimes(4);
+
+			expect(h.sm.closeWithReason).toHaveBeenCalledWith('reconnect_failed');
+			expect(h.reportError).toHaveBeenCalledTimes(1);
+			expect(dialedHandles(h.transport)).toEqual(['handle-1', 'handle-1', 'handle-1', 'handle-1']);
+			await vi.runAllTimersAsync();
+			expect(reconnect).toHaveBeenCalledTimes(4);
+		});
+
+		it('under the hold policy an exhausted budget parks the session', async () => {
+			const reconnect = vi.fn().mockRejectedValue(connectFailed());
+			const h = makeHarness({
+				transport: fakeTransport({ reconnect }),
+				upstreamLossPolicy: 'hold',
+			});
+			h.reconnector.handleCredentialExpiry();
+			await vi.runAllTimersAsync();
+			expect(reconnect).toHaveBeenCalledTimes(4);
+			expect(h.sm.state).toBe('UPSTREAM_LOST');
+			expect(h.eventBus.publish).toHaveBeenCalledWith(
+				'session.upstreamLost',
+				expect.objectContaining({ reason: 'reconnect-exhausted' }),
+			);
+			expect(h.sm.closeWithReason).not.toHaveBeenCalled();
+		});
+
+		it('a budgeted reconnect that fails this way is retried within the same budget', async () => {
+			const reconnect = vi.fn().mockRejectedValue(connectFailed({ source: 'session', code: 1011 }));
+			const h = makeHarness({ transport: fakeTransport({ reconnect }) });
+			h.reconnector.handleTransportClose(1006, 'gone');
+			await vi.runAllTimersAsync();
+			expect(reconnect).toHaveBeenCalledTimes(3);
+			expect(h.sm.closeWithReason).toHaveBeenCalledWith('reconnect_failed');
+		});
+
+		it('a failure the provider marked permanent ends recovery at once', async () => {
+			const reconnect = vi.fn().mockRejectedValue(connectFailed({ retryable: false }));
+			const h = makeHarness({ transport: fakeTransport({ reconnect }) });
+			h.reconnector.handleCredentialExpiry();
+			await vi.advanceTimersByTimeAsync(0);
+			expect(h.sm.closeWithReason).toHaveBeenCalledWith('reconnect_failed');
+			await vi.runAllTimersAsync();
+			expect(reconnect).toHaveBeenCalledTimes(1);
+		});
+
+		it('a host that owns recovery gets the failure at once, as before', async () => {
+			const reconnect = vi.fn().mockRejectedValue(connectFailed());
+			const h = makeHarness({
+				transport: fakeTransport({ reconnect }),
+				upstreamLossPolicy: 'hold',
+				hostOwnsRecovery: () => true,
+			});
+			h.reconnector.handleCredentialExpiry();
+			await vi.runAllTimersAsync();
+			expect(reconnect).toHaveBeenCalledTimes(1);
+			expect(h.eventBus.publish).toHaveBeenCalledWith(
+				'session.upstreamLost',
+				expect.objectContaining({ reason: 'reconnect-failed' }),
+			);
+		});
+
+		it('a planned reconnect that recovers after retries gives back the attempts it spent', async () => {
+			const reconnect = vi
+				.fn()
+				.mockRejectedValueOnce(connectFailed())
+				.mockRejectedValueOnce(connectFailed())
+				.mockResolvedValueOnce(undefined)
+				.mockRejectedValue(connectFailed());
+			const h = makeHarness({ transport: fakeTransport({ reconnect }) });
+
+			// Two retries, then connected: no turn completes before the next expiry.
+			h.reconnector.handleCredentialExpiry();
+			await vi.runAllTimersAsync();
+			expect(reconnect).toHaveBeenCalledTimes(3);
+			expect(h.sm.state).toBe('ACTIVE');
+
+			// The next expiry still has the whole budget: three retries, not one.
+			h.reconnector.handleCredentialExpiry();
+			await vi.runAllTimersAsync();
+			expect(reconnect).toHaveBeenCalledTimes(7);
+			expect(h.sm.closeWithReason).toHaveBeenCalledWith('reconnect_failed');
+		});
+
+		it('gives back only what the planned reconnect spent, not what a loss spent before it', async () => {
+			const reconnect = vi
+				.fn()
+				.mockResolvedValueOnce(undefined)
+				.mockRejectedValueOnce(connectFailed())
+				.mockResolvedValue(undefined);
+			const h = makeHarness({ transport: fakeTransport({ reconnect }) });
+
+			h.reconnector.handleTransportClose(1006, 'gone'); // a loss: attempt 1 of 3
+			await vi.runAllTimersAsync();
+			h.reconnector.handleCredentialExpiry(); // fails once, retried as attempt 2
+			await vi.runAllTimersAsync();
+			expect(reconnect).toHaveBeenCalledTimes(3);
+			expect(h.sm.state).toBe('ACTIVE');
+
+			// The loss's attempt is still spent: the next one waits the 2 s backoff.
+			h.reconnector.handleTransportClose(1006, 'gone');
+			await vi.advanceTimersByTimeAsync(1_999);
+			expect(reconnect).toHaveBeenCalledTimes(3);
+			await vi.advanceTimersByTimeAsync(1);
+			expect(reconnect).toHaveBeenCalledTimes(4);
+		});
+
+		it('gives back what it spent even when a turn reset the budget while it ran', async () => {
+			let reject: (e: unknown) => void = () => {};
+			const reconnect = vi
+				.fn()
+				.mockResolvedValueOnce(undefined)
+				.mockResolvedValueOnce(undefined)
+				.mockImplementationOnce(
+					() =>
+						new Promise<void>((_, r) => {
+							reject = r;
+						}),
+				)
+				.mockResolvedValue(undefined);
+			const h = makeHarness({ transport: fakeTransport({ reconnect }) });
+			for (let i = 0; i < 2; i++) {
+				h.reconnector.handleTransportClose(1006, 'gone'); // two losses: 2 of 3 spent
+				await vi.runAllTimersAsync();
+			}
+
+			h.reconnector.handleCredentialExpiry();
+			h.reconnector.resetAttempts(); // a late turnComplete from the old connection
+			reject(connectFailed());
+			await vi.runAllTimersAsync(); // the retry spends one, then connects
+			expect(reconnect).toHaveBeenCalledTimes(4);
+			expect(h.sm.state).toBe('ACTIVE');
+
+			// The reset stands and the retry is given back: the next loss waits 1 s.
+			h.reconnector.handleTransportClose(1006, 'gone');
+			await vi.advanceTimersByTimeAsync(999);
+			expect(reconnect).toHaveBeenCalledTimes(4);
+			await vi.advanceTimersByTimeAsync(1);
+			expect(reconnect).toHaveBeenCalledTimes(5);
+		});
+
+		it('never gives back more than the budget holds', async () => {
+			const reconnect = vi.fn().mockRejectedValueOnce(connectFailed()).mockResolvedValue(undefined);
+			const h = makeHarness({ transport: fakeTransport({ reconnect }) });
+			h.reconnector.handleCredentialExpiry();
+			await vi.advanceTimersByTimeAsync(0); // failed: the retry spent one and waits 1 s
+			h.reconnector.resetAttempts();
+			await vi.runAllTimersAsync();
+			expect(h.sm.state).toBe('ACTIVE');
+
+			h.reconnector.handleTransportClose(1006, 'gone');
+			await vi.advanceTimersByTimeAsync(1_000);
+			expect(reconnect).toHaveBeenCalledTimes(3);
+		});
+
+		it('a failure that lands after the session left RECONNECTING is not retried', async () => {
+			let reject: (e: unknown) => void = () => {};
+			const reconnect = vi.fn(
+				() =>
+					new Promise<void>((_, r) => {
+						reject = r;
+					}),
+			);
+			const h = makeHarness({ transport: fakeTransport({ reconnect }) });
+			h.reconnector.handleCredentialExpiry();
+			h.sm._setState('ACTIVE');
+			reject(connectFailed());
+			await vi.advanceTimersByTimeAsync(0);
+			expect(h.reportError).toHaveBeenCalledWith('reconnect', expect.any(Error));
+			expect(vi.getTimerCount()).toBe(0);
+		});
+
+		it('a session closed during the retry backoff dials nothing more', async () => {
+			const reconnect = vi.fn().mockRejectedValue(connectFailed());
+			const h = makeHarness({ transport: fakeTransport({ reconnect }) });
+			h.reconnector.handleCredentialExpiry();
+			await vi.advanceTimersByTimeAsync(0);
+			h.sm._setState('CLOSED');
+			await vi.runAllTimersAsync();
+			expect(reconnect).toHaveBeenCalledTimes(1);
+		});
+	});
+
+	describe('handleCredentialExpiry (immediate, unbudgeted, like GoAway)', () => {
+		it('disarms the watchdog and reconnects at once, without a session.goaway', async () => {
+			const ct = fakeClientTransport([]);
+			const h = makeHarness({ watchdogMs: 8000, clientTransport: ct });
+			h.reconnector.armResponseWatchdog();
+
+			h.reconnector.handleCredentialExpiry();
+			expect(h.eventBus.publish).not.toHaveBeenCalledWith('session.goaway', expect.anything());
+			expect(h.sm.transitionTo).toHaveBeenCalledWith('RECONNECTING');
+			expect(ct.startBuffering).toHaveBeenCalledTimes(1);
+			await vi.runAllTimersAsync();
+			expect(h.transport.reconnect).toHaveBeenCalledTimes(1);
+			expect(h.sm.transitionTo).toHaveBeenLastCalledWith('ACTIVE');
+
+			vi.advanceTimersByTime(20000);
+			expect(h.transport.reconnect).toHaveBeenCalledTimes(1);
+		});
+
+		it('is ignored outside ACTIVE', () => {
+			const closed = makeHarness({ initial: 'CLOSED' });
+			expect(() => closed.reconnector.handleCredentialExpiry()).not.toThrow();
+			expect(closed.sm.transitionTo).not.toHaveBeenCalled();
+			expect(closed.transport.reconnect).not.toHaveBeenCalled();
+		});
+
+		it('without a resumption handle reconnects at once to a fresh session that replays the conversation, spending no budget', async () => {
+			const replay: ReplayItem[] = [{ role: 'user', parts: [] } as unknown as ReplayItem];
+			const h = makeHarness({ handle: null, replay });
+
+			h.reconnector.handleCredentialExpiry();
+			expect(h.sm.transitionTo).toHaveBeenCalledWith('RECONNECTING');
+			expect(h.transport.reconnect).toHaveBeenCalledWith({ conversationHistory: replay });
+			expect(dialedHandles(h.transport)).toEqual([undefined]);
+			await vi.runAllTimersAsync();
+			expect(h.sm.state).toBe('ACTIVE');
+			expect(h.sm.closeWithReason).not.toHaveBeenCalled();
+			expect(h.eventBus.publish).not.toHaveBeenCalledWith(
+				'session.upstreamLost',
+				expect.anything(),
+			);
+
+			// The budget is untouched: a later loss starts at the first backoff step.
+			h.reconnector.handleResumptionUpdate('handle-2', true);
+			h.reconnector.handleTransportClose(1006, 'gone');
+			await vi.advanceTimersByTimeAsync(1_000);
+			expect(h.transport.reconnect).toHaveBeenCalledTimes(2);
+		});
+
+		it('without a resumption handle retries a credential failure, still without one', async () => {
+			const reconnect = vi.fn().mockRejectedValueOnce(connectFailed()).mockResolvedValue(undefined);
+			const h = makeHarness({ handle: null, transport: fakeTransport({ reconnect }) });
+			h.reconnector.handleCredentialExpiry();
+			await vi.advanceTimersByTimeAsync(1_000);
+			await vi.runAllTimersAsync();
+			expect(dialedHandles(h.transport)).toEqual([undefined, undefined]);
+			expect(h.sm.state).toBe('ACTIVE');
+		});
+
+		it('without a resumption handle first drops any handle the transport holds, before every dial', async () => {
+			const order: string[] = [];
+			const clearResumption = vi.fn(() => {
+				order.push('clear');
+			});
+			const reconnect = vi
+				.fn()
+				.mockImplementationOnce(async () => {
+					order.push('dial');
+					throw connectFailed();
+				})
+				.mockImplementation(async () => {
+					order.push('dial');
+				});
+			const h = makeHarness({
+				handle: null,
+				transport: fakeTransport({ reconnect, clearResumption }),
+			});
+
+			h.reconnector.handleCredentialExpiry();
+			await vi.advanceTimersByTimeAsync(1_000);
+			await vi.runAllTimersAsync();
+
+			expect(order).toEqual(['clear', 'dial', 'clear', 'dial']);
+			expect(h.sm.state).toBe('ACTIVE');
+		});
+
+		it('with a resumption handle leaves the transport’s handle alone', async () => {
+			const clearResumption = vi.fn();
+			const h = makeHarness({ transport: fakeTransport({ clearResumption }) });
+
+			h.reconnector.handleCredentialExpiry();
+			await vi.runAllTimersAsync();
+			h.reconnector.handleGoAway('10s');
+			await vi.runAllTimersAsync();
+
+			expect(dialedHandles(h.transport)).toEqual(['handle-1', 'handle-1']);
+			expect(clearResumption).not.toHaveBeenCalled();
+		});
+
+		it('without a resumption handle crosses the fresh-session boundary once, while ACTIVE and before any dial; its retries do not cross it again', async () => {
+			const order: string[] = [];
+			const reconnect = vi
+				.fn()
+				.mockImplementationOnce(async () => {
+					order.push('dial');
+					throw connectFailed();
+				})
+				.mockImplementation(async () => {
+					order.push('dial');
+				});
+			const h: Harness = makeHarness({
+				handle: null,
+				transport: fakeTransport({ reconnect }),
+				onFreshSessionBoundary: (reason) => order.push(`boundary:${reason}:${h.sm.state}`),
+			});
+			h.sm.transitionTo.mockImplementation((s: SessionState) => {
+				order.push(`to:${s}`);
+				h.sm._setState(s);
+			});
+
+			h.reconnector.handleCredentialExpiry();
+			await vi.advanceTimersByTimeAsync(1_000);
+			await vi.runAllTimersAsync();
+
+			expect(order).toEqual([
+				'boundary:credential-expiry:ACTIVE',
+				'to:RECONNECTING',
+				'dial',
+				'dial',
+				'to:ACTIVE',
+			]);
+		});
+
+		it('never crosses the boundary when the rotation or a GoAway resumes, or a GoAway finds no handle', async () => {
+			const onFreshSessionBoundary = vi.fn();
+			const h = makeHarness({ onFreshSessionBoundary });
+			h.reconnector.handleCredentialExpiry();
+			await vi.runAllTimersAsync();
+			h.reconnector.handleGoAway('10s');
+			await vi.runAllTimersAsync();
+			expect(dialedHandles(h.transport)).toEqual(['handle-1', 'handle-1']);
+
+			const noHandle = makeHarness({ handle: null, onFreshSessionBoundary });
+			noHandle.reconnector.handleGoAway('10s');
+			expect(noHandle.transport.reconnect).not.toHaveBeenCalled();
+
+			expect(onFreshSessionBoundary).not.toHaveBeenCalled();
+		});
+
+		it('a boundary that ends the session stops the rotation: nothing buffers or dials', async () => {
+			const h: Harness = makeHarness({
+				handle: null,
+				onFreshSessionBoundary: () => h.sm._setState('CLOSED'),
+			});
+
+			h.reconnector.handleCredentialExpiry();
+			await vi.runAllTimersAsync();
+
+			expect(h.sm.transitionTo).not.toHaveBeenCalled();
+			expect(h.clientTransport.startBuffering).not.toHaveBeenCalled();
+			expect(h.transport.reconnect).not.toHaveBeenCalled();
+		});
+
+		it('a boundary that throws is logged, and the rotation goes on', async () => {
+			const h = makeHarness({
+				handle: null,
+				onFreshSessionBoundary: () => {
+					throw new Error('subscriber failed');
+				},
+			});
+
+			h.reconnector.handleCredentialExpiry();
+			await vi.runAllTimersAsync();
+
+			expect(h.log).toHaveBeenCalledWith(
+				'Fresh-session boundary threw (rotation continues): subscriber failed',
+			);
+			expect(dialedHandles(h.transport)).toEqual([undefined]);
+			expect(h.sm.state).toBe('ACTIVE');
 		});
 	});
 

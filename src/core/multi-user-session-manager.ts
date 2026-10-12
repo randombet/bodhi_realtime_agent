@@ -5,8 +5,11 @@
  * Handles session lifecycle, cleanup, and resource limits.
  */
 
-import type { VoiceSession } from './voice-session.js';
-import type { VoiceSessionConfig } from './voice-session.js';
+import type {
+	VoiceSession,
+	VoiceSessionConfig,
+	VoiceSessionProviderConfig,
+} from './voice-session.js';
 
 export interface SessionMetadata {
 	sessionId: string;
@@ -53,7 +56,9 @@ export class MultiUserSessionManager {
 	 */
 	async createSession(
 		userId: string,
-		sessionConfig: Omit<VoiceSessionConfig, 'sessionId' | 'userId'>,
+		sessionConfig:
+			| Omit<VoiceSessionConfig, 'sessionId' | 'userId'>
+			| Omit<VoiceSessionProviderConfig, 'sessionId' | 'userId'>,
 		webSocketId?: string,
 	): Promise<VoiceSession> {
 		// Check total session limit

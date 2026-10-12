@@ -84,6 +84,129 @@ const session = new VoiceSession({
 });
 ```
 
+## Per-connection Gemini credentials
+
+Instead of one `apiKey` for every connection, the built-in Gemini transport can
+fetch a credential for each connection with `credentialProvider` (the two are
+mutually exclusive). Use it when a short-lived token, such as a Gemini ephemeral
+token minted per connection, should authenticate each dial. Such a session is
+configured with `VoiceSessionProviderConfig` (`GeminiProviderTransportConfig`
+for a transport you construct); `VoiceSessionConfig` and
+`GeminiTransportConfig` remain the static-key configs.
+
+```ts
+const session = new VoiceSession({
+  sessionId: 'session_1',
+  userId: 'user_1',
+  credentialProvider: async (setup, signal) => {
+    // `setup` is { model, config }: exactly what this connection will send.
+    const minted = await mintToken(setup, { signal });
+    return {
+      apiKey: minted.token, // e.g. 'auth_tokens/…'
+      apiVersion: 'v1alpha',
+      expiresAtMs: minted.expiresAtMs,
+      meta: { credentialId: minted.id },
+    };
+  },
+  agents: [mainAgent],
+  initialAgent: 'main',
+  model: google('gemini-2.5-flash'),
+});
+```
+
+- **What the provider sees:** `setup` includes the conversation's resumption
+  handle when there is one, a bearer secret that resumes the conversation under
+  any key, and the full system instruction. Send it only to whatever mints the
+  credential, and do not log or persist it.
+- **What to log:** what a provider rejects with is passed on. Its message is
+  part of `failure.message` and of the connect's error, which the session
+  reports through `onError` and in the `detail` of `session.upstreamLost`; the
+  error itself is `failure.error` on the lifecycle events. Throw errors that
+  are safe to log (no token, no URL that carries one, no response body). When
+  logging a `failure`, log its `source`, `code`, `status` and `retryable`, not
+  its `message`, `reason` or `error`.
+- **Every connect calls it:** the first dial, GoAway and close reconnects,
+  `recoverUpstream()` (including the client-attach redial of a parked session),
+  agent transfers, and the next connect after a tool or instruction change. Each
+  connection gets a client built for its credential alone, with the Developer
+  API selected explicitly (`vertexai: false`, `enterprise: false`), so
+  `GOOGLE_GENAI_USE_VERTEXAI` and `GOOGLE_GENAI_USE_ENTERPRISE` do not apply. No
+  client is built from a static key.
+- **One final setup:** `setup` is built once per connect as the JSON the SDK
+  sends (a value JSON cannot carry, such as a function, is dropped, as on the
+  wire) and deep-frozen, and `live.connect` receives a copy equal to it, so a
+  token locked to `setup` locks what is sent.
+- **One deadline:** the transport's `connectTimeoutMs` (30 seconds by default)
+  covers the fetch, the dial and `setupComplete` together. The fetch may use at
+  most half of it; then `signal` aborts and the connect fails. `signal` also
+  aborts when the attempt is retired (`abortIncumbent()`, a recovery, or a newer
+  connect) and when the session closes while it fetches. A credential that
+  arrives after that is never used, and a dial that opens after its attempt was
+  retired is closed at once. Closing the session (the transport's
+  `disconnect()`) at any point before `setupComplete` retires the connect the
+  same way, so no connection opens after a close. On a `GeminiLiveTransport`
+  you inject, keep `connectTimeoutMs` at or below the session's own deadline
+  for one automatic reconnect (`VoiceSession.RECONNECT_DEADLINE_MS`, 30
+  seconds): a reconnect that outlasts it ends without a retry, so with a
+  `connectTimeoutMs` of 60 seconds or more a hung token service is never
+  retried.
+- **Expiry:** when the provider returns, the credential must leave at least
+  `connectTimeoutMs` plus `minCredentialLifetimeMs` (60 seconds by default) before
+  `expiresAtMs`, or the transport refuses it and the connect fails. This floor
+  keeps a provider that serves a nearly expired cached token from reconnecting
+  the session every few seconds. A provider that caches credentials must
+  replace one with less than that left: the retries below come within seconds
+  and would get the same refused credential. Set `minCredentialLifetimeMs` on a
+  `GeminiLiveTransport` you construct to change it (`0` keeps only the deadline
+  check). At `expiresAtMs` an `ACTIVE` session reconnects at once with a new
+  credential, as for a GoAway: with its resumption handle when it has one, and
+  otherwise (`sessionResumption: false`, no handle issued yet, or the last
+  update was not resumable) to a fresh session that replays the conversation,
+  as an agent transfer does. A handle given to the transport's constructor
+  (`sessionResumption: { handle }`) that no server update has replaced yet
+  counts as none here: the session never saw it, so the rotation drops it
+  rather than resume from it. The new server session never saw the old
+  connection's turn or tool calls, so before that fresh dial the session
+  crosses the boundary `recoverUpstream()` crosses: the active turn ends as
+  interrupted (`turn.interrupted`, then `turn.end`), and results for tool calls
+  the old connection issued are dropped instead of sent to the new session. A
+  rotation that resumes on a handle keeps both. This rotation is planned, not a loss: it spends
+  none of the reconnect budget, and the old connection's close is reported as
+  a local disconnect (`1000 'local disconnect'`), which `upstreamRecovery`
+  does not count. In any other state the transport closes the connection
+  itself and reports it as a close (`1000 'credential expired'`).
+- **Lifecycle:** the provider's `meta` rides on the connection's
+  `onConnectionLifecycle` events once the provider has returned, including when
+  the transport refuses the credential (`setup-ok`, `setup-failed`,
+  `attempt-close`, `generation-close`). An attempt that fails
+  before `setupComplete` also carries `failure`: `source` is `'provider'` (the
+  provider threw, was aborted, or returned a credential that was refused, with
+  what it threw as `error`), `'dial'` (the socket never opened; a refused
+  upgrade's HTTP `status` when there is one) or `'session'` (the socket opened
+  and closed before `setupComplete`, with its `code` and `reason`). A provider
+  failure is reported as an `attempt-close` without a socket, then
+  `setup-failed`. Without a provider, no event carries `meta` or `failure`.
+- **Retries:** when the provider fails during an automatic reconnect (GoAway,
+  credential expiry, a transport close or a watchdog stall), or the connection
+  is refused before `setupComplete`, the session does not give up on that one
+  error. It dials again through the reconnect budget below: after 1, 2 and 4
+  seconds, with the same resumption handle (or none, for a rotation without
+  one) and a new credential each time. Only when the budget is spent does
+  `upstreamLossPolicy` decide. A provider
+  that knows its failure is permanent (no key for this owner, access revoked)
+  rejects with an error whose `retryable` property is `false`; the session then
+  gives up at once, and the failure carries `retryable: false`. With
+  `upstreamRecovery`, such a failure also starts its fatal backoff
+  (`fatalBackoffMs`, category `credential_permanent`), so the parked session is
+  not redialed until it ends. The policy's close classifier reads the failure's
+  message as well, so keep an HTTP 401, 403 or 404, or a quota, out of a
+  transient error's message, or it is treated as fatal too. The rejection of
+  `connect()` carries the attempt's failure as `connectFailure`
+  (`ConnectFailureError`).
+
+`credentialProvider` applies to the built-in transport. With an injected
+`transport`, pass it to the `GeminiLiveTransport` you construct instead.
+
 ## Local client connection roles
 
 The local `ClientTransport` reads the query string of each WebSocket upgrade
@@ -260,7 +383,14 @@ surfaces, and client behavior.
 The provider connection (Leg 2) can drop while the client stays attached.
 `VoiceSession` first recovers on its own: a GoAway resumes at once with the
 session resumption handle, and a transport close or a response-watchdog stall
-starts up to three backed-off reconnects with that handle.
+starts up to three backed-off reconnects with that handle. With a
+`credentialProvider`, a reconnect of either kind that fails before setup is
+dialed again within those three attempts (see
+[Per-connection Gemini credentials](#per-connection-gemini-credentials)).
+The three attempts are restored when a model turn completes or a host
+recovery activates, not when a reconnect connects, so a connection that keeps
+dying right after setup cannot loop. A GoAway or credential-expiry reconnect
+that needed retries gives back the attempts it spent once it connects.
 `upstreamLossPolicy` decides what happens when this automatic recovery cannot
 continue (the attempts are spent, there is no resumption handle, or an attempt
 fails or times out):
@@ -277,7 +407,7 @@ stateDiagram-v2
   CONNECTING --> ACTIVE: setup complete
   CONNECTING --> UPSTREAM_LOST: first dial fails (hold)
   CONNECTING --> RECONNECTING: recoverUpstream()
-  ACTIVE --> RECONNECTING: transport close, GoAway, watchdog stall, recoverUpstream()
+  ACTIVE --> RECONNECTING: transport close, GoAway, credential expiry, watchdog stall, recoverUpstream()
   RECONNECTING --> ACTIVE: replacement connection set up
   RECONNECTING --> UPSTREAM_LOST: automatic recovery ends, recovery dial fails, parkUpstream() (hold)
   ACTIVE --> UPSTREAM_LOST: no resumption handle, parkUpstream() (hold)

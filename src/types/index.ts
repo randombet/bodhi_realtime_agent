@@ -92,6 +92,8 @@ export type { FunctionBehavior, ToolContext, ToolDefinition, ToolExecution } fro
 export type {
 	AudioFormatSpec,
 	CacheConfigCommon,
+	ConnectFailure,
+	ConnectFailureError,
 	ConnectionLifecycleEvent,
 	ContentTurn,
 	LLMTransport,

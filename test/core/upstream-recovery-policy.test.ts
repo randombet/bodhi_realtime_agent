@@ -403,6 +403,45 @@ describe('UpstreamRecoveryPolicy', () => {
 			expect(recoverUpstream).toHaveBeenCalledTimes(1);
 		});
 
+		it('a credential failure the provider marked permanent starts the fatal backoff, whatever its text', () => {
+			const onFatal = vi.fn();
+			const { policy, world, recoverUpstream } = makePolicy({ fatalBackoffMs: 300_000, onFatal });
+			world.state = 'UPSTREAM_LOST';
+			const ledger = new ConnectionLifecycleLedger((ev) => policy.onLifecycle(ev));
+			const failure = {
+				source: 'provider' as const,
+				message: 'Gemini credential provider failed: owner has no voice key',
+				retryable: false as const,
+			};
+			ledger.beginAttempt(1, false);
+			ledger.closedBeforeDial(failure);
+			ledger.setupFailed(failure.message, failure);
+			expect(onFatal).toHaveBeenCalledWith(
+				expect.objectContaining({ category: 'credential_permanent' }),
+			);
+			// The provider's text is not repeated in what the host is told.
+			expect(JSON.stringify(onFatal.mock.calls)).not.toContain('voice key');
+			expect(policy.inFatalBackoff()).toBe(true);
+			vi.advanceTimersByTime(299_000);
+			expect(recoverUpstream).not.toHaveBeenCalled();
+		});
+
+		it('a credential failure without the mark redials on the ladder', () => {
+			const { policy, world, recoverUpstream } = makePolicy();
+			world.state = 'UPSTREAM_LOST';
+			const ledger = new ConnectionLifecycleLedger((ev) => policy.onLifecycle(ev));
+			const failure = {
+				source: 'provider' as const,
+				message: 'Gemini credential provider failed: token service unavailable',
+			};
+			ledger.beginAttempt(1, false);
+			ledger.closedBeforeDial(failure);
+			ledger.setupFailed(failure.message, failure);
+			expect(policy.inFatalBackoff()).toBe(false);
+			vi.advanceTimersByTime(1_000);
+			expect(recoverUpstream).toHaveBeenCalledTimes(1);
+		});
+
 		it('a retryable close before setup still redials on the ladder', () => {
 			const { policy, world, recoverUpstream } = makePolicy();
 			world.state = 'UPSTREAM_LOST';
