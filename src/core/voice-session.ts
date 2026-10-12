@@ -4046,8 +4046,9 @@ export class VoiceSession {
 	}
 
 	/** The transport's credential for this connection expired: reconnect now,
-	 *  as for a GoAway. The transport closes the connection itself if this does
-	 *  not start a reconnect. */
+	 *  as for a GoAway, and without a resumption handle to a fresh session that
+	 *  replays the conversation. The transport closes the connection itself if
+	 *  this does not start a reconnect (the session is not ACTIVE). */
 	private handleCredentialExpiry(): void {
 		this.eventBus.publish('session.reset', {
 			sessionId: this.config.sessionId,

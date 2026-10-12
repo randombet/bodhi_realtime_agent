@@ -358,6 +358,52 @@ describe('VoiceSession with a credentialProvider', () => {
 		]);
 	});
 
+	it('rotates an expiring credential without a resumption handle as a planned reconnect, not a loss', async () => {
+		const setups: GeminiLiveSetup[] = [];
+		const provider: GeminiCredentialProvider = async (setup) => {
+			setups.push(setup);
+			const lifetimeMs = setups.length === 1 ? 250 : 30 * 60_000;
+			return { apiKey: `auth_tokens/t${setups.length}`, expiresAtMs: Date.now() + lifetimeMs };
+		};
+		const transport = new GeminiLiveTransport(
+			{ credentialProvider: provider, connectTimeoutMs: 100, minCredentialLifetimeMs: 0 },
+			{},
+		);
+		const reconnect = vi.spyOn(transport, 'reconnect');
+		const lifecycle: ConnectionLifecycleEvent[] = [];
+		const states: string[] = [];
+		session = new VoiceSession({
+			sessionId: 'sess_expiry_fresh',
+			userId: 'u',
+			apiKey: 'unused-with-an-injected-transport',
+			transport,
+			agents: agents(),
+			initialAgent: 'main',
+			clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			model: mockModel,
+			upstreamLossPolicy: 'hold',
+			onConnectionLifecycle: (e) => lifecycle.push(e),
+		});
+		session.eventBus.subscribe('session.stateChange', (e) => states.push(e.toState));
+		await session.start();
+		await settle();
+		// No resumption update arrives: the expiry finds no handle.
+
+		await settle(300);
+
+		expect(session.sessionManager.state).toBe('ACTIVE');
+		expect(states).not.toContain('UPSTREAM_LOST');
+		expect(setups.map((s) => s.config.sessionResumption)).toEqual([{}, {}]);
+		expect(reconnect).toHaveBeenCalledWith(
+			expect.not.objectContaining({ resumptionHandle: expect.anything() }),
+		);
+		expect(reconnect.mock.calls[0]?.[0]).toHaveProperty('conversationHistory');
+		// Closed as a local disconnect, which upstream recovery does not count as a loss.
+		expect(lifecycle.filter((e) => e.kind === 'generation-close')).toEqual([
+			expect.objectContaining({ code: 1000, reason: 'local disconnect' }),
+		]);
+	});
+
 	it('closing during the first credential fetch aborts it, and nothing dials', async () => {
 		let signal: AbortSignal | undefined;
 		const provider: GeminiCredentialProvider = (_setup, s) => {

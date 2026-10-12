@@ -769,15 +769,44 @@ describe('TransportReconnector', () => {
 			expect(h.transport.reconnect).toHaveBeenCalledTimes(1);
 		});
 
-		it('is ignored outside ACTIVE and without a resumption handle', () => {
+		it('is ignored outside ACTIVE', () => {
 			const closed = makeHarness({ initial: 'CLOSED' });
 			expect(() => closed.reconnector.handleCredentialExpiry()).not.toThrow();
 			expect(closed.sm.transitionTo).not.toHaveBeenCalled();
 			expect(closed.transport.reconnect).not.toHaveBeenCalled();
+		});
 
-			const noHandle = makeHarness({ handle: null });
-			noHandle.reconnector.handleCredentialExpiry();
-			expect(noHandle.transport.reconnect).not.toHaveBeenCalled();
+		it('without a resumption handle reconnects at once to a fresh session that replays the conversation, spending no budget', async () => {
+			const replay: ReplayItem[] = [{ role: 'user', parts: [] } as unknown as ReplayItem];
+			const h = makeHarness({ handle: null, replay });
+
+			h.reconnector.handleCredentialExpiry();
+			expect(h.sm.transitionTo).toHaveBeenCalledWith('RECONNECTING');
+			expect(h.transport.reconnect).toHaveBeenCalledWith({ conversationHistory: replay });
+			expect(dialedHandles(h.transport)).toEqual([undefined]);
+			await vi.runAllTimersAsync();
+			expect(h.sm.state).toBe('ACTIVE');
+			expect(h.sm.closeWithReason).not.toHaveBeenCalled();
+			expect(h.eventBus.publish).not.toHaveBeenCalledWith(
+				'session.upstreamLost',
+				expect.anything(),
+			);
+
+			// The budget is untouched: a later loss starts at the first backoff step.
+			h.reconnector.handleResumptionUpdate('handle-2', true);
+			h.reconnector.handleTransportClose(1006, 'gone');
+			await vi.advanceTimersByTimeAsync(1_000);
+			expect(h.transport.reconnect).toHaveBeenCalledTimes(2);
+		});
+
+		it('without a resumption handle retries a credential failure, still without one', async () => {
+			const reconnect = vi.fn().mockRejectedValueOnce(connectFailed()).mockResolvedValue(undefined);
+			const h = makeHarness({ handle: null, transport: fakeTransport({ reconnect }) });
+			h.reconnector.handleCredentialExpiry();
+			await vi.advanceTimersByTimeAsync(1_000);
+			await vi.runAllTimersAsync();
+			expect(dialedHandles(h.transport)).toEqual([undefined, undefined]);
+			expect(h.sm.state).toBe('ACTIVE');
 		});
 	});
 

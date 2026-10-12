@@ -139,12 +139,15 @@ const session = new VoiceSession({
   keeps a provider that serves a nearly expired cached token from reconnecting
   the session every few seconds. Set `minCredentialLifetimeMs` on a
   `GeminiLiveTransport` you construct to change it (`0` keeps only the deadline
-  check). At `expiresAtMs` the session reconnects at once, as for a
-  GoAway, with a new credential. If it cannot (no resumption handle, or not
-  `ACTIVE`), the transport closes the connection and reports it as a close
-  (`1000 'credential expired'`), which the session handles like any server
-  close: without a resumption handle that ends or parks the session, per
-  `upstreamLossPolicy`, as a GoAway would.
+  check). At `expiresAtMs` an `ACTIVE` session reconnects at once with a new
+  credential, as for a GoAway: with its resumption handle when it has one, and
+  otherwise (`sessionResumption: false`, no handle issued yet, or the last
+  update was not resumable) to a fresh session that replays the conversation,
+  as an agent transfer does. This rotation is planned, not a loss: it spends
+  none of the reconnect budget, and the old connection's close is reported as
+  a local disconnect (`1000 'local disconnect'`), which `upstreamRecovery`
+  does not count. In any other state the transport closes the connection
+  itself and reports it as a close (`1000 'credential expired'`).
 - **Lifecycle:** the provider's `meta` rides on the connection's
   `onConnectionLifecycle` events once the provider has returned, including when
   the transport refuses the credential (`setup-ok`, `setup-failed`,
@@ -160,7 +163,8 @@ const session = new VoiceSession({
   credential expiry, a transport close or a watchdog stall), or the connection
   is refused before `setupComplete`, the session does not give up on that one
   error. It dials again through the reconnect budget below: after 1, 2 and 4
-  seconds, with the same resumption handle and a new credential each time.
+  seconds, with the same resumption handle (or none, for a rotation without
+  one) and a new credential each time.
   Only when the budget is spent does `upstreamLossPolicy` decide. A provider
   that knows its failure is permanent (no key for this owner, access revoked)
   rejects with an error whose `retryable` property is `false`; the session then
@@ -371,7 +375,7 @@ stateDiagram-v2
   CONNECTING --> ACTIVE: setup complete
   CONNECTING --> UPSTREAM_LOST: first dial fails (hold)
   CONNECTING --> RECONNECTING: recoverUpstream()
-  ACTIVE --> RECONNECTING: transport close, GoAway, watchdog stall, recoverUpstream()
+  ACTIVE --> RECONNECTING: transport close, GoAway, credential expiry, watchdog stall, recoverUpstream()
   RECONNECTING --> ACTIVE: replacement connection set up
   RECONNECTING --> UPSTREAM_LOST: automatic recovery ends, recovery dial fails, parkUpstream() (hold)
   ACTIVE --> UPSTREAM_LOST: no resumption handle, parkUpstream() (hold)

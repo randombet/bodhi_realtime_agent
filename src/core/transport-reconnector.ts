@@ -465,7 +465,7 @@ export class TransportReconnector {
 	 *  open; the caller checked that an attempt is left. */
 	private scheduleBudgetedDial(
 		reason: string,
-		handle: string,
+		handle: string | null,
 		opts: DialOptions,
 		closeDetail?: { code?: number; reason?: string },
 	): void {
@@ -500,7 +500,7 @@ export class TransportReconnector {
 	 */
 	private retryFailedAttempt(
 		reason: string,
-		handle: string,
+		handle: string | null,
 		opts: DialOptions,
 		err: unknown,
 	): boolean {
@@ -658,7 +658,7 @@ export class TransportReconnector {
 	 * reconnect continuation cannot dial after CLOSED and a late dial result is
 	 * closed rather than orphaned.
 	 */
-	private runReconnect(reason: string, handle: string, opts: DialOptions): void {
+	private runReconnect(reason: string, handle: string | null, opts: DialOptions): void {
 		const token = ++this._attemptToken;
 		this._attemptInFlight = true;
 		const deadlineMs = this.reconnectDeadlineMs;
@@ -675,7 +675,8 @@ export class TransportReconnector {
 		}
 		this.deps.transport
 			.reconnect({
-				resumptionHandle: handle,
+				// Without a handle the transport opens a fresh session and replays this.
+				...(handle ? { resumptionHandle: handle } : {}),
 				conversationHistory: this.deps.toReplayContent(),
 			})
 			.then(() => {
@@ -840,18 +841,24 @@ export class TransportReconnector {
 	}
 
 	/** The transport's per-connection credential expired. Reconnect at once, as
-	 *  for a GoAway; the reconnect fetches a new credential. When this does not
-	 *  reconnect, the transport closes the connection and the close path takes
-	 *  over. */
+	 *  for a GoAway; the reconnect fetches a new credential. Unlike a GoAway it
+	 *  reconnects without a resumption handle too (`sessionResumption: false`,
+	 *  none issued yet, or the last update was not resumable): a fresh session
+	 *  that replays the conversation, as an agent transfer does. The rotation is
+	 *  the library's own, so it is never treated as a loss. When this does not
+	 *  reconnect (the session is not ACTIVE), the transport closes the
+	 *  connection and the close path takes over. */
 	handleCredentialExpiry(): void {
 		this.disarmResponseWatchdog();
 		this.deps.log('Gemini connection credential expired');
-		this.reconnectBeforeClose('Credential expiry', 'credential-expiry');
+		this.reconnectBeforeClose('Credential expiry', 'credential-expiry', true);
 	}
 
 	/** The immediate, unbudgeted reconnect shared by GoAway and credential
-	 *  expiry: the provider connection is about to end, not lost. */
-	private reconnectBeforeClose(what: string, reason: string): void {
+	 *  expiry: the provider connection is about to end, not lost. Without a
+	 *  resumption handle only `freshWithoutHandle` reconnects; a GoAway then
+	 *  lets the connection end, and the close path decides. */
+	private reconnectBeforeClose(what: string, reason: string, freshWithoutHandle = false): void {
 		if (this._disposed) return;
 		// Only an ACTIVE session reconnects on GoAway. A late GoAway from a
 		// connection that a close or an earlier reconnect already tore down must
@@ -866,7 +873,10 @@ export class TransportReconnector {
 
 		// Initiate reconnection
 		const handle = this.deps.sessionManager.resumptionHandle;
-		if (handle) {
+		if (!handle && freshWithoutHandle) {
+			this.deps.log(`${what} without a resumption handle: reconnecting to a fresh session`);
+		}
+		if (handle || freshWithoutHandle) {
 			this.deps.sessionManager.transitionTo('RECONNECTING');
 			this.deps.clientTransport.startBuffering();
 			this._clientBuffering = true;
