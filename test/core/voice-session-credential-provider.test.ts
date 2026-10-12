@@ -278,7 +278,7 @@ describe('VoiceSession with a credentialProvider', () => {
 			return { apiKey: `auth_tokens/t${setups.length}`, expiresAtMs: Date.now() + 250 };
 		};
 		const transport = new GeminiLiveTransport(
-			{ credentialProvider: provider, connectTimeoutMs: 100 },
+			{ credentialProvider: provider, connectTimeoutMs: 100, minCredentialLifetimeMs: 0 },
 			{},
 		);
 		session = new VoiceSession({

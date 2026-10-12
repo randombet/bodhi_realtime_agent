@@ -196,8 +196,12 @@ export interface GeminiCredential {
 	 *  expects `v1alpha`). Omitted, the SDK's default applies. */
 	apiVersion?: string;
 	/** Epoch ms when the transport closes this connection and reconnects with a
-	 *  new credential, whether or not the server sent GoAway. Must be finite and
-	 *  at least `connectTimeoutMs` away when the provider returns. */
+	 *  new credential, whether or not the server sent GoAway. Must be finite and,
+	 *  when the provider returns, at least `connectTimeoutMs` plus
+	 *  `minCredentialLifetimeMs` away (90 s with the defaults): a credential
+	 *  closer to its expiry is refused, so a provider serving a nearly expired
+	 *  cached token fails the connect instead of reconnecting the session every
+	 *  few seconds. */
 	expiresAtMs: number;
 	/** Opaque to the transport: carried on this connection's lifecycle events. */
 	meta?: unknown;
@@ -234,7 +238,16 @@ export interface GeminiProviderTransportConfig extends GeminiTransportOptions {
 	 *  variables do not apply. `connect(config).auth` is ignored. */
 	credentialProvider: GeminiCredentialProvider;
 	apiKey?: never;
+	/** The least use, in ms, a credential must leave after the connect
+	 *  deadline: one that expires less than `connectTimeoutMs` plus this after
+	 *  the provider returns is refused, failing the connect. A floor on how
+	 *  often credential expiry can reconnect the session. Default 60000; `0`
+	 *  keeps only the connect-deadline check. */
+	minCredentialLifetimeMs?: number;
 }
+
+/** Default `GeminiProviderTransportConfig.minCredentialLifetimeMs`. */
+const DEFAULT_MIN_CREDENTIAL_LIFETIME_MS = 60_000;
 
 /** The Gemini transport's options apart from its credential. */
 export interface GeminiTransportOptions {
@@ -465,8 +478,13 @@ function stageFailure(attempt: CredentialAttempt, message: string): ConnectFailu
 	return { source: attempt.stage, message };
 }
 
-/** Why a provider's credential is refused, or `null` when it is usable. */
-function refuseCredential(credential: GeminiCredential, connectTimeoutMs: number): string | null {
+/** Why a provider's credential is refused, or `null` when it is usable: it
+ *  must outlast the connect deadline by `minLifetimeMs`. */
+function refuseCredential(
+	credential: GeminiCredential,
+	connectTimeoutMs: number,
+	minLifetimeMs: number,
+): string | null {
 	if (typeof credential?.apiKey !== 'string' || credential.apiKey === '') {
 		return 'credentialProvider returned no apiKey';
 	}
@@ -474,8 +492,10 @@ function refuseCredential(credential: GeminiCredential, connectTimeoutMs: number
 		return 'credentialProvider returned a non-finite expiresAtMs';
 	}
 	const remainingMs = credential.expiresAtMs - Date.now();
-	if (remainingMs < connectTimeoutMs) {
-		return `credential expires in ${remainingMs}ms, less than the ${connectTimeoutMs}ms connect deadline`;
+	if (remainingMs < connectTimeoutMs + minLifetimeMs) {
+		return minLifetimeMs > 0
+			? `credential expires in ${remainingMs}ms, less than the ${connectTimeoutMs}ms connect deadline plus ${minLifetimeMs}ms of use (minCredentialLifetimeMs)`
+			: `credential expires in ${remainingMs}ms, less than the ${connectTimeoutMs}ms connect deadline`;
 	}
 	return null;
 }
@@ -542,6 +562,8 @@ export class GeminiLiveTransport implements LLMTransport {
 	private callbacks: GeminiTransportCallbacks;
 	private config: GeminiTransportConfig | GeminiProviderTransportConfig;
 	private readonly credentialProvider: GeminiCredentialProvider | undefined;
+	/** The least use a provider's credential must leave after the connect deadline. */
+	private readonly minCredentialLifetimeMs: number;
 	/** Cancels the credential fetch of the dial in flight, if any. */
 	private credentialFetch: AbortController | null = null;
 	/** Retires the latest credential-provider connect until its setupComplete
@@ -757,6 +779,15 @@ export class GeminiLiveTransport implements LLMTransport {
 				);
 			}
 		}
+		const minLifetimeMs = config.credentialProvider
+			? (config.minCredentialLifetimeMs ?? DEFAULT_MIN_CREDENTIAL_LIFETIME_MS)
+			: 0;
+		if (!Number.isFinite(minLifetimeMs) || minLifetimeMs < 0) {
+			throw new ValidationError(
+				'GeminiLiveTransport: minCredentialLifetimeMs must be a finite number of ms, 0 or more.',
+			);
+		}
+		this.minCredentialLifetimeMs = minLifetimeMs;
 		this.credentialProvider = config.credentialProvider;
 		// With a provider there is no client until a connect has its credential.
 		this.ai = this.credentialProvider ? null : new GoogleGenAI({ apiKey: config.apiKey });
@@ -1106,7 +1137,7 @@ export class GeminiLiveTransport implements LLMTransport {
 		if (typeof credential === 'object' && credential !== null) {
 			this.lifecycle.credentialIssued(credential.meta);
 		}
-		const refusal = refuseCredential(credential, timeoutMs);
+		const refusal = refuseCredential(credential, timeoutMs, this.minCredentialLifetimeMs);
 		if (refusal) throw this.credentialFailed(attempt, new ValidationError(refusal));
 		attempt.expiresAtMs = credential.expiresAtMs;
 		attempt.stage = 'dial';

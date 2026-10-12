@@ -14,6 +14,7 @@ import {
 	type GeminiCredentialProvider,
 	type GeminiLiveSetup,
 	GeminiLiveTransport,
+	type GeminiProviderTransportConfig,
 	type GeminiTransportConfig,
 	type GeminiTransportOptions,
 } from '../../src/transport/gemini-live-transport.js';
@@ -173,7 +174,7 @@ function recordLifecycle(transport: GeminiLiveTransport): ConnectionLifecycleEve
 
 function providerTransport(
 	provider: GeminiCredentialProvider,
-	options: GeminiTransportOptions = {},
+	options: Omit<GeminiProviderTransportConfig, 'credentialProvider'> = {},
 ): GeminiLiveTransport {
 	return new GeminiLiveTransport({ credentialProvider: provider, ...options }, {});
 }
@@ -506,6 +507,11 @@ describe('GeminiLiveTransport credentialProvider', () => {
 				() => ({ expiresAtMs: Date.now() + 29_000 }),
 				'less than the 30000ms connect deadline',
 			],
+			[
+				'less than a minute of use left after the connect deadline',
+				() => ({ expiresAtMs: Date.now() + 89_000 }),
+				'less than the 30000ms connect deadline plus 60000ms of use',
+			],
 		])('refuse a credential with %s before dialing', async (_label, overrides, message) => {
 			const { provider } = tokenProvider(overrides());
 			const transport = providerTransport(provider);
@@ -524,6 +530,41 @@ describe('GeminiLiveTransport credentialProvider', () => {
 				expect.objectContaining({ kind: 'setup-failed', meta: { credentialId: 'cred_1' } }),
 			]);
 		});
+
+		it('take a credential that leaves exactly the minimum use, and honor a configured minimum', async () => {
+			vi.useFakeTimers();
+			const atFloor = tokenProvider({ expiresAtMs: Date.now() + 90_000 });
+			const connecting = providerTransport(atFloor.provider).connect();
+			await vi.advanceTimersByTimeAsync(1);
+			await connecting;
+			expect(sdk.clientOptions).toHaveLength(1);
+
+			// A cached token a few seconds from the floor would have reconnected the
+			// session every half minute; the floor is the owner's to lower or raise.
+			const cached = tokenProvider({ expiresAtMs: Date.now() + 31_000 });
+			await expect(providerTransport(cached.provider).connect()).rejects.toThrow(
+				'less than the 30000ms connect deadline plus 60000ms of use',
+			);
+			const lowered = providerTransport(cached.provider, { minCredentialLifetimeMs: 0 });
+			const loweredConnect = lowered.connect();
+			await vi.advanceTimersByTimeAsync(1);
+			await loweredConnect;
+			const raised = tokenProvider({ expiresAtMs: Date.now() + 10 * 60_000 });
+			await expect(
+				providerTransport(raised.provider, { minCredentialLifetimeMs: 15 * 60_000 }).connect(),
+			).rejects.toThrow('plus 900000ms of use');
+			expect(sdk.clientOptions).toHaveLength(2);
+		});
+
+		it.each([-1, Number.NaN, Number.POSITIVE_INFINITY])(
+			'refuse a minCredentialLifetimeMs of %s at construction',
+			(minCredentialLifetimeMs) => {
+				const { provider } = tokenProvider();
+				expect(() => providerTransport(provider, { minCredentialLifetimeMs })).toThrow(
+					ValidationError,
+				);
+			},
+		);
 
 		it('refuse a provider result that is not a credential, with no meta to report', async () => {
 			const transport = providerTransport(async () => undefined as unknown as GeminiCredential);
@@ -570,7 +611,7 @@ describe('GeminiLiveTransport credentialProvider', () => {
 			const transport = providerTransport(
 				async () => {
 					await new Promise((r) => setTimeout(r, 400));
-					return { apiKey: 'auth_tokens/t1', expiresAtMs: Date.now() + 60_000 };
+					return { apiKey: 'auth_tokens/t1', expiresAtMs: Date.now() + 30 * 60_000 };
 				},
 				{ connectTimeoutMs: 1_000 },
 			);
@@ -600,7 +641,7 @@ describe('GeminiLiveTransport credentialProvider', () => {
 			expect(signal?.aborted).toBe(true);
 			await expect(connecting).rejects.toThrow('Gemini dial superseded before setupComplete');
 
-			resolve({ apiKey: 'auth_tokens/late', expiresAtMs: Date.now() + 60_000 });
+			resolve({ apiKey: 'auth_tokens/late', expiresAtMs: Date.now() + 30 * 60_000 });
 			await new Promise((r) => setTimeout(r, 5));
 			expect(sdk.clientOptions).toEqual([]);
 			expect(events.map((e) => e.kind)).toEqual(['attempt']);
@@ -610,7 +651,7 @@ describe('GeminiLiveTransport credentialProvider', () => {
 			const transport = providerTransport(() => {
 				const credential = Promise.resolve({
 					apiKey: 'auth_tokens/t1',
-					expiresAtMs: Date.now() + 60_000,
+					expiresAtMs: Date.now() + 30 * 60_000,
 				});
 				// Retired once the credential has resolved, a microtask before the
 				// transport's continuation runs: the fetch can no longer be aborted.
@@ -640,7 +681,7 @@ describe('GeminiLiveTransport credentialProvider', () => {
 			await expect(connecting).rejects.toThrow(
 				'Gemini credential provider failed: Gemini transport disconnected',
 			);
-			resolve({ apiKey: 'auth_tokens/late', expiresAtMs: Date.now() + 60_000 });
+			resolve({ apiKey: 'auth_tokens/late', expiresAtMs: Date.now() + 30 * 60_000 });
 			await new Promise((r) => setTimeout(r, 5));
 			expect(sdk.clientOptions).toEqual([]);
 			expect(events.map((e) => e.kind)).toEqual(['attempt', 'attempt-close', 'setup-failed']);
@@ -651,7 +692,7 @@ describe('GeminiLiveTransport credentialProvider', () => {
 			const transport = providerTransport(() => {
 				const credential = Promise.resolve({
 					apiKey: 'auth_tokens/t1',
-					expiresAtMs: Date.now() + 60_000,
+					expiresAtMs: Date.now() + 30 * 60_000,
 				});
 				// Disconnected once the credential has resolved, a microtask before the
 				// transport's continuation runs: aborting the fetch can no longer fail it.
@@ -893,7 +934,7 @@ describe('GeminiLiveTransport credentialProvider', () => {
 			const transport = providerTransport(async () => {
 				calls += 1;
 				if (calls === 1) return new Promise<GeminiCredential>(() => {});
-				return { apiKey: 'auth_tokens/t2', expiresAtMs: Date.now() + 60_000 };
+				return { apiKey: 'auth_tokens/t2', expiresAtMs: Date.now() + 30 * 60_000 };
 			});
 			const events: ConnectionLifecycleEvent[] = [];
 			let redial: Promise<void> | undefined;
@@ -981,7 +1022,7 @@ describe('GeminiLiveTransport credentialProvider', () => {
 					});
 					return new Promise<GeminiCredential>(() => {});
 				}
-				return { apiKey: 'auth_tokens/t2', expiresAtMs: Date.now() + 60_000 };
+				return { apiKey: 'auth_tokens/t2', expiresAtMs: Date.now() + 30 * 60_000 };
 			});
 			const events = recordLifecycle(transport);
 			const first = transport.connect();
@@ -1007,7 +1048,7 @@ describe('GeminiLiveTransport credentialProvider', () => {
 					first = false;
 					return new Promise<GeminiCredential>(() => {});
 				}
-				return { apiKey: 'auth_tokens/second', expiresAtMs: Date.now() + 60_000 };
+				return { apiKey: 'auth_tokens/second', expiresAtMs: Date.now() + 30 * 60_000 };
 			});
 			const stale = transport.connect();
 			stale.catch(() => {});
@@ -1052,7 +1093,7 @@ describe('GeminiLiveTransport credentialProvider', () => {
 			sdk.mode = 'manual';
 			const transport = providerTransport(
 				async () => ({ apiKey: 'auth_tokens/t1', expiresAtMs: Date.now() + 1_000 }),
-				{ connectTimeoutMs: 1_000 },
+				{ connectTimeoutMs: 1_000, minCredentialLifetimeMs: 0 },
 			);
 			const expired = vi.fn();
 			transport.onCredentialExpiry = expired;
@@ -1069,17 +1110,22 @@ describe('GeminiLiveTransport credentialProvider', () => {
 	});
 
 	describe('hard close at expiresAtMs', () => {
+		// Short lifetimes keep these tests readable: the minimum-use floor is
+		// tested under 'credential checks'.
 		async function connectedWithExpiry(lifetimeMs: number) {
 			vi.useFakeTimers();
 			let n = 0;
-			const transport = providerTransport(async () => {
-				n++;
-				return {
-					apiKey: `auth_tokens/t${n}`,
-					expiresAtMs: Date.now() + lifetimeMs,
-					meta: { credentialId: `cred_${n}` },
-				};
-			});
+			const transport = providerTransport(
+				async () => {
+					n++;
+					return {
+						apiKey: `auth_tokens/t${n}`,
+						expiresAtMs: Date.now() + lifetimeMs,
+						meta: { credentialId: `cred_${n}` },
+					};
+				},
+				{ minCredentialLifetimeMs: 0 },
+			);
 			const events = recordLifecycle(transport);
 			const connecting = transport.connect();
 			await vi.advanceTimersByTimeAsync(1);
@@ -1174,11 +1220,14 @@ describe('GeminiLiveTransport credentialProvider', () => {
 		it('a connect that replaces the connection drops its expiry, even when it fails', async () => {
 			vi.useFakeTimers();
 			let n = 0;
-			const transport = providerTransport(async () => {
-				n++;
-				if (n > 1) throw new Error('refused');
-				return { apiKey: 'auth_tokens/t1', expiresAtMs: Date.now() + 60_000 };
-			});
+			const transport = providerTransport(
+				async () => {
+					n++;
+					if (n > 1) throw new Error('refused');
+					return { apiKey: 'auth_tokens/t1', expiresAtMs: Date.now() + 60_000 };
+				},
+				{ minCredentialLifetimeMs: 0 },
+			);
 			const expired = vi.fn();
 			transport.onCredentialExpiry = expired;
 			const connecting = transport.connect();

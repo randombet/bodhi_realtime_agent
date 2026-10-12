@@ -133,8 +133,13 @@ const session = new VoiceSession({
   retired is closed at once. Closing the session (the transport's
   `disconnect()`) at any point before `setupComplete` retires the connect the
   same way, so no connection opens after a close.
-- **Expiry:** the credential must expire at least `connectTimeoutMs` after the
-  provider returns. At `expiresAtMs` the session reconnects at once, as for a
+- **Expiry:** when the provider returns, the credential must leave at least
+  `connectTimeoutMs` plus `minCredentialLifetimeMs` (60 seconds by default) before
+  `expiresAtMs`, or the transport refuses it and the connect fails. This floor
+  keeps a provider that serves a nearly expired cached token from reconnecting
+  the session every few seconds. Set `minCredentialLifetimeMs` on a
+  `GeminiLiveTransport` you construct to change it (`0` keeps only the deadline
+  check). At `expiresAtMs` the session reconnects at once, as for a
   GoAway, with a new credential. If it cannot (no resumption handle, or not
   `ACTIVE`), the transport closes the connection and reports it as a close
   (`1000 'credential expired'`), which the session handles like any server
