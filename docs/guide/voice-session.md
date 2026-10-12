@@ -139,8 +139,9 @@ const session = new VoiceSession({
   close: without a resumption handle that ends or parks the session, per
   `upstreamLossPolicy`, as a GoAway would.
 - **Lifecycle:** the provider's `meta` rides on the connection's
-  `onConnectionLifecycle` events once the provider has returned (`setup-ok`,
-  `setup-failed`, `attempt-close`, `generation-close`). An attempt that fails
+  `onConnectionLifecycle` events once the provider has returned, including when
+  the transport refuses the credential (`setup-ok`, `setup-failed`,
+  `attempt-close`, `generation-close`). An attempt that fails
   before `setupComplete` also carries `failure`: `source` is `'provider'` (the
   provider threw, was aborted, or returned a credential that was refused, with
   what it threw as `error`), `'dial'` (the socket never opened; a refused

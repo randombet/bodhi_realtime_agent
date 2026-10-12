@@ -1033,9 +1033,13 @@ export class GeminiLiveTransport implements LLMTransport {
 			if (this.credentialFetch === fetch) this.credentialFetch = null;
 		}
 		if (gen !== this.dialGen) throw new Error('Gemini dial superseded before setupComplete');
+		// Recorded before the checks: a refused credential was still minted, and
+		// its meta is how the owner matches this attempt's failure to it.
+		if (typeof credential === 'object' && credential !== null) {
+			this.lifecycle.credentialIssued(credential.meta);
+		}
 		const refusal = refuseCredential(credential, timeoutMs);
 		if (refusal) throw this.credentialFailed(attempt, new ValidationError(refusal));
-		this.lifecycle.credentialIssued(credential.meta);
 		attempt.expiresAtMs = credential.expiresAtMs;
 		attempt.stage = 'dial';
 		const ai = new GoogleGenAI({

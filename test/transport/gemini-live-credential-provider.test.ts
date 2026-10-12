@@ -439,6 +439,21 @@ describe('GeminiLiveTransport credentialProvider', () => {
 			};
 			expect(failed.failure?.source).toBe('provider');
 			expect(failed.failure?.error).toBeInstanceOf(ValidationError);
+			// The refused credential was still minted: its meta lets the owner
+			// match these events to it.
+			expect(events.filter((e) => e.kind !== 'attempt')).toEqual([
+				expect.objectContaining({ kind: 'attempt-close', meta: { credentialId: 'cred_1' } }),
+				expect.objectContaining({ kind: 'setup-failed', meta: { credentialId: 'cred_1' } }),
+			]);
+		});
+
+		it('refuse a provider result that is not a credential, with no meta to report', async () => {
+			const transport = providerTransport(async () => undefined as unknown as GeminiCredential);
+			const events = recordLifecycle(transport);
+			await expect(transport.connect()).rejects.toThrow('credentialProvider returned no apiKey');
+			expect(sdk.clientOptions).toEqual([]);
+			expect(events.map((e) => e.kind)).toEqual(['attempt', 'attempt-close', 'setup-failed']);
+			for (const event of events) expect(event).not.toHaveProperty('meta');
 		});
 	});
 
