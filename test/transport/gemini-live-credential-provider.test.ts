@@ -371,6 +371,42 @@ describe('GeminiLiveTransport credentialProvider', () => {
 		expect(routed.vertexai).toBe(true);
 	});
 
+	it('the installed SDK takes enterprise: false itself and dials the Developer API endpoint', async () => {
+		vi.stubEnv('GOOGLE_GENAI_USE_ENTERPRISE', 'true');
+		vi.stubEnv('GOOGLE_GENAI_USE_VERTEXAI', 'true');
+		vi.stubEnv('GOOGLE_CLOUD_PROJECT', 'routing-test');
+		vi.stubEnv('GOOGLE_CLOUD_LOCATION', 'us-central1');
+		const { provider } = tokenProvider();
+		await providerTransport(provider).connect();
+		const options = sdk.clientOptions[0] as Record<string, unknown>;
+		const { model, config } = lastDial().params;
+
+		// The provider path's client options, given to the installed SDK under
+		// routing flags that point at Vertex AI, dial the Developer API's
+		// ephemeral-token endpoint with the token as its access_token.
+		const dialed = new URL((await sdkDial(options, model, config)).url);
+		expect(dialed.protocol).toBe('wss:');
+		expect(dialed.host).toBe('generativelanguage.googleapis.com');
+		expect(dialed.pathname).toMatch(
+			/\/ws\/google\.ai\.generativelanguage\.v1alpha\.GenerativeService\.BidiGenerateContentConstrained$/,
+		);
+		expect(dialed.searchParams.get('access_token')).toBe('auth_tokens/t1');
+
+		// `enterprise: false` alone does the same: the installed SDK reads the
+		// option rather than ignoring it, which would let the environment win.
+		const { vertexai: _vertexai, ...enterpriseOnly } = options;
+		expect((await sdkDial(enterpriseOnly, model, config)).url).toMatch(
+			/^wss:\/\/generativelanguage\.googleapis\.com\//,
+		);
+		// Controls: without the flags the environment routes the token to Vertex
+		// AI, and the SDK checks the two flags against each other.
+		const actual = await vi.importActual<typeof import('@google/genai')>('@google/genai');
+		expect(new actual.GoogleGenAI({ apiKey: 'auth_tokens/t1' }).vertexai).toBe(true);
+		expect(
+			() => new actual.GoogleGenAI({ apiKey: 'k', vertexai: false, enterprise: true }),
+		).toThrow(/conflicting/);
+	});
+
 	describe('lifecycle events', () => {
 		it("carry the provider's meta on the connection's setup-ok and close", async () => {
 			const { provider } = tokenProvider();

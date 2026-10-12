@@ -71,6 +71,8 @@ describe('package manifest', () => {
 		// The credential provider's per-connection client passes `enterprise: false`
 		// (GeminiLiveTransport), which the SDK's types have only from 1.52.0 on: a
 		// consumer resolving an older version could not compile the transport.
+		// That the installed SDK acts on it is tested on the dial itself, in
+		// test/transport/gemini-live-credential-provider.test.ts.
 		const range = manifest.dependencies['@google/genai'];
 		const floor = /^\^(\d+)\.(\d+)\.(\d+)$/.exec(range ?? '');
 		expect(floor, `@google/genai range ${range}`).not.toBeNull();
