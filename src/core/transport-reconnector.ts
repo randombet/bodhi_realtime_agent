@@ -675,6 +675,12 @@ export class TransportReconnector {
 				);
 			}, deadlineMs);
 		}
+		// Only a credential-expiry reconnect dials without a handle, and it means a
+		// fresh session. A transport can still hold a handle this session never
+		// saw (one passed to its constructor), and `reconnect()` falls back to it
+		// when none is given: it would resume from that handle and skip the replay.
+		// Drop it first, on every attempt, so the dial is fresh.
+		if (!handle) this.deps.transport.clearResumption?.();
 		this.deps.transport
 			.reconnect({
 				// Without a handle the transport opens a fresh session and replays this.
@@ -846,7 +852,9 @@ export class TransportReconnector {
 	 *  for a GoAway; the reconnect fetches a new credential. Unlike a GoAway it
 	 *  reconnects without a resumption handle too (`sessionResumption: false`,
 	 *  none issued yet, or the last update was not resumable): a fresh session
-	 *  that replays the conversation, as an agent transfer does. The rotation is
+	 *  that replays the conversation, as an agent transfer does. A handle only
+	 *  the transport holds (passed to its constructor, never reported to this
+	 *  session) is dropped, not resumed from. The rotation is
 	 *  the library's own, so it is never treated as a loss. When this does not
 	 *  reconnect (the session is not ACTIVE), the transport closes the
 	 *  connection and the close path takes over. */

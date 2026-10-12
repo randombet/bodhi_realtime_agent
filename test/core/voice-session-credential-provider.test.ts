@@ -404,6 +404,57 @@ describe('VoiceSession with a credentialProvider', () => {
 		]);
 	});
 
+	it('rotates to a fresh session that replays the conversation even when the transport was built with a handle the session never saw', async () => {
+		const setups: GeminiLiveSetup[] = [];
+		const provider: GeminiCredentialProvider = async (setup) => {
+			setups.push(setup);
+			const lifetimeMs = setups.length === 1 ? 250 : 30 * 60_000;
+			return { apiKey: `auth_tokens/t${setups.length}`, expiresAtMs: Date.now() + lifetimeMs };
+		};
+		const transport = new GeminiLiveTransport(
+			{
+				credentialProvider: provider,
+				connectTimeoutMs: 100,
+				minCredentialLifetimeMs: 0,
+				sessionResumption: { handle: 'seeded-handle' },
+			},
+			{},
+		);
+		session = new VoiceSession({
+			sessionId: 'sess_expiry_seeded',
+			userId: 'u',
+			apiKey: 'unused-with-an-injected-transport',
+			transport,
+			agents: agents(),
+			initialAgent: 'main',
+			clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			model: mockModel,
+			upstreamLossPolicy: 'hold',
+		});
+		await session.start();
+		await settle();
+		// The first connect resumed from the seeded handle; no resumption update
+		// arrives, so the session itself holds none when the credential expires.
+		expect(session.sessionManager.resumptionHandle).toBeNull();
+		session.conversationContext.addUserMessage('Book the table for eight.');
+
+		await settle(300);
+
+		expect(session.sessionManager.state).toBe('ACTIVE');
+		expect(setups.map((s) => s.config.sessionResumption)).toEqual([
+			{ handle: 'seeded-handle' },
+			{},
+		]);
+		expect(dials()).toHaveLength(2);
+		expect(lastDial().session.sendClientContent).toHaveBeenCalledWith(
+			expect.objectContaining({
+				turns: expect.arrayContaining([
+					{ role: 'user', parts: [{ text: 'Book the table for eight.' }] },
+				]),
+			}),
+		);
+	});
+
 	describe('with upstreamRecovery under hold (the voice lane)', () => {
 		async function startLane(failSecond: Error) {
 			const setups: GeminiLiveSetup[] = [];

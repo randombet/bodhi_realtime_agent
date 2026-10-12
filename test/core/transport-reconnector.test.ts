@@ -856,6 +856,46 @@ describe('TransportReconnector', () => {
 			expect(dialedHandles(h.transport)).toEqual([undefined, undefined]);
 			expect(h.sm.state).toBe('ACTIVE');
 		});
+
+		it('without a resumption handle first drops any handle the transport holds, before every dial', async () => {
+			const order: string[] = [];
+			const clearResumption = vi.fn(() => {
+				order.push('clear');
+			});
+			const reconnect = vi
+				.fn()
+				.mockImplementationOnce(async () => {
+					order.push('dial');
+					throw connectFailed();
+				})
+				.mockImplementation(async () => {
+					order.push('dial');
+				});
+			const h = makeHarness({
+				handle: null,
+				transport: fakeTransport({ reconnect, clearResumption }),
+			});
+
+			h.reconnector.handleCredentialExpiry();
+			await vi.advanceTimersByTimeAsync(1_000);
+			await vi.runAllTimersAsync();
+
+			expect(order).toEqual(['clear', 'dial', 'clear', 'dial']);
+			expect(h.sm.state).toBe('ACTIVE');
+		});
+
+		it('with a resumption handle leaves the transport’s handle alone', async () => {
+			const clearResumption = vi.fn();
+			const h = makeHarness({ transport: fakeTransport({ clearResumption }) });
+
+			h.reconnector.handleCredentialExpiry();
+			await vi.runAllTimersAsync();
+			h.reconnector.handleGoAway('10s');
+			await vi.runAllTimersAsync();
+
+			expect(dialedHandles(h.transport)).toEqual(['handle-1', 'handle-1']);
+			expect(clearResumption).not.toHaveBeenCalled();
+		});
 	});
 
 	describe('handleResumptionUpdate', () => {

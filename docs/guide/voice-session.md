@@ -155,7 +155,10 @@ const session = new VoiceSession({
   credential, as for a GoAway: with its resumption handle when it has one, and
   otherwise (`sessionResumption: false`, no handle issued yet, or the last
   update was not resumable) to a fresh session that replays the conversation,
-  as an agent transfer does. This rotation is planned, not a loss: it spends
+  as an agent transfer does. A handle given to the transport's constructor
+  (`sessionResumption: { handle }`) that no server update has replaced yet
+  counts as none here: the session never saw it, so the rotation drops it
+  rather than resume from it. This rotation is planned, not a loss: it spends
   none of the reconnect budget, and the old connection's close is reported as
   a local disconnect (`1000 'local disconnect'`), which `upstreamRecovery`
   does not count. In any other state the transport closes the connection
