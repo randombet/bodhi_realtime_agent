@@ -461,16 +461,56 @@ export interface UpstreamCounters {
  * attempt (e.g. attempt-close followed by setup-failed). */
 export type ConnectionLifecycleEvent =
 	| { kind: 'attempt'; connectAttemptId: string; handleSupplied: boolean }
-	| { kind: 'setup-ok'; connectAttemptId: string; transportGeneration: number }
-	| { kind: 'setup-failed'; connectAttemptId: string; reason?: string }
-	| { kind: 'attempt-close'; connectAttemptId: string; code?: number; reason?: string }
+	| { kind: 'setup-ok'; connectAttemptId: string; transportGeneration: number; meta?: unknown }
+	| {
+			kind: 'setup-failed';
+			connectAttemptId: string;
+			reason?: string;
+			meta?: unknown;
+			failure?: ConnectFailure;
+	  }
+	| {
+			kind: 'attempt-close';
+			connectAttemptId: string;
+			code?: number;
+			reason?: string;
+			meta?: unknown;
+			failure?: ConnectFailure;
+	  }
 	| {
 			kind: 'generation-close';
 			connectAttemptId: string;
 			transportGeneration: number;
 			code?: number;
 			reason?: string;
+			meta?: unknown;
 	  };
+
+/** Why a connect attempt failed before `setupComplete`. Reported on the
+ *  `attempt-close` and `setup-failed` lifecycle events of a transport that
+ *  authenticates each connect with a credential provider (the Gemini
+ *  transport's `credentialProvider`); those events also carry the provider's
+ *  `meta` once it has returned. Absent without a provider.
+ *
+ *  - `provider`: the credential provider threw, was aborted (its share of the
+ *    connect deadline ran out, or the attempt was superseded), or returned a
+ *    credential the transport refuses. `error` is what it threw.
+ *  - `dial`: the socket never opened (a refused upgrade, a reset, the deadline).
+ *  - `session`: the socket opened and closed, or timed out, before
+ *    `setupComplete`, for example when Gemini refused the token or the setup. */
+export interface ConnectFailure {
+	source: 'provider' | 'dial' | 'session';
+	/** The provider's error message, the timeout, or the close description. */
+	message: string;
+	/** WebSocket close code, when the socket closed. */
+	code?: number;
+	/** WebSocket close reason, when the socket closed with one. */
+	reason?: string;
+	/** HTTP status of a refused WebSocket upgrade, when the SDK reported one. */
+	status?: number;
+	/** What the credential provider threw or aborted with (`source: 'provider'`). */
+	error?: unknown;
+}
 
 /** Point-in-time transport diagnostics; safe to sample on any tick. */
 export interface TransportDiagnostics {
@@ -762,6 +802,13 @@ export interface LLMTransport {
 
 	// --- Optional capability callbacks (only fired by supporting transports) ---
 	onGoAway?: (timeLeft: string) => void;
+	/** The credential of the current connection reached its expiry
+	 *  (GeminiLiveTransport with a `credentialProvider`). A consumer that can
+	 *  reconnect now should start that reconnect synchronously, as for a GoAway:
+	 *  right after this returns the transport closes the connection, unless a
+	 *  `disconnect()` already detached it, and reports the close through
+	 *  `onClose` and a `generation-close` lifecycle event. */
+	onCredentialExpiry?: () => void;
 	onResumptionUpdate?: (handle: string, resumable: boolean) => void;
 	onGroundingMetadata?: (metadata: Record<string, unknown>) => void;
 

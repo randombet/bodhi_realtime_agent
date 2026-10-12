@@ -1,6 +1,7 @@
 import {
 	type FunctionResponseScheduling,
 	GoogleGenAI,
+	type LiveConnectConfig,
 	type LiveServerMessage,
 	type RealtimeInputConfig,
 	type Session,
@@ -11,6 +12,7 @@ import { ValidationError } from '../core/errors.js';
 import type { FunctionBehavior, ToolDefinition } from '../types/tool.js';
 import type {
 	AudioFormatSpec,
+	ConnectFailure,
 	ConnectionLifecycleEvent,
 	ContentTurn,
 	GenerationEndReason,
@@ -176,10 +178,65 @@ export function resolveGeminiRealtimeInputConfig(
 	} as GeminiRealtimeInputConfig;
 }
 
-/** Configuration for connecting to the Gemini Live API. */
-export interface GeminiTransportConfig {
+/** The final setup of one connection: exactly what the transport passes to
+ *  `live.connect`. Built once per connect and deep-frozen, so a credential
+ *  locked to it (a Gemini ephemeral token with `liveConnectConstraints`)
+ *  locks what is actually sent. */
+export interface GeminiLiveSetup {
+	readonly model: string;
+	readonly config: Readonly<LiveConnectConfig>;
+}
+
+/** What a {@link GeminiCredentialProvider} returns: the credential for one connection. */
+export interface GeminiCredential {
+	/** An API key or an ephemeral token (`auth_tokens/…`), used for this one connection. */
+	apiKey: string;
+	/** Gemini API version for this connection (the SDK's ephemeral-token support
+	 *  expects `v1alpha`). Omitted, the SDK's default applies. */
+	apiVersion?: string;
+	/** Epoch ms when the transport closes this connection and reconnects with a
+	 *  new credential, whether or not the server sent GoAway. Must be finite and
+	 *  at least `connectTimeoutMs` away when the provider returns. */
+	expiresAtMs: number;
+	/** Opaque to the transport: carried on this connection's lifecycle events. */
+	meta?: unknown;
+}
+
+/**
+ * Fetches the credential for one connection. Called inside every `connect()`
+ * (start, reconnect, transfer, recovery redial) with that connection's final
+ * setup, which is the object `live.connect` receives a copy of. `signal`
+ * aborts when the attempt is cancelled: its half of the connect deadline ran
+ * out, `abortIncumbent()` retired it, a newer `connect()` superseded it, or
+ * `disconnect()` ran while it fetched. A credential that arrives after
+ * cancellation is dropped unused.
+ */
+export type GeminiCredentialProvider = (
+	setup: GeminiLiveSetup,
+	signal: AbortSignal,
+) => Promise<GeminiCredential>;
+
+/** Configuration for connecting to the Gemini Live API with one static API key. */
+export interface GeminiTransportConfig extends GeminiTransportOptions {
 	/** Google API key for authentication. */
 	apiKey: string;
+	credentialProvider?: never;
+}
+
+/** Configuration for connecting to the Gemini Live API with a credential
+ *  fetched for each connection. */
+export interface GeminiProviderTransportConfig extends GeminiTransportOptions {
+	/** Per-connection credentials. The transport builds no client of its own
+	 *  and never uses a static key: each connect gets a client built from the
+	 *  provider's credential, with the Developer API selected explicitly
+	 *  (`vertexai: false`, `enterprise: false`), so the SDK's routing environment
+	 *  variables do not apply. `connect(config).auth` is ignored. */
+	credentialProvider: GeminiCredentialProvider;
+	apiKey?: never;
+}
+
+/** The Gemini transport's options apart from its credential. */
+export interface GeminiTransportOptions {
 	/** Gemini model name (default: "gemini-3.1-flash-live-preview"). */
 	model?: string;
 	/** System instruction sent to the model at connection time. */
@@ -229,7 +286,9 @@ export interface GeminiTransportConfig {
 	 *  sent verbatim with nothing merged in. Supplying it together with
 	 *  `realtimeInputConfig` (including `false`) throws a `ValidationError`. */
 	vadConfig?: GeminiVadConfig;
-	/** Timeout in ms for connect() to receive setupComplete (default: 30000). */
+	/** Timeout in ms for connect() to receive setupComplete (default: 30000).
+	 *  With a `credentialProvider` it is one deadline over the credential fetch,
+	 *  the dial and setupComplete; the fetch may use at most half of it. */
 	connectTimeoutMs?: number;
 	/** Force-kill delay in ms for `reconnect()` (default: 45000): when it expires
 	 *  and no newer dial has started, the session field is cleared. It does not
@@ -276,6 +335,9 @@ export interface GeminiTransportCallbacks {
 	onOutputTranscription?(text: string): void;
 	/** Server is shutting down — reconnect before timeLeft expires. */
 	onGoAway?(timeLeft: string): void;
+	/** The current connection's credential expired (`credentialProvider` only);
+	 *  see `LLMTransport.onCredentialExpiry`. */
+	onCredentialExpiry?(): void;
 	/** New session resumption handle available. */
 	onResumptionUpdate?(handle: string, resumable: boolean): void;
 	/** Connection-lifecycle facts (attempt / setup / close). */
@@ -349,6 +411,94 @@ function clientContentBytes(turns: ReadonlyArray<{ parts: ReadonlyArray<unknown>
 	return { raw, wire };
 }
 
+/** Close reason of a connection closed at its credential's expiry. */
+const CREDENTIAL_EXPIRED = 'credential expired';
+
+/** Where a credential-provider connect attempt is: fetching its credential,
+ *  dialing, or opened and waiting for setupComplete. */
+interface CredentialAttempt {
+	stage: ConnectFailure['source'];
+	/** The last WebSocket error message, for a refused upgrade's HTTP status. */
+	lastError?: string;
+	/** Set by the failure that ended the attempt, when it knew more than a timeout. */
+	failure?: ConnectFailure;
+	/** The credential's expiry, once the provider returned. */
+	expiresAtMs?: number;
+}
+
+/** HTTP status of a refused WebSocket upgrade, from the `ws` error message. */
+function upgradeStatus(message: string | undefined): number | undefined {
+	const match = /Unexpected server response: (\d{3})/.exec(message ?? '');
+	return match ? Number(match[1]) : undefined;
+}
+
+/** A socket close before setupComplete, as a `ConnectFailure`. */
+function closeFailure(
+	attempt: CredentialAttempt,
+	message: string,
+	code: number | undefined,
+	reason: string | undefined,
+): ConnectFailure {
+	const source = attempt.stage === 'session' ? 'session' : 'dial';
+	const status = source === 'dial' ? upgradeStatus(attempt.lastError) : undefined;
+	return {
+		source,
+		message,
+		...(code !== undefined ? { code } : {}),
+		...(reason ? { reason } : {}),
+		...(status !== undefined ? { status } : {}),
+	};
+}
+
+/** A failure that came with nothing but a message (the deadline, a supersede). */
+function stageFailure(attempt: CredentialAttempt, message: string): ConnectFailure {
+	return { source: attempt.stage, message };
+}
+
+/** Why a provider's credential is refused, or `null` when it is usable. */
+function refuseCredential(credential: GeminiCredential, connectTimeoutMs: number): string | null {
+	if (typeof credential?.apiKey !== 'string' || credential.apiKey === '') {
+		return 'credentialProvider returned no apiKey';
+	}
+	if (!Number.isFinite(credential.expiresAtMs)) {
+		return 'credentialProvider returned a non-finite expiresAtMs';
+	}
+	const remainingMs = credential.expiresAtMs - Date.now();
+	if (remainingMs < connectTimeoutMs) {
+		return `credential expires in ${remainingMs}ms, less than the ${connectTimeoutMs}ms connect deadline`;
+	}
+	return null;
+}
+
+/** `promise`, rejected with the signal's reason once it aborts, whether or not
+ *  `promise` honors the signal. */
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+	if (signal.aborted) return Promise.reject(signal.reason);
+	return new Promise<T>((resolve, reject) => {
+		const onAbort = () => reject(signal.reason);
+		signal.addEventListener('abort', onAbort, { once: true });
+		promise.then(
+			(value) => {
+				signal.removeEventListener('abort', onAbort);
+				resolve(value);
+			},
+			(error: unknown) => {
+				signal.removeEventListener('abort', onAbort);
+				reject(error);
+			},
+		);
+	});
+}
+
+/** Freeze `value` and everything it holds. */
+function deepFreeze<T>(value: T): T {
+	if (typeof value === 'object' && value !== null && !Object.isFrozen(value)) {
+		Object.freeze(value);
+		for (const child of Object.values(value)) deepFreeze(child);
+	}
+	return value;
+}
+
 /**
  * WebSocket transport layer for the Gemini Live API.
  *
@@ -363,11 +513,20 @@ function clientContentBytes(turns: ReadonlyArray<{ parts: ReadonlyArray<unknown>
 export class GeminiLiveTransport implements LLMTransport {
 	/** Bound on `abortIncumbent()`'s close of the stranded session. */
 	private static readonly ABORT_INCUMBENT_CLOSE_TIMEOUT_MS = 5_000;
+	/** Longest single `setTimeout` (Node fires a longer one at once). */
+	private static readonly MAX_TIMER_MS = 2_147_483_647;
 
 	private session: Session | null = null;
-	private ai: GoogleGenAI;
+	/** The static-key client; `null` with a `credentialProvider`, where each
+	 *  connect builds its own. */
+	private ai: GoogleGenAI | null;
 	private callbacks: GeminiTransportCallbacks;
-	private config: GeminiTransportConfig;
+	private config: GeminiTransportConfig | GeminiProviderTransportConfig;
+	private readonly credentialProvider: GeminiCredentialProvider | undefined;
+	/** Cancels the credential fetch of the dial in flight, if any. */
+	private credentialFetch: AbortController | null = null;
+	/** The expiry timer of the current dial's credential. */
+	private credentialExpiry: { gen: number; timer: ReturnType<typeof setTimeout> } | null = null;
 	/** Resolves when setupComplete fires — used to make connect() await Gemini readiness. */
 	private setupResolver: (() => void) | null = null;
 	/** Increments per dial and when the current dial fails or is aborted; socket
@@ -552,15 +711,32 @@ export class GeminiLiveTransport implements LLMTransport {
 	onUsageMetadata?: (usage: TransportUsageMetadata) => void = undefined;
 	/** Connection-lifecycle facts, property form (VoiceSession wires this one). */
 	onConnectionLifecycle?: (event: ConnectionLifecycleEvent) => void = undefined;
+	/** The current connection's credential expired (`credentialProvider` only). */
+	onCredentialExpiry?: () => void;
 
-	constructor(config: GeminiTransportConfig, callbacks: GeminiTransportCallbacks) {
+	constructor(
+		config: GeminiTransportConfig | GeminiProviderTransportConfig,
+		callbacks: GeminiTransportCallbacks,
+	) {
 		if (config.realtimeInputConfig !== undefined && config.vadConfig !== undefined) {
 			throw new ValidationError(
 				'GeminiLiveTransport: realtimeInputConfig and vadConfig are mutually exclusive. ' +
 					'vadConfig is shorthand for realtimeInputConfig: { automaticActivityDetection: vadConfig }; set only one.',
 			);
 		}
-		this.ai = new GoogleGenAI({ apiKey: config.apiKey });
+		if (config.credentialProvider !== undefined) {
+			if (typeof config.credentialProvider !== 'function') {
+				throw new ValidationError('GeminiLiveTransport: credentialProvider must be a function.');
+			}
+			if (config.apiKey !== undefined) {
+				throw new ValidationError(
+					'GeminiLiveTransport: apiKey and credentialProvider are mutually exclusive; set only one.',
+				);
+			}
+		}
+		this.credentialProvider = config.credentialProvider;
+		// With a provider there is no client until a connect has its credential.
+		this.ai = this.credentialProvider ? null : new GoogleGenAI({ apiKey: config.apiKey });
 		this.config = config;
 		this.callbacks = callbacks;
 
@@ -718,40 +894,54 @@ export class GeminiLiveTransport implements LLMTransport {
 		});
 		closedBeforeSetup.catch(() => {});
 
+		// A newer dial supersedes any credential fetch or expiry still pending.
+		this.cancelCredentialFetch('Gemini dial superseded before setupComplete');
+		this.clearCredentialExpiry();
 		const gen = ++this.dialGen;
 		this.lifecycle.beginAttempt(gen, handleSupplied);
-		const dial = this.ai.live.connect({
-			model,
-			config: connectConfig,
-			callbacks: {
-				onopen: () => {},
-				onmessage: (msg: LiveServerMessage) => {
-					if (gen !== this.dialGen) return;
-					this.handleMessage(msg);
-				},
-				onerror: (e: { message?: string }) => {
-					if (gen !== this.dialGen) return;
-					const error = new Error(e.message ?? 'WebSocket error');
-					this.callbacks.onError?.(error);
-					if (this.onError) this.onError({ error, recoverable: true });
-				},
-				onclose: (e: { code?: number; reason?: string }) => {
-					if (gen !== this.dialGen) return;
-					const code = e?.code;
-					const reason = e?.reason;
-					if (!setupDone) {
-						failSetup(
-							new Error(
-								`Gemini socket closed before setupComplete (code=${code})${reason ? `: ${reason}` : ''}`,
-							),
-						);
-					}
-					this.lifecycle.socketClosed(code, reason);
-					this.callbacks.onClose?.(code, reason);
-					if (this.onClose) this.onClose(code, reason);
-				},
+		// Where a credential-provider attempt is, so a failure can say where it
+		// failed (`ConnectFailure.source`); unused without a provider.
+		const attempt: CredentialAttempt = { stage: 'provider' };
+		const callbacks = {
+			onopen: () => {
+				attempt.stage = 'session';
 			},
-		});
+			onmessage: (msg: LiveServerMessage) => {
+				if (gen !== this.dialGen) return;
+				this.handleMessage(msg);
+			},
+			onerror: (e: { message?: string }) => {
+				if (gen !== this.dialGen) return;
+				attempt.lastError = e.message;
+				const error = new Error(e.message ?? 'WebSocket error');
+				this.callbacks.onError?.(error);
+				if (this.onError) this.onError({ error, recoverable: true });
+			},
+			onclose: (e: { code?: number; reason?: string }) => {
+				if (gen !== this.dialGen) return;
+				const code = e?.code;
+				const reason = e?.reason;
+				let failure: ConnectFailure | undefined;
+				if (!setupDone) {
+					const error = new Error(
+						`Gemini socket closed before setupComplete (code=${code})${reason ? `: ${reason}` : ''}`,
+					);
+					if (this.credentialProvider) {
+						failure = closeFailure(attempt, error.message, code, reason);
+						attempt.failure = failure;
+					}
+					failSetup(error);
+				}
+				this.clearCredentialExpiry(gen);
+				this.lifecycle.socketClosed(code, reason, failure);
+				this.callbacks.onClose?.(code, reason);
+				if (this.onClose) this.onClose(code, reason);
+			},
+		};
+		const provider = this.credentialProvider;
+		const dial = provider
+			? this.dialWithCredential(provider, gen, model, connectConfig, callbacks, timeoutMs, attempt)
+			: (this.ai as GoogleGenAI).live.connect({ model, config: connectConfig, callbacks });
 
 		let dialSession: Session | undefined;
 		try {
@@ -763,15 +953,28 @@ export class GeminiLiveTransport implements LLMTransport {
 			}
 			this.session = dialSession;
 			await Promise.race([setupComplete, timeout, closedBeforeSetup]);
+			// The connection is up: from here its credential's expiry closes it. A
+			// connection detached meanwhile (by a setup-ok observer) gets no timer.
+			if (
+				attempt.expiresAtMs !== undefined &&
+				gen === this.dialGen &&
+				this.session === dialSession
+			) {
+				this.armCredentialExpiry(gen, attempt.expiresAtMs);
+			}
 		} catch (err) {
 			if (gen === this.dialGen) {
 				this.dialGen++;
 				this.session = null;
+				const message = err instanceof Error ? err.message : String(err);
 				// Fenced like every other stale-dial signal (a superseded dial's late
 				// failure would follow a newer attempt's setup-ok with a stale event),
 				// and emitted after the fence advanced, so an observer that redials
 				// from it starts a dial nothing supersedes.
-				this.lifecycle.setupFailed(err instanceof Error ? err.message : String(err));
+				this.lifecycle.setupFailed(
+					message,
+					provider ? (attempt.failure ?? stageFailure(attempt, message)) : undefined,
+				);
 			} else if (dialSession !== undefined && this.session === dialSession) {
 				this.session = null;
 			}
@@ -782,6 +985,153 @@ export class GeminiLiveTransport implements LLMTransport {
 		} finally {
 			clearTimeout(timer);
 		}
+	}
+
+	/**
+	 * The dial of a `credentialProvider` connect: freeze the final setup, fetch
+	 * this connection's credential with it (aborted at half the connect
+	 * deadline, or when the attempt is retired), then dial with a client built
+	 * for that credential alone. Rejects without dialing when the provider fails,
+	 * its credential is refused, or the attempt was retired while it fetched, so
+	 * a late credential is never used and holds nothing.
+	 */
+	private async dialWithCredential(
+		provider: GeminiCredentialProvider,
+		gen: number,
+		model: string,
+		connectConfig: Record<string, unknown>,
+		callbacks: Parameters<GoogleGenAI['live']['connect']>[0]['callbacks'],
+		timeoutMs: number,
+		attempt: CredentialAttempt,
+	): Promise<Session> {
+		// A copy, so freezing it never freezes caller-owned objects the config
+		// references (realtimeInputConfig, the default VAD constant).
+		const setup: GeminiLiveSetup = deepFreeze({
+			model,
+			config: structuredClone(connectConfig) as LiveConnectConfig,
+		});
+		const fetch = new AbortController();
+		this.credentialFetch = fetch;
+		const fetchBudgetMs = Math.floor(timeoutMs / 2);
+		const budget = setTimeout(
+			() => fetch.abort(new Error(`Gemini credential fetch timed out after ${fetchBudgetMs}ms`)),
+			fetchBudgetMs,
+		);
+		let credential: GeminiCredential;
+		try {
+			// A provider that throws synchronously fails the attempt like one that rejects.
+			credential = await untilAborted(Promise.resolve(provider(setup, fetch.signal)), fetch.signal);
+		} catch (err) {
+			// Retired while fetching (abortIncumbent() or a newer dial): not a
+			// provider failure, and nothing to report for a retired attempt.
+			if (gen !== this.dialGen) {
+				throw new Error('Gemini dial superseded before setupComplete', { cause: err });
+			}
+			throw this.credentialFailed(attempt, err);
+		} finally {
+			clearTimeout(budget);
+			if (this.credentialFetch === fetch) this.credentialFetch = null;
+		}
+		if (gen !== this.dialGen) throw new Error('Gemini dial superseded before setupComplete');
+		const refusal = refuseCredential(credential, timeoutMs);
+		if (refusal) throw this.credentialFailed(attempt, new ValidationError(refusal));
+		this.lifecycle.credentialIssued(credential.meta);
+		attempt.expiresAtMs = credential.expiresAtMs;
+		attempt.stage = 'dial';
+		const ai = new GoogleGenAI({
+			apiKey: credential.apiKey,
+			vertexai: false,
+			enterprise: false,
+			...(credential.apiVersion ? { httpOptions: { apiVersion: credential.apiVersion } } : {}),
+		});
+		// A structurally identical copy of the frozen setup: the SDK writes
+		// `config.tools` during connect, which a frozen object would refuse.
+		return ai.live.connect({
+			model: setup.model,
+			config: structuredClone(setup.config) as LiveConnectConfig,
+			callbacks,
+		});
+	}
+
+	/** A provider failure of the current dial: recorded as a pre-setup close
+	 *  carrying the provider's error, and returned as the error the dial
+	 *  rejects with. */
+	private credentialFailed(attempt: CredentialAttempt, err: unknown): Error {
+		const error = err instanceof Error ? err : new Error(String(err));
+		const failure: ConnectFailure = {
+			source: 'provider',
+			message: `Gemini credential provider failed: ${error.message}`,
+			error: err,
+		};
+		attempt.failure = failure;
+		this.lifecycle.closedBeforeDial(failure);
+		return new Error(failure.message, { cause: err });
+	}
+
+	/** Abort the in-flight credential fetch, if any. */
+	private cancelCredentialFetch(reason: string): void {
+		const fetch = this.credentialFetch;
+		if (!fetch) return;
+		this.credentialFetch = null;
+		fetch.abort(new Error(reason));
+	}
+
+	/** Close dial `gen`'s connection at its credential's expiry. One timer per
+	 *  connection, armed at setupComplete (the refusal of a credential expiring
+	 *  within the connect deadline keeps expiry out of the dial); a longer wait
+	 *  than one timer can hold is re-armed in steps. */
+	private armCredentialExpiry(gen: number, expiresAtMs: number): void {
+		this.clearCredentialExpiry();
+		const arm = (): void => {
+			const wait = Math.min(
+				Math.max(0, expiresAtMs - Date.now()),
+				GeminiLiveTransport.MAX_TIMER_MS,
+			);
+			const timer = setTimeout(() => {
+				if (this.credentialExpiry?.timer !== timer) return;
+				if (Date.now() < expiresAtMs) {
+					arm();
+					return;
+				}
+				this.credentialExpiry = null;
+				this.expireCredential(gen);
+			}, wait);
+			this.credentialExpiry = { gen, timer };
+		};
+		arm();
+	}
+
+	/** Drop the pending expiry: any, or only dial `gen`'s. */
+	private clearCredentialExpiry(gen?: number): void {
+		const expiry = this.credentialExpiry;
+		if (!expiry || (gen !== undefined && expiry.gen !== gen)) return;
+		clearTimeout(expiry.timer);
+		this.credentialExpiry = null;
+	}
+
+	/**
+	 * Dial `gen`'s credential expired. The owner may reconnect at once
+	 * (`onCredentialExpiry`, as for a GoAway); if the connection is still
+	 * attached when that returns, it is closed here and reported like a server
+	 * close, so the owner's close handling reconnects, with a new credential,
+	 * either way.
+	 */
+	private expireCredential(gen: number): void {
+		const expiring = this.session;
+		if (gen !== this.dialGen || !expiring) return;
+		this.notifyObserver('onCredentialExpiry', () => this.callbacks.onCredentialExpiry?.());
+		this.notifyObserver('onCredentialExpiry', () => this.onCredentialExpiry?.());
+		if (gen !== this.dialGen || this.session !== expiring) return;
+		// Nobody reconnected: close it ourselves. Fence first, so the socket's own
+		// late close is not reported a second time.
+		this.dialGen += 1;
+		this.detachSession();
+		this.lifecycle.localDisconnect(CREDENTIAL_EXPIRED);
+		Promise.resolve()
+			.then(() => expiring.close())
+			.catch(() => {});
+		this.callbacks.onClose?.(1000, CREDENTIAL_EXPIRED);
+		if (this.onClose) this.onClose(1000, CREDENTIAL_EXPIRED);
 	}
 
 	/** Disconnect and reconnect, optionally with a new resumption handle or ReconnectState.
@@ -859,6 +1209,7 @@ export class GeminiLiveTransport implements LLMTransport {
 	 *  Does not go through `disconnect()`. */
 	abortIncumbent(): Promise<'closed' | 'forced'> {
 		this.dialGen += 1;
+		this.cancelCredentialFetch('Gemini connection retired by abortIncumbent()');
 		const incumbent = this.detachSession();
 		this.clearResumption();
 		let closing: Promise<unknown>;
@@ -896,6 +1247,10 @@ export class GeminiLiveTransport implements LLMTransport {
 	}
 
 	async disconnect(): Promise<void> {
+		// A credential still being fetched is for a connection nobody wants now
+		// (a session closing during its first dial): abort it, which fails that
+		// connect. A dial already past its fetch is retired by abortIncumbent().
+		this.cancelCredentialFetch('Gemini transport disconnected');
 		// Detach before awaiting: a newer dial can install a replacement session
 		// while close() is in flight, and it must survive this call untouched —
 		// nothing below touches `this.session` once the close completes.
@@ -926,6 +1281,7 @@ export class GeminiLiveTransport implements LLMTransport {
 	private detachSession(): Session | null {
 		const incumbent = this.session;
 		this.session = null;
+		this.clearCredentialExpiry();
 		this._firstAudioFired = false;
 		this._cachedGeminiUsage = null;
 		this.resetServerTurnState();
@@ -1398,7 +1754,8 @@ export class GeminiLiveTransport implements LLMTransport {
 	 *  undefined fields preserve existing constructor values.
 	 */
 	private applyTransportConfig(config: LLMTransportConfig): void {
-		if (config.auth.type === 'api_key') {
+		// A credential provider authenticates each connect: no static key replaces it.
+		if (config.auth.type === 'api_key' && !this.credentialProvider) {
 			this.ai = new GoogleGenAI({ apiKey: config.auth.apiKey });
 		}
 		if (config.model !== undefined) {

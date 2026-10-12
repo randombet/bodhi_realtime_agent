@@ -116,6 +116,52 @@ describe('ConnectionLifecycleLedger', () => {
 		expect(events.map((e) => e.kind)).toEqual(['attempt', 'attempt-close']);
 	});
 
+	it("a credential's meta rides on every later event of its attempt, and only that attempt", () => {
+		const { events, ledger } = record();
+		ledger.beginAttempt(1, false);
+		ledger.credentialIssued({ credentialId: 'c1' });
+		ledger.setupOk();
+		ledger.localDisconnect('credential expired');
+		ledger.beginAttempt(2, true);
+		ledger.setupOk();
+
+		expect(events).toEqual([
+			{ kind: 'attempt', connectAttemptId: 'att_1', handleSupplied: false },
+			{
+				kind: 'setup-ok',
+				connectAttemptId: 'att_1',
+				transportGeneration: 1,
+				meta: { credentialId: 'c1' },
+			},
+			{
+				kind: 'generation-close',
+				connectAttemptId: 'att_1',
+				transportGeneration: 1,
+				code: 1000,
+				reason: 'credential expired',
+				meta: { credentialId: 'c1' },
+			},
+			{ kind: 'attempt', connectAttemptId: 'att_2', handleSupplied: true },
+			{ kind: 'setup-ok', connectAttemptId: 'att_2', transportGeneration: 2 },
+		]);
+		expect(Object.hasOwn(events[4] as object, 'meta')).toBe(false);
+	});
+
+	it('a failure before a socket existed is one attempt-close carrying it', () => {
+		const { events, ledger } = record();
+		const failure = { source: 'provider' as const, message: 'refused', error: new Error('x') };
+		ledger.beginAttempt(1, false);
+		ledger.closedBeforeDial(failure);
+		ledger.socketClosed(1006);
+		ledger.setupFailed('refused', failure);
+
+		expect(events).toEqual([
+			{ kind: 'attempt', connectAttemptId: 'att_1', handleSupplied: false },
+			{ kind: 'attempt-close', connectAttemptId: 'att_1', reason: 'refused', failure },
+			{ kind: 'setup-failed', connectAttemptId: 'att_1', reason: 'refused', failure },
+		]);
+	});
+
 	it('a throwing observer never escapes and every later event still fires', () => {
 		const seen: string[] = [];
 		const warn = vi.fn();

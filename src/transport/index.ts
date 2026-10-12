@@ -39,8 +39,13 @@ export { GeminiLiveTranscribeSTTProvider } from './gemini-live-transcribe-stt-pr
 export type { GeminiLiveTranscribeSTTConfig } from './gemini-live-transcribe-stt-provider.js';
 export { GeminiLiveTransport } from './gemini-live-transport.js';
 export type {
+	GeminiCredential,
+	GeminiCredentialProvider,
+	GeminiLiveSetup,
+	GeminiProviderTransportConfig,
 	GeminiTransportCallbacks,
 	GeminiTransportConfig,
+	GeminiTransportOptions,
 	LiveUsageMetadata,
 } from './gemini-live-transport.js';
 export type { LLMTransport } from '../types/transport.js';
