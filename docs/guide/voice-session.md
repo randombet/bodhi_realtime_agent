@@ -84,6 +84,74 @@ const session = new VoiceSession({
 });
 ```
 
+## Per-connection Gemini credentials
+
+Instead of one `apiKey` for every connection, the built-in Gemini transport can
+fetch a credential for each connection with `credentialProvider` (the two are
+mutually exclusive). Use it when a short-lived token, such as a Gemini ephemeral
+token minted per connection, should authenticate each dial. Such a session is
+configured with `VoiceSessionProviderConfig` (`GeminiProviderTransportConfig`
+for a transport you construct); `VoiceSessionConfig` and
+`GeminiTransportConfig` remain the static-key configs.
+
+```ts
+const session = new VoiceSession({
+  sessionId: 'session_1',
+  userId: 'user_1',
+  credentialProvider: async (setup, signal) => {
+    // `setup` is { model, config }: exactly what this connection will send.
+    const minted = await mintToken(setup, { signal });
+    return {
+      apiKey: minted.token, // e.g. 'auth_tokens/…'
+      apiVersion: 'v1alpha',
+      expiresAtMs: minted.expiresAtMs,
+      meta: { credentialId: minted.id },
+    };
+  },
+  agents: [mainAgent],
+  initialAgent: 'main',
+  model: google('gemini-2.5-flash'),
+});
+```
+
+- **Every connect calls it:** the first dial, GoAway and close reconnects,
+  `recoverUpstream()` (including the client-attach redial of a parked session),
+  agent transfers, and the next connect after a tool or instruction change. Each
+  connection gets a client built for its credential alone, with the Developer
+  API selected explicitly (`vertexai: false`, `enterprise: false`), so
+  `GOOGLE_GENAI_USE_VERTEXAI` and `GOOGLE_GENAI_USE_ENTERPRISE` do not apply. No
+  client is built from a static key.
+- **One final setup:** `setup` is built once per connect and deep-frozen, and
+  `live.connect` receives a copy equal to it, so a token locked to `setup`
+  locks what is sent.
+- **One deadline:** the transport's `connectTimeoutMs` (30 seconds by default)
+  covers the fetch, the dial and `setupComplete` together. The fetch may use at
+  most half of it; then `signal` aborts and the connect fails. `signal` also
+  aborts when the attempt is retired (`abortIncumbent()`, a recovery, or a newer
+  connect) and when the session closes while it fetches. A credential that
+  arrives after that is never used, and a dial that opens after its attempt was
+  retired is closed at once.
+- **Expiry:** the credential must expire at least `connectTimeoutMs` after the
+  provider returns. At `expiresAtMs` the session reconnects at once, as for a
+  GoAway, with a new credential. If it cannot (no resumption handle, or not
+  `ACTIVE`), the transport closes the connection and reports it as a close
+  (`1000 'credential expired'`), which the session handles like any server
+  close: without a resumption handle that ends or parks the session, per
+  `upstreamLossPolicy`, as a GoAway would.
+- **Lifecycle:** the provider's `meta` rides on the connection's
+  `onConnectionLifecycle` events once the provider has returned (`setup-ok`,
+  `setup-failed`, `attempt-close`, `generation-close`). An attempt that fails
+  before `setupComplete` also carries `failure`: `source` is `'provider'` (the
+  provider threw, was aborted, or returned a credential that was refused, with
+  what it threw as `error`), `'dial'` (the socket never opened; a refused
+  upgrade's HTTP `status` when there is one) or `'session'` (the socket opened
+  and closed before `setupComplete`, with its `code` and `reason`). A provider
+  failure is reported as an `attempt-close` without a socket, then
+  `setup-failed`. Without a provider, no event carries `meta` or `failure`.
+
+`credentialProvider` applies to the built-in transport. With an injected
+`transport`, pass it to the `GeminiLiveTransport` you construct instead.
+
 ## Local client connection roles
 
 The local `ClientTransport` reads the query string of each WebSocket upgrade

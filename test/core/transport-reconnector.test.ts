@@ -548,6 +548,36 @@ describe('TransportReconnector', () => {
 		});
 	});
 
+	describe('handleCredentialExpiry (immediate, unbudgeted, like GoAway)', () => {
+		it('disarms the watchdog and reconnects at once, without a session.goaway', async () => {
+			const ct = fakeClientTransport([]);
+			const h = makeHarness({ watchdogMs: 8000, clientTransport: ct });
+			h.reconnector.armResponseWatchdog();
+
+			h.reconnector.handleCredentialExpiry();
+			expect(h.eventBus.publish).not.toHaveBeenCalledWith('session.goaway', expect.anything());
+			expect(h.sm.transitionTo).toHaveBeenCalledWith('RECONNECTING');
+			expect(ct.startBuffering).toHaveBeenCalledTimes(1);
+			await vi.runAllTimersAsync();
+			expect(h.transport.reconnect).toHaveBeenCalledTimes(1);
+			expect(h.sm.transitionTo).toHaveBeenLastCalledWith('ACTIVE');
+
+			vi.advanceTimersByTime(20000);
+			expect(h.transport.reconnect).toHaveBeenCalledTimes(1);
+		});
+
+		it('is ignored outside ACTIVE and without a resumption handle', () => {
+			const closed = makeHarness({ initial: 'CLOSED' });
+			expect(() => closed.reconnector.handleCredentialExpiry()).not.toThrow();
+			expect(closed.sm.transitionTo).not.toHaveBeenCalled();
+			expect(closed.transport.reconnect).not.toHaveBeenCalled();
+
+			const noHandle = makeHarness({ handle: null });
+			noHandle.reconnector.handleCredentialExpiry();
+			expect(noHandle.transport.reconnect).not.toHaveBeenCalled();
+		});
+	});
+
 	describe('handleResumptionUpdate', () => {
 		it('caches the handle on a resumable update', () => {
 			const h = makeHarness({});

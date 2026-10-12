@@ -750,7 +750,22 @@ export class TransportReconnector {
 			sessionId: this.deps.getSessionId(),
 			timeLeft,
 		});
+		this.reconnectBeforeClose('GoAway', 'goaway');
+	}
 
+	/** The transport's per-connection credential expired. Reconnect at once, as
+	 *  for a GoAway; the reconnect fetches a new credential. When this does not
+	 *  reconnect, the transport closes the connection and the close path takes
+	 *  over. */
+	handleCredentialExpiry(): void {
+		this.disarmResponseWatchdog();
+		this.deps.log('Gemini connection credential expired');
+		this.reconnectBeforeClose('Credential expiry', 'credential-expiry');
+	}
+
+	/** The immediate, unbudgeted reconnect shared by GoAway and credential
+	 *  expiry: the provider connection is about to end, not lost. */
+	private reconnectBeforeClose(what: string, reason: string): void {
 		if (this._disposed) return;
 		// Only an ACTIVE session reconnects on GoAway. A late GoAway from a
 		// connection that a close or an earlier reconnect already tore down must
@@ -759,7 +774,7 @@ export class TransportReconnector {
 		// CONNECTING → RECONNECTING edge, which only a host recovery uses.
 		const state = this.deps.sessionManager.state;
 		if (state !== 'ACTIVE') {
-			this.deps.log(`GoAway ignored — session state is ${state}, not ACTIVE`);
+			this.deps.log(`${what} ignored — session state is ${state}, not ACTIVE`);
 			return;
 		}
 
@@ -769,7 +784,7 @@ export class TransportReconnector {
 			this.deps.sessionManager.transitionTo('RECONNECTING');
 			this.deps.clientTransport.startBuffering();
 			this._clientBuffering = true;
-			this.runReconnect('goaway', handle, { drainReason: 'goaway', elicit: false });
+			this.runReconnect(reason, handle, { drainReason: 'goaway', elicit: false });
 		}
 	}
 

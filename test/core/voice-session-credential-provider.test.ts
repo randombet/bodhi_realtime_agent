@@ -1,0 +1,375 @@
+// SPDX-License-Identifier: MIT
+//
+// VoiceSession with a Gemini `credentialProvider`: every way the session dials
+// Gemini (start, GoAway, an unexpected close, a host recovery, a tool change,
+// an agent transfer, a client attach to a parked session, a credential
+// expiry) fetches a credential for that connect and dials with it.
+
+import type { LanguageModelV1 } from 'ai';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
+import { ValidationError } from '../../src/core/errors.js';
+import {
+	VoiceSession,
+	type VoiceSessionConfig,
+	type VoiceSessionOptions,
+	type VoiceSessionProviderConfig,
+} from '../../src/core/voice-session.js';
+import {
+	DEFAULT_GEMINI_LIVE_MODEL,
+	type GeminiCredentialProvider,
+	type GeminiLiveSetup,
+	GeminiLiveTransport,
+} from '../../src/transport/gemini-live-transport.js';
+import type { MainAgent } from '../../src/types/agent.js';
+import type { ConnectionLifecycleEvent } from '../../src/types/transport.js';
+
+type Callbacks = {
+	onmessage?: (msg: unknown) => void;
+	onclose?: (e: { code?: number; reason?: string }) => void;
+};
+
+interface Dial {
+	clientOptions: Record<string, unknown>;
+	params: { model: string; config: Record<string, unknown>; callbacks: Callbacks };
+	session: {
+		close: ReturnType<typeof vi.fn>;
+		sendRealtimeInput: ReturnType<typeof vi.fn>;
+		sendClientContent: ReturnType<typeof vi.fn>;
+	};
+}
+
+const sdk = vi.hoisted(() => ({
+	clientOptions: [] as Array<Record<string, unknown>>,
+	dials: [] as unknown[],
+}));
+
+vi.mock('@google/genai', () => ({
+	GoogleGenAI: vi.fn().mockImplementation((options: Record<string, unknown>) => {
+		sdk.clientOptions.push(options);
+		return {
+			live: {
+				connect: vi.fn(async (params: Dial['params']) => {
+					const session = {
+						sendRealtimeInput: vi.fn(),
+						sendToolResponse: vi.fn(),
+						sendClientContent: vi.fn(),
+						close: vi.fn(),
+					};
+					sdk.dials.push({ clientOptions: options, params, session });
+					setTimeout(() => params.callbacks.onmessage?.({ setupComplete: { sessionId: 'gs' } }), 5);
+					return session;
+				}),
+			},
+		};
+	}),
+}));
+vi.mock('ai', () => ({ generateText: vi.fn(async () => ({ text: 'ok' })) }));
+
+const dials = () => sdk.dials as Dial[];
+const lastDial = () => dials()[dials().length - 1] as Dial;
+const settle = (ms = 40) => new Promise((r) => setTimeout(r, ms));
+const mockModel = { modelId: 'test-model' } as unknown as LanguageModelV1;
+
+const agents = (): MainAgent[] => [
+	{ name: 'main', instructions: 'You are the main agent.', tools: [] },
+	{ name: 'other', instructions: 'You are the other agent.', tools: [] },
+];
+
+function tokenProvider() {
+	const setups: GeminiLiveSetup[] = [];
+	const provider = vi.fn<GeminiCredentialProvider>(async (setup) => {
+		setups.push(setup);
+		return {
+			apiKey: `auth_tokens/t${setups.length}`,
+			apiVersion: 'v1alpha',
+			expiresAtMs: Date.now() + 30 * 60_000,
+			meta: { credentialId: `cred_${setups.length}` },
+		};
+	});
+	return { provider, setups };
+}
+
+/** Every dial used the token of the provider call made for it, with the setup it was given. */
+function expectEachDialUsedItsCredential(setups: GeminiLiveSetup[]): void {
+	expect(dials()).toHaveLength(setups.length);
+	dials().forEach((dial, i) => {
+		expect(dial.clientOptions).toMatchObject({
+			apiKey: `auth_tokens/t${i + 1}`,
+			vertexai: false,
+			enterprise: false,
+		});
+		expect(dial.params.model).toBe(setups[i]?.model);
+		expect(dial.params.config).toEqual(setups[i]?.config);
+	});
+	// No client was ever built from a static key.
+	expect(sdk.clientOptions.every((o) => String(o.apiKey).startsWith('auth_tokens/'))).toBe(true);
+}
+
+describe('VoiceSession with a credentialProvider', () => {
+	let session: VoiceSession | null = null;
+
+	beforeEach(() => {
+		sdk.clientOptions.length = 0;
+		sdk.dials.length = 0;
+	});
+	afterEach(async () => {
+		if (session) await session.close();
+		session = null;
+	});
+
+	async function start(
+		provider: GeminiCredentialProvider,
+		extra: Partial<VoiceSessionOptions> = {},
+	): Promise<VoiceSession> {
+		const lifecycle: ConnectionLifecycleEvent[] = [];
+		session = new VoiceSession({
+			sessionId: 'sess_cred',
+			userId: 'u',
+			credentialProvider: provider,
+			agents: agents(),
+			initialAgent: 'main',
+			clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			upstreamLossPolicy: 'hold',
+			model: mockModel,
+			onConnectionLifecycle: (e) => lifecycle.push(e),
+			...extra,
+		});
+		(session as unknown as { lifecycle: ConnectionLifecycleEvent[] }).lifecycle = lifecycle;
+		await session.start();
+		await settle();
+		return session;
+	}
+
+	/** Deliver a resumption handle on the current connection, so GoAway and
+	 *  close reconnects have one to resume with. */
+	function sendHandle(handle: string): void {
+		lastDial().params.callbacks.onmessage?.({
+			sessionResumptionUpdate: { newHandle: handle, resumable: true },
+		});
+	}
+
+	it('starts on the credential the provider minted for the final setup it was given', async () => {
+		const { provider, setups } = tokenProvider();
+		const s = await start(provider);
+
+		expect(s.sessionManager.state).toBe('ACTIVE');
+		expect(provider).toHaveBeenCalledTimes(1);
+		expect(setups[0]?.model).toBe(DEFAULT_GEMINI_LIVE_MODEL);
+		expect(setups[0]?.config.systemInstruction).toContain('You are the main agent.');
+		expect(Object.isFrozen(setups[0])).toBe(true);
+		expect(Object.isFrozen(setups[0]?.config)).toBe(true);
+		expectEachDialUsedItsCredential(setups);
+		const lifecycle = (s as unknown as { lifecycle: ConnectionLifecycleEvent[] }).lifecycle;
+		expect(lifecycle.find((e) => e.kind === 'setup-ok')).toMatchObject({
+			meta: { credentialId: 'cred_1' },
+		});
+	});
+
+	it('sends text turns on the default model as the static-key session does', async () => {
+		const { provider } = tokenProvider();
+		const s = await start(provider);
+		const transport = (s as unknown as { transport: GeminiLiveTransport }).transport;
+		transport.sendContent([{ role: 'user', text: 'hello' }], true);
+		// The default Live model takes text as realtime input, not client content.
+		expect(lastDial().session.sendRealtimeInput).toHaveBeenCalledWith({ text: 'hello' });
+		expect(lastDial().session.sendClientContent).not.toHaveBeenCalled();
+	});
+
+	it('reconnects on GoAway with a new credential for the resumed setup', async () => {
+		const { provider, setups } = tokenProvider();
+		const s = await start(provider);
+		sendHandle('handle-1');
+		lastDial().params.callbacks.onmessage?.({ goAway: { timeLeft: '10s' } });
+		await settle();
+
+		expect(s.sessionManager.state).toBe('ACTIVE');
+		expect(provider).toHaveBeenCalledTimes(2);
+		expect(setups[1]?.config.sessionResumption).toEqual({ handle: 'handle-1' });
+		expectEachDialUsedItsCredential(setups);
+	});
+
+	it('reconnects after an unexpected close (the response watchdog takes the same path)', async () => {
+		const { provider, setups } = tokenProvider();
+		const s = await start(provider);
+		sendHandle('handle-1');
+		lastDial().params.callbacks.onclose?.({ code: 1011, reason: 'internal error' });
+		await settle(1_200);
+
+		expect(s.sessionManager.state).toBe('ACTIVE');
+		expect(provider).toHaveBeenCalledTimes(2);
+		expectEachDialUsedItsCredential(setups);
+	});
+
+	it('redials a host recovery with a new credential', async () => {
+		const { provider, setups } = tokenProvider();
+		const s = await start(provider);
+		await s.recoverUpstream({
+			reason: 'active-silence',
+			skipContextInjection: false,
+			holdSyntheticUntilFreshSpeech: false,
+		}).activated;
+
+		expect(s.sessionManager.state).toBe('ACTIVE');
+		expect(provider).toHaveBeenCalledTimes(2);
+		expectEachDialUsedItsCredential(setups);
+	});
+
+	it('re-arms a tool change with a credential locked to the new tool list', async () => {
+		const { provider, setups } = tokenProvider();
+		const s = await start(provider);
+		await s.registerTools([
+			{
+				name: 'lookup',
+				description: 'Look something up',
+				parameters: z.object({ q: z.string() }),
+				execution: 'inline',
+				execute: async () => 'found',
+			},
+		]);
+		await s.recoverUpstream({
+			reason: 'human-retry',
+			skipContextInjection: false,
+			holdSyntheticUntilFreshSpeech: false,
+		}).activated;
+
+		const names = (
+			setups[1]?.config.tools as Array<{ functionDeclarations?: Array<{ name: string }> }>
+		)
+			.flatMap((t) => t.functionDeclarations ?? [])
+			.map((d) => d.name);
+		expect(names).toContain('lookup');
+		expectEachDialUsedItsCredential(setups);
+	});
+
+	it('transfers to another agent on a credential for that agent’s setup', async () => {
+		const { provider, setups } = tokenProvider();
+		const s = await start(provider);
+		await s.transfer('other');
+		await settle();
+
+		expect(provider).toHaveBeenCalledTimes(2);
+		expect(setups[1]?.config.systemInstruction).toContain('You are the other agent.');
+		expectEachDialUsedItsCredential(setups);
+	});
+
+	it('redials a parked session on a client attach with a new credential', async () => {
+		const { provider, setups } = tokenProvider();
+		const s = await start(provider);
+		await s.parkUpstream('idle');
+		expect(s.sessionManager.state).toBe('UPSTREAM_LOST');
+
+		s.notifyClientConnected();
+		await settle();
+
+		expect(s.sessionManager.state).toBe('ACTIVE');
+		expect(provider).toHaveBeenCalledTimes(2);
+		expectEachDialUsedItsCredential(setups);
+	});
+
+	it('reconnects at credential expiry, before any GoAway, on a new credential', async () => {
+		const setups: GeminiLiveSetup[] = [];
+		const provider: GeminiCredentialProvider = async (setup) => {
+			setups.push(setup);
+			return { apiKey: `auth_tokens/t${setups.length}`, expiresAtMs: Date.now() + 250 };
+		};
+		const transport = new GeminiLiveTransport(
+			{ credentialProvider: provider, connectTimeoutMs: 100 },
+			{},
+		);
+		session = new VoiceSession({
+			sessionId: 'sess_expiry',
+			userId: 'u',
+			apiKey: 'unused-with-an-injected-transport',
+			transport,
+			agents: agents(),
+			initialAgent: 'main',
+			clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			model: mockModel,
+		});
+		await session.start();
+		await settle();
+		sendHandle('handle-1');
+		const first = lastDial();
+
+		await settle(300);
+
+		expect(first.session.close).toHaveBeenCalled();
+		expect(setups.length).toBeGreaterThanOrEqual(2);
+		expect(setups[1]?.config.sessionResumption).toEqual({ handle: 'handle-1' });
+		expect(session.sessionManager.state).toBe('ACTIVE');
+		expectEachDialUsedItsCredential(setups);
+	});
+
+	it('closing during the first credential fetch aborts it, and nothing dials', async () => {
+		let signal: AbortSignal | undefined;
+		const provider: GeminiCredentialProvider = (_setup, s) => {
+			signal = s;
+			return new Promise(() => {});
+		};
+		session = new VoiceSession({
+			sessionId: 'sess_close',
+			userId: 'u',
+			credentialProvider: provider,
+			agents: agents(),
+			initialAgent: 'main',
+			clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			model: mockModel,
+		});
+		const starting = session.start();
+		starting.catch(() => {});
+		await settle(5);
+		await session.close();
+		session = null;
+
+		expect(signal?.aborted).toBe(true);
+		await expect(starting).rejects.toThrow('Gemini transport disconnected');
+		await settle();
+		expect(dials()).toEqual([]);
+	});
+
+	it('keeps the static-key config as it was, and takes exactly one credential', () => {
+		const { provider } = tokenProvider();
+		const options: VoiceSessionOptions = {
+			sessionId: 's',
+			userId: 'u',
+			agents: agents(),
+			initialAgent: 'main',
+			model: mockModel,
+		};
+		// Static-key configs extend, omit and spread as before.
+		interface AppConfig extends VoiceSessionConfig {
+			region: string;
+		}
+		const app: AppConfig = { ...options, apiKey: 'k', region: 'eu' };
+		const overrides: Partial<VoiceSessionConfig> = { userId: 'v' };
+		const merged: VoiceSessionConfig = { ...app, ...overrides };
+		const omitted: Omit<VoiceSessionConfig, 'sessionId'> = merged;
+		const withProvider: VoiceSessionProviderConfig = { ...options, credentialProvider: provider };
+		expect([omitted.apiKey, withProvider.credentialProvider]).toEqual(['k', provider]);
+		// @ts-expect-error apiKey and credentialProvider are mutually exclusive
+		const both: VoiceSessionConfig | VoiceSessionProviderConfig = {
+			...options,
+			apiKey: 'k',
+			credentialProvider: provider,
+		};
+		expect(() => new VoiceSession(both)).toThrow(ValidationError);
+	});
+
+	it('refuses a credentialProvider beside an injected transport', () => {
+		const { provider } = tokenProvider();
+		expect(
+			() =>
+				new VoiceSession({
+					sessionId: 's',
+					userId: 'u',
+					credentialProvider: provider,
+					transport: new GeminiLiveTransport({ apiKey: 'k' }, {}),
+					agents: agents(),
+					initialAgent: 'main',
+					clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+					model: mockModel,
+				}),
+		).toThrow(ValidationError);
+	});
+});

@@ -25,6 +25,7 @@ import { EchoGuard, type EchoGuardConfig } from '../transport/echo-guard.js';
 import {
 	DEFAULT_GEMINI_LIVE_MODEL,
 	type GeminiCompressionConfig,
+	type GeminiCredentialProvider,
 	GeminiLiveTransport,
 	type GeminiMediaResolution,
 	type GeminiRealtimeInputConfig,
@@ -286,13 +287,33 @@ interface InjectTextInternalOptions extends InjectTextOptions {
 /**
  * Configuration for creating a VoiceSession.
  */
-export interface VoiceSessionConfig {
+export interface VoiceSessionConfig extends VoiceSessionOptions {
+	/** Google API key for the Gemini Live API (used when no transport is provided). */
+	apiKey: string;
+	credentialProvider?: never;
+}
+
+/**
+ * Configuration for creating a VoiceSession whose built-in Gemini transport
+ * fetches a credential for every connect instead of using one `apiKey`. A
+ * provider applies to the built-in transport only: with an injected
+ * `transport`, give the `GeminiLiveTransport` you construct its own.
+ */
+export interface VoiceSessionProviderConfig extends VoiceSessionOptions {
+	/** Called on every connect of the built-in Gemini transport; see
+	 *  `GeminiProviderTransportConfig.credentialProvider`. */
+	credentialProvider: GeminiCredentialProvider;
+	apiKey?: never;
+}
+
+/**
+ * The options of a VoiceSession apart from its Gemini credential.
+ */
+export interface VoiceSessionOptions {
 	/** Unique session identifier. */
 	sessionId: string;
 	/** User identifier (used for memory storage and history). */
 	userId: string;
-	/** Google API key for the Gemini Live API (used when no transport is provided). */
-	apiKey: string;
 	/** All agents available in this session. */
 	agents: MainAgent[];
 	/** Name of the agent to activate on start. */
@@ -921,7 +942,7 @@ export class VoiceSession {
 	/** G5 drain-normalization flag (rollback = false → legacy raw bytes). */
 	private readonly normalizeDrainedInbound: boolean;
 	// --- Server-turn finalization dedup (external-TTS turn completion). ---
-	private config: VoiceSessionConfig;
+	private config: VoiceSessionConfig | VoiceSessionProviderConfig;
 	/** Injectable ms clock for metric/latency math (default `Date.now`). */
 	private readonly nowMs: () => number;
 	/** §11 latency-fact correlator (bus subscriber with an async-edge ring). */
@@ -1013,7 +1034,18 @@ export class VoiceSession {
 	 *  client's rate map (`slow | normal | fast → 0.85 | 1.0 | 1.2`). */
 	private static readonly MIN_PLAYBACK_RATE = MIN_PLAYBACK_RATE;
 
-	constructor(config: VoiceSessionConfig) {
+	constructor(config: VoiceSessionConfig | VoiceSessionProviderConfig) {
+		if (config.credentialProvider !== undefined && config.apiKey !== undefined) {
+			throw new ValidationError(
+				'VoiceSession: apiKey and credentialProvider are mutually exclusive; set only one.',
+			);
+		}
+		if (config.credentialProvider !== undefined && config.transport) {
+			throw new ValidationError(
+				'VoiceSession: credentialProvider applies to the built-in Gemini transport; ' +
+					'pass it to the GeminiLiveTransport you inject instead.',
+			);
+		}
 		if (config.upstreamRecovery && config.upstreamLossPolicy !== 'hold') {
 			throw new ValidationError(
 				"VoiceSession: upstreamRecovery requires upstreamLossPolicy 'hold'",
@@ -1330,8 +1362,14 @@ export class VoiceSession {
 					: undefined;
 			this.transport = new GeminiLiveTransport(
 				{
-					apiKey: config.apiKey,
-					model: config.geminiModel,
+					// A provider authenticates every connect, so dialTransport() passes the
+					// transport no per-dial config: it gets the resolved model here instead.
+					...(config.credentialProvider
+						? {
+								credentialProvider: config.credentialProvider,
+								model: config.geminiModel ?? DEFAULT_GEMINI_LIVE_MODEL,
+							}
+						: { apiKey: config.apiKey, model: config.geminiModel }),
 					systemInstruction: instructions,
 					tools: allInitialTools.length ? allInitialTools : undefined,
 					googleSearch: initialForLive?.googleSearch,
@@ -1896,7 +1934,7 @@ export class VoiceSession {
 		bus.subscribe('tool.result', (e) => policy.noteToolSettled(e.toolCallId));
 	}
 
-	private buildClientChannelAndGating(config: VoiceSessionConfig): void {
+	private buildClientChannelAndGating(config: VoiceSessionOptions): void {
 		const clientMedia = config.clientMedia ?? DEFAULT_CLIENT_MEDIA_PROFILE;
 		const directRtcMedia =
 			clientMedia.kind === 'direct_rtc' && clientMedia.rtcAudio === 'werift_opus'
@@ -2127,7 +2165,7 @@ export class VoiceSession {
 	}
 
 	private buildAgentRouter(
-		config: VoiceSessionConfig,
+		config: VoiceSessionOptions,
 		allInitialTools: ToolDefinition[],
 		behaviorTools: ToolDefinition[],
 	): void {
@@ -2175,7 +2213,7 @@ export class VoiceSession {
 	}
 
 	private buildOrchestration(
-		config: VoiceSessionConfig,
+		config: VoiceSessionOptions,
 		agentTools: ToolDefinition[],
 		behaviorTools: ToolDefinition[],
 	): void {
@@ -2543,6 +2581,7 @@ export class VoiceSession {
 		this.transport.onError = (error) => this.handleTransportError(error);
 		this.transport.onClose = (code, reason) => this.handleTransportClose(code, reason);
 		this.transport.onGoAway = (timeLeft) => this.handleGoAway(timeLeft);
+		this.transport.onCredentialExpiry = () => this.handleCredentialExpiry();
 		this.transport.onResumptionUpdate = (handle, resumable) =>
 			this.reconnector.handleResumptionUpdate(handle, resumable);
 		this.transport.onGroundingMetadata = (metadata) => this.handleGroundingMetadata(metadata);
@@ -2968,16 +3007,20 @@ export class VoiceSession {
 	 *  connecting (after any pre-connect session update), abandons the dial.
 	 *  Resolves `true` when it connected, `false` when it was abandoned. */
 	private async dialTransport(skipConnect?: () => boolean): Promise<boolean> {
-		if (this.config.transport && this.isTextMode) {
+		// An injected transport, and the built-in one with a credential provider,
+		// already hold their connect config: they dial without static auth.
+		const config = this.config;
+		const preconfigured = config.transport !== undefined || config.credentialProvider !== undefined;
+		if (preconfigured && this.isTextMode) {
 			await this.transport.updateSession({ responseModality: 'text' });
 		}
 		if (skipConnect?.()) return false;
-		if (this.config.transport) {
+		if (preconfigured) {
 			await this.transport.connect();
 			return true;
 		}
 		await this.transport.connect({
-			auth: { type: 'api_key', apiKey: this.config.apiKey },
+			auth: { type: 'api_key', apiKey: config.apiKey },
 			model: this.config.geminiModel ?? DEFAULT_GEMINI_LIVE_MODEL,
 			...(this.resolvedRealtimeInputConfig
 				? {
@@ -4000,6 +4043,17 @@ export class VoiceSession {
 			reason: 'reconnect',
 		});
 		this.reconnector.handleGoAway(timeLeft);
+	}
+
+	/** The transport's credential for this connection expired: reconnect now,
+	 *  as for a GoAway. The transport closes the connection itself if this does
+	 *  not start a reconnect. */
+	private handleCredentialExpiry(): void {
+		this.eventBus.publish('session.reset', {
+			sessionId: this.config.sessionId,
+			reason: 'reconnect',
+		});
+		this.reconnector.handleCredentialExpiry();
 	}
 
 	// --- Client transport handlers ---
