@@ -330,8 +330,10 @@ export interface HostRecoveryControllerDeps {
 	clearGreetingState(): void;
 	/** Drop retained user audio (the watchdog replay candidate). */
 	clearRetainedUtterances(): void;
-	/** Replay the conversation into the replacement connection, quiet and hold-gated. */
-	replayConversation(): void;
+	/** Replay the conversation into the replacement connection, quiet and hold-gated.
+	 *  `attemptEpoch` names the recovery being activated, so a replacement whose setup
+	 *  already seeded the conversation (`initialHistory`) is not given it twice. */
+	replayConversation(attemptEpoch: number): void;
 	reportError(component: string, error: Error): void;
 	log(message: string): void;
 }
@@ -388,6 +390,12 @@ const PARKABLE_STATES: readonly SessionState[] = ['ACTIVE', 'RECONNECTING', 'UPS
  */
 export class HostRecoveryController {
 	private inFlight: RecoveryAttempt | null = null;
+
+	/** The `attemptEpoch` of the recovery in flight, or `null`: the connection
+	 *  setting up right now, if any, is that recovery's replacement. */
+	get inFlightAttemptEpoch(): number | null {
+		return this.inFlight?.result.attemptEpoch ?? null;
+	}
 	private disposed = false;
 	private replacedFirstDial = false;
 
@@ -638,7 +646,9 @@ export class HostRecoveryController {
 		try {
 			this.runGuarded('notification drain on activation', () => hold.releaseDialWindow());
 			if (!attempt.args.skipContextInjection) {
-				this.runGuarded('conversation replay on activation', () => this.deps.replayConversation());
+				this.runGuarded('conversation replay on activation', () =>
+					this.deps.replayConversation(epoch),
+				);
 			}
 		} finally {
 			// A park or a close from the drain or the replay: `activated` rejects.

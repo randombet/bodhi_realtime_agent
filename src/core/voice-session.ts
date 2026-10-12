@@ -742,6 +742,11 @@ export class VoiceSession {
 	private historyWriter?: ConversationHistoryWriter;
 	/** Resume: guards the one-time initial-connect model prefill (see handleSetupComplete). */
 	private initialHistoryReplayed = false;
+	/** The host-recovery attempt whose replacement connection was seeded with
+	 *  `initialHistory` at setup (`null`: the seeding was not on a recovery's
+	 *  replacement). That recovery's activation replay would send the same
+	 *  conversation again, so it is skipped for this one attempt. */
+	private initialHistorySeededForAttempt: number | null = null;
 	private transport: LLMTransport;
 	/** Assigned in `buildClientChannelAndGating`, called unconditionally from the constructor. */
 	private clientTransport!: IClientChannel;
@@ -1841,7 +1846,7 @@ export class VoiceSession {
 				this._pendingResponseOrigin = null;
 			},
 			clearRetainedUtterances: () => this.utteranceRetainer?.clearAll(),
-			replayConversation: () => this.replayConversationToReplacement(),
+			replayConversation: (attemptEpoch) => this.replayConversationToReplacement(attemptEpoch),
 			reportError: (component, error) => this.reportError(component, error),
 			log: (msg) => this.log(msg),
 		});
@@ -3650,6 +3655,7 @@ export class VoiceSession {
 			(this.config.initialHistory?.length ?? 0) > 0
 		) {
 			this.initialHistoryReplayed = true;
+			this.initialHistorySeededForAttempt = this.hostRecovery.inFlightAttemptEpoch;
 			this.transport.replayHistory?.(
 				this.conversationContext.toReplayContent({ log: (m) => this.log(m) }),
 			);
@@ -4896,10 +4902,6 @@ export class VoiceSession {
 		}
 	}
 
-	/** Quietly (no response requested) inject the last ten user and assistant
-	 *  items, 150 characters each, as context for a connection that starts
-	 *  without the server-side conversation. Suppressed (logged) while synthetic
-	 *  output is held; nothing is sent when there is no conversation yet. */
 	/**
 	 * A replacement connection is a fresh upstream session with no server-side
 	 * context. Replay the conversation into it the way a reconnect without a
@@ -4907,8 +4909,18 @@ export class VoiceSession {
 	 * batch that requests no response. Hold-gated like every synthetic send.
 	 * The last ten lines (`injectRecentContext`) lost everything older and
 	 * everything summarized, and their "wait silently" lead was taken as a mode.
+	 *
+	 * A replacement that was seeded with `initialHistory` at setup (the session
+	 * had never been ACTIVE: the first dial of `start()` failed or was replaced
+	 * while CONNECTING) already holds the conversation; it is not sent twice.
 	 */
-	private replayConversationToReplacement(): void {
+	private replayConversationToReplacement(attemptEpoch: number): void {
+		if (this.initialHistorySeededForAttempt === attemptEpoch) {
+			this.log(
+				`Replacement connection: the conversation was seeded at setup (attempt ${attemptEpoch}); not replayed again`,
+			);
+			return;
+		}
 		const items = this.conversationContext.toReplayContent({ log: (m) => this.log(m) });
 		if (items.length === 0) return;
 		if (!this.hold.gate('gemini-reconnect-context')) return;
@@ -4922,6 +4934,10 @@ export class VoiceSession {
 		this.log(`Replayed the conversation into the replacement connection (${items.length} items)`);
 	}
 
+	/** Quietly (no response requested) inject the last ten user and assistant
+	 *  items, 150 characters each, as context for a connection that starts
+	 *  without the server-side conversation. Suppressed (logged) while synthetic
+	 *  output is held; nothing is sent when there is no conversation yet. */
 	private injectRecentContext(
 		origin: 'gemini-reconnect-context' | 'client-reconnect-context',
 	): void {

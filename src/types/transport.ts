@@ -520,9 +520,12 @@ export interface LLMTransport {
 	connect(config?: LLMTransportConfig): Promise<void>;
 	disconnect(): Promise<void>;
 	reconnect(state?: ReconnectState): Promise<void>;
-	/** Prefill prior turns before the first turn (resume). Call ONCE, AFTER connect(), BEFORE the
-	 *  first send; idempotent (no-op if already seeded). Optional — a transport that cannot prefill
-	 *  on the initial connect omits it (VoiceSession calls it as `transport.replayHistory?.(...)`).
+	/** Replay prior turns into the live upstream session as quiet context (no response requested).
+	 *  Called AFTER connect() and BEFORE the next send, for a session that has no server-side
+	 *  conversation: the host's `initialHistory` on the first connection that sets up (resume),
+	 *  and the whole conversation on a host-recovery replacement connection. Not idempotent: the
+	 *  caller sends a given conversation to a given connection once. Optional — a transport that
+	 *  cannot prefill omits it (VoiceSession calls it as `transport.replayHistory?.(...)`).
 	 *  Distinct from reconnect recovery, which transports drive internally from `ReconnectState`. */
 	replayHistory?(items: readonly ReplayItem[]): void;
 	readonly isConnected: boolean;

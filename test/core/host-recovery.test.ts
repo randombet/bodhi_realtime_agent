@@ -1466,6 +1466,42 @@ describe('host recovery (legacy mode)', () => {
 			]);
 		});
 
+		it('initialHistory is replayed once when the CONNECTING recovery also asks for the conversation (skipContextInjection: false)', async () => {
+			// The replacement is seeded at setup; its activation replay would send the same
+			// conversation again (review of #54). Documented path: the UPSTREAM_LOST client-attach redial.
+			const stub = createRecoveryTransport();
+			const replayHistory = vi.fn();
+			stub.transport.replayHistory = replayHistory;
+			const lines: string[] = [];
+			session = createRecoverySession(stub, { initialHistory: history, log: (l) => lines.push(l) });
+			const { started, firstDial } = await startWithPendingDial(stub, session);
+
+			const r = session.recoverUpstream(
+				recoverArgs({ reason: 'human-retry', skipContextInjection: false }),
+			);
+			await r.activated;
+			firstDial.resolve();
+			await started;
+
+			expect(replayHistory).toHaveBeenCalledTimes(1);
+			expect(replayHistory).toHaveBeenCalledWith([
+				{ type: 'text', role: 'user', text: 'my name is Ada' },
+				{ type: 'text', role: 'assistant', text: 'hello Ada' },
+			]);
+			expect(
+				lines.some((l) =>
+					l.includes(
+						`the conversation was seeded at setup (attempt ${r.attemptEpoch}); not replayed again`,
+					),
+				),
+			).toBe(true);
+
+			// A later recovery of the now-ACTIVE session is not the seeded one: it gets the conversation.
+			replayHistory.mockClear();
+			await session.recoverUpstream(recoverArgs({ skipContextInjection: false })).activated;
+			expect(replayHistory).toHaveBeenCalledTimes(1);
+		});
+
 		it('initialHistory is replayed once by a first dial that sets up, and not again by a later recovery', async () => {
 			const stub = createRecoveryTransport();
 			const replayHistory = vi.fn();
