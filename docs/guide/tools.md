@@ -7,6 +7,12 @@ Tools are callable functions exposed to the live model.
 - `inline`: blocking, result returned in-turn
 - `background`: async handoff to subagent
 
+On Gemini Live, every function is declared `BLOCKING` unless the tool sets
+`behavior` or the session sets `functionBehavior`. Live models differ when a
+declaration says nothing: `gemini-3.8-live` would run the call `NON_BLOCKING`
+and end the model's turn before the result exists, so the framework never leaves
+it to the model. Set `'NON_BLOCKING'` to opt into asynchronous calls.
+
 ## Tool basics
 
 Each tool defines:

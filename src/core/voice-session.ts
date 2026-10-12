@@ -472,7 +472,9 @@ export interface VoiceSessionOptions {
 	 *  defaults. */
 	compressionConfig?: GeminiCompressionConfig;
 	/** Gemini Live default function-call `behavior` for every tool that does not set its own
-	 *  (see `ToolDefinition.behavior`). Unset leaves the model's default in place. */
+	 *  (see `ToolDefinition.behavior`). Unset means `'BLOCKING'` on every model, so an inline
+	 *  tool's call and the answer spoken from it stay one turn; it is never left to the
+	 *  model's own default, which differs between Live models. */
 	functionBehavior?: FunctionBehavior;
 	/** Enable server-side transcription of user audio input (default: true).
 	 *  Has no effect when sttProvider is set (built-in is disabled automatically).

@@ -156,6 +156,19 @@ export const DEFAULT_GEMINI_REALTIME_INPUT_CONFIG: GeminiRealtimeInputConfig = {
 export const DEFAULT_GEMINI_LIVE_MODEL = 'gemini-3.1-flash-live-preview';
 
 /**
+ * `behavior` declared on a function whose tool sets none, when the transport's
+ * `functionBehavior` is unset too. Gemini Live models differ when a
+ * declaration carries no `behavior`: gemini-3.1-flash-live-preview calls
+ * functions synchronously only, while gemini-3.8-live runs a call NON_BLOCKING
+ * and ends the model turn right after the toolCall, before the result exists.
+ * Declaring BLOCKING keeps `execution: 'inline'` meaning what it says (the
+ * model waits for the result, and a call and the answer spoken from it are one
+ * turn) on every model. Set `functionBehavior: 'NON_BLOCKING'`, or `behavior`
+ * on a tool, to opt into asynchronous calls.
+ */
+export const DEFAULT_FUNCTION_BEHAVIOR: FunctionBehavior = 'BLOCKING';
+
+/**
  * Deep-merges a user-supplied realtimeInputConfig over
  * DEFAULT_GEMINI_REALTIME_INPUT_CONFIG. Merge depth is exactly one level into
  * automaticActivityDetection — user fields win, missing fields fall back to
@@ -311,7 +324,8 @@ export interface GeminiTransportOptions {
 	 *  per-send override. Omitted → server default. */
 	mediaResolution?: GeminiMediaResolution;
 	/** Default `behavior` written on every function declaration that does not set its own.
-	 *  Unset sends no `behavior`, so the model's default applies. */
+	 *  Unset means `'BLOCKING'` ({@link DEFAULT_FUNCTION_BEHAVIOR}), on every model: the
+	 *  model's own default differs between Live models, so it is never left to it. */
 	functionBehavior?: FunctionBehavior;
 	/** Enable Gemini's built-in Google Search grounding. */
 	googleSearch?: boolean;
@@ -907,14 +921,15 @@ export class GeminiLiveTransport implements LLMTransport {
 		if (this.config.googleSearch) {
 			toolEntries.push({ googleSearch: {} });
 		}
+		const fallbackBehavior = this.config.functionBehavior ?? DEFAULT_FUNCTION_BEHAVIOR;
 		this.liveBehaviors = {
 			byTool: new Map((this.config.tools ?? []).map((t) => [t.name, t.behavior])),
-			fallback: this.config.functionBehavior,
+			fallback: fallbackBehavior,
 		};
 		if (this.config.tools?.length) {
 			toolEntries.push({
 				functionDeclarations: this.config.tools.map((tool) =>
-					toolToDeclaration(tool, this.config.functionBehavior),
+					toolToDeclaration(tool, fallbackBehavior),
 				),
 			});
 		}

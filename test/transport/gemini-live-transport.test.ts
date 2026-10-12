@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { ValidationError } from '../../src/core/errors.js';
 import {
+	DEFAULT_FUNCTION_BEHAVIOR,
 	DEFAULT_GEMINI_LIVE_MODEL,
 	DEFAULT_GEMINI_REALTIME_INPUT_CONFIG,
 	GeminiLiveTransport,
@@ -187,18 +188,24 @@ describe('GeminiLiveTransport', () => {
 			expect(tools[0].functionDeclarations[0].description).toBe('Search the web');
 		});
 
-		it('sends no behavior on a declaration unless one is set, so the model default applies', async () => {
-			const transport = new GeminiLiveTransport(
-				{ apiKey: 'test-key', tools: [createTestTool()] },
-				{},
-			);
-			await transport.connect();
-			const config = capturedConnectConfig.config as Record<string, unknown>;
-			const [entry] = config.tools as Array<{
-				functionDeclarations: Array<Record<string, unknown>>;
-			}>;
-			expect(entry.functionDeclarations[0]).not.toHaveProperty('behavior');
-		});
+		it.each(['gemini-3.1-flash-live-preview', 'gemini-3.8-live', undefined])(
+			'declares BLOCKING when neither the tool nor the transport sets a behavior (model %s)',
+			async (model) => {
+				// 3.8 Live runs an undeclared call NON_BLOCKING and ends the turn before the
+				// result; the framework never leaves the choice to the model.
+				const transport = new GeminiLiveTransport(
+					{ apiKey: 'test-key', model, tools: [createTestTool()] },
+					{},
+				);
+				await transport.connect();
+				const config = capturedConnectConfig.config as Record<string, unknown>;
+				const [entry] = config.tools as Array<{
+					functionDeclarations: Array<Record<string, unknown>>;
+				}>;
+				expect(DEFAULT_FUNCTION_BEHAVIOR).toBe('BLOCKING');
+				expect(entry.functionDeclarations[0].behavior).toBe('BLOCKING');
+			},
+		);
 
 		it('writes the transport functionBehavior on every declaration, and a tool can override it', async () => {
 			const blocking: ToolDefinition = {
