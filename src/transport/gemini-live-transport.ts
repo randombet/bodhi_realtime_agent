@@ -207,7 +207,9 @@ export interface GeminiCredential {
 	 *  `minCredentialLifetimeMs` away (90 s with the defaults): a credential
 	 *  closer to its expiry is refused, so a provider serving a nearly expired
 	 *  cached token fails the connect instead of reconnecting the session every
-	 *  few seconds. */
+	 *  few seconds. A provider that caches credentials must replace one with
+	 *  less than that left: a session's retries come within seconds and would
+	 *  get the same refused credential. */
 	expiresAtMs: number;
 	/** Opaque to the transport: carried on this connection's lifecycle events. */
 	meta?: unknown;
@@ -325,7 +327,11 @@ export interface GeminiTransportOptions {
 	vadConfig?: GeminiVadConfig;
 	/** Timeout in ms for connect() to receive setupComplete (default: 30000).
 	 *  With a `credentialProvider` it is one deadline over the credential fetch,
-	 *  the dial and setupComplete; the fetch may use at most half of it. */
+	 *  the dial and setupComplete; the fetch may use at most half of it. Under a
+	 *  `VoiceSession`, keep it at or below `VoiceSession.RECONNECT_DEADLINE_MS`:
+	 *  an automatic reconnect that outlasts that deadline ends without a retry,
+	 *  so a hung provider is retried only when its half of this deadline ends
+	 *  first. */
 	connectTimeoutMs?: number;
 	/** Force-kill delay in ms for `reconnect()` (default: 45000): when it expires
 	 *  and no newer dial has started, the session field is cleared. It does not

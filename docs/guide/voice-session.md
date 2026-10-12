@@ -144,12 +144,19 @@ const session = new VoiceSession({
   arrives after that is never used, and a dial that opens after its attempt was
   retired is closed at once. Closing the session (the transport's
   `disconnect()`) at any point before `setupComplete` retires the connect the
-  same way, so no connection opens after a close.
+  same way, so no connection opens after a close. On a `GeminiLiveTransport`
+  you inject, keep `connectTimeoutMs` at or below the session's own deadline
+  for one automatic reconnect (`VoiceSession.RECONNECT_DEADLINE_MS`, 30
+  seconds): a reconnect that outlasts it ends without a retry, so with a
+  `connectTimeoutMs` of 60 seconds or more a hung token service is never
+  retried.
 - **Expiry:** when the provider returns, the credential must leave at least
   `connectTimeoutMs` plus `minCredentialLifetimeMs` (60 seconds by default) before
   `expiresAtMs`, or the transport refuses it and the connect fails. This floor
   keeps a provider that serves a nearly expired cached token from reconnecting
-  the session every few seconds. Set `minCredentialLifetimeMs` on a
+  the session every few seconds. A provider that caches credentials must
+  replace one with less than that left: the retries below come within seconds
+  and would get the same refused credential. Set `minCredentialLifetimeMs` on a
   `GeminiLiveTransport` you construct to change it (`0` keeps only the deadline
   check). At `expiresAtMs` an `ACTIVE` session reconnects at once with a new
   credential, as for a GoAway: with its resumption handle when it has one, and
