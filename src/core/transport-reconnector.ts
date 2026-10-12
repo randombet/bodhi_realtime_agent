@@ -112,9 +112,10 @@ export type ReconnectWindowSpeech = 'none' | 'local-drained-speech' | 'hosted-sp
 interface DialOptions {
 	drainReason: 'reconnect' | 'goaway';
 	elicit: boolean;
-	/** A planned reconnect's (GoAway, credential expiry) budget when it began:
-	 *  once it connects, the attempts its retries spent are given back. */
-	refundTo?: number;
+	/** Set on a planned reconnect (GoAway, credential expiry): the attempts its
+	 *  retries spent, given back once it connects. Counted rather than captured
+	 *  as a starting value, so a budget reset while it runs still stands. */
+	planned?: { spent: number };
 }
 
 /** The {@link ConnectFailure} a reconnect's rejection carries
@@ -470,6 +471,7 @@ export class TransportReconnector {
 		closeDetail?: { code?: number; reason?: string },
 	): void {
 		const attempt = this.reconnectAttempts++;
+		if (opts.planned) opts.planned.spent++;
 		const delay = TransportReconnector.RECONNECT_BACKOFF_MS[attempt] ?? 4000;
 		this.deps.log(
 			`Reconnect attempt ${attempt + 1}/${TransportReconnector.MAX_RECONNECT_ATTEMPTS} in ${delay}ms (reason=${reason})`,
@@ -708,8 +710,8 @@ export class TransportReconnector {
 				// A planned reconnect is not a loss: retries of its transient failures
 				// leave the budget as it was, so a long call does not lose a retry
 				// for each one. A loss's own attempts stay spent until a turn completes.
-				if (opts.refundTo !== undefined && this.reconnectAttempts > opts.refundTo) {
-					this.reconnectAttempts = opts.refundTo;
+				if (opts.planned) {
+					this.reconnectAttempts = Math.max(0, this.reconnectAttempts - opts.planned.spent);
 				}
 				this.deps.sessionManager.transitionTo('ACTIVE');
 				this.deps.log('Reconnect complete; session ACTIVE');
@@ -883,7 +885,7 @@ export class TransportReconnector {
 			this.runReconnect(reason, handle, {
 				drainReason: 'goaway',
 				elicit: false,
-				refundTo: this.reconnectAttempts,
+				planned: { spent: 0 },
 			});
 		}
 	}

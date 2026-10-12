@@ -723,6 +723,54 @@ describe('TransportReconnector', () => {
 			expect(reconnect).toHaveBeenCalledTimes(4);
 		});
 
+		it('gives back what it spent even when a turn reset the budget while it ran', async () => {
+			let reject: (e: unknown) => void = () => {};
+			const reconnect = vi
+				.fn()
+				.mockResolvedValueOnce(undefined)
+				.mockResolvedValueOnce(undefined)
+				.mockImplementationOnce(
+					() =>
+						new Promise<void>((_, r) => {
+							reject = r;
+						}),
+				)
+				.mockResolvedValue(undefined);
+			const h = makeHarness({ transport: fakeTransport({ reconnect }) });
+			for (let i = 0; i < 2; i++) {
+				h.reconnector.handleTransportClose(1006, 'gone'); // two losses: 2 of 3 spent
+				await vi.runAllTimersAsync();
+			}
+
+			h.reconnector.handleCredentialExpiry();
+			h.reconnector.resetAttempts(); // a late turnComplete from the old connection
+			reject(connectFailed());
+			await vi.runAllTimersAsync(); // the retry spends one, then connects
+			expect(reconnect).toHaveBeenCalledTimes(4);
+			expect(h.sm.state).toBe('ACTIVE');
+
+			// The reset stands and the retry is given back: the next loss waits 1 s.
+			h.reconnector.handleTransportClose(1006, 'gone');
+			await vi.advanceTimersByTimeAsync(999);
+			expect(reconnect).toHaveBeenCalledTimes(4);
+			await vi.advanceTimersByTimeAsync(1);
+			expect(reconnect).toHaveBeenCalledTimes(5);
+		});
+
+		it('never gives back more than the budget holds', async () => {
+			const reconnect = vi.fn().mockRejectedValueOnce(connectFailed()).mockResolvedValue(undefined);
+			const h = makeHarness({ transport: fakeTransport({ reconnect }) });
+			h.reconnector.handleCredentialExpiry();
+			await vi.advanceTimersByTimeAsync(0); // failed: the retry spent one and waits 1 s
+			h.reconnector.resetAttempts();
+			await vi.runAllTimersAsync();
+			expect(h.sm.state).toBe('ACTIVE');
+
+			h.reconnector.handleTransportClose(1006, 'gone');
+			await vi.advanceTimersByTimeAsync(1_000);
+			expect(reconnect).toHaveBeenCalledTimes(3);
+		});
+
 		it('a failure that lands after the session left RECONNECTING is not retried', async () => {
 			let reject: (e: unknown) => void = () => {};
 			const reconnect = vi.fn(
