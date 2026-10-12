@@ -678,6 +678,51 @@ describe('TransportReconnector', () => {
 			);
 		});
 
+		it('a planned reconnect that recovers after retries gives back the attempts it spent', async () => {
+			const reconnect = vi
+				.fn()
+				.mockRejectedValueOnce(connectFailed())
+				.mockRejectedValueOnce(connectFailed())
+				.mockResolvedValueOnce(undefined)
+				.mockRejectedValue(connectFailed());
+			const h = makeHarness({ transport: fakeTransport({ reconnect }) });
+
+			// Two retries, then connected: no turn completes before the next expiry.
+			h.reconnector.handleCredentialExpiry();
+			await vi.runAllTimersAsync();
+			expect(reconnect).toHaveBeenCalledTimes(3);
+			expect(h.sm.state).toBe('ACTIVE');
+
+			// The next expiry still has the whole budget: three retries, not one.
+			h.reconnector.handleCredentialExpiry();
+			await vi.runAllTimersAsync();
+			expect(reconnect).toHaveBeenCalledTimes(7);
+			expect(h.sm.closeWithReason).toHaveBeenCalledWith('reconnect_failed');
+		});
+
+		it('gives back only what the planned reconnect spent, not what a loss spent before it', async () => {
+			const reconnect = vi
+				.fn()
+				.mockResolvedValueOnce(undefined)
+				.mockRejectedValueOnce(connectFailed())
+				.mockResolvedValue(undefined);
+			const h = makeHarness({ transport: fakeTransport({ reconnect }) });
+
+			h.reconnector.handleTransportClose(1006, 'gone'); // a loss: attempt 1 of 3
+			await vi.runAllTimersAsync();
+			h.reconnector.handleCredentialExpiry(); // fails once, retried as attempt 2
+			await vi.runAllTimersAsync();
+			expect(reconnect).toHaveBeenCalledTimes(3);
+			expect(h.sm.state).toBe('ACTIVE');
+
+			// The loss's attempt is still spent: the next one waits the 2 s backoff.
+			h.reconnector.handleTransportClose(1006, 'gone');
+			await vi.advanceTimersByTimeAsync(1_999);
+			expect(reconnect).toHaveBeenCalledTimes(3);
+			await vi.advanceTimersByTimeAsync(1);
+			expect(reconnect).toHaveBeenCalledTimes(4);
+		});
+
 		it('a failure that lands after the session left RECONNECTING is not retried', async () => {
 			let reject: (e: unknown) => void = () => {};
 			const reconnect = vi.fn(

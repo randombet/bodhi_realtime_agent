@@ -351,6 +351,10 @@ starts up to three backed-off reconnects with that handle. With a
 `credentialProvider`, a reconnect of either kind that fails before setup is
 dialed again within those three attempts (see
 [Per-connection Gemini credentials](#per-connection-gemini-credentials)).
+The three attempts are restored when a model turn completes or a host
+recovery activates, not when a reconnect connects, so a connection that keeps
+dying right after setup cannot loop. A GoAway or credential-expiry reconnect
+that needed retries gives back the attempts it spent once it connects.
 `upstreamLossPolicy` decides what happens when this automatic recovery cannot
 continue (the attempts are spent, there is no resumption handle, or an attempt
 fails or times out):

@@ -112,6 +112,9 @@ export type ReconnectWindowSpeech = 'none' | 'local-drained-speech' | 'hosted-sp
 interface DialOptions {
 	drainReason: 'reconnect' | 'goaway';
 	elicit: boolean;
+	/** A planned reconnect's (GoAway, credential expiry) budget when it began:
+	 *  once it connects, the attempts its retries spent are given back. */
+	refundTo?: number;
 }
 
 /** The {@link ConnectFailure} a reconnect's rejection carries
@@ -173,7 +176,10 @@ export class TransportReconnector {
 	 *  latency (~7.5s from client-VAD end) with headroom. */
 	private static readonly RESPONSE_WATCHDOG_ACTIVITY_CAP_MS = 15_000;
 
-	/** Tracks consecutive reconnect attempts to prevent infinite reconnect storms. */
+	/** Tracks consecutive reconnect attempts to prevent infinite reconnect storms.
+	 *  A connected reconnect does not reset it, since a connection that dies
+	 *  again at once would loop; a completed turn does ({@link resetAttempts}).
+	 *  A planned reconnect gives back what its retries spent once it connects. */
 	private reconnectAttempts = 0;
 	/** Pending response-watchdog timer (model-silence-after-user-turn). */
 	private _responseWatchdogTimer?: ReturnType<typeof setTimeout>;
@@ -698,6 +704,12 @@ export class TransportReconnector {
 				}
 				// Only the eliciting (watchdog) path consults the speech verdict.
 				const reconnectSpeech = opts.elicit ? this.reconnectWindowSpeech(buffered) : null;
+				// A planned reconnect is not a loss: retries of its transient failures
+				// leave the budget as it was, so a long call does not lose a retry
+				// for each one. A loss's own attempts stay spent until a turn completes.
+				if (opts.refundTo !== undefined && this.reconnectAttempts > opts.refundTo) {
+					this.reconnectAttempts = opts.refundTo;
+				}
 				this.deps.sessionManager.transitionTo('ACTIVE');
 				this.deps.log('Reconnect complete; session ACTIVE');
 				if (reconnectSpeech) this.recoverModelResponse(reason, reconnectSpeech);
@@ -858,7 +870,11 @@ export class TransportReconnector {
 			this.deps.sessionManager.transitionTo('RECONNECTING');
 			this.deps.clientTransport.startBuffering();
 			this._clientBuffering = true;
-			this.runReconnect(reason, handle, { drainReason: 'goaway', elicit: false });
+			this.runReconnect(reason, handle, {
+				drainReason: 'goaway',
+				elicit: false,
+				refundTo: this.reconnectAttempts,
+			});
 		}
 	}
 
