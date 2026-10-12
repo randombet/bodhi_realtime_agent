@@ -179,9 +179,10 @@ export function resolveGeminiRealtimeInputConfig(
 }
 
 /** The final setup of one connection: exactly what the transport passes to
- *  `live.connect`. Built once per connect and deep-frozen, so a credential
- *  locked to it (a Gemini ephemeral token with `liveConnectConstraints`)
- *  locks what is actually sent. */
+ *  `live.connect`. Built once per connect as the JSON the SDK sends (a value
+ *  JSON cannot carry, such as a function, is dropped, as it is on the wire)
+ *  and deep-frozen, so a credential locked to it (a Gemini ephemeral token with
+ *  `liveConnectConstraints`) locks what is actually sent. */
 export interface GeminiLiveSetup {
 	readonly model: string;
 	readonly config: Readonly<LiveConnectConfig>;
@@ -497,6 +498,15 @@ function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 			},
 		);
 	});
+}
+
+/** A plain copy of a Live setup as the SDK puts it on the wire, which it
+ *  serializes as JSON: a value JSON cannot carry (a function, a symbol,
+ *  `undefined`) is dropped, a class instance becomes a plain object and
+ *  `toJSON` applies. A structured clone would instead throw on a function the
+ *  static-key path sends without complaint. */
+function wireCopy<T>(value: T): T {
+	return JSON.parse(JSON.stringify(value)) as T;
 }
 
 /** Freeze `value` and everything it holds. */
@@ -1061,11 +1071,12 @@ export class GeminiLiveTransport implements LLMTransport {
 		// dialed anew): no credential is requested, and the fetch slot stays the
 		// newer dial's.
 		if (gen !== this.dialGen) throw new Error('Gemini dial superseded before setupComplete');
-		// A copy, so freezing it never freezes caller-owned objects the config
-		// references (realtimeInputConfig, the default VAD constant).
+		// A copy as sent on the wire, so the provider sees what the server will,
+		// and freezing it never freezes caller-owned objects the config references
+		// (realtimeInputConfig, the default VAD constant).
 		const setup: GeminiLiveSetup = deepFreeze({
 			model,
-			config: structuredClone(connectConfig) as LiveConnectConfig,
+			config: wireCopy(connectConfig) as LiveConnectConfig,
 		});
 		const fetch = new AbortController();
 		this.credentialFetch = fetch;
@@ -1109,7 +1120,7 @@ export class GeminiLiveTransport implements LLMTransport {
 		// `config.tools` during connect, which a frozen object would refuse.
 		return ai.live.connect({
 			model: setup.model,
-			config: structuredClone(setup.config) as LiveConnectConfig,
+			config: wireCopy(setup.config),
 			callbacks,
 		});
 	}

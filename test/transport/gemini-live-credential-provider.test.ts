@@ -124,6 +124,42 @@ function tokenProvider(overrides: Partial<GeminiCredential> = {}) {
 	return { provider, calls };
 }
 
+/** The installed SDK's `live.connect`, on a socket stand-in that records what it
+ *  is sent and the URL it dials. `options` is the client's (the real class, not
+ *  this file's mock). */
+async function sdkDial(
+	options: Record<string, unknown>,
+	model: string,
+	config: Record<string, unknown>,
+): Promise<{ url: string; sent: unknown }> {
+	const actual = await vi.importActual<typeof import('@google/genai')>('@google/genai');
+	const client = new actual.GoogleGenAI(options as { apiKey: string });
+	let url = '';
+	const sent: string[] = [];
+	(client.live as unknown as { webSocketFactory: unknown }).webSocketFactory = {
+		create: (dialed: string, _headers: unknown, callbacks: { onopen: () => void }) => {
+			url = dialed;
+			return {
+				connect: () => callbacks.onopen(),
+				send: (message: string) => sent.push(message),
+				close: () => {},
+			};
+		},
+	};
+	const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+	try {
+		await client.live.connect({ model, config: { ...config }, callbacks: { onmessage: () => {} } });
+	} finally {
+		warn.mockRestore();
+	}
+	return { url, sent: JSON.parse(sent[0] ?? 'null') };
+}
+
+/** The setup message the installed SDK sends for `config` on the Developer API. */
+async function sdkSetupMessage(model: string, config: Record<string, unknown>): Promise<unknown> {
+	return (await sdkDial({ apiKey: 'k', vertexai: false }, model, config)).sent;
+}
+
 function isDeepFrozen(value: unknown): boolean {
 	if (typeof value !== 'object' || value === null) return true;
 	return Object.isFrozen(value) && Object.values(value).every(isDeepFrozen);
@@ -215,6 +251,48 @@ describe('GeminiLiveTransport credentialProvider', () => {
 		// and freezing it never froze the caller's own config.
 		expect(lastDial().params.config).not.toBe(setup.config);
 		expect(Object.isFrozen(realtimeInputConfig)).toBe(false);
+	});
+
+	it('hands the provider the setup as the SDK sends it, from a config the static-key path also accepts', async () => {
+		// Values a structured clone refuses but the SDK's JSON serialization drops:
+		// a function, a class instance holding one, and a symbol in a tool schema.
+		class Tuning {
+			silenceDurationMs = 700;
+			onTune = () => {};
+		}
+		const realtimeInputConfig = {
+			automaticActivityDetection: new Tuning(),
+			observer: () => {},
+		} as unknown as Record<string, unknown>;
+		const options: GeminiTransportOptions = {
+			systemInstruction: 'You are Kestrel.',
+			tools: [
+				{
+					...searchTool(),
+					parameters: z.object({ kind: z.literal(Symbol.for('web') as unknown as string) }),
+				},
+			],
+			realtimeInputConfig,
+		};
+		const statically = new GeminiLiveTransport({ apiKey: 'static-key', ...options }, {});
+		await statically.connect();
+		const staticDial = lastDial();
+
+		const { provider, calls } = tokenProvider();
+		await providerTransport(provider, options).connect();
+
+		const setup = calls[0]?.setup as GeminiLiveSetup;
+		expect(isDeepFrozen(setup)).toBe(true);
+		expect(lastDial().params.config).toEqual(setup.config);
+		expect(setup.config.realtimeInputConfig).toEqual({
+			automaticActivityDetection: { silenceDurationMs: 700 },
+		});
+		// What goes on the wire, through the installed SDK's own serialization, is
+		// the same for both paths.
+		const staticWire = await sdkSetupMessage(staticDial.params.model, staticDial.params.config);
+		const providerWire = await sdkSetupMessage(setup.model, lastDial().params.config);
+		expect(providerWire).toEqual(staticWire);
+		expect(JSON.parse(JSON.stringify(setup))).toEqual(setup);
 	});
 
 	it('calls the provider on every connect path, each with its own setup and token', async () => {
