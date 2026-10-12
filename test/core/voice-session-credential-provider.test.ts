@@ -42,6 +42,8 @@ interface Dial {
 const sdk = vi.hoisted(() => ({
 	clientOptions: [] as Array<Record<string, unknown>>,
 	dials: [] as unknown[],
+	/** When set, each dial's socket opens only once this settles. */
+	opening: null as Promise<void> | null,
 }));
 
 vi.mock('@google/genai', () => ({
@@ -57,6 +59,7 @@ vi.mock('@google/genai', () => ({
 						close: vi.fn(),
 					};
 					sdk.dials.push({ clientOptions: options, params, session });
+					if (sdk.opening) await sdk.opening;
 					setTimeout(() => params.callbacks.onmessage?.({ setupComplete: { sessionId: 'gs' } }), 5);
 					return session;
 				}),
@@ -112,6 +115,7 @@ describe('VoiceSession with a credentialProvider', () => {
 	beforeEach(() => {
 		sdk.clientOptions.length = 0;
 		sdk.dials.length = 0;
+		sdk.opening = null;
 	});
 	afterEach(async () => {
 		if (session) await session.close();
@@ -326,6 +330,35 @@ describe('VoiceSession with a credentialProvider', () => {
 		await expect(starting).rejects.toThrow('Gemini transport disconnected');
 		await settle();
 		expect(dials()).toEqual([]);
+	});
+
+	it('closing after the first credential, before its socket opens, leaves no connection open', async () => {
+		let open: () => void = () => {};
+		sdk.opening = new Promise<void>((r) => {
+			open = r;
+		});
+		const { provider } = tokenProvider();
+		session = new VoiceSession({
+			sessionId: 'sess_close_dial',
+			userId: 'u',
+			credentialProvider: provider,
+			agents: agents(),
+			initialAgent: 'main',
+			clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			model: mockModel,
+		});
+		const transport = (session as unknown as { transport: GeminiLiveTransport }).transport;
+		const starting = session.start();
+		starting.catch(() => {});
+		await vi.waitFor(() => expect(dials()).toHaveLength(1));
+		await session.close();
+		session = null;
+		await expect(starting).rejects.toThrow('Gemini transport disconnected before setupComplete');
+
+		open();
+		await settle();
+		expect(lastDial().session.close).toHaveBeenCalledTimes(1);
+		expect(transport.isConnected).toBe(false);
 	});
 
 	it('keeps the static-key config as it was, and takes exactly one credential', () => {

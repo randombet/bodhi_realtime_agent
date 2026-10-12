@@ -569,6 +569,116 @@ describe('GeminiLiveTransport credentialProvider', () => {
 			expect(transport.isConnected).toBe(false);
 		});
 
+		it('disconnect() past the fetch, before the socket opens, fails that connect and closes a late open at once', async () => {
+			sdk.mode = 'manual';
+			const { provider } = tokenProvider();
+			const transport = providerTransport(provider);
+			const events = recordLifecycle(transport);
+			const connecting = transport.connect();
+			connecting.catch(() => {});
+			await vi.waitFor(() => expect(dials()).toHaveLength(1));
+
+			await transport.disconnect();
+			const message = 'Gemini transport disconnected before setupComplete';
+			await expect(connecting).rejects.toThrow(message);
+			expect(events.slice(1)).toEqual([
+				{
+					kind: 'setup-failed',
+					connectAttemptId: 'att_1',
+					reason: message,
+					meta: { credentialId: 'cred_1' },
+					failure: { source: 'dial', message },
+				},
+			]);
+
+			const dial = lastDial();
+			dial.open();
+			await new Promise((r) => setTimeout(r, 0));
+			expect(dial.session.close).toHaveBeenCalledTimes(1);
+			dial.setup();
+			dial.close(1000, '');
+			expect(transport.isConnected).toBe(false);
+			expect(events.slice(2)).toEqual([]);
+		});
+
+		it('disconnect() after the socket opened, before setupComplete, fails that connect: a late setupComplete installs nothing', async () => {
+			vi.useFakeTimers();
+			sdk.mode = 'manual';
+			const { provider } = tokenProvider();
+			const transport = providerTransport(provider);
+			const expired = vi.fn();
+			transport.onCredentialExpiry = expired;
+			const events = recordLifecycle(transport);
+			const connecting = transport.connect();
+			connecting.catch(() => {});
+			await vi.advanceTimersByTimeAsync(0);
+			const dial = lastDial();
+			dial.open();
+			await vi.advanceTimersByTimeAsync(0);
+			expect(transport.isConnected).toBe(true);
+
+			await transport.disconnect();
+			const message = 'Gemini transport disconnected before setupComplete';
+			await expect(connecting).rejects.toThrow(message);
+			expect(dial.session.close).toHaveBeenCalled();
+			expect(events.at(-1)).toEqual({
+				kind: 'setup-failed',
+				connectAttemptId: 'att_1',
+				reason: message,
+				meta: { credentialId: 'cred_1' },
+				failure: { source: 'session', message },
+			});
+
+			dial.setup();
+			dial.close(1000, '');
+			expect(transport.isConnected).toBe(false);
+			expect(events.map((e) => e.kind)).toEqual(['attempt', 'setup-failed']);
+			await vi.advanceTimersByTimeAsync(60 * 60_000);
+			expect(expired).not.toHaveBeenCalled();
+			expect(vi.getTimerCount()).toBe(0);
+		});
+
+		it('a disconnect() from a setup-ok observer closes the set-up connection; it does not fail the connect', async () => {
+			vi.useFakeTimers();
+			const { provider } = tokenProvider();
+			const transport = providerTransport(provider);
+			const events: ConnectionLifecycleEvent[] = [];
+			transport.onConnectionLifecycle = (e) => {
+				events.push(e);
+				if (e.kind === 'setup-ok') void transport.disconnect();
+			};
+			const connecting = transport.connect();
+			await vi.advanceTimersByTimeAsync(0);
+			await expect(connecting).resolves.toBeUndefined();
+			expect(events.map((e) => e.kind)).toEqual(['attempt', 'setup-ok', 'generation-close']);
+			expect(transport.isConnected).toBe(false);
+			expect(vi.getTimerCount()).toBe(0);
+		});
+
+		it('reconnect() during a dial past its fetch retires it and dials a replacement', async () => {
+			sdk.mode = 'manual';
+			const { provider } = tokenProvider();
+			const transport = providerTransport(provider);
+			const first = transport.connect();
+			first.catch(() => {});
+			await vi.waitFor(() => expect(dials()).toHaveLength(1));
+			const stale = lastDial();
+
+			const reconnecting = transport.reconnect();
+			await vi.waitFor(() => expect(dials()).toHaveLength(2));
+			lastDial().open();
+			lastDial().setup();
+			await reconnecting;
+			await expect(first).rejects.toThrow('before setupComplete');
+			expect(transport.isConnected).toBe(true);
+			expect(sdk.clientOptions.map((o) => o.apiKey)).toEqual(['auth_tokens/t1', 'auth_tokens/t2']);
+
+			stale.open();
+			await new Promise((r) => setTimeout(r, 0));
+			expect(stale.session.close).toHaveBeenCalledTimes(1);
+			expect(transport.isConnected).toBe(true);
+		});
+
 		it('a newer connect() supersedes a fetch in flight', async () => {
 			const signals: AbortSignal[] = [];
 			let first = true;

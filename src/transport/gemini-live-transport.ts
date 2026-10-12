@@ -525,6 +525,9 @@ export class GeminiLiveTransport implements LLMTransport {
 	private readonly credentialProvider: GeminiCredentialProvider | undefined;
 	/** Cancels the credential fetch of the dial in flight, if any. */
 	private credentialFetch: AbortController | null = null;
+	/** Fails the latest credential-provider connect until its setupComplete
+	 *  arrives, so `disconnect()` retires it past its credential fetch too. */
+	private pendingSetup: { fail: (error: Error) => void } | null = null;
 	/** The expiry timer of the current dial's credential. */
 	private credentialExpiry: { gen: number; timer: ReturnType<typeof setTimeout> } | null = null;
 	/** Resolves when setupComplete fires — used to make connect() await Gemini readiness. */
@@ -939,6 +942,8 @@ export class GeminiLiveTransport implements LLMTransport {
 			},
 		};
 		const provider = this.credentialProvider;
+		const pending = provider ? { fail: (error: Error) => failSetup(error) } : null;
+		this.pendingSetup = pending;
 		const dial = provider
 			? this.dialWithCredential(provider, gen, model, connectConfig, callbacks, timeoutMs, attempt)
 			: (this.ai as GoogleGenAI).live.connect({ model, config: connectConfig, callbacks });
@@ -984,6 +989,7 @@ export class GeminiLiveTransport implements LLMTransport {
 			throw err;
 		} finally {
 			clearTimeout(timer);
+			if (pending && this.pendingSetup === pending) this.pendingSetup = null;
 		}
 	}
 
@@ -1251,10 +1257,18 @@ export class GeminiLiveTransport implements LLMTransport {
 	}
 
 	async disconnect(): Promise<void> {
-		// A credential still being fetched is for a connection nobody wants now
-		// (a session closing during its first dial): abort it, which fails that
-		// connect. A dial already past its fetch is retired by abortIncumbent().
-		this.cancelCredentialFetch('Gemini transport disconnected');
+		// A credential-provider connect still before setupComplete is for a
+		// connection nobody wants now (a session closing during its dial). While
+		// it fetches, aborting the fetch fails it; past the fetch, it fails at
+		// once, and its socket is closed the moment it opens (the dial's own
+		// failure path). Without a provider a pending dial is left as before.
+		const pending = this.pendingSetup;
+		this.pendingSetup = null;
+		if (this.credentialFetch) {
+			this.cancelCredentialFetch('Gemini transport disconnected');
+		} else {
+			pending?.fail(new Error('Gemini transport disconnected before setupComplete'));
+		}
 		// Detach before awaiting: a newer dial can install a replacement session
 		// while close() is in flight, and it must survive this call untouched —
 		// nothing below touches `this.session` once the close completes.
@@ -2033,6 +2047,9 @@ export class GeminiLiveTransport implements LLMTransport {
 			// counters start at zero. Reset first, then mint: the ledger's emit
 			// adopts the new generation before the setup-ok observers run.
 			this.upstream = freshUpstreamCounters();
+			// Set up: a disconnect() from here on (a setup-ok observer's included)
+			// closes a connection, it no longer fails the connect.
+			this.pendingSetup = null;
 			this.lifecycle.setupOk();
 			// Resolve the connect() promise so callers know Gemini is ready
 			if (this.setupResolver) {

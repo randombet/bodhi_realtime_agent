@@ -130,7 +130,9 @@ const session = new VoiceSession({
   aborts when the attempt is retired (`abortIncumbent()`, a recovery, or a newer
   connect) and when the session closes while it fetches. A credential that
   arrives after that is never used, and a dial that opens after its attempt was
-  retired is closed at once.
+  retired is closed at once. Closing the session (the transport's
+  `disconnect()`) at any point before `setupComplete` retires the connect the
+  same way, so no connection opens after a close.
 - **Expiry:** the credential must expire at least `connectTimeoutMs` after the
   provider returns. At `expiresAtMs` the session reconnects at once, as for a
   GoAway, with a new credential. If it cannot (no resumption handle, or not
