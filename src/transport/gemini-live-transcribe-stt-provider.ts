@@ -150,6 +150,8 @@ const OPEN = 1;
 const STOP_DRAIN_MS = 500;
 const QUIET_RMS = 300;
 const PAUSE_MS = 250;
+/** The longest delay one timer holds; Node runs a longer one after 1 ms. */
+const MAX_TIMER_MS = 2_147_483_647;
 
 export function rmsPcm16(pcm: Buffer): number {
 	const n = Math.floor(pcm.length / 2);
@@ -680,20 +682,29 @@ export class GeminiLiveTranscribeSTTProvider implements STTProvider {
 		this.rotateTimer.unref?.();
 	}
 
-	/** Closes `conn` at its credential's expiry, replacing it if it is still in use. */
+	/** Closes `conn` at its credential's expiry, replacing it if it is still in use.
+	 *  A longer wait than one timer can hold is re-armed in steps. */
 	private armExpiry(conn: Conn): void {
-		if (conn.expiresAtMs === undefined || conn.ended) return;
-		conn.expiryTimer = setTimeout(
-			() => {
-				conn.expiryTimer = undefined;
-				if (conn.ended) return;
-				this.log(`[Transcribe#${conn.id}] credential expired; closing`);
-				this.closeConn(conn);
-				this.lost(conn);
-			},
-			Math.max(0, conn.expiresAtMs - Date.now()),
-		);
-		conn.expiryTimer.unref?.();
+		const expiresAtMs = conn.expiresAtMs;
+		if (expiresAtMs === undefined || conn.ended) return;
+		const arm = (): void => {
+			conn.expiryTimer = setTimeout(
+				() => {
+					conn.expiryTimer = undefined;
+					if (conn.ended) return;
+					if (Date.now() < expiresAtMs) {
+						arm();
+						return;
+					}
+					this.log(`[Transcribe#${conn.id}] credential expired; closing`);
+					this.closeConn(conn);
+					this.lost(conn);
+				},
+				Math.min(Math.max(0, expiresAtMs - Date.now()), MAX_TIMER_MS),
+			);
+			conn.expiryTimer.unref?.();
+		};
+		arm();
 	}
 
 	/** Hand over to the ready next session during a pause, so no word is split across sessions. */

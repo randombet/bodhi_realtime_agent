@@ -556,6 +556,39 @@ describe('GeminiLiveTranscribeSTTProvider credentials', () => {
 		await stopped;
 	});
 
+	it('closes a connection at a credential expiry further out than one timer holds, not at once', async () => {
+		vi.useFakeTimers();
+		// Past setTimeout's 2^31-1 ms (~24.8 days), which a single timer runs after 1 ms.
+		const expiresAtMs = Date.now() + 30 * 86_400_000;
+		const fatal: Error[] = [];
+		const { p, sockets, calls } = makeTokenProvider(
+			(n) =>
+				n === 1
+					? token(1, { expiresAtMs })
+					: n <= 3
+						? Promise.reject(new Error('mint failed')) // the replacement never comes
+						: token(n),
+			{ rotateAfterMs: 600_000, maxRetries: 1, retryDelayMs: 10, onFatal: (e) => fatal.push(e) },
+		);
+		const started = p.start();
+		await vi.advanceTimersByTimeAsync(0);
+		sockets[0].openAndSetup();
+		await started;
+		await vi.advanceTimersByTimeAsync(1_000);
+		expect(sockets[0].closed).toBe(false);
+		expect(calls).toHaveLength(1);
+		await vi.advanceTimersByTimeAsync(expiresAtMs - Date.now() - 1);
+		expect(calls).toHaveLength(3); // the rotation and its one retry failed
+		expect(sockets[0].closed).toBe(false);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(sockets[0].closed).toBe(true);
+		expect(calls).toHaveLength(4);
+		expect(fatal).toHaveLength(0);
+		const stopped = p.stop();
+		await vi.advanceTimersByTimeAsync(1_000);
+		await stopped;
+	});
+
 	it('aborts the credential fetch on stop(), rejects start(), and never dials a late credential', async () => {
 		let late: (c: GeminiCredential) => void = () => {};
 		const { p, sockets, calls, events } = makeTokenProvider(
