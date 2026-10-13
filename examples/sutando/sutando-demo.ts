@@ -81,12 +81,13 @@ const LEDGER_DIR = process.env.SUTANDO_LEDGER_DIR || './sutando-ledger';
 const SESSION_ID = `sutando_${Date.now()}`;
 // Google Search grounding — ON by default (SUTANDO_GOOGLE_SEARCH=0 disables).
 const GOOGLE_SEARCH = process.env.SUTANDO_GOOGLE_SEARCH !== '0';
-// Live model — always the 3.1 Live model (~1.32s replies with a 62ms spread;
-// probed 2026-07-26).
-// Caveat: on a FREE-TIER key, declaring google_search at connect on this model
-// is rejected with 1011 "quota exceeded" (the grounding entitlement, not a
-// rate limit) — set SUTANDO_GOOGLE_SEARCH=0 there and lookups fall back to
-// ask_sutando. SUTANDO_LIVE_MODEL overrides the model if needed.
+// Live model — the framework default, gemini-3.8-live; SUTANDO_LIVE_MODEL
+// overrides it.
+// Caveat: on a FREE-TIER key, declaring google_search at connect on
+// gemini-3.1-flash-live-preview is rejected with 1011 "quota exceeded" (the
+// grounding entitlement, not a rate limit; probed 2026-07-26). Not yet
+// re-probed on 3.8. If connect fails that way, set SUTANDO_GOOGLE_SEARCH=0
+// and lookups fall back to ask_sutando.
 const LIVE_MODEL = process.env.SUTANDO_LIVE_MODEL || DEFAULT_GEMINI_LIVE_MODEL;
 const google = createGoogleGenerativeAI({ apiKey: API_KEY });
 

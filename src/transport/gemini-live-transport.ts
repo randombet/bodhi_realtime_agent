@@ -153,7 +153,31 @@ export const DEFAULT_GEMINI_REALTIME_INPUT_CONFIG: GeminiRealtimeInputConfig = {
 };
 
 /** Current default Gemini Live model for bidiGenerateContent sessions. */
-export const DEFAULT_GEMINI_LIVE_MODEL = 'gemini-3.1-flash-live-preview';
+export const DEFAULT_GEMINI_LIVE_MODEL = 'gemini-3.8-live';
+
+/**
+ * `behavior` declared on a function whose tool sets none, when the transport's
+ * `functionBehavior` is unset too. Gemini Live models differ when a
+ * declaration carries no `behavior`: gemini-3.1-flash-live-preview calls
+ * functions synchronously only, while gemini-3.8-live runs a call NON_BLOCKING
+ * and ends the model turn right after the toolCall, before the result exists.
+ * Declaring BLOCKING keeps `execution: 'inline'` meaning what it says: the
+ * model waits for the result, and a call and the answer spoken from it are one
+ * turn. Set `functionBehavior: 'NON_BLOCKING'`, or `behavior` on a tool, to opt
+ * into asynchronous calls.
+ */
+export const DEFAULT_FUNCTION_BEHAVIOR: FunctionBehavior = 'BLOCKING';
+
+/** Whether a model gets {@link DEFAULT_FUNCTION_BEHAVIOR} when neither the tool
+ *  nor the transport declares one. Only gemini-3.8 Live models do: they are the
+ *  ones measured to run an undeclared call asynchronously. Every other model —
+ *  gemini-3.1-flash-live-preview, the 2.5 native-audio models the examples pick
+ *  — keeps the server's own default, which is the behavior they were tested on;
+ *  an invalid behavior closes the socket with 1007, so an unmeasured model is
+ *  never sent one on our initiative. */
+export function defaultsToBlockingBehavior(model: string): boolean {
+	return /^gemini-3\.8(?:[-.]|$)/.test(model);
+}
 
 /**
  * Deep-merges a user-supplied realtimeInputConfig over
@@ -276,7 +300,7 @@ const DEFAULT_MIN_CREDENTIAL_LIFETIME_MS = 60_000;
 
 /** The Gemini transport's options apart from its credential. */
 export interface GeminiTransportOptions {
-	/** Gemini model name (default: "gemini-3.1-flash-live-preview"). */
+	/** Gemini model name (default: {@link DEFAULT_GEMINI_LIVE_MODEL}, "gemini-3.8-live"). */
 	model?: string;
 	/** System instruction sent to the model at connection time. */
 	systemInstruction?: string;
@@ -311,7 +335,10 @@ export interface GeminiTransportOptions {
 	 *  per-send override. Omitted → server default. */
 	mediaResolution?: GeminiMediaResolution;
 	/** Default `behavior` written on every function declaration that does not set its own.
-	 *  Unset sends no `behavior`, so the model's default applies. */
+	 *  Unset means `'BLOCKING'` ({@link DEFAULT_FUNCTION_BEHAVIOR}) on gemini-3.8 Live
+	 *  models, whose own default is asynchronous; on every other model it sends no
+	 *  `behavior`, leaving the server default those models were measured with
+	 *  ({@link defaultsToBlockingBehavior}). */
 	functionBehavior?: FunctionBehavior;
 	/** Enable Gemini's built-in Google Search grounding. */
 	googleSearch?: boolean;
@@ -907,14 +934,17 @@ export class GeminiLiveTransport implements LLMTransport {
 		if (this.config.googleSearch) {
 			toolEntries.push({ googleSearch: {} });
 		}
+		const fallbackBehavior =
+			this.config.functionBehavior ??
+			(defaultsToBlockingBehavior(model) ? DEFAULT_FUNCTION_BEHAVIOR : undefined);
 		this.liveBehaviors = {
 			byTool: new Map((this.config.tools ?? []).map((t) => [t.name, t.behavior])),
-			fallback: this.config.functionBehavior,
+			fallback: fallbackBehavior,
 		};
 		if (this.config.tools?.length) {
 			toolEntries.push({
 				functionDeclarations: this.config.tools.map((tool) =>
-					toolToDeclaration(tool, this.config.functionBehavior),
+					toolToDeclaration(tool, fallbackBehavior),
 				),
 			});
 		}
@@ -1592,7 +1622,8 @@ export class GeminiLiveTransport implements LLMTransport {
 	// --- LLMTransport methods ---
 
 	private shouldUseRealtimeTextForContent(): boolean {
-		const model = this.config.model ?? '';
+		// The model this connection dials: an unset one is the default, a 3.x Live model.
+		const model = this.config.model ?? DEFAULT_GEMINI_LIVE_MODEL;
 		return (
 			/^gemini-3(?:\.\d+)?-.*live/i.test(model) ||
 			/^gemini-2\.5-.*(?:live|native-audio)/i.test(model)

@@ -31,6 +31,7 @@ import 'dotenv/config';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { resamplePcm } from '../../src/audio/resample.js';
 import { VoiceSession } from '../../src/core/voice-session.js';
+import { DEFAULT_GEMINI_LIVE_MODEL } from '../../src/transport/gemini-live-transport.js';
 import type { MainAgent } from '../../src/types/agent.js';
 
 const API_KEY = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY ?? '';
@@ -38,7 +39,7 @@ if (!API_KEY) {
 	console.error('GEMINI_API_KEY required');
 	process.exit(1);
 }
-const MODEL = process.env.GEMINI_LIVE_MODEL || 'gemini-3.1-flash-live-preview';
+const MODEL = process.env.GEMINI_LIVE_MODEL || DEFAULT_GEMINI_LIVE_MODEL;
 const CASE = (process.argv[2] ?? 'all') as 'silence' | 'speech' | 'none' | 'all';
 
 const FRAME_MS = 20;

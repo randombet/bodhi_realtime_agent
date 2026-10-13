@@ -37,8 +37,9 @@ export interface ToolDefinition {
 	pendingMessage?: string;
 	/** Gemini Live function-call behavior for this tool. `'NON_BLOCKING'` lets the model keep
 	 *  talking while the call runs; `'BLOCKING'` makes it wait for the result. Unset falls back
-	 *  to the transport's `functionBehavior`, and if that is unset too, to the model's own default
-	 *  (blocking on 3.1 Flash Live, non-blocking on 3.8 Live). Ignored by non-Gemini transports. */
+	 *  to the transport's `functionBehavior`, and if that is unset too, to `'BLOCKING'` on every
+	 *  model, never to the model's own default (blocking on 3.1 Flash Live, non-blocking on
+	 *  3.8 Live). Ignored by non-Gemini transports. */
 	behavior?: FunctionBehavior;
 	/** Execution timeout in milliseconds (default 30 000). */
 	timeout?: number;

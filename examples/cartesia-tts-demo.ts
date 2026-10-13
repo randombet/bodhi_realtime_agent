@@ -30,6 +30,7 @@
  *   CARTESIA_VOICE_ID   - Cartesia voice ID (default: Barbershop Man)
  *   CARTESIA_SPEED      - Speed: slowest/slow/normal/fast/fastest (default: normal)
  *   CARTESIA_EMOTION    - Comma-separated emotions, e.g. "cheerful,friendly" (default: none)
+ *   GEMINI_LIVE_MODEL   - Live model (default: DEFAULT_GEMINI_LIVE_MODEL, gemini-3.8-live)
  *   PORT                - WebSocket port (default: 9900)
  *   HOST                - Bind address (default: 0.0.0.0)
  */
@@ -40,6 +41,7 @@ import { z } from 'zod';
 import { VoiceSession } from '../src/core/voice-session.js';
 import { CartesiaTTSProvider } from '../src/transport/cartesia-tts-provider.js';
 import { GeminiBatchSTTProvider } from '../src/transport/gemini-batch-stt-provider.js';
+import { DEFAULT_GEMINI_LIVE_MODEL } from '../src/transport/gemini-live-transport.js';
 import type { MainAgent } from '../src/types/agent.js';
 import type { ToolContext, ToolDefinition } from '../src/types/tool.js';
 
@@ -77,7 +79,6 @@ const SPEED = (process.env.CARTESIA_SPEED || 'normal') as
 	| 'fast'
 	| 'fastest';
 const EMOTION = process.env.CARTESIA_EMOTION?.split(',').filter(Boolean) ?? [];
-const DEFAULT_LIVE_MODEL = 'gemini-3.1-flash-live-preview';
 
 const SESSION_ID = `session_${Date.now()}`;
 const google = createGoogleGenerativeAI({ apiKey: API_KEY });
@@ -193,7 +194,7 @@ TOOLS:
 // =============================================================================
 
 async function main() {
-	const geminiLiveModel = process.env.GEMINI_LIVE_MODEL || DEFAULT_LIVE_MODEL;
+	const geminiLiveModel = process.env.GEMINI_LIVE_MODEL || DEFAULT_GEMINI_LIVE_MODEL;
 
 	// Create Cartesia TTS provider
 	const ttsProvider = new CartesiaTTSProvider({

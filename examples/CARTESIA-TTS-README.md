@@ -49,7 +49,7 @@ pnpm web-client
 | `CARTESIA_VOICE_ID` | No | `a0e99841-...` (Barbershop Man) | Cartesia voice ID |
 | `CARTESIA_SPEED` | No | `normal` | `slowest` / `slow` / `normal` / `fast` / `fastest` |
 | `CARTESIA_EMOTION` | No | *(none)* | Comma-separated emotions, e.g. `cheerful,friendly` |
-| `GEMINI_LIVE_MODEL` | No | `gemini-2.5-flash-native-audio-preview-12-2025` | Gemini Live model for bidiGenerateContent |
+| `GEMINI_LIVE_MODEL` | No | `gemini-3.8-live` (the framework default) | Gemini Live model for bidiGenerateContent |
 | `PORT` | No | `9900` | WebSocket server port |
 | `HOST` | No | `0.0.0.0` | Bind address |
 

@@ -39,7 +39,7 @@ Open the local web client and connect to `ws://localhost:9900`.
 |----------|---------|---------|
 | `PORT` | `9900` | Local WebSocket port |
 | `HOST` | `0.0.0.0` | Bind address |
-| `GEMINI_LIVE_MODEL` | `gemini-3.1-flash-live-preview` | Live voice model |
+| `GEMINI_LIVE_MODEL` | `gemini-3.8-live` (the framework default) | Live voice model |
 | `INTERVIEWER_REASONING_MODEL` | `gemini-2.5-flash` | Main voice-agent reasoning model |
 | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | (required) | Live + document tools |
 | `OPENAI_API_KEY` | — | Optional; only if you wire an OpenAI `LanguageModelV1` for the subagent |

@@ -59,12 +59,13 @@
  *   COMPRESSION_TRIGGER=8000      triggerTokens (default off).
  *   COMPRESSION_TARGET=4000       slidingWindow.targetTokens (default off).
  *   GEMINI_LIVE_MODEL             Live model (default:
- *                                  gemini-3.1-flash-live-preview).
+ *                                  DEFAULT_GEMINI_LIVE_MODEL, gemini-3.8-live).
  *   GOOGLE_SEARCH=0               Disable Google Search grounding (default:
  *                                  enabled). Free-tier keys: search on the
  *                                  3.1 Live model is rejected at connect with
- *                                  1011 "quota exceeded" — disable it or use
- *                                  a 2.5 native-audio model.
+ *                                  1011 "quota exceeded"; not yet checked on
+ *                                  3.8. On that failure, disable search or
+ *                                  use a 2.5 native-audio model.
  */
 
 import 'dotenv/config';
@@ -141,9 +142,10 @@ const LIVE_MODEL = process.env.GEMINI_LIVE_MODEL || DEFAULT_GEMINI_LIVE_MODEL;
 // verified 2026-07-26: declaring the google_search tool at Live setup on
 // gemini-3.1-flash-live-preview is rejected at CONNECT with 1011 "quota
 // exceeded" on a free-tier key (plain connects succeed seconds apart; the
-// same key grounds fine on the 2.5 native-audio models). If startup dies
-// with a quota error, either set GOOGLE_SEARCH=0 or pick a 2.5 model via
-// GEMINI_LIVE_MODEL.
+// same key grounds fine on the 2.5 native-audio models). It has not been
+// re-checked on gemini-3.8-live, the default, so treat it as possible there
+// too. If startup dies with a quota error, either set GOOGLE_SEARCH=0 or
+// pick a 2.5 model via GEMINI_LIVE_MODEL.
 const GOOGLE_SEARCH = process.env.GOOGLE_SEARCH !== '0';
 
 if (SESSION_RESUMPTION_DISABLE && SESSION_RESUMPTION_RESUME) {
@@ -484,7 +486,7 @@ main().catch((err) => {
 	if (GOOGLE_SEARCH && /quota|timed out/i.test(String(err))) {
 		console.error(
 			'\nHint: a connect-time quota failure with Google Search enabled on a',
-			'free-tier key is the google_search entitlement on the 3.1 Live model.',
+			'free-tier key is likely the google_search entitlement (seen on the 3.1 Live model).',
 			'Retry with GOOGLE_SEARCH=0, or GEMINI_LIVE_MODEL=gemini-2.5-flash-native-audio-latest.',
 		);
 	}

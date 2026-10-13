@@ -36,7 +36,7 @@ Open the local web client and connect to `ws://localhost:9900`.
 |----------|---------|---------|
 | `PORT` | `9900` | Local WebSocket port |
 | `HOST` | `0.0.0.0` | Bind address |
-| `GEMINI_LIVE_MODEL` | `gemini-3.1-flash-live-preview` | Live voice model |
+| `GEMINI_LIVE_MODEL` | `gemini-3.8-live` (the framework default) | Live voice model |
 | `DEEPDIVE_REASONING_MODEL` | `gemini-2.5-flash` | Main voice-agent reasoning model |
 | `DEEPDIVE_SUBAGENT_MODEL` | `gemini-3.1-flash-lite-preview` | Persistent subagent reasoning model |
 | `DEEPDIVE_SUBAGENT_THINKING_BUDGET` | `128` | Low reasoning budget for the persistent subagent |

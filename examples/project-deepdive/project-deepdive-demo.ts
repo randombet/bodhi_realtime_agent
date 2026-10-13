@@ -22,7 +22,7 @@
  *   GEMINI_API_KEY                       - Required: Google AI Studio API key
  *   PORT                                 - WebSocket port (default: 9900)
  *   HOST                                 - Bind address (default: 0.0.0.0)
- *   GEMINI_LIVE_MODEL                    - Live voice model (default: gemini-3.1-flash-live-preview)
+ *   GEMINI_LIVE_MODEL                    - Live voice model (default: DEFAULT_GEMINI_LIVE_MODEL, gemini-3.8-live)
  *   DEEPDIVE_REASONING_MODEL             - MainAgent reasoning model (default: gemini-2.5-flash)
  *   DEEPDIVE_SUBAGENT_MODEL              - Persistent subagent model (default: gemini-3.1-flash-lite-preview)
  *   DEEPDIVE_SUBAGENT_THINKING_BUDGET    - Reasoning budget for the subagent (default: 128)
@@ -35,6 +35,7 @@ import 'dotenv/config';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { MarkdownConversationHistoryStore } from '../../src/core/markdown-conversation-history-store.js';
 import { VoiceSession } from '../../src/core/voice-session.js';
+import { DEFAULT_GEMINI_LIVE_MODEL } from '../../src/transport/gemini-live-transport.js';
 import { TimingReminderBackgroundAgent } from '../interviewer/lib/timing-reminder-agent.js';
 import { createProjectDeepdiveAgent } from './lib/project-deepdive-agent.js';
 import {
@@ -70,7 +71,7 @@ const HOST = process.env.HOST || '0.0.0.0';
 const SESSION_ID = `deepdive_${Date.now()}`;
 // Where the WhatsApp-style markdown transcript for each session is written.
 const TRANSCRIPT_DIR = process.env.TRANSCRIPT_DIR || './transcripts';
-const LIVE_MODEL = process.env.GEMINI_LIVE_MODEL || 'gemini-3.1-flash-live-preview';
+const LIVE_MODEL = process.env.GEMINI_LIVE_MODEL || DEFAULT_GEMINI_LIVE_MODEL;
 const REASONING_MODEL = process.env.DEEPDIVE_REASONING_MODEL || 'gemini-2.5-flash';
 const SUBAGENT_MODEL = process.env.DEEPDIVE_SUBAGENT_MODEL || 'gemini-3.1-flash-lite-preview';
 const SUBAGENT_THINKING_BUDGET = parseSubagentThinkingBudget();

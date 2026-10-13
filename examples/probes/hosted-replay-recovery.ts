@@ -22,7 +22,11 @@
  *
  * Results are RECORDED (RESULT lines), not asserted — live-model timing can
  * race (if Gemini answers faster than the watchdog, the stall is not forced;
- * rerun or lower PROBE_WATCHDOG_MS).
+ * rerun or lower PROBE_WATCHDOG_MS). The 1.3–2.8 s figure is
+ * gemini-3.1-flash-live-preview's; the default, gemini-3.8-live, starts
+ * audio ~0.6 s (median) after speech ends, so a 700 ms watchdog may not force
+ * the stall there. Lower PROBE_WATCHDOG_MS, or set GEMINI_LIVE_MODEL to the
+ * 3.1 model.
  *
  * Run: pnpm tsx examples/probes/hosted-replay-recovery.ts
  * Env: GEMINI_API_KEY (or GOOGLE_API_KEY); optional PROBE_WATCHDOG_MS,
@@ -34,6 +38,7 @@ import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { resamplePcm } from '../../src/audio/resample.js';
 import { VoiceSession } from '../../src/core/voice-session.js';
 import { GeminiBatchSTTProvider } from '../../src/transport/gemini-batch-stt-provider.js';
+import { DEFAULT_GEMINI_LIVE_MODEL } from '../../src/transport/gemini-live-transport.js';
 import type { MainAgent } from '../../src/types/agent.js';
 
 const API_KEY = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY ?? '';
@@ -41,7 +46,7 @@ if (!API_KEY) {
 	console.error('GEMINI_API_KEY required');
 	process.exit(1);
 }
-const MODEL = process.env.GEMINI_LIVE_MODEL || 'gemini-3.1-flash-live-preview';
+const MODEL = process.env.GEMINI_LIVE_MODEL || DEFAULT_GEMINI_LIVE_MODEL;
 const WATCHDOG_MS = Number(process.env.PROBE_WATCHDOG_MS) || 700;
 
 const FRAME_MS = 20;

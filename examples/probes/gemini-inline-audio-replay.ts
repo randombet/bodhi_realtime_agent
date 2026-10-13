@@ -17,19 +17,21 @@
  * Falls back to a WAV-wrapped payload if raw PCM gets no response in the clean state.
  *
  * Run: pnpm tsx examples/probes/gemini-inline-audio-replay.ts
- * Env: GEMINI_API_KEY (or GOOGLE_API_KEY)
+ * Env: GEMINI_API_KEY (or GOOGLE_API_KEY); optional GEMINI_LIVE_MODEL (default:
+ *      DEFAULT_GEMINI_LIVE_MODEL, gemini-3.8-live).
  */
 
 import 'dotenv/config';
 import { GoogleGenAI, type LiveServerMessage, Modality } from '@google/genai';
 import { resamplePcm } from '../../src/audio/resample.js';
+import { DEFAULT_GEMINI_LIVE_MODEL } from '../../src/transport/gemini-live-transport.js';
 
 const API_KEY = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY ?? '';
 if (!API_KEY) {
 	console.error('GEMINI_API_KEY required');
 	process.exit(1);
 }
-const MODEL = process.env.GEMINI_LIVE_MODEL || 'gemini-3.1-flash-live-preview';
+const MODEL = process.env.GEMINI_LIVE_MODEL || DEFAULT_GEMINI_LIVE_MODEL;
 
 function ts(): string {
 	return new Date().toISOString().slice(11, 23);

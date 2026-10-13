@@ -22,6 +22,7 @@ import {
 	GeminiLiveTransport,
 } from '../../src/transport/gemini-live-transport.js';
 import type { MainAgent } from '../../src/types/agent.js';
+import type { ToolDefinition } from '../../src/types/tool.js';
 import type { ConnectionLifecycleEvent } from '../../src/types/transport.js';
 
 type Callbacks = {
@@ -178,6 +179,30 @@ describe('VoiceSession with a credentialProvider', () => {
 		// The default Live model takes text as realtime input, not client content.
 		expect(lastDial().session.sendRealtimeInput).toHaveBeenCalledWith({ text: 'hello' });
 		expect(lastDial().session.sendClientContent).not.toHaveBeenCalled();
+	});
+
+	it('hands the provider the default setup: gemini-3.8-live, every function BLOCKING', async () => {
+		// A token locked to the setup locks the declarations with it, so a session
+		// that sets no behavior must already carry BLOCKING in what the provider sees.
+		const { provider, setups } = tokenProvider();
+		const lookup: ToolDefinition = {
+			name: 'lookup',
+			description: 'Look something up',
+			parameters: z.object({ q: z.string() }),
+			execution: 'inline',
+			execute: async () => 'ok',
+		};
+		await start(provider, {
+			agents: [{ name: 'main', instructions: 'You are the main agent.', tools: [lookup] }],
+		});
+
+		expect(setups[0]?.model).toBe('gemini-3.8-live');
+		const declarations = (
+			setups[0]?.config.tools as Array<{ functionDeclarations?: Array<Record<string, unknown>> }>
+		).flatMap((t) => t.functionDeclarations ?? []);
+		expect(declarations.map((d) => d.name)).toContain('lookup');
+		expect(declarations.every((d) => d.behavior === 'BLOCKING')).toBe(true);
+		expectEachDialUsedItsCredential(setups);
 	});
 
 	it('reconnects on GoAway with a new credential for the resumed setup', async () => {
