@@ -804,6 +804,26 @@ describe('GeminiLiveTranscribeSTTProvider credentials', () => {
 		await p.stop();
 	});
 
+	it('disarms a connection’s credential expiry when its socket closes, leaving no timer after stop()', async () => {
+		vi.useFakeTimers();
+		const { p, sockets } = makeTokenProvider(
+			(n) => token(n, { expiresAtMs: Date.now() + 30 * 86_400_000 }),
+			{ rotateAfterMs: 600_000 },
+		);
+		const started = p.start();
+		await vi.advanceTimersByTimeAsync(0);
+		sockets[0].openAndSetup();
+		await started;
+		sockets[0].readyState = 3;
+		sockets[0].emit('close', 1011, 'boom'); // reconnect
+		await vi.advanceTimersByTimeAsync(0);
+		sockets[1].openAndSetup();
+		const stopped = p.stop();
+		await vi.advanceTimersByTimeAsync(1_000);
+		await stopped;
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
 	it('ignores a setupComplete that arrives after its connection timed out', async () => {
 		const events: GeminiLiveTranscribeLifecycleEvent[] = [];
 		const { p, sockets } = makeProvider({

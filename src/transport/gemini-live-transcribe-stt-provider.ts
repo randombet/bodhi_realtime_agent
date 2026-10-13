@@ -519,6 +519,8 @@ export class GeminiLiveTranscribeSTTProvider implements STTProvider {
 		ws.on('close', (code: number, reason: unknown) => {
 			this.log(`[Transcribe#${conn.id}] closed ${code ?? ''} ${String(reason ?? '')}`.trim());
 			this.conns.delete(conn);
+			// Gone: its credential expiry has nothing left to close, and stop() no longer sees it.
+			this.disarmExpiry(conn);
 			const why = String(reason ?? '');
 			if (!conn.ready) {
 				this.onFailed(conn, new Error(`Gemini Transcribe Live closed before setup (${code})`), {
@@ -746,8 +748,7 @@ export class GeminiLiveTranscribeSTTProvider implements STTProvider {
 	/** Closes `conn` once. One that never dialed has its credential fetch aborted and
 	 *  its close reported here, since no socket will report it. */
 	private closeConn(conn: Conn): void {
-		if (conn.expiryTimer) clearTimeout(conn.expiryTimer);
-		conn.expiryTimer = undefined;
+		this.disarmExpiry(conn);
 		if (conn.ended) return;
 		conn.ended = true;
 		if (!conn.ws) {
@@ -759,6 +760,11 @@ export class GeminiLiveTranscribeSTTProvider implements STTProvider {
 		try {
 			conn.ws.close();
 		} catch {}
+	}
+
+	private disarmExpiry(conn: Conn): void {
+		if (conn.expiryTimer) clearTimeout(conn.expiryTimer);
+		conn.expiryTimer = undefined;
 	}
 
 	private reportClosed(conn: Conn, code?: number, reason?: string): void {
