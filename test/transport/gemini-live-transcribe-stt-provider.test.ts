@@ -689,6 +689,52 @@ describe('GeminiLiveTranscribeSTTProvider credentials', () => {
 		await expect(again).rejects.toThrow(/access revoked/);
 	});
 
+	it('retries a reconnect whose credential provider throws synchronously', async () => {
+		const sockets: FakeSocket[] = [];
+		let calls = 0;
+		const p = new GeminiLiveTranscribeSTTProvider({
+			// Not async: call 2 throws before it returns a promise.
+			credentialProvider: () => {
+				calls++;
+				if (calls === 2) throw new Error('vault unreachable');
+				return Promise.resolve(token(calls));
+			},
+			retryDelayMs: 5,
+			createSocket: () => {
+				const s = new FakeSocket();
+				sockets.push(s);
+				return s;
+			},
+		});
+		p.configure({ sampleRate: 24000, bitDepth: 16, channels: 1 });
+		await startWithCredential(p, sockets);
+		sockets[0].readyState = 3;
+		sockets[0].emit('close', 1011, 'boom'); // reconnect: its credential throws
+		await tick(30);
+		expect(calls).toBe(3);
+		expect(sockets).toHaveLength(2);
+		p.feedAudio(chunk);
+		sockets[1].openAndSetup();
+		expect(sockets[1].audioCount()).toBe(1);
+		await p.stop();
+	});
+
+	it('rejects start(), without onFatal, when the credential provider throws a permanent error synchronously', async () => {
+		const fatal: Error[] = [];
+		const p = new GeminiLiveTranscribeSTTProvider({
+			credentialProvider: () => {
+				throw Object.assign(new Error('no key for this owner'), { retryable: false });
+			},
+			onFatal: (e) => fatal.push(e),
+			createSocket: () => {
+				throw new Error('never dialed');
+			},
+		});
+		const err = (await p.start().catch((e: unknown) => e)) as ConnectFailureError;
+		expect(err.connectFailure).toMatchObject({ source: 'provider', retryable: false });
+		expect(fatal).toHaveLength(0);
+	});
+
 	it('reports each connection’s dial, setup-ok and close with its credential meta', async () => {
 		const { p, sockets, events } = makeTokenProvider((n) => token(n));
 		await startWithCredential(p, sockets);

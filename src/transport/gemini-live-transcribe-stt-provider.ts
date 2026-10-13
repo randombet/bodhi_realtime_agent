@@ -464,9 +464,11 @@ export class GeminiLiveTranscribeSTTProvider implements STTProvider {
 		budget.unref?.();
 		let credential: GeminiCredential;
 		try {
-			// A provider that throws synchronously fails the connection like one that rejects.
+			// A provider that throws synchronously fails the connection like one that
+			// rejects: after this await, once open()'s caller has made it `active`,
+			// `next` or the one start() awaits, so the failure is retried or reported.
 			credential = await untilAborted(
-				Promise.resolve(provider(locked, fetch.signal)),
+				new Promise<GeminiCredential>((resolve) => resolve(provider(locked, fetch.signal))),
 				fetch.signal,
 			);
 		} catch (err) {
