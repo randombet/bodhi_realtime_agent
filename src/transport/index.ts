@@ -36,7 +36,12 @@ export type { HumeTTSConfig } from './hume-tts-provider.js';
 export { GeminiBatchSTTProvider } from './gemini-batch-stt-provider.js';
 export type { GeminiBatchSTTConfig } from './gemini-batch-stt-provider.js';
 export { GeminiLiveTranscribeSTTProvider } from './gemini-live-transcribe-stt-provider.js';
-export type { GeminiLiveTranscribeSTTConfig } from './gemini-live-transcribe-stt-provider.js';
+export type {
+	GeminiLiveTranscribeLifecycleEvent,
+	GeminiLiveTranscribeSTTConfig,
+	GeminiLiveTranscribeSTTOptions,
+	GeminiLiveTranscribeSTTProviderConfig,
+} from './gemini-live-transcribe-stt-provider.js';
 export { GeminiLiveTransport } from './gemini-live-transport.js';
 export type {
 	GeminiCredential,

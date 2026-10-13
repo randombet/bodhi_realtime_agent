@@ -296,7 +296,7 @@ export interface GeminiProviderTransportConfig extends GeminiTransportOptions {
 }
 
 /** Default `GeminiProviderTransportConfig.minCredentialLifetimeMs`. */
-const DEFAULT_MIN_CREDENTIAL_LIFETIME_MS = 60_000;
+export const DEFAULT_MIN_CREDENTIAL_LIFETIME_MS = 60_000;
 
 /** The Gemini transport's options apart from its credential. */
 export interface GeminiTransportOptions {
@@ -507,8 +507,12 @@ interface PendingSetup {
 	retiredGen?: number;
 }
 
+// upgradeStatus, refuseCredential, untilAborted, wireCopy and deepFreeze are shared
+// with GeminiLiveTranscribeSTTProvider, which takes the same credentialProvider; the
+// package index does not re-export them.
+
 /** HTTP status of a refused WebSocket upgrade, from the `ws` error message. */
-function upgradeStatus(message: string | undefined): number | undefined {
+export function upgradeStatus(message: string | undefined): number | undefined {
 	const match = /Unexpected server response: (\d{3})/.exec(message ?? '');
 	return match ? Number(match[1]) : undefined;
 }
@@ -538,7 +542,7 @@ function stageFailure(attempt: CredentialAttempt, message: string): ConnectFailu
 
 /** Why a provider's credential is refused, or `null` when it is usable: it
  *  must outlast the connect deadline by `minLifetimeMs`. */
-function refuseCredential(
+export function refuseCredential(
 	credential: GeminiCredential,
 	connectTimeoutMs: number,
 	minLifetimeMs: number,
@@ -560,7 +564,7 @@ function refuseCredential(
 
 /** `promise`, rejected with the signal's reason once it aborts, whether or not
  *  `promise` honors the signal. */
-function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+export function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 	if (signal.aborted) return Promise.reject(signal.reason);
 	return new Promise<T>((resolve, reject) => {
 		const onAbort = () => reject(signal.reason);
@@ -583,12 +587,12 @@ function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
  *  `undefined`) is dropped, a class instance becomes a plain object and
  *  `toJSON` applies. A structured clone would instead throw on a function the
  *  static-key path sends without complaint. */
-function wireCopy<T>(value: T): T {
+export function wireCopy<T>(value: T): T {
 	return JSON.parse(JSON.stringify(value)) as T;
 }
 
 /** Freeze `value` and everything it holds. */
-function deepFreeze<T>(value: T): T {
+export function deepFreeze<T>(value: T): T {
 	if (typeof value === 'object' && value !== null && !Object.isFrozen(value)) {
 		Object.freeze(value);
 		for (const child of Object.values(value)) deepFreeze(child);
