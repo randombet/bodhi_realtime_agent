@@ -146,6 +146,7 @@ const KEY_API_VERSION = 'v1beta';
 const TOKEN_API_VERSION = 'v1alpha';
 const WS_URL = `${WS_BASE}.${KEY_API_VERSION}.GenerativeService.BidiGenerateContent`;
 const TARGET_RATE = 16000;
+const CONNECTING = 0;
 const OPEN = 1;
 const STOP_DRAIN_MS = 500;
 const QUIET_RMS = 300;
@@ -540,10 +541,13 @@ export class GeminiLiveTranscribeSTTProvider implements STTProvider {
 			return;
 		}
 		if (this.active !== conn) return;
-		// Loss of the socket being fed: promote an open replacement or reconnect, buffering meanwhile.
+		// Loss of the socket being fed: promote the replacement while it is still on its way
+		// (fetching its credential, dialing, or open), else reconnect; audio buffers meanwhile.
+		// Opening another beside a replacement under way would leave that one to connect
+		// unused, holding a session and the credential minted for it.
 		const next = this.next;
 		this.next = null;
-		this.activate(next && next.ws?.readyState === OPEN ? next : this.open());
+		this.activate(next && underWay(next) ? next : this.open());
 	}
 
 	/** A connection failed before setup: reject startup, or retry it within the retry budget. */
@@ -815,6 +819,12 @@ function setupMessage(setup: GeminiLiveSetup): string {
 			inputAudioTranscription: setup.config.inputAudioTranscription,
 		},
 	});
+}
+
+/** Whether `conn` is still on its way to serving: fetching its credential (no
+ *  socket yet), dialing, or open. A socket that is closing is not. */
+function underWay(conn: Conn): boolean {
+	return conn.ws === null || conn.ws.readyState === CONNECTING || conn.ws.readyState === OPEN;
 }
 
 /** Where a credential connects: an ephemeral token (`auth_tokens/…`) to the

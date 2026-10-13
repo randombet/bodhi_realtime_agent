@@ -268,6 +268,7 @@ describe('GeminiLiveTranscribeSTTProvider', () => {
 		sockets[1].openAndSetup();
 		sockets[0].readyState = 3;
 		sockets[0].emit('close', 1011, 'boom'); // promotes the ready replacement
+		expect(sockets).toHaveLength(2); // no reconnect beside it
 		await tick(30);
 		expect(sockets.length).toBe(3);
 		sockets[2].openAndSetup();
@@ -329,6 +330,20 @@ describe('GeminiLiveTranscribeSTTProvider', () => {
 		p.feedAudio(chunk);
 		expect(sockets[2].audioCount()).toBe(1);
 		expect(sockets[1].audioCount()).toBe(0);
+		await p.stop();
+	});
+
+	it('promotes a replacement still connecting when the active socket drops, opening none beside it', async () => {
+		const { p, sockets } = makeProvider({ rotateAfterMs: 20 });
+		await startReady(p, () => sockets[0]);
+		await tick(30);
+		expect(sockets).toHaveLength(2); // the replacement is dialing
+		sockets[0].readyState = 3;
+		sockets[0].emit('close', 1011, 'boom');
+		expect(sockets).toHaveLength(2);
+		p.feedAudio(chunk); // buffered for the replacement
+		sockets[1].openAndSetup();
+		expect(sockets[1].audioCount()).toBe(1);
 		await p.stop();
 	});
 });
@@ -754,6 +769,38 @@ describe('GeminiLiveTranscribeSTTProvider credentials', () => {
 		]);
 		await tick();
 		expect(events.at(-1)).toEqual({ phase: 'dial', connectionId: 2, meta: { id: 'c2' } });
+		await p.stop();
+	});
+
+	it('promotes a replacement still fetching its credential when the active socket drops, minting none beside it', async () => {
+		let resolveReplacement: (c: GeminiCredential) => void = () => {};
+		const { p, sockets, calls, events } = makeTokenProvider(
+			(n) =>
+				n === 2
+					? new Promise<GeminiCredential>((resolve) => {
+							resolveReplacement = resolve;
+						})
+					: token(n),
+			{ rotateAfterMs: 20 },
+		);
+		await startWithCredential(p, sockets);
+		await tick(30); // rotation: the replacement's credential is in flight
+		expect(calls).toHaveLength(2);
+		sockets[0].readyState = 3;
+		sockets[0].emit('close', 1011, 'boom');
+		await tick(30);
+		expect(calls).toHaveLength(2); // no reconnect beside the replacement
+		expect(calls[1].signal.aborted).toBe(false);
+		p.feedAudio(chunk); // buffered for the replacement
+		resolveReplacement(token(2));
+		await tick();
+		expect(sockets).toHaveLength(2);
+		sockets[1].openAndSetup();
+		expect(sockets[1].audioCount()).toBe(1); // it is the fed socket, not an unused session
+		expect(events.filter((e) => e.phase === 'dial').map((e) => e.meta)).toEqual([
+			{ id: 'c1' },
+			{ id: 'c2' },
+		]);
 		await p.stop();
 	});
 
