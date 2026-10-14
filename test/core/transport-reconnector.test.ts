@@ -699,6 +699,48 @@ describe('TransportReconnector', () => {
 			expect(h.sm.state).toBe('ACTIVE');
 		});
 
+		it.each([
+			['a setup timeout (no close code)', { source: 'session' as const }],
+			['a 1006 network drop', { source: 'session' as const, code: 1006 }],
+			['a 1005 close without a status', { source: 'session' as const, code: 1005 }],
+			['a 1015 TLS failure', { source: 'session' as const, code: 1015 }],
+		])(
+			'%s before setup is not a refusal: the handle is kept and no boundary is crossed',
+			async (_label, failure) => {
+				const reconnect = vi
+					.fn()
+					.mockRejectedValueOnce(connectFailed(failure))
+					.mockResolvedValue(undefined);
+				const onFreshSessionBoundary = vi.fn();
+				const h = makeHarness({ transport: fakeTransport({ reconnect }), onFreshSessionBoundary });
+				h.reconnector.handleTransportClose(1011, 'Internal error encountered.');
+				await vi.runAllTimersAsync();
+				expect(dialedHandles(h.transport)).toEqual(['handle-1', 'handle-1']);
+				expect(h.sm.clearResumptionHandle).not.toHaveBeenCalled();
+				expect(onFreshSessionBoundary).not.toHaveBeenCalled();
+				expect(h.sm.state).toBe('ACTIVE');
+			},
+		);
+
+		it('the boundary is crossed right before the fresh dial: a session that closes during the backoff crosses none and dials nothing', async () => {
+			const reconnect = vi
+				.fn()
+				.mockRejectedValueOnce(connectFailed({ source: 'session', code: 1008 }))
+				.mockResolvedValue(undefined);
+			const onFreshSessionBoundary = vi.fn();
+			const h = makeHarness({ transport: fakeTransport({ reconnect }), onFreshSessionBoundary });
+			h.reconnector.handleTransportClose(1011, 'Internal error encountered.');
+			await vi.advanceTimersByTimeAsync(1_000); // the first attempt dials and is refused
+			expect(reconnect).toHaveBeenCalledTimes(1);
+			expect(h.sm.clearResumptionHandle).toHaveBeenCalledTimes(1);
+			expect(onFreshSessionBoundary).not.toHaveBeenCalled();
+
+			h.sm._setState('CLOSED');
+			await vi.runAllTimersAsync();
+			expect(reconnect).toHaveBeenCalledTimes(1);
+			expect(onFreshSessionBoundary).not.toHaveBeenCalled();
+		});
+
 		it('repeated refusals drop the handle once and spend the rest of the budget on fresh dials', async () => {
 			const reconnect = vi.fn().mockRejectedValue(connectFailed({ source: 'session', code: 1008 }));
 			const onFreshSessionBoundary = vi.fn();

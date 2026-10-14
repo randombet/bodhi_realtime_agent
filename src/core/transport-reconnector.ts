@@ -124,7 +124,18 @@ interface DialOptions {
 	 *  retries spent, given back once it connects. Counted rather than captured
 	 *  as a starting value, so a budget reset while it runs still stands. */
 	planned?: { spent: number };
+	/** Set when a refused resume's handle was dropped: cross the fresh-session
+	 *  boundary with this reason right before the dial, once. A session that
+	 *  closes or is handed to the host during the backoff dials nothing and
+	 *  crosses nothing. */
+	freshBoundary?: string;
 }
+
+/** Close codes RFC 6455 reserves for an endpoint to report locally and that
+ *  never travel in a close frame: 1005 (no status), 1006 (abnormal closure,
+ *  such as a dropped network) and 1015 (TLS failure). A close with one of
+ *  these, or with none, is not the server's answer about a session. */
+const LOCAL_ONLY_CLOSE_CODES: ReadonlySet<number> = new Set([1005, 1006, 1015]);
 
 /** The {@link ConnectFailure} a reconnect's rejection carries
  *  ({@link ConnectFailureError}), if any. */
@@ -156,9 +167,11 @@ export interface TransportReconnectorOptions {
  *
  * An attempt of either kind that the transport says failed before setup
  * ({@link ConnectFailureError}, such as a credential provider's transient
- * error) is dialed again through the budgeted path, with the same handle,
- * unless the failure is marked permanent; any other failed attempt ends
- * automatic recovery at once.
+ * error) is dialed again through the budgeted path, unless the failure is
+ * marked permanent; any other failed attempt ends automatic recovery at once.
+ * The retry keeps the handle, except after a resume the server refused
+ * (see {@link dropRefusedHandle}), which the rest of the budget replaces with
+ * a fresh session.
  *
  * Both dial through {@link runReconnect}, which bounds each attempt by a
  * session-level deadline, so the session can never stay in RECONNECTING.
@@ -493,7 +506,19 @@ export class TransportReconnector {
 				this.parkUpstreamLost('host-owns-recovery', closeDetail);
 				return;
 			}
-			this.runReconnect(reason, handle, opts);
+			const { freshBoundary, ...dialOpts } = opts;
+			if (freshBoundary) {
+				try {
+					this.deps.onFreshSessionBoundary?.(freshBoundary);
+				} catch (e) {
+					this.deps.log(
+						`Fresh-session boundary threw (recovery continues): ${e instanceof Error ? e.message : String(e)}`,
+					);
+				}
+				// The boundary's observers may have closed the session.
+				if (this._disposed || this.deps.sessionManager.state !== 'RECONNECTING') return;
+			}
+			this.runReconnect(reason, handle, dialOpts);
 		}, delay);
 	}
 
@@ -502,8 +527,9 @@ export class TransportReconnector {
 	 * ({@link ConnectFailureError}): for example the credential provider of a
 	 * GoAway or credential-expiry reconnect returned a transient error. Rather
 	 * than giving up on that one error, dial again through the budget, after its
-	 * backoff and with the same handle, as for a transport close; an exhausted
-	 * budget then gives up with `reconnect-exhausted`. Returns `false`, leaving
+	 * backoff, as for a transport close: with the same handle, unless the server
+	 * refused the resume ({@link dropRefusedHandle}); an exhausted budget then
+	 * gives up with `reconnect-exhausted`. Returns `false`, leaving
 	 * the failure to {@link failAttempt} as before, when the failure is marked
 	 * permanent (`retryable: false`), the session left RECONNECTING, or the
 	 * host owns recovery.
@@ -530,37 +556,41 @@ export class TransportReconnector {
 			this.failAttempt('reconnect-exhausted', err);
 			return true;
 		}
-		this.scheduleBudgetedDial(reason, this.dropRefusedHandle(handle, failure), opts);
+		if (this.dropRefusedHandle(handle, failure)) {
+			this.scheduleBudgetedDial(reason, null, { ...opts, freshBoundary: 'resume-refused' });
+		} else {
+			this.scheduleBudgetedDial(reason, handle, opts);
+		}
 		return true;
 	}
 
 	/**
-	 * The handle the next attempt dials with. A resume that Gemini closed before
-	 * setup (`source: 'session'`) is the server's answer about that session: on
-	 * prd, after a 1011 crash, every resume of its handle closed with 1008
-	 * "BidiGenerateContent session not found or expired" until the budget was
-	 * gone and the call ended. So the handle is dropped (the transport's copy
-	 * too, by the fresh dial) and the rest of the budget dials a fresh session
-	 * that replays the conversation, crossing the fresh-session boundary first,
-	 * as a credential-expiry rotation without a handle does. Keyed on the
-	 * failure's source, not its close code or reason text, so a reworded or
-	 * renumbered refusal cannot bring the loop back. A provider or dial failure
-	 * says nothing about the session and keeps the handle.
+	 * Whether the server refused this resume, and if so drop its handle. A
+	 * resume that Gemini closed before setup with a close frame of its own
+	 * (`source: 'session'` and a status code that travels on the wire) is the
+	 * server's answer about that session: on prd, after a 1011 crash, every
+	 * resume of its handle closed with 1008 "BidiGenerateContent session not
+	 * found or expired" until the budget was gone and the call ended. So the
+	 * handle is dropped (the transport's copy too, by the fresh dial) and the
+	 * rest of the budget dials a fresh session that replays the conversation,
+	 * crossing the fresh-session boundary right before that dial, as a
+	 * credential-expiry rotation without a handle does.
+	 *
+	 * Keyed on the server having sent a close code, not on which code or the
+	 * reason text, so a reworded or renumbered refusal cannot bring the loop
+	 * back. Everything else keeps the handle, because it says nothing about the
+	 * session: a provider or dial failure, a setup timeout or supersede (no
+	 * code), and a close the endpoint reports locally ({@link LOCAL_ONLY_CLOSE_CODES},
+	 * such as a 1006 network drop).
 	 */
-	private dropRefusedHandle(handle: string | null, failure: ConnectFailure): string | null {
-		if (!handle || failure.source !== 'session') return handle;
+	private dropRefusedHandle(handle: string | null, failure: ConnectFailure): boolean {
+		if (!handle || failure.source !== 'session') return false;
+		if (failure.code == null || LOCAL_ONLY_CLOSE_CODES.has(failure.code)) return false;
 		this.deps.log(
-			'Resume refused before setup: dropping the resumption handle, dialing a fresh session',
+			`Resume refused before setup (code=${failure.code}): dropping the resumption handle, dialing a fresh session`,
 		);
 		this.deps.sessionManager.clearResumptionHandle();
-		try {
-			this.deps.onFreshSessionBoundary?.('resume-refused');
-		} catch (e) {
-			this.deps.log(
-				`Fresh-session boundary threw (recovery continues): ${e instanceof Error ? e.message : String(e)}`,
-			);
-		}
-		return null;
+		return true;
 	}
 
 	/** Exhaustion policy: automatic recovery cannot continue. Policy `'hold'`
