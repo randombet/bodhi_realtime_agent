@@ -103,7 +103,10 @@ export interface GeminiLiveTranscribeSTTProviderConfig extends GeminiLiveTranscr
 	apiKey?: never;
 	/** The least use, in ms, a credential must leave after the connect deadline:
 	 *  one that expires sooner is refused, failing that connection. Default 60000;
-	 *  as `GeminiProviderTransportConfig.minCredentialLifetimeMs`. */
+	 *  as `GeminiProviderTransportConfig.minCredentialLifetimeMs`. A rotation starts
+	 *  `connectTimeoutMs + pauseWaitMs + drainMs` before expiry, so the minimum
+	 *  applied is never less than that plus 1000 ms: a shorter-lived credential
+	 *  would rotate as soon as it is set up. */
 	minCredentialLifetimeMs?: number;
 }
 
@@ -484,10 +487,14 @@ export class GeminiLiveTranscribeSTTProvider implements STTProvider {
 		// Recorded before the checks: a refused credential was still minted, and its
 		// meta is how the owner matches this connection's failure to it.
 		if (typeof credential === 'object' && credential !== null) conn.meta = credential.meta;
+		// This connection's setup may use connectTimeoutMs, and its rotation starts
+		// connectTimeoutMs + pauseWaitMs + drainMs before expiry; keep 1 s of use past both.
+		const rotationFloorMs =
+			this.cfg.connectTimeoutMs + this.cfg.pauseWaitMs + this.cfg.drainMs + 1_000;
 		const refusal = refuseCredential(
 			credential,
 			this.cfg.connectTimeoutMs,
-			this.minCredentialLifetimeMs,
+			Math.max(this.minCredentialLifetimeMs, rotationFloorMs),
 		);
 		if (refusal) {
 			this.onFailed(conn, credentialError(new ValidationError(refusal)));

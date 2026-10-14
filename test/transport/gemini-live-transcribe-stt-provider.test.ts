@@ -679,6 +679,39 @@ describe('GeminiLiveTranscribeSTTProvider credentials', () => {
 		]);
 	});
 
+	it('refuses a credential that would rotate at once when pauseWaitMs + drainMs exceed minCredentialLifetimeMs', async () => {
+		vi.useFakeTimers();
+		// Rotation starts 1 000 + 3 000 + 2 000 = 6 000 ms before expiry, past the 1 000 ms minimum.
+		const opts = {
+			rotateAfterMs: 600_000,
+			connectTimeoutMs: 1_000,
+			pauseWaitMs: 3_000,
+			drainMs: 2_000,
+			minCredentialLifetimeMs: 1_000,
+		};
+		const short = makeTokenProvider(() => token(1, { expiresAtMs: Date.now() + 5_000 }), opts);
+		const refused = expect(short.p.start()).rejects.toThrow(/credential expires in/);
+		await vi.advanceTimersByTimeAsync(1_000); // an accepted one would hit the connect deadline
+		await refused;
+		expect(short.sockets).toHaveLength(0);
+
+		const long = makeTokenProvider(
+			(n) => token(n, { expiresAtMs: Date.now() + 8_000 }), // 1 000 + 6 000 + 1 000 of floor
+			opts,
+		);
+		const started = long.p.start();
+		await vi.advanceTimersByTimeAsync(0);
+		long.sockets[0].openAndSetup();
+		await started;
+		await vi.advanceTimersByTimeAsync(1_999); // rotation is due at 8 000 - 6 000 = 2 000
+		expect(long.calls).toHaveLength(1);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(long.calls).toHaveLength(2);
+		const stopped = long.p.stop();
+		await vi.advanceTimersByTimeAsync(10_000);
+		await stopped;
+	});
+
 	it('ends the run at once, without a retry, when the provider fails permanently after start()', async () => {
 		const fatal: Error[] = [];
 		const { p, sockets, calls } = makeTokenProvider(
