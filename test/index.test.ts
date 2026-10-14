@@ -7,6 +7,9 @@ import type {
 	EchoCheckResult,
 	EchoEnvEntry,
 	EchoGuardConfig,
+	GeminiLiveTranscribeLifecycleEvent,
+	GeminiLiveTranscribeSTTOptions,
+	GeminiLiveTranscribeSTTProviderConfig,
 	LiveUsageMetadata,
 	TransportDiagnostics,
 	TransportUsageMetadata,
@@ -130,5 +133,19 @@ describe('module smoke test', () => {
 		const entry: EchoEnvEntry = { rms: 0.5, at: 0 };
 		const result: EchoCheckResult = { suppress: false, corr: 0, lagMs: -1 };
 		expect([config.enabled, entry.rms, result.suppress]).toEqual([true, 0.5, false]);
+	});
+
+	it('root-exports GeminiLiveTranscribeSTTProvider with its credential config and lifecycle types', async () => {
+		const mod = await import('../src/index.js');
+		expect(typeof mod.GeminiLiveTranscribeSTTProvider).toBe('function');
+
+		// Type-level: fails typecheck:tests if any name stops resolving from the root.
+		const options: GeminiLiveTranscribeSTTOptions = { connectTimeoutMs: 30_000 };
+		const config: GeminiLiveTranscribeSTTProviderConfig = {
+			...options,
+			credentialProvider: async () => ({ apiKey: 'auth_tokens/t', expiresAtMs: 0 }),
+		};
+		const event: GeminiLiveTranscribeLifecycleEvent = { phase: 'setup-ok', connectionId: 1 };
+		expect([typeof config.credentialProvider, event.phase]).toEqual(['function', 'setup-ok']);
 	});
 });
