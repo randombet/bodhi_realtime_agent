@@ -654,6 +654,78 @@ describe('TransportReconnector', () => {
 			expect(h.sm.closeWithReason).toHaveBeenCalledWith('reconnect_failed');
 		});
 
+		it('a resume Gemini refuses before setup drops the dead handle: the next attempt dials a fresh session that replays the conversation', async () => {
+			// prd 2026-10-14: a 1011 crash, then "BidiGenerateContent session not
+			// found or expired" (1008) on every resume of that session's handle,
+			// until the budget was gone and the call ended.
+			const reconnect = vi
+				.fn()
+				.mockRejectedValueOnce(
+					connectFailed({ source: 'session', code: 1008, reason: 'session not found or expired' }),
+				)
+				.mockResolvedValue(undefined);
+			const clearResumption = vi.fn();
+			const onFreshSessionBoundary = vi.fn();
+			const replay: ReplayItem[] = [{ role: 'user', parts: [] } as unknown as ReplayItem];
+			const h = makeHarness({
+				transport: fakeTransport({ reconnect, clearResumption }),
+				onFreshSessionBoundary,
+				replay,
+			});
+
+			h.reconnector.handleTransportClose(1011, 'Internal error encountered.');
+			await vi.runAllTimersAsync();
+
+			expect(dialedHandles(h.transport)).toEqual(['handle-1', undefined]);
+			expect(h.sm.clearResumptionHandle).toHaveBeenCalledTimes(1);
+			expect(clearResumption).toHaveBeenCalled();
+			expect(onFreshSessionBoundary).toHaveBeenCalledTimes(1);
+			expect(onFreshSessionBoundary).toHaveBeenCalledWith('resume-refused');
+			expect(reconnect.mock.calls[1][0]).toMatchObject({ conversationHistory: replay });
+			expect(h.sm.state).toBe('ACTIVE');
+			expect(h.sm.closeWithReason).not.toHaveBeenCalled();
+			expect(h.reportError).not.toHaveBeenCalled();
+		});
+
+		it('a provider failure says nothing about the session: the handle is kept and no boundary is crossed', async () => {
+			const reconnect = vi.fn().mockRejectedValueOnce(connectFailed()).mockResolvedValue(undefined);
+			const onFreshSessionBoundary = vi.fn();
+			const h = makeHarness({ transport: fakeTransport({ reconnect }), onFreshSessionBoundary });
+			h.reconnector.handleTransportClose(1011, 'Internal error encountered.');
+			await vi.runAllTimersAsync();
+			expect(dialedHandles(h.transport)).toEqual(['handle-1', 'handle-1']);
+			expect(h.sm.clearResumptionHandle).not.toHaveBeenCalled();
+			expect(onFreshSessionBoundary).not.toHaveBeenCalled();
+			expect(h.sm.state).toBe('ACTIVE');
+		});
+
+		it('repeated refusals drop the handle once and spend the rest of the budget on fresh dials', async () => {
+			const reconnect = vi.fn().mockRejectedValue(connectFailed({ source: 'session', code: 1008 }));
+			const onFreshSessionBoundary = vi.fn();
+			const h = makeHarness({ transport: fakeTransport({ reconnect }), onFreshSessionBoundary });
+			h.reconnector.handleTransportClose(1011, 'Internal error encountered.');
+			await vi.runAllTimersAsync();
+			expect(dialedHandles(h.transport)).toEqual(['handle-1', undefined, undefined]);
+			expect(h.sm.clearResumptionHandle).toHaveBeenCalledTimes(1);
+			expect(onFreshSessionBoundary).toHaveBeenCalledTimes(1);
+			expect(h.sm.closeWithReason).toHaveBeenCalledWith('reconnect_failed');
+		});
+
+		it('a refusal on the last attempt of the budget gives up without crossing a boundary', async () => {
+			const reconnect = vi
+				.fn()
+				.mockRejectedValueOnce(connectFailed())
+				.mockRejectedValueOnce(connectFailed())
+				.mockRejectedValue(connectFailed({ source: 'session', code: 1008 }));
+			const onFreshSessionBoundary = vi.fn();
+			const h = makeHarness({ transport: fakeTransport({ reconnect }), onFreshSessionBoundary });
+			h.reconnector.handleTransportClose(1011, 'Internal error encountered.');
+			await vi.runAllTimersAsync();
+			expect(dialedHandles(h.transport)).toEqual(['handle-1', 'handle-1', 'handle-1']);
+			expect(onFreshSessionBoundary).not.toHaveBeenCalled();
+			expect(h.sm.closeWithReason).toHaveBeenCalledWith('reconnect_failed');
+		});
+
 		it('a failure the provider marked permanent ends recovery at once', async () => {
 			const reconnect = vi.fn().mockRejectedValue(connectFailed({ retryable: false }));
 			const h = makeHarness({ transport: fakeTransport({ reconnect }) });

@@ -530,8 +530,37 @@ export class TransportReconnector {
 			this.failAttempt('reconnect-exhausted', err);
 			return true;
 		}
-		this.scheduleBudgetedDial(reason, handle, opts);
+		this.scheduleBudgetedDial(reason, this.dropRefusedHandle(handle, failure), opts);
 		return true;
+	}
+
+	/**
+	 * The handle the next attempt dials with. A resume that Gemini closed before
+	 * setup (`source: 'session'`) is the server's answer about that session: on
+	 * prd, after a 1011 crash, every resume of its handle closed with 1008
+	 * "BidiGenerateContent session not found or expired" until the budget was
+	 * gone and the call ended. So the handle is dropped (the transport's copy
+	 * too, by the fresh dial) and the rest of the budget dials a fresh session
+	 * that replays the conversation, crossing the fresh-session boundary first,
+	 * as a credential-expiry rotation without a handle does. Keyed on the
+	 * failure's source, not its close code or reason text, so a reworded or
+	 * renumbered refusal cannot bring the loop back. A provider or dial failure
+	 * says nothing about the session and keeps the handle.
+	 */
+	private dropRefusedHandle(handle: string | null, failure: ConnectFailure): string | null {
+		if (!handle || failure.source !== 'session') return handle;
+		this.deps.log(
+			'Resume refused before setup: dropping the resumption handle, dialing a fresh session',
+		);
+		this.deps.sessionManager.clearResumptionHandle();
+		try {
+			this.deps.onFreshSessionBoundary?.('resume-refused');
+		} catch (e) {
+			this.deps.log(
+				`Fresh-session boundary threw (recovery continues): ${e instanceof Error ? e.message : String(e)}`,
+			);
+		}
+		return null;
 	}
 
 	/** Exhaustion policy: automatic recovery cannot continue. Policy `'hold'`
