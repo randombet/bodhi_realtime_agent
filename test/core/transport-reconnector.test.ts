@@ -741,6 +741,52 @@ describe('TransportReconnector', () => {
 			expect(onFreshSessionBoundary).not.toHaveBeenCalled();
 		});
 
+		it('a boundary observer that hands recovery to the host stops the automatic fresh dial', async () => {
+			const reconnect = vi
+				.fn()
+				.mockRejectedValueOnce(connectFailed({ source: 'session', code: 1008 }))
+				.mockResolvedValue(undefined);
+			const host: { h?: Harness } = {};
+			const onFreshSessionBoundary = vi.fn(() => {
+				host.h?.reconnector.beginHostRecovery();
+			});
+			const h = makeHarness({
+				transport: fakeTransport({ reconnect }),
+				onFreshSessionBoundary,
+				upstreamLossPolicy: 'hold',
+			});
+			host.h = h;
+			h.reconnector.handleTransportClose(1011, 'Internal error encountered.');
+			await vi.runAllTimersAsync();
+			expect(onFreshSessionBoundary).toHaveBeenCalledTimes(1);
+			// Only the refused resume: the host owns the fresh dial now.
+			expect(reconnect).toHaveBeenCalledTimes(1);
+		});
+
+		it('a host that comes to own recovery during the boundary gets the session parked, not an automatic dial', async () => {
+			const reconnect = vi
+				.fn()
+				.mockRejectedValueOnce(connectFailed({ source: 'session', code: 1008 }))
+				.mockResolvedValue(undefined);
+			let hostOwns = false;
+			const h = makeHarness({
+				transport: fakeTransport({ reconnect }),
+				onFreshSessionBoundary: () => {
+					hostOwns = true;
+				},
+				upstreamLossPolicy: 'hold',
+				hostOwnsRecovery: () => hostOwns,
+			});
+			h.reconnector.handleTransportClose(1011, 'Internal error encountered.');
+			await vi.runAllTimersAsync();
+			expect(reconnect).toHaveBeenCalledTimes(1);
+			expect(h.sm.state).toBe('UPSTREAM_LOST');
+			expect(h.eventBus.publish).toHaveBeenCalledWith(
+				'session.upstreamLost',
+				expect.objectContaining({ reason: 'host-owns-recovery' }),
+			);
+		});
+
 		it('repeated refusals drop the handle once and spend the rest of the budget on fresh dials', async () => {
 			const reconnect = vi.fn().mockRejectedValue(connectFailed({ source: 'session', code: 1008 }));
 			const onFreshSessionBoundary = vi.fn();

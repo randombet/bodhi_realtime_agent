@@ -508,6 +508,7 @@ export class TransportReconnector {
 			}
 			const { freshBoundary, ...dialOpts } = opts;
 			if (freshBoundary) {
+				const token = this._attemptToken;
 				try {
 					this.deps.onFreshSessionBoundary?.(freshBoundary);
 				} catch (e) {
@@ -515,8 +516,15 @@ export class TransportReconnector {
 						`Fresh-session boundary threw (recovery continues): ${e instanceof Error ? e.message : String(e)}`,
 					);
 				}
-				// The boundary's observers may have closed the session.
+				// The boundary's observers may have closed the session, or handed
+				// recovery to the host (beginHostRecovery() advances the attempt
+				// token and leaves the session RECONNECTING): no automatic dial then.
 				if (this._disposed || this.deps.sessionManager.state !== 'RECONNECTING') return;
+				if (token !== this._attemptToken) return;
+				if (this.isHostOwningRecovery()) {
+					this.parkUpstreamLost('host-owns-recovery', closeDetail);
+					return;
+				}
 			}
 			this.runReconnect(reason, handle, dialOpts);
 		}, delay);
