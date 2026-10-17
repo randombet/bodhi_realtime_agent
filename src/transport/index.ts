@@ -83,6 +83,20 @@ export type {
 	ReasoningSummary,
 } from './openai-realtime-models.js';
 export type { ReasoningEffort } from '../types/transport.js';
+export {
+	chunkForAppend as openaiLiveChunkForAppend,
+	DEFAULT_OPENAI_LIVE_MODEL,
+	DEFAULT_OPENAI_LIVE_URL,
+	DEFAULT_OPENAI_LIVE_VOICE,
+	OpenAILiveTransport,
+} from './openai-live-transport.js';
+export type {
+	OpenAILiveAudioFormat,
+	OpenAILiveClientDelegationTool,
+	OpenAILiveConfig,
+	OpenAILiveDelegation,
+	OpenAILiveHostedTool,
+} from './openai-live-transport.js';
 export { QwenRealtimeTransport } from './qwen-realtime-transport.js';
 export type { QwenRealtimeConfig, QwenTurnDetection } from './qwen-realtime-transport.js';
 export {

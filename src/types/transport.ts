@@ -380,7 +380,11 @@ export interface LLMTransportError {
 }
 
 /** Which realtime provider produced this usage event. */
-export type RealtimeUsageProvider = 'gemini_live' | 'openai_realtime' | 'qwen_realtime';
+export type RealtimeUsageProvider =
+	| 'gemini_live'
+	| 'openai_realtime'
+	| 'qwen_realtime'
+	| 'openai_live';
 
 /** What billable slice this event describes. */
 export type RealtimeUsageKind = 'response' | 'input_transcription';
