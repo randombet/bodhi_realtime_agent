@@ -1463,7 +1463,16 @@ export class VoiceSession {
 				// let a deferred watchdog replay re-evaluate instead of stranding.
 				// Phase-2 re-bind: abort/notify actuation runs from the ledger's
 				// terminal observer for ignored/aborted terminals.
-				onSegmentAborted: () => {},
+				// The segment's `speech.user_started` was published; without this, subscribers that wait
+				// for the user to finish (a host holding a request until the user's turn is over) waited
+				// for an end that never comes. Retained-audio and watchdog actuation stay with the ledger.
+				onSegmentAborted: () => {
+					this.eventBus.publish('speech.user_aborted', {
+						sessionId: this.config.sessionId,
+						atMs: this.nowMs(),
+						source: 'client-vad',
+					});
+				},
 			},
 			(msg) => this.log(msg),
 			this.nowMs,
@@ -2275,6 +2284,8 @@ export class VoiceSession {
 					this.conversationContext.addToolCall(toolCall);
 					try {
 						let resultText: string;
+						// A persistent subagent may ask for its result to close the call silently.
+						let resultScheduling: 'when_idle' | 'silent' | undefined;
 						const usePersistentRuntimePath =
 							request.lifetime === 'persistent_session' && !!registeredConfig.persistentFactory;
 
@@ -2289,12 +2300,18 @@ export class VoiceSession {
 								registeredConfig,
 								factory,
 							);
-							resultText = await this.persistentSubagents.invoke(
+							const outcome = await this.persistentSubagents.invoke(
 								persistentKey,
 								`Execute tool: ${request.toolName}`,
 								request.args,
 								signal,
 							);
+							if (typeof outcome === 'string') {
+								resultText = outcome;
+							} else {
+								resultText = outcome.text;
+								resultScheduling = outcome.scheduling;
+							}
 						} else {
 							const subagentConfig = registeredConfig.createInstance
 								? registeredConfig.createInstance()
@@ -2317,9 +2334,11 @@ export class VoiceSession {
 							);
 						}
 						this.log(
-							`Background task completed: ${request.toolName} (toolCallId=${request.toolCallId}, duration=${Date.now() - backgroundStartedAt}ms)`,
+							`Background task completed: ${request.toolName} (toolCallId=${request.toolCallId}, duration=${Date.now() - backgroundStartedAt}ms${resultScheduling === 'silent' ? ', silent' : ''})`,
 						);
-						return resultText;
+						return resultScheduling
+							? { text: resultText, scheduling: resultScheduling }
+							: resultText;
 					} catch (err) {
 						this.conversationContext.addToolResult({
 							toolCallId: toolCall.toolCallId,
@@ -2661,30 +2680,44 @@ export class VoiceSession {
 		// A session parked in UPSTREAM_LOST is disconnected too (and routes no
 		// microphone audio), so STT stops there as well; a redial's activation
 		// starts it again.
-		this.eventBus.subscribe('session.stateChange', (payload: { toState: string }) => {
-			if (payload.toState === 'ACTIVE') {
-				this.startSttProvider();
-				this.startShadowStt();
-			} else if (
-				payload.toState === 'RECONNECTING' ||
-				payload.toState === 'TRANSFERRING' ||
-				payload.toState === 'UPSTREAM_LOST'
-			) {
-				void this.sttProvider?.stop();
-				this.shadowStt
-					?.stop()
-					.catch((err) =>
-						this.log(
-							`[ShadowSTT] stop failed: ${err instanceof Error ? err.message : String(err)}`,
-						),
-					);
-			}
-			// Parked, nothing can reach the model: a notification sent now would
-			// be dropped by the disconnected transport, and synthetic output has
-			// nowhere to go. The dial window holds both until a recovery's
-			// replacement connection activates. Only legacy sessions park.
-			if (payload.toState === 'UPSTREAM_LOST') this.hold.engageDialWindow();
-		});
+		this.eventBus.subscribe(
+			'session.stateChange',
+			(payload: { fromState?: string; toState: string }) => {
+				if (payload.toState === 'ACTIVE') {
+					this.startSttProvider();
+					this.startShadowStt();
+					// A reconnect ends whatever the model was saying on the old connection, and that turn never
+					// completes. Its "audio playing" state must not carry over: notifications would wait for a
+					// turn_complete that never comes (a background result published after the reconnect was
+					// never delivered). The new connection starts idle, and one queued notification goes now
+					// unless a response is already being elicited on it. The cut turn may still be the active
+					// one (an automatic reconnect does not finalize it), so the usual idle drain would wait on
+					// it too.
+					if (payload.fromState === 'RECONNECTING') {
+						this.notificationSink.resetAudio();
+						if (this._pendingResponseOrigin === null) this.notificationSink.turnComplete();
+					}
+				} else if (
+					payload.toState === 'RECONNECTING' ||
+					payload.toState === 'TRANSFERRING' ||
+					payload.toState === 'UPSTREAM_LOST'
+				) {
+					void this.sttProvider?.stop();
+					this.shadowStt
+						?.stop()
+						.catch((err) =>
+							this.log(
+								`[ShadowSTT] stop failed: ${err instanceof Error ? err.message : String(err)}`,
+							),
+						);
+				}
+				// Parked, nothing can reach the model: a notification sent now would
+				// be dropped by the disconnected transport, and synthetic output has
+				// nowhere to go. The dial window holds both until a recovery's
+				// replacement connection activates. Only legacy sessions park.
+				if (payload.toState === 'UPSTREAM_LOST') this.hold.engageDialWindow();
+			},
+		);
 
 		// Route UI button responses back to the waiting SubagentSession
 		this.eventBus.subscribe(

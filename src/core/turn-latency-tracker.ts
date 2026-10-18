@@ -105,6 +105,7 @@ export class TurnLatencyTracker {
 			this.unsubscribes.push(deps.bus.subscribe(topic, (payload) => this.append(topic, payload)));
 		sub('speech.user_started');
 		sub('speech.user_ended');
+		sub('speech.user_aborted');
 		sub('response.started');
 		sub('response.first_audio');
 		sub('turn.interrupted');
@@ -169,6 +170,12 @@ export class TurnLatencyTracker {
 			case 'speech.user_started': {
 				const p = entry.payload as EventPayloadMap['speech.user_started'];
 				this.lastSpeechStartBySource[p.source] = p.atMs;
+				return;
+			}
+			case 'speech.user_aborted': {
+				// The segment never ends: its start must not pair with a later end.
+				const p = entry.payload as EventPayloadMap['speech.user_aborted'];
+				this.lastSpeechStartBySource[p.source] = null;
 				return;
 			}
 			case 'speech.user_ended': {

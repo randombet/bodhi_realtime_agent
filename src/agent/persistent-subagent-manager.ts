@@ -3,6 +3,7 @@ import type { SubagentConfig } from '../types/agent.js';
 import type {
 	PersistentSubagentFactory,
 	PersistentSubagentInstance,
+	PersistentSubagentResult,
 } from './persistent-subagent-types.js';
 
 /**
@@ -68,7 +69,7 @@ export class PersistentSubagentManager {
 		taskDescription: string,
 		args: Record<string, unknown>,
 		signal?: AbortSignal,
-	): Promise<string> {
+	): Promise<string | PersistentSubagentResult> {
 		const instance = this.instances.get(key);
 		if (!instance) {
 			throw new FrameworkError(`No persistent subagent instance for key "${key}"`, {

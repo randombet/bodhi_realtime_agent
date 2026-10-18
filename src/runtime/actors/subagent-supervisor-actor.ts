@@ -25,7 +25,7 @@ export interface SubagentExecutionRequest {
 export type SubagentExecutionHandler = (
 	request: SubagentExecutionRequest,
 	signal: AbortSignal,
-) => Promise<string>;
+) => Promise<string | { text: string; scheduling?: 'when_idle' | 'silent' }>;
 
 /** Tracks a single subagent workflow. */
 interface SubagentWorkflow {
@@ -82,6 +82,7 @@ export class SubagentSupervisorActor implements Actor {
 					toolCallId: string;
 					workflowId: string;
 					result: string;
+					scheduling?: 'when_idle' | 'silent';
 				};
 				this.handleCompleted(p);
 				break;
@@ -178,7 +179,12 @@ export class SubagentSupervisorActor implements Actor {
 		this.workflows.delete(toolCallId);
 	}
 
-	private handleCompleted(p: { toolCallId: string; workflowId: string; result: string }): void {
+	private handleCompleted(p: {
+		toolCallId: string;
+		workflowId: string;
+		result: string;
+		scheduling?: 'when_idle' | 'silent';
+	}): void {
 		const workflow = this.workflows.get(p.toolCallId);
 		if (!workflow || this.isTerminal(workflow.state)) return;
 
@@ -193,7 +199,8 @@ export class SubagentSupervisorActor implements Actor {
 					id: p.toolCallId,
 					name: workflow.configName,
 					result: { result: p.result },
-					scheduling: 'when_idle',
+					// 'silent' closes the call without prompting a response (nothing new to say).
+					scheduling: p.scheduling ?? 'when_idle',
 				},
 				this.transportActorId,
 			);
@@ -265,7 +272,7 @@ export class SubagentSupervisorActor implements Actor {
 			// Guard: runExecution is only called when executionHandler is defined
 			// (checked in handleSpawnRequest), but guard defensively.
 			if (!this.executionHandler) return;
-			const result = await this.executionHandler(request, signal);
+			const outcome = await this.executionHandler(request, signal);
 
 			// Workflow may have been cancelled while execution was in flight.
 			const current = this.workflows.get(workflow.toolCallId);
@@ -274,7 +281,9 @@ export class SubagentSupervisorActor implements Actor {
 			this.handleCompleted({
 				toolCallId: workflow.toolCallId,
 				workflowId: workflow.workflowId,
-				result,
+				...(typeof outcome === 'string'
+					? { result: outcome }
+					: { result: outcome.text, scheduling: outcome.scheduling }),
 			});
 		} catch (err) {
 			// Ignore expected aborts after cancellation.

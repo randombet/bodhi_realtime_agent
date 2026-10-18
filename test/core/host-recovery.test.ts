@@ -272,10 +272,14 @@ function createSession(
 		whisperProvider?: STTProvider;
 		responseWatchdogMs?: number;
 		log?: (line: string) => void;
+		orchestrationMode?: 'legacy' | 'actor';
+		subagentConfigs?: VoiceSessionConfig['subagentConfigs'];
 	} = {},
 ): VoiceSession {
 	const config: VoiceSessionConfig = {
 		sessionId: 'sess_host_recovery',
+		orchestrationMode: opts.orchestrationMode,
+		subagentConfigs: opts.subagentConfigs,
 		userId: 'user_1',
 		apiKey: 'test-key',
 		agents: [opts.agent ?? createAgent()],
@@ -552,6 +556,56 @@ describe('synthetic-output hold wiring (legacy mode)', () => {
 		expect(origins).toEqual(['assistant_initiated']);
 	});
 
+	it.each(['legacy', 'actor'] as const)(
+		'%s mode: a reconnect that cuts the model mid-speech does not leave notifications waiting for that turn to end',
+		async (orchestrationMode) => {
+			// The cut turn never completes, so its "audio playing" state must not survive the new connection:
+			// a background result published afterwards was queued for a turn_complete that never came
+			// (sutando chain probe S4 on gemini-3.8-live, 2026-10-17: the result was never spoken).
+			const stub = createStubTransport();
+			session = createSession(stub, { orchestrationMode });
+			await activate(session, stub);
+			stub.transport.onModelTurnStart?.();
+			stub.transport.onAudioOutput?.(Buffer.alloc(960).toString('base64'));
+			stub.transport.onResumptionUpdate?.('handle-1', true);
+			stub.transport.onClose?.(1006, 'socket lost');
+			expect(session.sessionManager.state).toBe('RECONNECTING');
+			await vi.waitFor(() => expect(session?.sessionManager.state).toBe('ACTIVE'), {
+				timeout: 5_000,
+			});
+
+			session.publishSystemNotification('background job finished');
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			expect(sentTexts(stub).filter((t) => t.includes('background job finished'))).toHaveLength(1);
+		},
+		10_000,
+	);
+
+	it.each(['legacy', 'actor'] as const)(
+		'%s mode: a notification queued behind speech that a reconnect cut off is delivered once the new connection is up',
+		async (orchestrationMode) => {
+			const stub = createStubTransport();
+			session = createSession(stub, { orchestrationMode });
+			await activate(session, stub);
+			stub.transport.onModelTurnStart?.();
+			stub.transport.onAudioOutput?.(Buffer.alloc(960).toString('base64'));
+			session.publishSystemNotification('job finished while speaking');
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			expect(sentTexts(stub).some((t) => t.includes('job finished while speaking'))).toBe(false);
+			stub.transport.onResumptionUpdate?.('handle-1', true);
+			stub.transport.onClose?.(1006, 'socket lost');
+			await vi.waitFor(() => expect(session?.sessionManager.state).toBe('ACTIVE'), {
+				timeout: 5_000,
+			});
+			await vi.waitFor(() =>
+				expect(
+					sentTexts(stub).filter((t) => t.includes('job finished while speaking')),
+				).toHaveLength(1),
+			);
+		},
+		10_000,
+	);
+
 	it('holds notifications; a dial-window release delivers one at once while the model is idle', async () => {
 		const stub = createStubTransport();
 		session = createSession(stub);
@@ -671,6 +725,74 @@ describe('synthetic-output hold wiring (legacy mode)', () => {
 		hold.engage();
 		stt.onTranscript?.('hello again', 0);
 		expect(hold.isActive()).toBe(false);
+	});
+
+	it('actor mode: a persistent subagent result asking for silent scheduling closes its call SILENT', async () => {
+		const stub = createStubTransport();
+		const relay: ToolDefinition = {
+			name: 'work',
+			description: 'Relays a task.',
+			parameters: z.object({ task: z.string() }),
+			execution: 'background',
+			behavior: 'NON_BLOCKING',
+			execute: async () => '',
+		};
+		let answer: string | { text: string; scheduling: 'silent' } = 'first answer';
+		session = createSession(stub, {
+			orchestrationMode: 'actor',
+			agent: createAgent({ tools: [relay] }),
+			subagentConfigs: {
+				work: {
+					name: 'relay',
+					instructions: 'relay',
+					tools: {},
+					lifetime: 'persistent_session',
+					persistentFactory: async (key) => ({
+						key,
+						invoke: async () => answer,
+						dispose: async () => {},
+					}),
+				},
+			},
+		});
+		await activate(session, stub);
+		const results = () => stub.sendToolResult.mock.calls.map((c) => c[0] as TransportToolResult);
+
+		stub.transport.onToolCall?.([{ id: 'c1', name: 'work', args: { task: 'x' } }]);
+		await vi.waitFor(() => expect(results().some((r) => r.id === 'c1')).toBe(true));
+		expect(results().find((r) => r.id === 'c1')?.scheduling).toBe('when_idle');
+
+		answer = { text: 'already answered', scheduling: 'silent' };
+		stub.transport.onToolCall?.([{ id: 'c2', name: 'work', args: { task: 'x' } }]);
+		await vi.waitFor(() => expect(results().some((r) => r.id === 'c2')).toBe(true));
+		expect(results().find((r) => r.id === 'c2')?.scheduling).toBe('silent');
+	});
+
+	it('a blip client VAD ignores is closed with speech.user_aborted, never left open', async () => {
+		// An ignored segment published speech.user_started and nothing after it: a host that holds a request
+		// until the user's turn is over waited for the next real utterance to end (14.5 s in a sutando call).
+		vi.useFakeTimers();
+		try {
+			const stub = createStubTransport();
+			session = createSession(stub);
+			await activate(session, stub);
+			const seen: string[] = [];
+			for (const topic of [
+				'speech.user_started',
+				'speech.user_ended',
+				'speech.user_aborted',
+			] as const) {
+				session.eventBus.subscribe(topic, (p: { source: string }) => {
+					if (p.source === 'client-vad') seen.push(topic);
+				});
+			}
+			session.feedAudioFromClient(micFrame(4000)); // one 30 ms voiced frame: under the 120 ms minimum
+			vi.advanceTimersByTime(600);
+			session.feedAudioFromClient(micFrame(0)); // silence past 500 ms closes the segment as ignored
+			expect(seen).toEqual(['speech.user_started', 'speech.user_aborted']);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it('client-VAD microphone PCM is not evidence and does not release the hold', async () => {

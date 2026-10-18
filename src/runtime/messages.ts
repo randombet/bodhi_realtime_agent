@@ -63,7 +63,7 @@ export interface TransportSendToolResult {
 	id: string;
 	name: string;
 	result: unknown;
-	scheduling: 'immediate' | 'when_idle';
+	scheduling: 'immediate' | 'when_idle' | 'silent';
 }
 
 export interface TransportTransferSession {
@@ -146,6 +146,7 @@ export interface SubagentCompleted {
 	toolCallId: string;
 	workflowId: string;
 	result: string;
+	scheduling?: 'when_idle' | 'silent';
 }
 
 export interface SubagentFailed {
