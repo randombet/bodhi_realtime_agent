@@ -582,6 +582,32 @@ describe('synthetic-output hold wiring (legacy mode)', () => {
 	);
 
 	it.each(['legacy', 'actor'] as const)(
+		'%s mode: a reconnect that replays or re-elicits a response does not drain a notification on top of it',
+		async (orchestrationMode) => {
+			const stub = createStubTransport();
+			session = createSession(stub, { orchestrationMode });
+			await activate(session, stub);
+			stub.transport.onModelTurnStart?.();
+			stub.transport.onAudioOutput?.(Buffer.alloc(960).toString('base64'));
+			session.publishSystemNotification('job finished while speaking');
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			// The reconnector dispatches its recovery in the same tick as the ACTIVE transition.
+			const recovery = session as unknown as { recoveryDispatches: number };
+			session.eventBus.subscribe('session.stateChange', (e: { toState: string }) => {
+				if (e.toState === 'ACTIVE') recovery.recoveryDispatches++;
+			});
+			stub.transport.onResumptionUpdate?.('handle-1', true);
+			stub.transport.onClose?.(1006, 'socket lost');
+			await vi.waitFor(() => expect(session?.sessionManager.state).toBe('ACTIVE'), {
+				timeout: 5_000,
+			});
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			expect(sentTexts(stub).some((t) => t.includes('job finished while speaking'))).toBe(false);
+		},
+		10_000,
+	);
+
+	it.each(['legacy', 'actor'] as const)(
 		'%s mode: a notification queued behind speech that a reconnect cut off is delivered once the new connection is up',
 		async (orchestrationMode) => {
 			const stub = createStubTransport();

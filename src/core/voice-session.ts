@@ -784,6 +784,8 @@ export class VoiceSession {
 	private runtimeToolRegistry?: Map<string, ToolRoutingInfo>;
 	private subagentConfigs: Record<string, SubagentConfig>;
 	private persistentSubagents = new PersistentSubagentManager();
+	/** Replays and re-elicits the reconnector dispatched; a reconnect's notification drain yields to one. */
+	private recoveryDispatches = 0;
 	/** The declared tool list: the active agent's tools plus the behavior
 	 *  tools, as changed by `registerTools()` and `replaceTools()`. An agent
 	 *  transfer resets it from the new agent. */
@@ -2138,7 +2140,10 @@ export class VoiceSession {
 				isSpeechActive: () => this.clientVadDetector.isSpeechActive,
 				// Phase-3 coordinator seam: a recovery response must never bind
 				// as the greeting (H1) — invalidate before actuation.
-				onRecoveryDispatch: () => this.triggerCoordinator.dispatch('watchdog-recovery'),
+				onRecoveryDispatch: () => {
+					this.recoveryDispatches++;
+					this.triggerCoordinator.dispatch('watchdog-recovery');
+				},
 				// H4 hold predicate: FULL-greeting suppression only (the greeting
 				// controller's uninterruptible state — never grace windows).
 				isGreetingSuppressionArmed: () => this.greeting.isUninterruptibleGreetingActive(),
@@ -2682,16 +2687,18 @@ export class VoiceSession {
 				if (payload.toState === 'ACTIVE') {
 					this.startSttProvider();
 					this.startShadowStt();
-					// A reconnect ends whatever the model was saying on the old connection, and that turn never
-					// completes. Its "audio playing" state must not carry over: notifications would wait for a
-					// turn_complete that never comes (a background result published after the reconnect was
-					// never delivered). The new connection starts idle, and one queued notification goes now
-					// unless a response is already being elicited on it. The cut turn may still be the active
-					// one (an automatic reconnect does not finalize it), so the usual idle drain would wait on
-					// it too.
+					// The turn a reconnect cut never completes, so its "audio playing" state must not carry over.
+					// One queued notification goes once the reconnect settles, unless a response is elicited.
 					if (payload.fromState === 'RECONNECTING') {
 						this.notificationSink.resetAudio();
-						if (this._pendingResponseOrigin === null) this.notificationSink.turnComplete();
+						// The reconnector replays or re-elicits right after this transition, in the same tick.
+						const dispatches = this.recoveryDispatches;
+						queueMicrotask(() => {
+							if (this.recoveryDispatches !== dispatches || this._pendingResponseOrigin !== null)
+								return;
+							if (this.sessionManager.state !== 'ACTIVE') return;
+							this.notificationSink.turnComplete();
+						});
 					}
 				} else if (
 					payload.toState === 'RECONNECTING' ||
