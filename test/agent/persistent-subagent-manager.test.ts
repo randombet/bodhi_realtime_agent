@@ -97,6 +97,27 @@ describe('PersistentSubagentManager', () => {
 			);
 		});
 
+		it("invoke stays a string; invokeWithScheduling keeps an instance's scheduling and wraps a plain string", async () => {
+			const scheduled: PersistentSubagentInstance = {
+				key: 'relay',
+				invoke: vi.fn().mockResolvedValue('already answered'),
+				invokeWithScheduling: vi
+					.fn()
+					.mockResolvedValue({ text: 'already answered', scheduling: 'silent' }),
+				dispose: vi.fn().mockResolvedValue(undefined),
+			};
+			await manager.acquirePersistent('relay', createConfig('relay'), async () => scheduled);
+			expect(await manager.invoke('relay', 'task', {})).toBe('already answered');
+			expect(await manager.invokeWithScheduling('relay', 'task', {})).toEqual({
+				text: 'already answered',
+				scheduling: 'silent',
+			});
+			await manager.acquirePersistent('agent-a', createConfig('a'), factory);
+			expect(await manager.invokeWithScheduling('agent-a', 'task', {})).toEqual({
+				text: 'result from agent-a',
+			});
+		});
+
 		it('throws when invoking a key that was released', async () => {
 			await manager.acquirePersistent('agent-a', createConfig('a'), factory);
 			await manager.releasePersistent('agent-a');

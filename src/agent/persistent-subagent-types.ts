@@ -37,10 +37,19 @@ export interface PersistentSubagentInstance {
 	 * @param taskDescription - Description of the task to execute.
 	 * @param args - Tool call arguments.
 	 * @param signal - Abort signal for cancellation.
-	 * @returns Result text from the subagent, or a {@link PersistentSubagentResult} that also sets
-	 *   how the result is delivered.
+	 * @returns Result text from the subagent.
 	 */
 	invoke(
+		taskDescription: string,
+		args: Record<string, unknown>,
+		signal?: AbortSignal,
+	): Promise<string>;
+
+	/**
+	 * Optional: like {@link invoke}, but the result may also set how it is delivered
+	 * ({@link PersistentSubagentResult}). When present, the session calls this instead of `invoke`.
+	 */
+	invokeWithScheduling?(
 		taskDescription: string,
 		args: Record<string, unknown>,
 		signal?: AbortSignal,

@@ -749,7 +749,8 @@ describe('synthetic-output hold wiring (legacy mode)', () => {
 					lifetime: 'persistent_session',
 					persistentFactory: async (key) => ({
 						key,
-						invoke: async () => answer,
+						invoke: async () => (typeof answer === 'string' ? answer : answer.text),
+						invokeWithScheduling: async () => answer,
 						dispose: async () => {},
 					}),
 				},

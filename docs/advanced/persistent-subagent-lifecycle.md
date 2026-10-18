@@ -80,6 +80,8 @@ stateDiagram-v2
 - Persistent instances are disposed when `VoiceSession.close()` runs.
 - For tools with `pendingMessage`, completion/failure updates are queued as system notifications so the main LLM can reliably speak progress back.
 
+- An instance may implement the optional `invokeWithScheduling`, returning `{ text, scheduling: 'silent' }` (`PersistentSubagentResult`); the session then calls it instead of `invoke`. The result then closes its tool call without prompting a response, for a call with nothing new to say, such as a NON_BLOCKING call the model re-issued after its result was already returned. Gemini honours it for NON_BLOCKING tools only. It is supported on this actor-mode persistent path only, not on legacy `ToolCallRouter` handoffs. `PersistentSubagentManager.invoke` still returns the text; `invokeWithScheduling` returns both.
+
 ## Routing Precedence (OpenClaw Demo)
 
 In `examples/openclaw/openclaw-demo.ts`, explicit mentions of OpenClaw route to `ask_openclaw`, but media generation has higher precedence:

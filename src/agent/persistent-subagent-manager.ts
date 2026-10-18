@@ -69,14 +69,37 @@ export class PersistentSubagentManager {
 		taskDescription: string,
 		args: Record<string, unknown>,
 		signal?: AbortSignal,
-	): Promise<string | PersistentSubagentResult> {
+	): Promise<string> {
+		return this.instanceFor(key).invoke(taskDescription, args, signal);
+	}
+
+	private instanceFor(key: string): PersistentSubagentInstance {
 		const instance = this.instances.get(key);
 		if (!instance) {
 			throw new FrameworkError(`No persistent subagent instance for key "${key}"`, {
 				component: 'persistent-subagent-manager',
 			});
 		}
-		return instance.invoke(taskDescription, args, signal);
+		return instance;
+	}
+
+	/**
+	 * Like {@link invoke}, but keeps the delivery scheduling an instance's optional `invokeWithScheduling`
+	 * returns ({@link PersistentSubagentResult}); a plain string comes back as `{ text }`.
+	 *
+	 * @throws FrameworkError if no instance exists for `key`.
+	 */
+	async invokeWithScheduling(
+		key: string,
+		taskDescription: string,
+		args: Record<string, unknown>,
+		signal?: AbortSignal,
+	): Promise<PersistentSubagentResult> {
+		const instance = this.instanceFor(key);
+		const outcome = instance.invokeWithScheduling
+			? await instance.invokeWithScheduling(taskDescription, args, signal)
+			: await instance.invoke(taskDescription, args, signal);
+		return typeof outcome === 'string' ? { text: outcome } : outcome;
 	}
 
 	/**

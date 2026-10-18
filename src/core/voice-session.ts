@@ -2300,18 +2300,14 @@ export class VoiceSession {
 								registeredConfig,
 								factory,
 							);
-							const outcome = await this.persistentSubagents.invoke(
+							const outcome = await this.persistentSubagents.invokeWithScheduling(
 								persistentKey,
 								`Execute tool: ${request.toolName}`,
 								request.args,
 								signal,
 							);
-							if (typeof outcome === 'string') {
-								resultText = outcome;
-							} else {
-								resultText = outcome.text;
-								resultScheduling = outcome.scheduling;
-							}
+							resultText = outcome.text;
+							resultScheduling = outcome.scheduling;
 						} else {
 							const subagentConfig = registeredConfig.createInstance
 								? registeredConfig.createInstance()
