@@ -145,11 +145,20 @@ async function sdkDial(
 	let url = '';
 	const sent: string[] = [];
 	(client.live as unknown as { webSocketFactory: unknown }).webSocketFactory = {
-		create: (dialed: string, _headers: unknown, callbacks: { onopen: () => void }) => {
+		create: (
+			dialed: string,
+			_headers: unknown,
+			callbacks: { onopen: () => void; onmessage: (event: { data: string }) => void },
+		) => {
 			url = dialed;
 			return {
 				connect: () => callbacks.onopen(),
-				send: (message: string) => sent.push(message),
+				send: (message: string) => {
+					sent.push(message);
+					// @google/genai 2.x resolves live.connect only after the server's setupComplete.
+					if (sent.length === 1)
+						callbacks.onmessage({ data: JSON.stringify({ setupComplete: {} }) });
+				},
 				close: () => {},
 			};
 		},

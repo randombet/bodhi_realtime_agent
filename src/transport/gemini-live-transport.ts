@@ -1061,12 +1061,24 @@ export class GeminiLiveTransport implements LLMTransport {
 		}
 		this.pendingSetup = pending;
 		this.lifecycle.beginAttempt(gen, handleSupplied);
+		// @google/genai 2.x resolves live.connect only after setupComplete, and hands setupComplete (and
+		// anything before it) to onmessage before it returns the session. Handled then, setupComplete's
+		// observers (session ready: the greeting, a reconnect's history replay) would send on a
+		// connection this transport does not hold yet, and those sends were dropped. Messages wait until
+		// this dial's session is installed, then are handled in order. 1.x returned the session at open,
+		// so nothing waited.
+		let sessionInstalled = false;
+		const beforeInstall: LiveServerMessage[] = [];
 		const callbacks = {
 			onopen: () => {
 				attempt.stage = 'session';
 			},
 			onmessage: (msg: LiveServerMessage) => {
 				if (gen !== this.dialGen) return;
+				if (!sessionInstalled) {
+					beforeInstall.push(msg);
+					return;
+				}
 				this.handleMessage(msg);
 			},
 			onerror: (e: { message?: string }) => {
@@ -1110,6 +1122,11 @@ export class GeminiLiveTransport implements LLMTransport {
 				throw new Error('Gemini dial superseded before setupComplete');
 			}
 			this.session = dialSession;
+			sessionInstalled = true;
+			for (const msg of beforeInstall.splice(0)) {
+				if (gen !== this.dialGen) break;
+				this.handleMessage(msg);
+			}
 			await Promise.race([setupComplete, timeout, closedBeforeSetup]);
 			// The connection is up: from here its credential's expiry closes it. A
 			// connection detached meanwhile (by a setup-ok observer) gets no timer.

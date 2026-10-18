@@ -25,7 +25,11 @@
  * connection if it is still in use then.
  */
 
-import { type AudioTranscriptionConfig, Modality } from '@google/genai';
+import {
+	type AudioTranscriptionConfig,
+	AudioTranscriptionConfigMode,
+	Modality,
+} from '@google/genai';
 import { WebSocket } from 'ws';
 import { resamplePcm } from '../audio/resample.js';
 import { ValidationError } from '../core/errors.js';
@@ -432,10 +436,11 @@ export class GeminiLiveTranscribeSTTProvider implements STTProvider {
 	/** The setup every connection sends, in the SDK's `live.connect` form: what a
 	 *  `credentialProvider` gets, so what a token is locked to. */
 	private setup(): GeminiLiveSetup {
-		const inputAudioTranscription: AudioTranscriptionConfig & {
-			mode: string;
-			customVocabulary?: string[];
-		} = { languageCodes: this.cfg.languageCodes, mode: this.cfg.mode };
+		// @google/genai 2.x types `mode` (an enum with the same wire values) and `customVocabulary`.
+		const inputAudioTranscription: AudioTranscriptionConfig = {
+			languageCodes: this.cfg.languageCodes,
+			mode: AudioTranscriptionConfigMode[this.cfg.mode],
+		};
 		if (this.cfg.customVocabulary?.length)
 			inputAudioTranscription.customVocabulary = this.cfg.customVocabulary.slice(0, 1000);
 		return {

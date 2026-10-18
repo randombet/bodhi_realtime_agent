@@ -69,7 +69,7 @@ describe('package manifest', () => {
 
 	it('requires an @google/genai whose client takes the explicit enterprise option', () => {
 		// The credential provider's per-connection client passes `enterprise: false`
-		// (GeminiLiveTransport), which the SDK's types have only from 1.52.0 on: a
+		// (GeminiLiveTransport), which the SDK's types have from 1.52.0 on (2.x included): a
 		// consumer resolving an older version could not compile the transport.
 		// That the installed SDK acts on it is tested on the dial itself, in
 		// test/transport/gemini-live-credential-provider.test.ts.
@@ -77,7 +77,7 @@ describe('package manifest', () => {
 		const floor = /^\^(\d+)\.(\d+)\.(\d+)$/.exec(range ?? '');
 		expect(floor, `@google/genai range ${range}`).not.toBeNull();
 		const [major, minor] = [Number(floor?.[1]), Number(floor?.[2])];
-		expect(major === 1 && minor >= 52, `@google/genai range ${range}`).toBe(true);
+		expect((major === 1 && minor >= 52) || major >= 2, `@google/genai range ${range}`).toBe(true);
 	});
 
 	it('runs the packed-consumer gate from prepublishOnly', () => {
