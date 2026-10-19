@@ -244,10 +244,14 @@ export class DialGenerationFence {
 
 	/** Whether this result answers a call issued before the last boundary
 	 *  (logged when so). Settles the call's stamp either way. */
-	/** Calls stamped and not yet answered or cancelled: a drained notification would land on top
-	 *  of the function response the model still waits for. */
+	/** Calls the live session still waits on: stamped, not yet answered or cancelled, and issued
+	 *  after the last boundary (a call from an abandoned dial has its result dropped here, so no
+	 *  session waits for it). A drained notification would land on top of such a response. */
 	hasOpenToolCalls(): boolean {
-		return this.toolCallGens.size > 0;
+		for (const issuedGen of this.toolCallGens.values()) {
+			if (this.boundaryGen === null || issuedGen > this.boundaryGen) return true;
+		}
+		return false;
 	}
 
 	/** Cancelled calls get no result, so they leave the open set here. */
