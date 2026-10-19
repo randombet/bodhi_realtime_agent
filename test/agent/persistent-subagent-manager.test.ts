@@ -118,6 +118,35 @@ describe('PersistentSubagentManager', () => {
 			});
 		});
 
+		it('invokeWithScheduling normalizes an instance that resolves nothing, so the task still completes', async () => {
+			// An untyped implementor (or a bare vi.fn()) resolves undefined; the caller reads
+			// `outcome.text`, which used to throw and report a finished task as failed.
+			const untyped: PersistentSubagentInstance = {
+				key: 'untyped',
+				invoke: vi.fn().mockResolvedValue(undefined as unknown as string),
+				dispose: vi.fn().mockResolvedValue(undefined),
+			};
+			await manager.acquirePersistent('untyped', createConfig('untyped'), async () => untyped);
+			const viaInvoke = await manager.invokeWithScheduling('untyped', 'task', {});
+			expect(viaInvoke).toEqual({ text: '' });
+			expect(viaInvoke.scheduling).toBeUndefined();
+
+			const scheduledNull: PersistentSubagentInstance = {
+				key: 'scheduled-null',
+				invoke: vi.fn().mockResolvedValue('unused'),
+				invokeWithScheduling: vi.fn().mockResolvedValue(null as unknown as string),
+				dispose: vi.fn().mockResolvedValue(undefined),
+			};
+			await manager.acquirePersistent(
+				'scheduled-null',
+				createConfig('scheduled-null'),
+				async () => scheduledNull,
+			);
+			expect(await manager.invokeWithScheduling('scheduled-null', 'task', {})).toEqual({
+				text: '',
+			});
+		});
+
 		it('throws when invoking a key that was released', async () => {
 			await manager.acquirePersistent('agent-a', createConfig('a'), factory);
 			await manager.releasePersistent('agent-a');

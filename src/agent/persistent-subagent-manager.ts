@@ -99,7 +99,11 @@ export class PersistentSubagentManager {
 		const outcome = instance.invokeWithScheduling
 			? await instance.invokeWithScheduling(taskDescription, args, signal)
 			: await instance.invoke(taskDescription, args, signal);
-		return typeof outcome === 'string' ? { text: outcome } : outcome;
+		// An untyped implementor can resolve undefined/null; callers read `outcome.text`, so a
+		// missing outcome must normalize here rather than fail an otherwise-complete task.
+		return typeof outcome === 'object' && outcome !== null
+			? outcome
+			: { text: String(outcome ?? '') };
 	}
 
 	/**
