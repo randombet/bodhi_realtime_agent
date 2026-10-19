@@ -3822,7 +3822,10 @@ export class VoiceSession {
 		// Correlate the completion to its Turn. `stale` → a long-gone turn,
 		// ignore; `new` → a turn that produced no model output, birth it.
 		const r = this.turns.resolve(serverTurnId, 'completion');
-		// The server moved past this turn, so it waits on none of its calls any more.
+		// The server moved past this turn, so it waits on none of its calls any more. Assumes the
+		// provider completes a turn only after every BLOCKING call of it is answered (Gemini does:
+		// a BLOCKING function response is part of the turn); were one still unanswered here, a
+		// reconnect drain could land on top of its response.
 		this.fence.turnCompleted();
 		if (r.kind === 'stale') {
 			this.log(
