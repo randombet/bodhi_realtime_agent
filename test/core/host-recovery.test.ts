@@ -581,31 +581,146 @@ describe('synthetic-output hold wiring (legacy mode)', () => {
 		10_000,
 	);
 
+	/** The model is speaking with a notification queued behind it, and a resumption handle is set so
+	 *  the watchdog's fire forces a reconnect (reason `response-watchdog`, the eliciting path). */
+	async function speakingWithQueuedNotification(
+		stub: StubTransport,
+		orchestrationMode: 'legacy' | 'actor',
+	): Promise<VoiceSession> {
+		const s = createSession(stub, { orchestrationMode, responseWatchdogMs: 300 });
+		session = s;
+		await activate(s, stub);
+		stub.transport.onModelTurnStart?.();
+		stub.transport.onAudioOutput?.(Buffer.alloc(960).toString('base64'));
+		s.publishSystemNotification('job finished while speaking');
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(sentTexts(stub).some((t) => t.includes('job finished while speaking'))).toBe(false);
+		stub.transport.onResumptionUpdate?.('handle-1', true);
+		return s;
+	}
+
+	async function watchdogReconnects(session: VoiceSession, stub: StubTransport): Promise<void> {
+		internals(session).reconnector.armResponseWatchdog();
+		await vi.waitFor(() => expect(stub.transport.reconnect).toHaveBeenCalled(), { timeout: 5_000 });
+		await vi.waitFor(() => expect(session.sessionManager.state).toBe('ACTIVE'), { timeout: 5_000 });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+	}
+
 	it.each(['legacy', 'actor'] as const)(
-		'%s mode: a reconnect that replays or re-elicits a response does not drain a notification on top of it',
+		'%s mode: a watchdog reconnect whose nudge elicits a response (transport generates on request) does not drain a notification on top of it',
 		async (orchestrationMode) => {
 			const stub = createStubTransport();
-			session = createSession(stub, { orchestrationMode });
-			await activate(session, stub);
+			(stub.transport.capabilities as TransportCapabilities).explicitGenerationTrigger = true;
+			const s = await speakingWithQueuedNotification(stub, orchestrationMode);
+			await watchdogReconnects(s, stub);
+			expect(stub.triggerGeneration).toHaveBeenCalled();
+			expect(sentTexts(stub).some((t) => t.includes('job finished while speaking'))).toBe(false);
+			// The elicited response ends: the notification goes then, once.
+			stub.transport.onModelTurnStart?.();
+			stub.transport.onTurnComplete?.();
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			expect(sentTexts(stub).filter((t) => t.includes('job finished while speaking'))).toHaveLength(
+				1,
+			);
+		},
+		10_000,
+	);
+
+	it.each(['legacy', 'actor'] as const)(
+		'%s mode: a watchdog reconnect whose nudge is a no-op (transport generates by itself) drains the notification once',
+		async (orchestrationMode) => {
+			const stub = createStubTransport(); // no explicitGenerationTrigger, no elicitResponse: Gemini's shape
+			const s = await speakingWithQueuedNotification(stub, orchestrationMode);
+			await watchdogReconnects(s, stub);
+			expect(stub.triggerGeneration).toHaveBeenCalled();
+			await vi.waitFor(() =>
+				expect(
+					sentTexts(stub).filter((t) => t.includes('job finished while speaking')),
+				).toHaveLength(1),
+			);
+		},
+		10_000,
+	);
+
+	it.each(['legacy', 'actor'] as const)(
+		'%s mode: the user talking through a reconnect keeps the queued notification waiting for their turn',
+		async (orchestrationMode) => {
+			const stub = createStubTransport();
+			const s = createSession(stub, { orchestrationMode });
+			session = s;
+			await activate(s, stub);
 			stub.transport.onModelTurnStart?.();
 			stub.transport.onAudioOutput?.(Buffer.alloc(960).toString('base64'));
-			session.publishSystemNotification('job finished while speaking');
-			await new Promise((resolve) => setTimeout(resolve, 0));
-			// The reconnector dispatches its recovery in the same tick as the ACTIVE transition.
-			const recovery = session as unknown as { recoveryDispatches: number };
-			session.eventBus.subscribe('session.stateChange', (e: { toState: string }) => {
-				if (e.toState === 'ACTIVE') recovery.recoveryDispatches++;
-			});
+			s.publishSystemNotification('job finished while speaking');
+			for (let i = 0; i < 20; i++) s.feedAudioFromClient(micFrame(4000)); // a segment in progress
 			stub.transport.onResumptionUpdate?.('handle-1', true);
 			stub.transport.onClose?.(1006, 'socket lost');
-			await vi.waitFor(() => expect(session?.sessionManager.state).toBe('ACTIVE'), {
-				timeout: 5_000,
-			});
+			await vi.waitFor(() => expect(s.sessionManager.state).toBe('ACTIVE'), { timeout: 5_000 });
 			await new Promise((resolve) => setTimeout(resolve, 0));
 			expect(sentTexts(stub).some((t) => t.includes('job finished while speaking'))).toBe(false);
 		},
 		10_000,
 	);
+
+	it.each(['legacy', 'actor'] as const)(
+		'%s mode: a resumed session still owing a tool result gets no notification injected ahead of it',
+		async (orchestrationMode) => {
+			const stub = createStubTransport();
+			const slow = deferredTool();
+			const s = createSession(stub, {
+				orchestrationMode,
+				agent: createAgent({ tools: [slow.tool] }),
+			});
+			session = s;
+			await activate(s, stub);
+			stub.transport.onModelTurnStart?.();
+			stub.transport.onAudioOutput?.(Buffer.alloc(960).toString('base64'));
+			stub.transport.onToolCall?.([{ id: 'c1', name: 'slow_lookup', args: {} }]);
+			s.publishSystemNotification('job finished while speaking');
+			stub.transport.onResumptionUpdate?.('handle-1', true);
+			stub.transport.onClose?.(1006, 'socket lost');
+			await vi.waitFor(() => expect(s.sessionManager.state).toBe('ACTIVE'), { timeout: 5_000 });
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			expect(sentTexts(stub).some((t) => t.includes('job finished while speaking'))).toBe(false);
+			// The call is answered on the resumed session and that turn ends: the notification goes then.
+			await slow.finish('c1');
+			expect(sentToolResultIds(stub)).toContain('c1');
+			stub.transport.onTurnComplete?.();
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			expect(sentTexts(stub).filter((t) => t.includes('job finished while speaking'))).toHaveLength(
+				1,
+			);
+		},
+		10_000,
+	);
+
+	it('legacy mode: a response origin the dead connection never started does not hold the next notification back', async () => {
+		const stub = createStubTransport();
+		const s = createSession(stub);
+		session = s;
+		await activate(s, stub);
+		const origins: string[] = [];
+		s.eventBus.subscribe('response.started', (p) => origins.push(p.origin));
+		stub.transport.onModelTurnStart?.();
+		stub.transport.onAudioOutput?.(Buffer.alloc(960).toString('base64'));
+		s.publishSystemNotification('first');
+		stub.transport.onTurnComplete?.(); // flushes `first`; its response is now pending
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(sentTexts(stub).some((t) => t.includes('first'))).toBe(true);
+		stub.transport.onResumptionUpdate?.('handle-1', true);
+		stub.transport.onClose?.(1006, 'socket lost'); // before that response started
+		await vi.waitFor(() => expect(s.sessionManager.state).toBe('ACTIVE'), { timeout: 5_000 });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		// The next real response is not labelled with the origin the dead connection owed.
+		stub.transport.onModelTurnStart?.();
+		expect(origins.at(-1)).not.toBe('assistant_initiated');
+		stub.transport.onTurnComplete?.();
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		// Nor is the next notification held for it.
+		s.publishSystemNotification('second');
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(sentTexts(stub).some((t) => t.includes('second'))).toBe(true);
+	}, 10_000);
 
 	it.each(['legacy', 'actor'] as const)(
 		'%s mode: a notification queued behind speech that a reconnect cut off is delivered once the new connection is up',
@@ -1160,6 +1275,28 @@ describe('host recovery (legacy mode)', () => {
 		await session?.close().catch(() => {});
 		session = undefined;
 	});
+
+	it.each(['legacy', 'actor'] as const)(
+		'%s mode: a host recovery drains one queued notification, not two',
+		async (orchestrationMode) => {
+			const stub = createRecoveryTransport();
+			session = createRecoverySession(stub, { orchestrationMode });
+			await session.start();
+			stub.transport.onResumptionUpdate?.('handle-1', true);
+			stub.openGeneration('gen-1');
+			stub.transport.onModelTurnStart?.();
+			stub.transport.onAudioOutput?.(Buffer.alloc(960).toString('base64'));
+			session.publishSystemNotification('job A');
+			session.publishSystemNotification('job B');
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			expect(stubTexts(stub).some((t) => t.includes('job'))).toBe(false);
+
+			await session.recoverUpstream(recoverArgs()).activated;
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			expect(stubTexts(stub).filter((t) => t.includes('job A'))).toHaveLength(1);
+			expect(stubTexts(stub).some((t) => t.includes('job B'))).toBe(false);
+		},
+	);
 
 	it('recoverUpstream returns a numeric attemptEpoch synchronously, enters RECONNECTING, clears the handle and publishes one boundary', async () => {
 		const stub = createRecoveryTransport();

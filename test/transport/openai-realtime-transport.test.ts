@@ -97,6 +97,7 @@ describe('OpenAIRealtimeTransport', () => {
 	describe('capabilities and audioFormat', () => {
 		it('reports correct capabilities', () => {
 			expect(transport.capabilities).toEqual({
+				explicitGenerationTrigger: true,
 				messageTruncation: true,
 				turnDetection: true,
 				userTranscription: true,

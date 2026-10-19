@@ -49,6 +49,10 @@ export interface DictationControllerDeps {
 	getSessionId(): string;
 	reportError(context: string, error: Error): void;
 	log(message: string): void;
+	/** Whether the provider honours a `'silent'` result for this tool, i.e. adds it without starting a
+	 *  response: every tool on a transport that generates only on request (OpenAI, Qwen), and only a
+	 *  NON_BLOCKING function on one that generates after each result (Gemini). Absent: none. */
+	silentResultHonoured?(toolName: string): boolean;
 }
 
 /**
@@ -110,12 +114,15 @@ export class DictationController {
 		// wrap the method on the transport instance itself.
 		const originalSendToolResult = this.deps.transport.sendToolResult.bind(this.deps.transport);
 		this.deps.transport.sendToolResult = (result: TransportToolResult) => {
-			// `scheduling: 'silent'` doesn't trigger response.create (the OpenAI
-			// transport just inserts the conversation item), so it doesn't
-			// violate the §3.5 invariant. Pass it through immediately even
-			// during transcription mode. Useful for tools whose result is
-			// informational only — e.g. set_transcription_mode itself.
-			if (result.scheduling === 'silent') {
+			// A `'silent'` result starts no response where the provider honours it (OpenAI inserts
+			// the conversation item without a response.create; Gemini honours it on NON_BLOCKING
+			// functions only), so it does not violate the §3.5 invariant and passes at once even in
+			// transcription mode — e.g. set_transcription_mode's own result. Where it is not honoured
+			// the provider answers it like any result, so it waits for agent mode like any result.
+			if (
+				result.scheduling === 'silent' &&
+				this.deps.silentResultHonoured?.(result.name) === true
+			) {
 				originalSendToolResult(result);
 				return;
 			}

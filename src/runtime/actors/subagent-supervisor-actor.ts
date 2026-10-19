@@ -7,6 +7,7 @@
  * subagent lifecycle.
  */
 
+import type { BackgroundResultScheduling, BackgroundToolResult } from '../../types/transport.js';
 import type { Actor } from '../actor-runtime.js';
 import type { ActorSendFn } from '../actor-send-fn.js';
 import type { ActorId, Envelope } from '../envelope.js';
@@ -25,7 +26,7 @@ export interface SubagentExecutionRequest {
 export type SubagentExecutionHandler = (
 	request: SubagentExecutionRequest,
 	signal: AbortSignal,
-) => Promise<string | { text: string; scheduling?: 'when_idle' | 'silent' }>;
+) => Promise<string | BackgroundToolResult>;
 
 /** Tracks a single subagent workflow. */
 interface SubagentWorkflow {
@@ -82,7 +83,7 @@ export class SubagentSupervisorActor implements Actor {
 					toolCallId: string;
 					workflowId: string;
 					result: string;
-					scheduling?: 'when_idle' | 'silent';
+					scheduling?: BackgroundResultScheduling;
 				};
 				this.handleCompleted(p);
 				break;
@@ -183,7 +184,7 @@ export class SubagentSupervisorActor implements Actor {
 		toolCallId: string;
 		workflowId: string;
 		result: string;
-		scheduling?: 'when_idle' | 'silent';
+		scheduling?: BackgroundResultScheduling;
 	}): void {
 		const workflow = this.workflows.get(p.toolCallId);
 		if (!workflow || this.isTerminal(workflow.state)) return;
@@ -278,12 +279,14 @@ export class SubagentSupervisorActor implements Actor {
 			const current = this.workflows.get(workflow.toolCallId);
 			if (!current || this.isTerminal(current.state)) return;
 
+			// A handler that resolves nothing (an untyped implementor) completes the task with an empty result.
+			const result: BackgroundToolResult =
+				typeof outcome === 'object' && outcome !== null ? outcome : { text: String(outcome ?? '') };
 			this.handleCompleted({
 				toolCallId: workflow.toolCallId,
 				workflowId: workflow.workflowId,
-				...(typeof outcome === 'string'
-					? { result: outcome }
-					: { result: outcome.text, scheduling: outcome.scheduling }),
+				result: result.text,
+				scheduling: result.scheduling,
 			});
 		} catch (err) {
 			// Ignore expected aborts after cancellation.

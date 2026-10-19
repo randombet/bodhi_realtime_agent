@@ -39,6 +39,11 @@ export interface TransportCapabilities {
 	 *  Optional — `undefined` means `false`. Doc-only signal; the transport's
 	 *  batched-tool-call dispatch is on for everyone (no-op if only one call). */
 	parallelToolCalls?: boolean;
+	/** `triggerGeneration()` starts a model response by itself (a `response.create` on OpenAI/Qwen).
+	 *  Unset or false: the provider generates on its own after content or tool results, and the call
+	 *  is a no-op (Gemini). The reconnector's content-less nudge counts as eliciting only when this
+	 *  is true or `elicitResponse` exists. */
+	explicitGenerationTrigger?: boolean;
 	/** Model exposes a configurable reasoning-effort dial (e.g. `gpt-realtime-2`).
 	 *  Optional — `undefined` means `false`. */
 	reasoningEffort?: boolean;
@@ -106,6 +111,7 @@ export const DEFAULT_TRANSPORT_CAPABILITIES: Required<TransportCapabilities> = {
 	groundingMetadata: false,
 	textResponseModality: false,
 	parallelToolCalls: false,
+	explicitGenerationTrigger: false,
 	reasoningEffort: false,
 	automaticPreambles: false,
 	quiescible: false,
@@ -317,6 +323,20 @@ export interface TransportToolResult {
 	 *  'interrupt': interrupt current response and deliver immediately
 	 *  'silent':    send result without triggering a new response */
 	scheduling?: 'immediate' | 'when_idle' | 'interrupt' | 'silent';
+}
+
+/** How a background tool's result is delivered: `'when_idle'` once the model's current turn ends, or
+ *  `'silent'`, added to the model's context without prompting a response. The subset of
+ *  {@link TransportToolResult.scheduling} a background outcome may carry. */
+export type BackgroundResultScheduling = Extract<
+	TransportToolResult['scheduling'],
+	'when_idle' | 'silent'
+>;
+
+/** A background tool's outcome and how it is delivered. A plain string outcome is `'when_idle'`. */
+export interface BackgroundToolResult {
+	text: string;
+	scheduling?: BackgroundResultScheduling;
 }
 
 /** State provided to the transport for reconnection/recovery. */

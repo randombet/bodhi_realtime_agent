@@ -56,6 +56,7 @@ import type {
 import type { SessionEndReason } from '../types/session.js';
 import type { FunctionBehavior, ToolDefinition } from '../types/tool.js';
 import type {
+	BackgroundResultScheduling,
 	ConnectionLifecycleEvent,
 	ContentTurn,
 	LLMTransport,
@@ -112,7 +113,7 @@ import { SessionManager } from './session-manager.js';
 import { ShadowSttController } from './shadow-stt-controller.js';
 import { ToolCallRouter } from './tool-call-router.js';
 import { TranscriptManager } from './transcript-manager.js';
-import { TransportReconnector } from './transport-reconnector.js';
+import { type RecoverySettled, TransportReconnector } from './transport-reconnector.js';
 import { TtsPipeline } from './tts-pipeline.js';
 import { TurnLatencyTracker } from './turn-latency-tracker.js';
 import { TurnManager } from './turn-manager.js';
@@ -785,7 +786,6 @@ export class VoiceSession {
 	private subagentConfigs: Record<string, SubagentConfig>;
 	private persistentSubagents = new PersistentSubagentManager();
 	/** Replays and re-elicits the reconnector dispatched; a reconnect's notification drain yields to one. */
-	private recoveryDispatches = 0;
 	/** The declared tool list: the active agent's tools plus the behavior
 	 *  tools, as changed by `registerTools()` and `replaceTools()`. An agent
 	 *  transfer resets it from the new agent. */
@@ -859,6 +859,8 @@ export class VoiceSession {
 	 *  connection a host recovery abandoned; inert until a recovery marks a
 	 *  boundary. Wraps `transport.sendToolResult`. See `host-recovery.ts`. */
 	private fence!: DialGenerationFence;
+	/** Tools that set their own function-call `behavior`; the rest take the session's default. */
+	private readonly toolBehaviors = new Map<string, FunctionBehavior>();
 	/** Host-driven upstream recovery: `recoverUpstream`, `parkUpstream` and
 	 *  the recovery boundary. See `host-recovery.ts`. */
 	private hostRecovery!: HostRecoveryController;
@@ -1550,6 +1552,12 @@ export class VoiceSession {
 				getSessionId: () => this.config.sessionId,
 				reportError: (context, error) => this.reportError(context, error),
 				log: (msg) => this.log(msg),
+				// A silent result starts no response on a transport that generates only on request;
+				// on one that generates after each result (Gemini) only a NON_BLOCKING function
+				// honours it. Anywhere else it is held like any result until agent mode.
+				silentResultHonoured: (name: string) =>
+					this.transport.capabilities.explicitGenerationTrigger === true ||
+					this.functionBehaviorOf(name) === 'NON_BLOCKING',
 			},
 			{
 				whisperProvider: config.whisperProvider,
@@ -2141,9 +2149,11 @@ export class VoiceSession {
 				// Phase-3 coordinator seam: a recovery response must never bind
 				// as the greeting (H1) — invalidate before actuation.
 				onRecoveryDispatch: () => {
-					this.recoveryDispatches++;
 					this.triggerCoordinator.dispatch('watchdog-recovery');
 				},
+				// The reconnect settled: one queued notification goes now unless a response was elicited
+				// or the user is talking (see `drainNotificationsAfterReconnect`).
+				onRecoverySettled: (outcome) => this.drainNotificationsAfterReconnect(outcome),
 				// H4 hold predicate: FULL-greeting suppression only (the greeting
 				// controller's uninterruptible state — never grace windows).
 				isGreetingSuppressionArmed: () => this.greeting.isUninterruptibleGreetingActive(),
@@ -2242,6 +2252,9 @@ export class VoiceSession {
 		agentTools: ToolDefinition[],
 		behaviorTools: ToolDefinition[],
 	): void {
+		for (const tool of [...agentTools, ...behaviorTools]) {
+			if (tool.behavior) this.toolBehaviors.set(tool.name, tool.behavior);
+		}
 		if (config.orchestrationMode === 'actor') {
 			this.runtimeToolRegistry = this.buildRuntimeToolRegistry([...agentTools, ...behaviorTools]);
 
@@ -2290,7 +2303,7 @@ export class VoiceSession {
 					try {
 						let resultText: string;
 						// A persistent subagent may ask for its result to close the call silently.
-						let resultScheduling: 'when_idle' | 'silent' | undefined;
+						let resultScheduling: BackgroundResultScheduling | undefined;
 						const usePersistentRuntimePath =
 							request.lifetime === 'persistent_session' && !!registeredConfig.persistentFactory;
 
@@ -2326,10 +2339,11 @@ export class VoiceSession {
 							toolName: toolCall.toolName,
 							result: resultText,
 						});
-						if (hasPendingMessage) {
-							// Actor mode: publish the SYSTEM completion notification through
-							// NotificationActor. TransportActor wraps it as "[SYSTEM]: text"
-							// at the wire-out boundary (centralized label rendering).
+						// A pendingMessage tool's call was answered by its pending message, so its outcome
+						// reaches the model as a SYSTEM notification (actor mode: through NotificationActor;
+						// TransportActor wraps it as "[SYSTEM]: text" at the wire-out boundary). A silent
+						// outcome has nothing new to say, so no notification prompts the model to speak.
+						if (hasPendingMessage && resultScheduling !== 'silent') {
 							this.publishSystemNotification(
 								`Background task "${request.toolName}" completed successfully. Result: ${resultText}. Please inform the user now.`,
 							);
@@ -2337,9 +2351,7 @@ export class VoiceSession {
 						this.log(
 							`Background task completed: ${request.toolName} (toolCallId=${request.toolCallId}, duration=${Date.now() - backgroundStartedAt}ms${resultScheduling === 'silent' ? ', silent' : ''})`,
 						);
-						return resultScheduling
-							? { text: resultText, scheduling: resultScheduling }
-							: resultText;
+						return { text: resultText, scheduling: resultScheduling };
 					} catch (err) {
 						this.conversationContext.addToolResult({
 							toolCallId: toolCall.toolCallId,
@@ -2544,6 +2556,7 @@ export class VoiceSession {
 			this.toolCallRouter?.handleToolCalls(calls);
 		};
 		this.transport.onToolCallCancel = (ids) => {
+			this.fence.forgetToolCalls(ids);
 			if (this.runtimeOrchestrator) {
 				this.toolExecutor.cancel(ids);
 			}
@@ -2578,6 +2591,9 @@ export class VoiceSession {
 				generationId,
 				reason,
 			});
+			// A generation the connection's loss ended mid-speech: no audio of it plays on any later
+			// connection, so a notification must not wait for its turn to end.
+			if (reason === 'disconnected') this.notificationSink.resetAudio();
 		};
 		this.transport.onOutputTranscription = (text) => {
 			const turn = this.turns.ensureCurrent();
@@ -2687,18 +2703,15 @@ export class VoiceSession {
 				if (payload.toState === 'ACTIVE') {
 					this.startSttProvider();
 					this.startShadowStt();
-					// The turn a reconnect cut never completes, so its "audio playing" state must not carry over.
-					// One queued notification goes once the reconnect settles, unless a response is elicited.
-					if (payload.fromState === 'RECONNECTING') {
+					// A connection replaced the one the model was speaking on. The cut turn never completes
+					// and the response the dead connection owed never starts: neither its "audio playing"
+					// state nor its pending response origin may carry over, or the next notification waits
+					// for a turn end that never comes and the next real response is mislabelled. The
+					// transport reports the cut itself (`generation.end` with reason 'disconnected'); this
+					// edge also covers a transport that does not, and the transfer edge.
+					if (payload.fromState === 'RECONNECTING' || payload.fromState === 'TRANSFERRING') {
 						this.notificationSink.resetAudio();
-						// The reconnector replays or re-elicits right after this transition, in the same tick.
-						const dispatches = this.recoveryDispatches;
-						queueMicrotask(() => {
-							if (this.recoveryDispatches !== dispatches || this._pendingResponseOrigin !== null)
-								return;
-							if (this.sessionManager.state !== 'ACTIVE') return;
-							this.notificationSink.turnComplete();
-						});
+						this._pendingResponseOrigin = null;
 					}
 				} else if (
 					payload.toState === 'RECONNECTING' ||
@@ -5075,6 +5088,30 @@ export class VoiceSession {
 	 *  notification hold, but only while the model is idle: no framework turn
 	 *  open and no requested response still waiting to start. Otherwise the
 	 *  next turn completion delivers it, as usual. */
+	/** A reconnect the reconnector ran has settled. The turn it cut never completes, so a notification
+	 *  queued behind that speech would otherwise wait for the user's next turn. One goes now, unless the
+	 *  reconnect started a response itself (a replay or a nudge), the user is talking (server VAD
+	 *  answers them next), or the resumed session still owes a function response on an open call. */
+	private drainNotificationsAfterReconnect(outcome: RecoverySettled): void {
+		if (outcome.elicited || outcome.userSpeaking) return;
+		if (this.sessionManager.state !== 'ACTIVE') return;
+		if (this.clientVadDetector.isSpeechActive) return;
+		if (this.fence.hasOpenToolCalls()) return;
+		try {
+			this.notificationSink.turnComplete();
+		} catch (error) {
+			const err = error instanceof Error ? error : new Error(String(error));
+			this.log(`notification drain after reconnect failed: ${err.message}`);
+			this.reportError('reconnect-drain', err);
+		}
+	}
+
+	/** The function-call behavior a tool's call runs with: its own, else the session's default,
+	 *  else `'BLOCKING'` (see `VoiceSessionOptions.functionBehavior`). */
+	private functionBehaviorOf(toolName: string): FunctionBehavior {
+		return this.toolBehaviors.get(toolName) ?? this.config.functionBehavior ?? 'BLOCKING';
+	}
+
 	private drainNotificationsWhenIdle(): void {
 		if (this.turns.active() !== null || this._pendingResponseOrigin !== null) return;
 		this.notificationSink.turnComplete();
