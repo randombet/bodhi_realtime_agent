@@ -663,6 +663,63 @@ describe('synthetic-output hold wiring (legacy mode)', () => {
 	);
 
 	it.each(['legacy', 'actor'] as const)(
+		'%s mode: a notification published while the connection is being redialed is not lost; it goes once the connection is up',
+		async (orchestrationMode) => {
+			const stub = createStubTransport();
+			const s = createSession(stub, { orchestrationMode });
+			session = s;
+			await activate(s, stub);
+			stub.transport.onModelTurnStart?.();
+			stub.transport.onGenerationStart?.('gen-1');
+			stub.transport.onAudioOutput?.(Buffer.alloc(960).toString('base64'));
+			stub.transport.onResumptionUpdate?.('handle-1', true);
+			stub.transport.onClose?.(1006, 'socket lost');
+			expect(s.sessionManager.state).toBe('RECONNECTING');
+			// Gemini ends the cut generation as the redial starts; a background task finishes meanwhile.
+			stub.transport.onGenerationEnd?.('gen-1', 'disconnected');
+			s.publishSystemNotification('job finished during the dial');
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			expect(sentTexts(stub).some((t) => t.includes('job finished during the dial'))).toBe(false);
+			await vi.waitFor(() => expect(s.sessionManager.state).toBe('ACTIVE'), { timeout: 5_000 });
+			await vi.waitFor(() =>
+				expect(
+					sentTexts(stub).filter((t) => t.includes('job finished during the dial')),
+				).toHaveLength(1),
+			);
+		},
+		10_000,
+	);
+
+	it.each(['legacy', 'actor'] as const)(
+		'%s mode: a call the server moved past (its turn completed unanswered) does not hold the reconnect drain',
+		async (orchestrationMode) => {
+			const stub = createStubTransport();
+			const slow = deferredTool();
+			const s = createSession(stub, {
+				orchestrationMode,
+				agent: createAgent({ tools: [slow.tool] }),
+			});
+			session = s;
+			await activate(s, stub);
+			stub.transport.onModelTurnStart?.();
+			stub.transport.onToolCall?.([{ id: 'c-orphan', name: 'slow_lookup', args: {} }]);
+			stub.transport.onTurnComplete?.(); // the server went on without waiting for it
+			stub.transport.onModelTurnStart?.();
+			stub.transport.onAudioOutput?.(Buffer.alloc(960).toString('base64'));
+			s.publishSystemNotification('job finished while speaking');
+			stub.transport.onResumptionUpdate?.('handle-1', true);
+			stub.transport.onClose?.(1006, 'socket lost');
+			await vi.waitFor(() => expect(s.sessionManager.state).toBe('ACTIVE'), { timeout: 5_000 });
+			await vi.waitFor(() =>
+				expect(
+					sentTexts(stub).filter((t) => t.includes('job finished while speaking')),
+				).toHaveLength(1),
+			);
+		},
+		10_000,
+	);
+
+	it.each(['legacy', 'actor'] as const)(
 		'%s mode: speech the hosted user started while the connection was down keeps the queued notification waiting',
 		async (orchestrationMode) => {
 			const stub = createStubTransport();

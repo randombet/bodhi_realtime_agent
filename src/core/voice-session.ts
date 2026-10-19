@@ -2589,9 +2589,6 @@ export class VoiceSession {
 				generationId,
 				reason,
 			});
-			// A generation the connection's loss ended mid-speech: no audio of it plays on any later
-			// connection, so a notification must not wait for its turn to end.
-			if (reason === 'disconnected') this.notificationSink.resetAudio();
 		};
 		this.transport.onOutputTranscription = (text) => {
 			const turn = this.turns.ensureCurrent();
@@ -2704,9 +2701,11 @@ export class VoiceSession {
 					// A connection replaced the one the model was speaking on. The cut turn never completes
 					// and the response the dead connection owed never starts: neither its "audio playing"
 					// state nor its pending response origin may carry over, or the next notification waits
-					// for a turn end that never comes and the next real response is mislabelled. The
-					// transport reports the cut itself (`generation.end` with reason 'disconnected'); this
-					// edge also covers a transport that does not, and the transfer edge.
+					// for a turn end that never comes and the next real response is mislabelled. Reset
+					// here, once the new connection is up, and not at the transport's 'disconnected'
+					// generation end: that fires as the redial starts, and a notification published during
+					// the dial window must keep queuing behind the cut turn's audio state, since a send
+					// then reaches no session and is lost.
 					if (payload.fromState === 'RECONNECTING' || payload.fromState === 'TRANSFERRING') {
 						this.notificationSink.resetAudio();
 						this._pendingResponseOrigin = null;
@@ -3819,6 +3818,8 @@ export class VoiceSession {
 		// Correlate the completion to its Turn. `stale` → a long-gone turn,
 		// ignore; `new` → a turn that produced no model output, birth it.
 		const r = this.turns.resolve(serverTurnId, 'completion');
+		// The server moved past this turn, so it waits on none of its calls any more.
+		this.fence.turnCompleted();
 		if (r.kind === 'stale') {
 			this.log(
 				`[Watchdog] Ignored stale turnComplete (serverTurnId=${serverTurnId}); watchdog NOT disarmed`,

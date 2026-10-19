@@ -213,6 +213,8 @@ export class SyntheticOutputHold {
 export class DialGenerationFence {
 	/** Dial generation each tool call was issued on, until its result is sent. */
 	private readonly toolCallGens = new Map<string, number>();
+	/** Calls of the turn still in progress: stamped since the last turn completion, unanswered. */
+	private readonly awaitedCalls = new Set<string>();
 	/** Dial generation each turn's STT capture was committed on. A batch
 	 *  provider transcribes asynchronously, so a transcript can arrive long
 	 *  after its commit: its capture, not its arrival, places it. */
@@ -239,29 +241,48 @@ export class DialGenerationFence {
 	stampToolCalls(ids: string[]): void {
 		const gen = this.transport.currentDialGen;
 		if (gen === undefined) return;
-		for (const id of ids) this.toolCallGens.set(id, gen);
+		for (const id of ids) {
+			this.toolCallGens.set(id, gen);
+			this.awaitedCalls.add(id);
+		}
 	}
 
-	/** Whether this result answers a call issued before the last boundary
-	 *  (logged when so). Settles the call's stamp either way. */
-	/** Calls the live session still waits on: stamped, not yet answered or cancelled, and issued
-	 *  after the last boundary (a call from an abandoned dial has its result dropped here, so no
-	 *  session waits for it). A drained notification would land on top of such a response. */
+	/** Calls the server still waits on: issued in the turn that has not completed, on the live
+	 *  dial, and neither answered nor cancelled. A notification drained now would land on top of
+	 *  the function response that turn is waiting for. A call the server moved past (its turn
+	 *  completed, e.g. a NON_BLOCKING call, or one a router never answered) is not waited on; a
+	 *  call from an abandoned dial has its result dropped here, so no session waits for it either.
+	 *  Transports without `currentDialGen` stamp nothing and never resume a server session, so
+	 *  they have nothing to wait on. */
 	hasOpenToolCalls(): boolean {
-		for (const issuedGen of this.toolCallGens.values()) {
+		for (const id of this.awaitedCalls) {
+			const issuedGen = this.toolCallGens.get(id);
+			if (issuedGen === undefined) continue;
 			if (this.boundaryGen === null || issuedGen > this.boundaryGen) return true;
 		}
 		return false;
 	}
 
-	/** Cancelled calls get no result, so they leave the open set here. */
-	forgetToolCalls(ids: string[]): void {
-		for (const id of ids) this.toolCallGens.delete(id);
+	/** The server completed a turn: whatever calls of it were still open are no longer waited on
+	 *  (their stamps stay, so a late result of an abandoned call is still dropped). */
+	turnCompleted(): void {
+		this.awaitedCalls.clear();
 	}
 
+	/** Cancelled calls get no result, so they leave the open set here. */
+	forgetToolCalls(ids: string[]): void {
+		for (const id of ids) {
+			this.toolCallGens.delete(id);
+			this.awaitedCalls.delete(id);
+		}
+	}
+
+	/** Whether this result answers a call issued before the last boundary
+	 *  (logged when so). Settles the call's stamp either way. */
 	shouldDropToolResult(id: string): boolean {
 		const issuedGen = this.toolCallGens.get(id);
 		this.toolCallGens.delete(id);
+		this.awaitedCalls.delete(id);
 		if (issuedGen === undefined || this.boundaryGen === null || issuedGen > this.boundaryGen) {
 			return false;
 		}
