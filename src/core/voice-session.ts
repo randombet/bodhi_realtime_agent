@@ -785,7 +785,6 @@ export class VoiceSession {
 	private runtimeToolRegistry?: Map<string, ToolRoutingInfo>;
 	private subagentConfigs: Record<string, SubagentConfig>;
 	private persistentSubagents = new PersistentSubagentManager();
-	/** Replays and re-elicits the reconnector dispatched; a reconnect's notification drain yields to one. */
 	/** The declared tool list: the active agent's tools plus the behavior
 	 *  tools, as changed by `registerTools()` and `replaceTools()`. An agent
 	 *  transfer resets it from the new agent. */
@@ -2537,6 +2536,11 @@ export class VoiceSession {
 		this.transport.onToolCall = (calls) => {
 			// Stamp each call with the dial it was issued on, for the tool-result fence.
 			this.fence.stampToolCalls(calls.map((c) => c.id));
+			// Only a BLOCKING call makes the server wait for its response; a NON_BLOCKING one lets the
+			// turn go on, so a notification may be drained past it.
+			this.fence.awaitToolCalls(
+				calls.filter((c) => this.functionBehaviorOf(c.name) === 'BLOCKING').map((c) => c.id),
+			);
 			this.reconnector.disarmResponseWatchdog();
 			// Native playback-end gate: this response dispatched a tool call, so
 			// it is not the turn's terminal spoken response.
@@ -5083,10 +5087,6 @@ export class VoiceSession {
 		return this.hold.isActive();
 	}
 
-	/** Deliver one held-back notification once a dial window has released the
-	 *  notification hold, but only while the model is idle: no framework turn
-	 *  open and no requested response still waiting to start. Otherwise the
-	 *  next turn completion delivers it, as usual. */
 	/** A reconnect the reconnector ran has settled. The turn it cut never completes, so a notification
 	 *  queued behind that speech would otherwise wait for the user's next turn. One goes now, unless the
 	 *  reconnect started a response itself (a replay or a nudge), the user is talking (server VAD
@@ -5116,6 +5116,10 @@ export class VoiceSession {
 		);
 	}
 
+	/** Deliver one held-back notification once a dial window has released the
+	 *  notification hold, but only while the model is idle: no framework turn
+	 *  open and no requested response still waiting to start. Otherwise the
+	 *  next turn completion delivers it, as usual. */
 	private drainNotificationsWhenIdle(): void {
 		if (this.turns.active() !== null || this._pendingResponseOrigin !== null) return;
 		this.notificationSink.turnComplete();

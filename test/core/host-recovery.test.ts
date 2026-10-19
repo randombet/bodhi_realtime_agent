@@ -691,6 +691,35 @@ describe('synthetic-output hold wiring (legacy mode)', () => {
 	);
 
 	it.each(['legacy', 'actor'] as const)(
+		'%s mode: an open NON_BLOCKING call does not hold the reconnect drain (the server does not wait for it)',
+		async (orchestrationMode) => {
+			const stub = createStubTransport();
+			const slow = deferredTool();
+			const nonBlocking: ToolDefinition = { ...slow.tool, behavior: 'NON_BLOCKING' };
+			const s = createSession(stub, {
+				orchestrationMode,
+				agent: createAgent({ tools: [nonBlocking] }),
+			});
+			session = s;
+			await activate(s, stub);
+			stub.transport.onModelTurnStart?.();
+			stub.transport.onAudioOutput?.(Buffer.alloc(960).toString('base64'));
+			stub.transport.onToolCall?.([{ id: 'c-nb', name: 'slow_lookup', args: {} }]);
+			s.publishSystemNotification('job finished while speaking');
+			stub.transport.onResumptionUpdate?.('handle-1', true);
+			stub.transport.onClose?.(1006, 'socket lost');
+			await vi.waitFor(() => expect(s.sessionManager.state).toBe('ACTIVE'), { timeout: 5_000 });
+			await vi.waitFor(() =>
+				expect(
+					sentTexts(stub).filter((t) => t.includes('job finished while speaking')),
+				).toHaveLength(1),
+			);
+			await slow.finish('c-nb');
+		},
+		10_000,
+	);
+
+	it.each(['legacy', 'actor'] as const)(
 		'%s mode: a call the server moved past (its turn completed unanswered) does not hold the reconnect drain',
 		async (orchestrationMode) => {
 			const stub = createStubTransport();

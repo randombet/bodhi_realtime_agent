@@ -213,7 +213,7 @@ export class SyntheticOutputHold {
 export class DialGenerationFence {
 	/** Dial generation each tool call was issued on, until its result is sent. */
 	private readonly toolCallGens = new Map<string, number>();
-	/** Calls of the turn still in progress: stamped since the last turn completion, unanswered. */
+	/** BLOCKING calls of the turn in progress, unanswered (see `awaitToolCalls`). */
 	private readonly awaitedCalls = new Set<string>();
 	/** Dial generation each turn's STT capture was committed on. A batch
 	 *  provider transcribes asynchronously, so a transcript can arrive long
@@ -241,16 +241,19 @@ export class DialGenerationFence {
 	stampToolCalls(ids: string[]): void {
 		const gen = this.transport.currentDialGen;
 		if (gen === undefined) return;
-		for (const id of ids) {
-			this.toolCallGens.set(id, gen);
-			this.awaitedCalls.add(id);
-		}
+		for (const id of ids) this.toolCallGens.set(id, gen);
 	}
 
-	/** Calls the server still waits on: issued in the turn that has not completed, on the live
-	 *  dial, and neither answered nor cancelled. A notification drained now would land on top of
-	 *  the function response that turn is waiting for. A call the server moved past (its turn
-	 *  completed, e.g. a NON_BLOCKING call, or one a router never answered) is not waited on; a
+	/** Calls of the turn in progress the server waits for before it goes on: the BLOCKING ones
+	 *  (a NON_BLOCKING call lets the turn continue). Only stamped calls are kept. */
+	awaitToolCalls(ids: string[]): void {
+		for (const id of ids) if (this.toolCallGens.has(id)) this.awaitedCalls.add(id);
+	}
+
+	/** Calls the server still waits on: BLOCKING, issued in the turn that has not completed, on
+	 *  the live dial, and neither answered nor cancelled. A notification drained now would land on
+	 *  top of the function response that turn is waiting for. A NON_BLOCKING call, or one the
+	 *  server moved past (its turn completed, or one a router never answered), is not waited on; a
 	 *  call from an abandoned dial has its result dropped here, so no session waits for it either.
 	 *  Transports without `currentDialGen` stamp nothing and never resume a server session, so
 	 *  they have nothing to wait on. */
