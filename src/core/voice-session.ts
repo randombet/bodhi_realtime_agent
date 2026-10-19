@@ -859,8 +859,6 @@ export class VoiceSession {
 	 *  connection a host recovery abandoned; inert until a recovery marks a
 	 *  boundary. Wraps `transport.sendToolResult`. See `host-recovery.ts`. */
 	private fence!: DialGenerationFence;
-	/** Tools that set their own function-call `behavior`; the rest take the session's default. */
-	private readonly toolBehaviors = new Map<string, FunctionBehavior>();
 	/** Host-driven upstream recovery: `recoverUpstream`, `parkUpstream` and
 	 *  the recovery boundary. See `host-recovery.ts`. */
 	private hostRecovery!: HostRecoveryController;
@@ -2178,6 +2176,9 @@ export class VoiceSession {
 				hostedReconnectSpeech: this.utteranceRetainer
 					? () => this.reconnectWindowSpeechVerdict()
 					: undefined,
+				// Read on every reconnect, flag or no flag: a notification is never drained on top of
+				// speech the user started while the connection was down.
+				userSpokeInReconnectWindow: () => this._reconnectWindowSpeech,
 				onReconnectWindowStart: () => {
 					this._reconnectWindowFrames = 0;
 					this._reconnectWindowSpeech = false;
@@ -2252,9 +2253,6 @@ export class VoiceSession {
 		agentTools: ToolDefinition[],
 		behaviorTools: ToolDefinition[],
 	): void {
-		for (const tool of [...agentTools, ...behaviorTools]) {
-			if (tool.behavior) this.toolBehaviors.set(tool.name, tool.behavior);
-		}
 		if (config.orchestrationMode === 'actor') {
 			this.runtimeToolRegistry = this.buildRuntimeToolRegistry([...agentTools, ...behaviorTools]);
 
@@ -4420,7 +4418,7 @@ export class VoiceSession {
 		// R7c input-side freshness tee: while RECONNECTING the router drops input
 		// at the isSessionActive() gate, so the speech-energy verdict for the
 		// reconnect window must be captured here, before the drop.
-		if (this.utteranceRetainer && this.sessionManager.state === 'RECONNECTING') {
+		if (this.sessionManager.state === 'RECONNECTING') {
 			this._reconnectWindowFrames++;
 			if (!this._reconnectWindowSpeech && pcmChunksContainSpeech([data])) {
 				this._reconnectWindowSpeech = true;
@@ -5107,9 +5105,14 @@ export class VoiceSession {
 	}
 
 	/** The function-call behavior a tool's call runs with: its own, else the session's default,
-	 *  else `'BLOCKING'` (see `VoiceSessionOptions.functionBehavior`). */
+	 *  else `'BLOCKING'` (see `VoiceSessionOptions.functionBehavior`). Read from the current
+	 *  agent's tools, so a transfer, `registerTools()` or `replaceTools()` is seen. */
 	private functionBehaviorOf(toolName: string): FunctionBehavior {
-		return this.toolBehaviors.get(toolName) ?? this.config.functionBehavior ?? 'BLOCKING';
+		return (
+			this.currentTools.find((t) => t.name === toolName)?.behavior ??
+			this.config.functionBehavior ??
+			'BLOCKING'
+		);
 	}
 
 	private drainNotificationsWhenIdle(): void {

@@ -663,6 +663,30 @@ describe('synthetic-output hold wiring (legacy mode)', () => {
 	);
 
 	it.each(['legacy', 'actor'] as const)(
+		'%s mode: speech the hosted user started while the connection was down keeps the queued notification waiting',
+		async (orchestrationMode) => {
+			const stub = createStubTransport();
+			const s = createSession(stub, { orchestrationMode });
+			session = s;
+			await activate(s, stub);
+			stub.transport.onModelTurnStart?.();
+			stub.transport.onAudioOutput?.(Buffer.alloc(960).toString('base64'));
+			s.publishSystemNotification('job finished while speaking');
+			stub.transport.onResumptionUpdate?.('handle-1', true);
+			stub.transport.onClose?.(1006, 'socket lost');
+			expect(s.sessionManager.state).toBe('RECONNECTING');
+			// Hosted audio in the window never reaches the client VAD (dropped at the session-active
+			// gate); the reconnect-window verdict is what sees it.
+			for (let i = 0; i < 5; i++) s.feedAudioFromClient(micFrame(4000));
+			await vi.waitFor(() => expect(s.sessionManager.state).toBe('ACTIVE'), { timeout: 5_000 });
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			expect(sentTexts(stub).some((t) => t.includes('job finished while speaking'))).toBe(false);
+			// Silence through the window: the verdict is 'none' and the notification is drained.
+		},
+		10_000,
+	);
+
+	it.each(['legacy', 'actor'] as const)(
 		'%s mode: a resumed session still owing a tool result gets no notification injected ahead of it',
 		async (orchestrationMode) => {
 			const stub = createStubTransport();

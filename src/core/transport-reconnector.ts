@@ -83,6 +83,11 @@ export interface TransportReconnectorDeps {
 	 *  `transitionTo('ACTIVE')`; host-owned recoveries (`recoverUpstream`) never go through here
 	 *  and own their own drain. Optional. */
 	onRecoverySettled?(outcome: RecoverySettled): void;
+	/** Whether the user's audio carried speech while the connection was down (a hosted client's
+	 *  frames never reach the local VAD; the session samples them at its gate). Read on every
+	 *  reconnect for `RecoverySettled.userSpeaking`; the eliciting path's own verdict
+	 *  (`hostedReconnectSpeech`) stays as it is. Optional. */
+	userSpokeInReconnectWindow?(): boolean;
 	/** H4 hold predicate — FULL-GREETING suppression ONLY (never the AEC
 	 *  grace or pre-first-audio windows; see recovery.policy.ts). */
 	isGreetingSuppressionArmed?(): boolean;
@@ -799,8 +804,15 @@ export class TransportReconnector {
 						this.deps.transport.sendAudio(chunk.toString('base64'));
 					}
 				}
-				// Only the eliciting (watchdog) path consults the speech verdict.
-				const reconnectSpeech = opts.elicit ? this.reconnectWindowSpeech(buffered) : null;
+				// The eliciting (watchdog) path decides between replay, nudge and silence on the speech
+				// verdict; every path tells the session whether the user spoke while the connection was
+				// down, so nothing is injected on top of speech still to be answered.
+				const speech = this.reconnectWindowSpeech(buffered);
+				const reconnectSpeech = opts.elicit ? speech : null;
+				const userSpoke =
+					speech === 'local-drained-speech' ||
+					speech === 'hosted-speech' ||
+					this.deps.userSpokeInReconnectWindow?.() === true;
 				// A planned reconnect is not a loss: retries of its transient failures
 				// leave the budget as it was, so a long call does not lose a retry
 				// for each one. A loss's own attempts stay spent until a turn completes.
@@ -811,7 +823,7 @@ export class TransportReconnector {
 				this.deps.log('Reconnect complete; session ACTIVE');
 				const settled = reconnectSpeech
 					? this.recoverModelResponse(reason, reconnectSpeech)
-					: { elicited: false, userSpeaking: false };
+					: { elicited: false, userSpeaking: userSpoke };
 				this.deps.onRecoverySettled?.(settled);
 			})
 			.catch((err) => {
