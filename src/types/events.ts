@@ -132,6 +132,10 @@ export interface EventPayloadMap {
 	// (bounded late bias — see the design doc).
 	'speech.user_started': { sessionId: string; atMs: number; source: SpeechEventSource };
 	'speech.user_ended': { sessionId: string; atMs: number; source: SpeechEventSource };
+	/** A `speech.user_started` whose segment will never end: client VAD dropped it as a blip shorter
+	 *  than the minimum speech duration, or a forced reset discarded it. No `speech.user_ended` follows,
+	 *  so a subscriber holding on an open start must let go here. */
+	'speech.user_aborted': { sessionId: string; atMs: number; source: SpeechEventSource };
 	'response.started': {
 		sessionId: string;
 		turnId: string;

@@ -62,6 +62,7 @@ export interface TextLLMTransportOptions {
 export class TextLLMTransport implements LLMTransport {
 	readonly capabilities: TransportCapabilities = {
 		...DEFAULT_TRANSPORT_CAPABILITIES,
+		explicitGenerationTrigger: true,
 		textResponseModality: true,
 		inPlaceSessionUpdate: true,
 	};

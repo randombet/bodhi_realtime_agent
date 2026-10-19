@@ -122,6 +122,7 @@ function makeHarness(opts: {
 	upstreamLossPolicy?: TransportReconnectorDeps['upstreamLossPolicy'];
 	hostOwnsRecovery?: TransportReconnectorDeps['hostOwnsRecovery'];
 	onFreshSessionBoundary?: TransportReconnectorDeps['onFreshSessionBoundary'];
+	onRecoverySettled?: TransportReconnectorDeps['onRecoverySettled'];
 	reconnectDeadlineMs?: number;
 }): Harness {
 	const sm = fakeSessionManager(
@@ -153,6 +154,7 @@ function makeHarness(opts: {
 		upstreamLossPolicy: opts.upstreamLossPolicy ?? 'close',
 		hostOwnsRecovery: opts.hostOwnsRecovery,
 		onFreshSessionBoundary: opts.onFreshSessionBoundary,
+		onRecoverySettled: opts.onRecoverySettled,
 	};
 	const reconnector = new TransportReconnector(
 		deps,
@@ -478,6 +480,80 @@ describe('TransportReconnector', () => {
 			vi.advanceTimersByTime(1000);
 			await vi.runAllTimersAsync();
 			expect(transport.triggerGeneration).toHaveBeenCalledTimes(1);
+		});
+
+		describe('the settled outcome handed to the session', () => {
+			async function settledAfterWatchdog(
+				transport: LLMTransport,
+				extra: Partial<Parameters<typeof makeHarness>[0]> = {},
+			) {
+				const onRecoverySettled = vi.fn();
+				const h = makeHarness({ watchdogMs: 8000, transport, onRecoverySettled, ...extra });
+				h.reconnector.armResponseWatchdog();
+				vi.advanceTimersByTime(9000);
+				// One fire's reconnect (a speaking user re-arms the watchdog, so later fires are not awaited).
+				await vi.advanceTimersByTimeAsync(100);
+				expect(onRecoverySettled).toHaveBeenCalledTimes(1);
+				return onRecoverySettled.mock.calls[0]?.[0];
+			}
+
+			it('elicited when the transport has elicitResponse', async () => {
+				expect(await settledAfterWatchdog(fakeTransport())).toEqual({
+					elicited: true,
+					userSpeaking: false,
+				});
+			});
+
+			it('elicited when triggerGeneration is a request of its own (explicitGenerationTrigger)', async () => {
+				const transport = fakeTransport({
+					elicitResponse: undefined,
+					capabilities: { explicitGenerationTrigger: true } as LLMTransport['capabilities'],
+				});
+				expect(await settledAfterWatchdog(transport)).toEqual({
+					elicited: true,
+					userSpeaking: false,
+				});
+			});
+
+			it('not elicited when the nudge is a no-op (no elicitResponse, no explicit trigger: Gemini)', async () => {
+				const transport = fakeTransport({ elicitResponse: undefined });
+				expect(await settledAfterWatchdog(transport)).toEqual({
+					elicited: false,
+					userSpeaking: false,
+				});
+				expect(transport.triggerGeneration).toHaveBeenCalledTimes(1);
+			});
+
+			it('not elicited when the nudge throws', async () => {
+				const transport = fakeTransport({
+					elicitResponse: vi.fn(() => {
+						throw new Error('nudge rejected');
+					}),
+				});
+				expect(await settledAfterWatchdog(transport)).toEqual({
+					elicited: false,
+					userSpeaking: false,
+				});
+			});
+
+			it('userSpeaking when the user spoke during the reconnect window', async () => {
+				const transport = fakeTransport({ elicitResponse: undefined });
+				const outcome = await settledAfterWatchdog(transport, {
+					clientTransport: fakeClientTransport([Buffer.alloc(320)]),
+					detectSpeech: () => true,
+				});
+				expect(outcome).toEqual({ elicited: false, userSpeaking: true });
+				expect(transport.triggerGeneration).not.toHaveBeenCalled();
+			});
+
+			it('is not handed over for a reconnect that does not elicit (a transport close)', async () => {
+				const onRecoverySettled = vi.fn();
+				const h = makeHarness({ transport: fakeTransport(), onRecoverySettled });
+				h.reconnector.handleTransportClose(1006, 'lost');
+				await vi.runAllTimersAsync();
+				expect(h.sm.state).toBe('ACTIVE');
+				expect(onRecoverySettled).toHaveBeenCalledWith({ elicited: false, userSpeaking: false });
+			});
 		});
 
 		it('survives a throwing re-elicit nudge (best-effort) and stays reconnected', async () => {

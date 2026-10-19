@@ -213,6 +213,8 @@ export class SyntheticOutputHold {
 export class DialGenerationFence {
 	/** Dial generation each tool call was issued on, until its result is sent. */
 	private readonly toolCallGens = new Map<string, number>();
+	/** BLOCKING calls of the turn in progress, unanswered (see `awaitToolCalls`). */
+	private readonly awaitedCalls = new Set<string>();
 	/** Dial generation each turn's STT capture was committed on. A batch
 	 *  provider transcribes asynchronously, so a transcript can arrive long
 	 *  after its commit: its capture, not its arrival, places it. */
@@ -242,11 +244,48 @@ export class DialGenerationFence {
 		for (const id of ids) this.toolCallGens.set(id, gen);
 	}
 
+	/** Calls of the turn in progress the server waits for before it goes on: the BLOCKING ones
+	 *  (a NON_BLOCKING call lets the turn continue). Only stamped calls are kept. */
+	awaitToolCalls(ids: string[]): void {
+		for (const id of ids) if (this.toolCallGens.has(id)) this.awaitedCalls.add(id);
+	}
+
+	/** Calls the server still waits on: BLOCKING, issued in the turn that has not completed, on
+	 *  the live dial, and neither answered nor cancelled. A notification drained now would land on
+	 *  top of the function response that turn is waiting for. A NON_BLOCKING call, or one the
+	 *  server moved past (its turn completed, or one a router never answered), is not waited on; a
+	 *  call from an abandoned dial has its result dropped here, so no session waits for it either.
+	 *  Transports without `currentDialGen` stamp nothing and never resume a server session, so
+	 *  they have nothing to wait on. */
+	hasOpenToolCalls(): boolean {
+		for (const id of this.awaitedCalls) {
+			const issuedGen = this.toolCallGens.get(id);
+			if (issuedGen === undefined) continue;
+			if (this.boundaryGen === null || issuedGen > this.boundaryGen) return true;
+		}
+		return false;
+	}
+
+	/** The server completed a turn: whatever calls of it were still open are no longer waited on
+	 *  (their stamps stay, so a late result of an abandoned call is still dropped). */
+	turnCompleted(): void {
+		this.awaitedCalls.clear();
+	}
+
+	/** Cancelled calls get no result, so they leave the open set here. */
+	forgetToolCalls(ids: string[]): void {
+		for (const id of ids) {
+			this.toolCallGens.delete(id);
+			this.awaitedCalls.delete(id);
+		}
+	}
+
 	/** Whether this result answers a call issued before the last boundary
 	 *  (logged when so). Settles the call's stamp either way. */
 	shouldDropToolResult(id: string): boolean {
 		const issuedGen = this.toolCallGens.get(id);
 		this.toolCallGens.delete(id);
+		this.awaitedCalls.delete(id);
 		if (issuedGen === undefined || this.boundaryGen === null || issuedGen > this.boundaryGen) {
 			return false;
 		}

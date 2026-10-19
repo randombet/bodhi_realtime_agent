@@ -247,10 +247,35 @@ describe('DictationController', () => {
 			expect(transport.__toolResults).toHaveLength(1);
 		});
 
-		it('passes silent-scheduled tool results through even while not in agent mode', () => {
+		it('passes a silent-scheduled tool result through while not in agent mode when the provider honours it', () => {
+			const { transport } = build(
+				{ transcriptionMode: 'transcription' },
+				{ silentResultHonoured: (name) => name === 'nb' },
+			);
+			transport.sendToolResult({ id: '1', name: 'nb', result: {}, scheduling: 'silent' } as never);
+			expect(transport.__toolResults).toHaveLength(1);
+		});
+
+		it('holds a silent-scheduled result for a tool the provider would answer (a blocking function), like any other', async () => {
+			const { controller, transport } = build(
+				{ transcriptionMode: 'transcription' },
+				{ silentResultHonoured: (name) => name === 'nb' },
+			);
+			transport.sendToolResult({
+				id: '1',
+				name: 'blocking',
+				result: {},
+				scheduling: 'silent',
+			} as never);
+			expect(transport.__toolResults).toHaveLength(0);
+			await controller.exitTranscriptionMode();
+			expect(transport.__toolResults).toHaveLength(1);
+		});
+
+		it('holds a silent-scheduled result when nothing says the provider honours it', () => {
 			const { transport } = build({ transcriptionMode: 'transcription' });
 			transport.sendToolResult({ id: '1', name: 't', result: {}, scheduling: 'silent' } as never);
-			expect(transport.__toolResults).toHaveLength(1);
+			expect(transport.__toolResults).toHaveLength(0);
 		});
 
 		it('queues turnComplete=true content while not in agent mode; turnComplete=false passes through', async () => {

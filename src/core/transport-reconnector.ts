@@ -76,6 +76,18 @@ export interface TransportReconnectorDeps {
 	 *  token is invalidated first — a recovery response must never bind as
 	 *  the greeting. */
 	onRecoveryDispatch?(): void;
+	/** A reconnect this controller ran has settled: the session is ACTIVE and the recovery decision
+	 *  is made. `elicited`: a response was started (a replayed utterance, or a nudge on a transport
+	 *  that can elicit one). `userSpeaking`: the user spoke during the reconnect window, so server
+	 *  VAD answers them next and nothing else may be injected now. Called synchronously, after
+	 *  `transitionTo('ACTIVE')`; host-owned recoveries (`recoverUpstream`) never go through here
+	 *  and own their own drain. Optional. */
+	onRecoverySettled?(outcome: RecoverySettled): void;
+	/** Whether the user's audio carried speech while the connection was down (a hosted client's
+	 *  frames never reach the local VAD; the session samples them at its gate). Read on every
+	 *  reconnect for `RecoverySettled.userSpeaking`; the eliciting path's own verdict
+	 *  (`hostedReconnectSpeech`) stays as it is. Optional. */
+	userSpokeInReconnectWindow?(): boolean;
 	/** H4 hold predicate — FULL-GREETING suppression ONLY (never the AEC
 	 *  grace or pre-first-audio windows; see recovery.policy.ts). */
 	isGreetingSuppressionArmed?(): boolean;
@@ -115,6 +127,12 @@ export interface TransportReconnectorDeps {
 
 /** Reconnect-window speech verdict driving the stage-2 replay decision. */
 export type ReconnectWindowSpeech = 'none' | 'local-drained-speech' | 'hosted-speech' | 'unknown';
+
+/** What a settled reconnect did about the model's response (see `TransportReconnectorDeps.onRecoverySettled`). */
+export interface RecoverySettled {
+	elicited: boolean;
+	userSpeaking: boolean;
+}
 
 /** How one automatic reconnect dials and what it does once connected. */
 interface DialOptions {
@@ -786,8 +804,15 @@ export class TransportReconnector {
 						this.deps.transport.sendAudio(chunk.toString('base64'));
 					}
 				}
-				// Only the eliciting (watchdog) path consults the speech verdict.
-				const reconnectSpeech = opts.elicit ? this.reconnectWindowSpeech(buffered) : null;
+				// The eliciting (watchdog) path decides between replay, nudge and silence on the speech
+				// verdict; every path tells the session whether the user spoke while the connection was
+				// down, so nothing is injected on top of speech still to be answered.
+				const speech = this.reconnectWindowSpeech(buffered);
+				const reconnectSpeech = opts.elicit ? speech : null;
+				const userSpoke =
+					speech === 'local-drained-speech' ||
+					speech === 'hosted-speech' ||
+					this.deps.userSpokeInReconnectWindow?.() === true;
 				// A planned reconnect is not a loss: retries of its transient failures
 				// leave the budget as it was, so a long call does not lose a retry
 				// for each one. A loss's own attempts stay spent until a turn completes.
@@ -796,7 +821,10 @@ export class TransportReconnector {
 				}
 				this.deps.sessionManager.transitionTo('ACTIVE');
 				this.deps.log('Reconnect complete; session ACTIVE');
-				if (reconnectSpeech) this.recoverModelResponse(reason, reconnectSpeech);
+				const settled = reconnectSpeech
+					? this.recoverModelResponse(reason, reconnectSpeech)
+					: { elicited: false, userSpeaking: userSpoke };
+				this.deps.onRecoverySettled?.(settled);
 			})
 			.catch((err) => {
 				if (token !== this._attemptToken) return;
@@ -854,25 +882,29 @@ export class TransportReconnector {
 	 *  a proven `'none'` ("fresh speech wins", and unknown is unsafe to guess).
 	 *  Falls back to the content-less nudge (tier 3). Agent mode only — never
 	 *  nudge a non-agent dictation/transcription turn. */
-	private recoverModelResponse(reason: string, reconnectSpeech: ReconnectWindowSpeech): void {
-		if (!this.deps.isAgentMode()) return;
+	private recoverModelResponse(
+		reason: string,
+		reconnectSpeech: ReconnectWindowSpeech,
+	): RecoverySettled {
+		if (!this.deps.isAgentMode()) return { elicited: false, userSpeaking: false };
 		if (reconnectSpeech === 'local-drained-speech') {
 			this.deps.log('[Watchdog] Skipping retained replay — user spoke during reconnect');
 			// The drained speech bypassed AudioRouter/VAD, so no completion will
 			// arm a watchdog for it — re-arm here or a second stall on that fresh
 			// speech has no timer left to recover it (R7c bookkeeping).
 			this.armResponseWatchdog();
-			return; // server VAD handles the freshly drained speech as a normal turn
+			// Server VAD handles the freshly drained speech as a normal turn.
+			return { elicited: false, userSpeaking: true };
 		}
 		if (reconnectSpeech === 'hosted-speech') {
 			// The user's reconnect-window speech was dropped at the input gate —
 			// answering the OLDER retained utterance now would be out of order.
 			this.deps.log('[Watchdog] Skipping retained replay — hosted user spoke during reconnect');
-			return;
+			return { elicited: false, userSpeaking: true };
 		}
 		if (reconnectSpeech === 'unknown') {
 			this.deps.log('[Watchdog] Skipping retained replay — reconnect-window speech state unknown');
-			return;
+			return { elicited: false, userSpeaking: true };
 		}
 		const retained = this.deps.peekRetainedUtterance?.() ?? null;
 		const replayEligible =
@@ -886,7 +918,7 @@ export class TransportReconnector {
 			this.deps.log('[Watchdog] Replayed retained user utterance after reconnect');
 			this.deps.onReplayDispatched?.(); // R7b: surface the replayed turn's transcript
 			this.armResponseWatchdog();
-			return;
+			return { elicited: true, userSpeaking: false };
 		}
 		// Tier 3 — content-less nudge, for transports that accept one. No in-tree
 		// transport currently does (see `LLMTransport.elicitResponse`), so this
@@ -894,15 +926,23 @@ export class TransportReconnector {
 		// no-op on Gemini, which auto-generates and rejects content-less requests.
 		this.deps.log(`[Watchdog] Re-eliciting model response after reconnect (reason=${reason})`);
 		this.deps.onRecoveryDispatch?.();
+		// The nudge starts a response only where the transport can: `elicitResponse`, or a
+		// `triggerGeneration` that is a request of its own. On a provider that generates by itself
+		// (Gemini) the call is a no-op and nothing was elicited.
+		const transport = this.deps.transport;
+		const elicits =
+			!!transport.elicitResponse || transport.capabilities?.explicitGenerationTrigger === true;
 		try {
-			if (this.deps.transport.elicitResponse) {
-				this.deps.transport.elicitResponse();
+			if (transport.elicitResponse) {
+				transport.elicitResponse();
 			} else {
-				this.deps.transport.triggerGeneration();
+				transport.triggerGeneration();
 			}
 		} catch (e) {
 			this.deps.log(`[Watchdog] Re-elicit nudge failed (best-effort): ${(e as Error).message}`);
+			return { elicited: false, userSpeaking: false };
 		}
+		return { elicited: elicits, userSpeaking: false };
 	}
 
 	handleTransportClose(code?: number, reason?: string): void {

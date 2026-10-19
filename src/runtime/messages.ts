@@ -10,6 +10,8 @@
  * Message naming convention: `domain.action` (e.g., `transport.session_ready`).
  */
 
+import type { BackgroundResultScheduling } from '../types/transport.js';
+
 // ---------------------------------------------------------------------------
 // 1. Transport → Orchestration
 // ---------------------------------------------------------------------------
@@ -63,7 +65,7 @@ export interface TransportSendToolResult {
 	id: string;
 	name: string;
 	result: unknown;
-	scheduling: 'immediate' | 'when_idle';
+	scheduling: 'immediate' | 'when_idle' | 'silent';
 }
 
 export interface TransportTransferSession {
@@ -146,6 +148,7 @@ export interface SubagentCompleted {
 	toolCallId: string;
 	workflowId: string;
 	result: string;
+	scheduling?: BackgroundResultScheduling;
 }
 
 export interface SubagentFailed {

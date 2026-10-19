@@ -354,6 +354,33 @@ describe('SubagentSupervisorActor', () => {
 			expect((toolResult?.payload as { result: { result: string } }).result.result).toBe(
 				'background done',
 			);
+			expect((toolResult?.payload as { scheduling: string }).scheduling).toBe('when_idle');
+		});
+
+		it('a handler result that asks for silent scheduling closes the call without prompting a response', async () => {
+			// A NON_BLOCKING call the model re-issued after its result was already returned has nothing new
+			// to say: it is closed SILENT instead of being answered WHEN_IDLE.
+			const bridgeMessages: SentMessage[] = [];
+			const send = (type: string, payload: unknown, to: string) => {
+				bridgeMessages.push({ type, payload, to });
+			};
+			const actorWithBridge = new SubagentSupervisorActor(
+				'subagent-supervisor',
+				send,
+				'transport',
+				'session',
+				async () => ({ text: 'already answered', scheduling: 'silent' as const }),
+			);
+
+			await actorWithBridge.onMessage(spawnEnvelope('tc-silent', 'ask_openclaw'));
+
+			await new Promise((r) => setTimeout(r, 10));
+			const toolResult = bridgeMessages.find((m) => m.type === 'transport.send_tool_result');
+			expect(toolResult).toBeDefined();
+			expect((toolResult?.payload as { result: { result: string } }).result.result).toBe(
+				'already answered',
+			);
+			expect((toolResult?.payload as { scheduling: string }).scheduling).toBe('silent');
 		});
 	});
 });

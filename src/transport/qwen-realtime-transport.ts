@@ -172,6 +172,7 @@ export class QwenRealtimeTransport implements LLMTransport {
 	private resolveCapabilities(): TransportCapabilities {
 		return {
 			...DEFAULT_TRANSPORT_CAPABILITIES,
+			explicitGenerationTrigger: true, // `response.create`
 			turnDetection: true,
 			userTranscription: true,
 			inPlaceSessionUpdate: true,

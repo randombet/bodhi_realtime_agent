@@ -1,4 +1,5 @@
 import type { SubagentConfig } from '../types/agent.js';
+import type { BackgroundToolResult } from '../types/transport.js';
 
 /**
  * Subagent lifetime mode.
@@ -35,11 +36,31 @@ export interface PersistentSubagentInstance {
 	): Promise<string>;
 
 	/**
+	 * Optional: like {@link invoke}, but the result may also set how it is delivered
+	 * ({@link PersistentSubagentResult}). When present, the session calls this instead of `invoke`.
+	 */
+	invokeWithScheduling?(
+		taskDescription: string,
+		args: Record<string, unknown>,
+		signal?: AbortSignal,
+	): Promise<string | PersistentSubagentResult>;
+
+	/**
 	 * Release provider resources held by this instance.
 	 * Must be idempotent — safe to call multiple times.
 	 */
 	dispose(): Promise<void>;
 }
+
+/**
+ * A background result together with how it is delivered ({@link BackgroundToolResult}). A plain
+ * string is delivered `'when_idle'`. `'silent'` adds the result to the model's context without
+ * prompting a response: for a call that must be closed but has nothing new to say, e.g. a
+ * NON_BLOCKING call the model re-issued after its result was already returned. Honoured where the
+ * transport supports it (Gemini NON_BLOCKING tools); for a `pendingMessage` tool, whose call was
+ * already answered by its pending message, it also skips the completion notification.
+ */
+export type PersistentSubagentResult = BackgroundToolResult;
 
 /**
  * Factory function that creates a new PersistentSubagentInstance.

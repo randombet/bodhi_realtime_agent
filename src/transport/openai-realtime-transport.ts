@@ -461,6 +461,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		const frameworkOwnsInterrupt = wire !== null && effective.interrupt_response === false;
 		return {
 			...this.staticCapabilities,
+			explicitGenerationTrigger: true, // `response.create`
 			parallelToolCalls: supports(model, 'parallelToolCalls'),
 			reasoningEffort: supports(model, 'reasoning'),
 			// gpt-realtime-2 emits automatic preambles; gating on reasoning is the

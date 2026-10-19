@@ -15,6 +15,7 @@ export { PersistentSubagentManager } from './persistent-subagent-manager.js';
 export type {
 	PersistentSubagentFactory,
 	PersistentSubagentInstance,
+	PersistentSubagentResult,
 	SubagentLifetimeMode,
 } from './persistent-subagent-types.js';
 export { createAskUserTool, runSubagent } from './subagent-runner.js';
