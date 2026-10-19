@@ -1,3 +1,4 @@
+import { GoogleGenAI } from '@google/genai';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { ValidationError } from '../../src/core/errors.js';
@@ -78,6 +79,35 @@ describe('GeminiLiveTransport', () => {
 			expect(config.responseModalities).toEqual(['AUDIO']);
 			expect(config.sessionResumption).toEqual({});
 			expect(config.inputAudioTranscription).toEqual({});
+		});
+
+		it('an SDK that delivers setupComplete before live.connect returns (2.x): session-ready sends reach the connection', async () => {
+			// @google/genai 2.x resolves live.connect only after setupComplete, and hands setupComplete to
+			// onmessage before returning the session. A session-ready observer that sends at once (the
+			// greeting, the history replay of a reconnect) must not find the transport without a session.
+			vi.mocked(GoogleGenAI).mockImplementationOnce(
+				() =>
+					({
+						live: {
+							connect: vi.fn(async (params: Record<string, unknown>) => {
+								const cbs = params.callbacks as Record<string, (...args: unknown[]) => void>;
+								cbs.onopen?.();
+								cbs.onmessage?.({ setupComplete: { sessionId: 'sid_2x' } });
+								return mockSession;
+							}),
+						},
+					}) as unknown as GoogleGenAI,
+			);
+			const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+			const ready: string[] = [];
+			transport.onSessionReady = (sid) => {
+				ready.push(sid);
+				transport.sendContent([{ role: 'user', text: 'greet now' }], false);
+			};
+			mockSession.sendClientContent.mockClear();
+			await transport.connect();
+			expect(ready).toEqual(['sid_2x']);
+			expect(mockSession.sendClientContent).toHaveBeenCalledTimes(1);
 		});
 
 		it('dials gemini-3.8-live when no model is set', async () => {
