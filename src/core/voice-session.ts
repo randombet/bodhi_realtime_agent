@@ -2710,8 +2710,12 @@ export class VoiceSession {
 					// generation end: that fires as the redial starts, and a notification published during
 					// the dial window must keep queuing behind the cut turn's audio state, since a send
 					// then reaches no session and is lost.
+					// A resumed turn that still owes a function response does complete, after that response:
+					// its audio state stays, so a notification published now waits for that turn's end
+					// instead of landing ahead of the result. The same holds for an actor-mode transfer,
+					// whose transfer_to_agent call is answered only after the new agent is active.
 					if (payload.fromState === 'RECONNECTING' || payload.fromState === 'TRANSFERRING') {
-						this.notificationSink.resetAudio();
+						if (!this.fence.hasOpenToolCalls()) this.notificationSink.resetAudio();
 						this._pendingResponseOrigin = null;
 					}
 				} else if (
@@ -2719,6 +2723,12 @@ export class VoiceSession {
 					payload.toState === 'TRANSFERRING' ||
 					payload.toState === 'UPSTREAM_LOST'
 				) {
+					// Every reconnect window is judged on its own frames: speech in an earlier window must
+					// not hold this one's drain (GoAway and host recovery never reach onReconnectWindowStart).
+					if (payload.toState === 'RECONNECTING') {
+						this._reconnectWindowFrames = 0;
+						this._reconnectWindowSpeech = false;
+					}
 					void this.sttProvider?.stop();
 					this.shadowStt
 						?.stop()

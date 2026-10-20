@@ -804,6 +804,76 @@ describe('synthetic-output hold wiring (legacy mode)', () => {
 		10_000,
 	);
 
+	it.each(['legacy', 'actor'] as const)(
+		'%s mode: a notification published after a resume waits while the resumed turn still owes a tool result',
+		async (orchestrationMode) => {
+			const stub = createStubTransport();
+			const slow = deferredTool();
+			const s = createSession(stub, {
+				orchestrationMode,
+				agent: createAgent({ tools: [slow.tool] }),
+			});
+			session = s;
+			await activate(s, stub);
+			stub.transport.onModelTurnStart?.();
+			stub.transport.onAudioOutput?.(Buffer.alloc(960).toString('base64'));
+			stub.transport.onToolCall?.([{ id: 'c1', name: 'slow_lookup', args: {} }]);
+			stub.transport.onResumptionUpdate?.('handle-1', true);
+			stub.transport.onClose?.(1006, 'socket lost');
+			await vi.waitFor(() => expect(s.sessionManager.state).toBe('ACTIVE'), { timeout: 5_000 });
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			// A background task finishes after the resume, while the call is still unanswered.
+			s.publishSystemNotification('job finished after the resume');
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			expect(sentTexts(stub).some((t) => t.includes('job finished after the resume'))).toBe(false);
+			// The call is answered and its turn ends: the notification goes then, once.
+			await slow.finish('c1');
+			expect(sentToolResultIds(stub)).toContain('c1');
+			stub.transport.onTurnComplete?.();
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			expect(
+				sentTexts(stub).filter((t) => t.includes('job finished after the resume')),
+			).toHaveLength(1);
+		},
+		10_000,
+	);
+
+	it.each(['legacy', 'actor'] as const)(
+		'%s mode: speech in an earlier reconnect window does not hold a later GoAway drain',
+		async (orchestrationMode) => {
+			const stub = createStubTransport();
+			const s = createSession(stub, { orchestrationMode });
+			session = s;
+			await activate(s, stub);
+			// First window (a socket close): the hosted user speaks while the connection is down.
+			stub.transport.onResumptionUpdate?.('handle-1', true);
+			stub.transport.onClose?.(1006, 'socket lost');
+			expect(s.sessionManager.state).toBe('RECONNECTING');
+			for (let i = 0; i < 5; i++) s.feedAudioFromClient(micFrame(4000));
+			await vi.waitFor(() => expect(s.sessionManager.state).toBe('ACTIVE'), { timeout: 5_000 });
+			// Their segment ends and the model answers it.
+			await new Promise((resolve) => setTimeout(resolve, 650));
+			s.feedAudioFromClient(micFrame(0));
+			s.feedAudioFromClient(micFrame(0));
+			stub.transport.onModelTurnStart?.();
+			stub.transport.onTurnComplete?.();
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			// Later the model speaks, a notification queues behind it, and a GoAway comes with a silent window.
+			stub.transport.onModelTurnStart?.();
+			stub.transport.onAudioOutput?.(Buffer.alloc(960).toString('base64'));
+			s.publishSystemNotification('job finished before the GoAway');
+			stub.transport.onResumptionUpdate?.('handle-2', true);
+			stub.transport.onGoAway?.('10s');
+			await vi.waitFor(() => expect(s.sessionManager.state).toBe('ACTIVE'), { timeout: 5_000 });
+			await vi.waitFor(() =>
+				expect(
+					sentTexts(stub).filter((t) => t.includes('job finished before the GoAway')),
+				).toHaveLength(1),
+			);
+		},
+		10_000,
+	);
+
 	it('legacy mode: a response origin the dead connection never started does not hold the next notification back', async () => {
 		const stub = createStubTransport();
 		const s = createSession(stub);
