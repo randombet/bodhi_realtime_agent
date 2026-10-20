@@ -9,7 +9,9 @@ export type RealtimeUsageSource =
 	| 'gemini.usage.update'
 	| 'gemini.turn.final'
 	| 'qwen.response'
-	| 'qwen.transcription';
+	| 'qwen.transcription'
+	| 'openai_live.session'
+	| 'openai_live.backend';
 
 /**
  * Provider-aware cache hit ratio. Returns `cachedTokens / inputTokens` ONLY
@@ -47,6 +49,16 @@ export function computeCacheHitRatio(
 		case 'qwen.transcription':
 			// Qwen Omni Realtime exposes no cache-token signal — no cache ratio.
 			return undefined;
+		case 'openai_live.backend': {
+			// The delegated Responses backend reports cached input tokens like any
+			// Responses call; the voice session itself is billed by the second.
+			const cached = usage.modalityBreakdown?.cachedTokens;
+			const input = usage.inputTokens;
+			if (cached === undefined || input === undefined || input <= 0) return undefined;
+			return cached / input;
+		}
+		case 'openai_live.session':
+			return undefined;
 	}
 }
 
@@ -73,6 +85,10 @@ export function deriveProviderItemId(
 		case 'gemini.usage.update':
 		case 'gemini.turn.final':
 			return null;
+		case 'openai_live.backend':
+			return usage.providerResponseId ?? null;
+		case 'openai_live.session':
+			return null;
 	}
 }
 
@@ -85,6 +101,10 @@ export function deriveUsageSource(usage: RealtimeLLMUsageEvent): RealtimeUsageSo
 	}
 	if (usage.provider === 'qwen_realtime') {
 		return usage.kind === 'input_transcription' ? 'qwen.transcription' : 'qwen.response';
+	}
+	if (usage.provider === 'openai_live') {
+		// Voice time is a duration snapshot; delegated backend work is tokens.
+		return usage.unit === 'duration_seconds' ? 'openai_live.session' : 'openai_live.backend';
 	}
 	// gemini_live
 	return usage.phase === 'final' ? 'gemini.turn.final' : 'gemini.usage.update';

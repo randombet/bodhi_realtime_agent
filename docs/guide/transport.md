@@ -19,6 +19,7 @@ This is what most people mean by “transport” in the framework: the **`LLMTra
 
 - Gemini Live transport
 - OpenAI Realtime transport
+- OpenAI Live transport (`OpenAILiveTransport`, GPT-Live full duplex; see [GPT-Live](/guide/gpt-live))
 
 ### Responsibilities
 

@@ -26,7 +26,9 @@ export type RealtimeUsageSource =
 	| 'gemini.usage.update'
 	| 'gemini.turn.final'
 	| 'qwen.response'
-	| 'qwen.transcription';
+	| 'qwen.transcription'
+	| 'openai_live.session'
+	| 'openai_live.backend';
 
 /**
  * Payload for the `realtime.usage` EventBus event. One emission per provider
@@ -41,6 +43,8 @@ export type RealtimeUsageSource =
  * - gemini.usage.update   → ignored for billing; use `sequence` for replay
  * - qwen.response         → (sessionId, turnId, source, providerItemId)
  * - qwen.transcription    → (sessionId, source, providerItemId)  // turnId is null
+ * - openai_live.session   → (sessionId, source): cumulative voice seconds, latest wins
+ * - openai_live.backend   → (sessionId, turnId, source, providerItemId): Responses tokens
  */
 export interface RealtimeUsagePublished {
 	sessionId: string;

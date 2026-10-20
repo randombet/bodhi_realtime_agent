@@ -54,6 +54,7 @@ export default withMermaid(
 							{ text: 'Events & Hooks', link: '/guide/events' },
 							{ text: 'Observability', link: '/guide/observability' },
 							{ text: 'Transport', link: '/guide/transport' },
+							{ text: 'GPT-Live', link: '/guide/gpt-live' },
 							{ text: 'Known Issues', link: '/guide/known-issues' },
 						],
 					},
