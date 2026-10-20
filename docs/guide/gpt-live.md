@@ -76,9 +76,16 @@ to route delegations to an existing background tool of that name.
   instruction (client); assistant text becomes commentary the model paraphrases.
   `replayHistory` after startup is quiet context; `reconnect` seeds the new
   session's `input` with the conversation text (there is no resumption handle).
+- **Background tools**: the Responses backend cannot finish a response until
+  every function call has an output, and the Live model waits for the backend.
+  A background tool *with* a `pendingMessage` is answered at once by the
+  framework, as on Gemini. One *without* (its call stays open until the task
+  ends) is answered by the transport the moment it is dispatched, with a
+  "started in the background, the result follows later" output, so the model
+  can say it has started and keep talking.
 - **Tool results** that the backend is not waiting on — a client delegation's
-  result, or a background tool's final answer after its pending message — are
-  spoken via `session.commentary.append` (`scheduling: 'silent'` → quiet
+  result, or a background tool's final answer after its pending or "started"
+  output — are spoken via `session.commentary.append` (`scheduling: 'silent'` → quiet
   `session.thinking.append`; `'interrupt'` → an instruction to say it now;
   `'when_idle'` waits for the model to stop speaking). Appends are chunked to
   the 500-token limit.

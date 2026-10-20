@@ -171,6 +171,11 @@ const INPUT_MAX_ITEMS = 128;
 const INPUT_MAX_CHARS = 24_000;
 /** Silent output frames still forwarded after the last voiced one. */
 const SILENCE_HANGOVER_MS = 200;
+/** The function output a background call gets at once, so the backend's response can finish. */
+const BACKGROUND_STARTED_OUTPUT =
+	'Started in the background. The result is not available yet; it will be delivered later as a ' +
+	'separate message. Tell the user in one short sentence that it has started, then continue the conversation.';
+
 /** A gap this long in the user's transcript starts a new utterance. */
 const USER_UTTERANCE_GAP_MS = 1_000;
 
@@ -837,6 +842,12 @@ export class OpenAILiveTransport implements LLMTransport {
 			this.config.providerOptions = { live: { ...this.config.providerOptions?.live, ...live } };
 	}
 
+	/** A background tool without a pendingMessage: nothing answers its call until the task ends. */
+	private answeredWhenStarted(toolName: string): boolean {
+		const tool = (this.config.tools ?? []).find((t) => t.name === toolName);
+		return tool?.execution === 'background' && !tool.pendingMessage;
+	}
+
 	private buildResponsesTools(
 		d: Extract<OpenAILiveDelegation, { type: 'responses' }>,
 	): Array<Record<string, unknown>> {
@@ -1177,12 +1188,30 @@ export class OpenAILiveTransport implements LLMTransport {
 				const calls = this.collectedCalls.get(responseId) ?? [];
 				this.collectedCalls.delete(responseId);
 				if (calls.length > 0 && inner.type !== 'response.failed') {
+					// A background tool with no pendingMessage keeps its call open until the task ends
+					// (minutes, with a WHEN_IDLE result). The backend cannot finish its response without
+					// an output for every call, and the Live model waits for the backend, so such a call
+					// is answered now with a "started" output; the real result arrives later as commentary
+					// (see sendToolResult). A pendingMessage tool is answered by the framework at once.
 					const waiting = new Set<string>();
 					for (const c of calls) {
+						if (this.answeredWhenStarted(c.name)) {
+							this.send({
+								type: 'response.item.create',
+								event_id: this.nextEventId(),
+								item: {
+									type: 'function_call_output',
+									call_id: c.id,
+									output: BACKGROUND_STARTED_OUTPUT,
+								},
+							});
+							continue;
+						}
 						waiting.add(c.id);
 						this.callToResponse.set(c.id, responseId);
 					}
-					this.awaitingOutputs.set(responseId, waiting);
+					if (waiting.size > 0) this.awaitingOutputs.set(responseId, waiting);
+					else this.send({ type: 'response.create', event_id: this.nextEventId() });
 					this.onToolCall?.(calls);
 				} else {
 					this.backendBusy = Math.max(0, this.backendBusy - 1);

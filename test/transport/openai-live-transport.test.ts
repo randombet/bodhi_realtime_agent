@@ -528,6 +528,97 @@ describe('OpenAILiveTransport: Responses delegation', () => {
 		expect(ws.sentOfType('response.create')).toHaveLength(1);
 	});
 
+	it('a background call without a pendingMessage is answered "started" at once; its real result is commentary', async () => {
+		const work = {
+			name: 'work',
+			description: 'Run a task in the background.',
+			parameters: z.object({ task: z.string() }),
+			execution: 'background' as const,
+			execute: async () => ({}),
+		};
+		const [t, ws] = await connect({
+			tools: [weather, work],
+			delegation: { type: 'responses', model: 'gpt-5.6-luna' },
+		});
+		const calls: string[] = [];
+		t.onToolCall = (c) => calls.push(...c.map((x) => x.name));
+		ws.msg({
+			type: 'response.event',
+			event_id: 'e1',
+			delegation_id: 'd',
+			event: {
+				type: 'response.output_item.done',
+				item: {
+					type: 'function_call',
+					call_id: 'work_1',
+					name: 'work',
+					arguments: '{"task":"count the PRs"}',
+				},
+			},
+		});
+		ws.msg({
+			type: 'response.event',
+			event_id: 'e2',
+			delegation_id: 'd',
+			event: { type: 'response.completed', response: { id: 'r', status: 'completed' } },
+		});
+		// The framework still runs the tool, but the backend is not kept waiting for it.
+		expect(calls).toEqual(['work']);
+		const outputs = ws.sentOfType('response.item.create');
+		expect(outputs).toHaveLength(1);
+		expect(outputs[0].item).toMatchObject({ type: 'function_call_output', call_id: 'work_1' });
+		expect(String((outputs[0].item as { output: string }).output)).toMatch(
+			/Started in the background/,
+		);
+		expect(ws.sentOfType('response.create')).toHaveLength(1);
+		// Minutes later: the task's result, under the same call id, is spoken when the model is idle.
+		t.sendToolResult({
+			id: 'work_1',
+			name: 'work',
+			result: 'Four PRs are open.',
+			scheduling: 'when_idle',
+		});
+		expect(ws.sentOfType('response.item.create')).toHaveLength(1);
+		const said = ws.sentOfType('session.commentary.append');
+		expect(said).toHaveLength(1);
+		expect(said[0].content).toBe('Four PRs are open.');
+	});
+
+	it("a background tool WITH a pendingMessage keeps its call open for the framework's immediate answer", async () => {
+		const notify = {
+			name: 'notify',
+			description: 'Send a notification.',
+			parameters: z.object({}),
+			execution: 'background' as const,
+			pendingMessage: 'Sending it now.',
+			execute: async () => ({}),
+		};
+		const [t, ws] = await connect({
+			tools: [notify],
+			delegation: { type: 'responses', model: 'gpt-5.6-luna' },
+		});
+		t.onToolCall = () => {};
+		ws.msg({
+			type: 'response.event',
+			event_id: 'e1',
+			delegation_id: 'd',
+			event: {
+				type: 'response.output_item.done',
+				item: { type: 'function_call', call_id: 'n_1', name: 'notify', arguments: '{}' },
+			},
+		});
+		ws.msg({
+			type: 'response.event',
+			event_id: 'e2',
+			delegation_id: 'd',
+			event: { type: 'response.completed', response: { id: 'r', status: 'completed' } },
+		});
+		expect(ws.sentOfType('response.item.create')).toHaveLength(0);
+		t.sendToolResult({ id: 'n_1', name: 'notify', result: 'Sending it now.' });
+		expect(ws.sentOfType('response.item.create')).toHaveLength(1);
+		expect(ws.sentOfType('response.create')).toHaveLength(1);
+	});
+
 	it('a second result for a call already answered is spoken as commentary (background tool)', async () => {
 		const [t, ws] = await connectResponses();
 		t.onToolCall = () => {};
