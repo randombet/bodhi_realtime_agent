@@ -27,6 +27,31 @@ This is what most people mean by “transport” in the framework: the **`LLMTra
 - tool call/result protocol mapping
 - provider-specific session update and recovery logic
 
+### Idle keepalive (Gemini Live)
+
+Gemini Live closes a session that receives no client input for about two
+minutes, with WebSocket close code `1008` ("Session closed due to client
+inactivity."). A session can go that long without sending the model any audio
+even while the user is talking: in transcription mode
+(`setTranscriptionMode('transcription')`) mic audio goes to the transcriber,
+not the model, and an app may withhold mic audio while a call is paused or on
+hold. Each such close costs a reconnect.
+
+The Gemini transport therefore sends 100 ms of digital silence (PCM16 zeros at
+its input rate) whenever its connection is set up and no audio has gone
+upstream for `keepaliveIntervalMs` (default `20000`). Every `sendAudio` resets
+the clock, so a session that streams mic audio sends no keepalive at all. The
+silence goes to the Gemini connection only, never to a transcriber or to the
+client, and nothing is sent while the transport is connecting, reconnecting or
+closed.
+
+Set `keepaliveIntervalMs` on `VoiceSessionConfig` for the built-in transport,
+or on the `GeminiLiveTransport` you construct; `0` disables it.
+
+```ts
+new GeminiLiveTransport({ apiKey, keepaliveIntervalMs: 30_000 }, {});
+```
+
 ### STT/TTS
 
 - Built-in transcription is supported via transport/provider capabilities.

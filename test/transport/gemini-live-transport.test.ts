@@ -1186,7 +1186,11 @@ describe('GeminiLiveTransport', () => {
 			await useConnect(connectFn);
 			vi.useFakeTimers();
 			try {
-				const transport = new GeminiLiveTransport({ apiKey: 'test-key' }, {});
+				// Counts sends across 60 s, so no idle keepalive.
+				const transport = new GeminiLiveTransport(
+					{ apiKey: 'test-key', keepaliveIntervalMs: 0 },
+					{},
+				);
 				const connecting = transport.connect();
 				await vi.advanceTimersByTimeAsync(1); // setupComplete
 				await connecting;
