@@ -3797,6 +3797,22 @@ describe('VoiceSession realtimeInputConfig defaulting', () => {
 		expect(connectConfig.mediaResolution).toBe('MEDIA_RESOLUTION_LOW');
 	});
 
+	it('keepaliveIntervalMs reaches the built-in Gemini transport', () => {
+		const keepaliveOf = (s: VoiceSession) =>
+			(s as unknown as { transport: { keepaliveIntervalMs: number } }).transport
+				.keepaliveIntervalMs;
+		session = new VoiceSession(
+			builtInConfig('sess_keepalive_off', 9961, { keepaliveIntervalMs: 0 }),
+		);
+		expect(keepaliveOf(session)).toBe(0);
+		session = new VoiceSession(builtInConfig('sess_keepalive_default', 9962, {}));
+		expect(keepaliveOf(session)).toBe(20_000);
+		expect(
+			() =>
+				new VoiceSession(builtInConfig('sess_keepalive_bad', 9963, { keepaliveIntervalMs: -1 })),
+		).toThrow(ValidationError);
+	});
+
 	it.each([
 		['maps verbatim with no default sensitivity merged', { silenceDurationMs: 200 }, 9973],
 		['sends an empty automaticActivityDetection when empty', {}, 9974],

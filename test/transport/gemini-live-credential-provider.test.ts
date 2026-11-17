@@ -1248,7 +1248,8 @@ describe('GeminiLiveTransport credentialProvider', () => {
 						meta: { credentialId: `cred_${n}` },
 					};
 				},
-				{ minCredentialLifetimeMs: 0 },
+				// These tests count the expiry timer alone.
+				{ minCredentialLifetimeMs: 0, keepaliveIntervalMs: 0 },
 			);
 			const events = recordLifecycle(transport);
 			const connecting = transport.connect();
@@ -1350,7 +1351,7 @@ describe('GeminiLiveTransport credentialProvider', () => {
 					if (n > 1) throw new Error('refused');
 					return { apiKey: 'auth_tokens/t1', expiresAtMs: Date.now() + 60_000 };
 				},
-				{ minCredentialLifetimeMs: 0 },
+				{ minCredentialLifetimeMs: 0, keepaliveIntervalMs: 0 },
 			);
 			const expired = vi.fn();
 			transport.onCredentialExpiry = expired;

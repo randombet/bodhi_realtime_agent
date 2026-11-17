@@ -506,6 +506,10 @@ export interface VoiceSessionOptions {
 	 *  realtime-input image on the session; realtime input has no per-send
 	 *  override. Omitted → server default. */
 	mediaResolution?: GeminiMediaResolution;
+	/** Idle keepalive on the built-in Gemini transport, in ms (default 20000; `0`
+	 *  disables it). See `GeminiTransportOptions.keepaliveIntervalMs`. With an
+	 *  injected `transport`, set it on the transport you construct instead. */
+	keepaliveIntervalMs?: number;
 	/** External STT provider for user input transcription.
 	 *  When set, transport built-in transcription is automatically disabled.
 	 *  When omitted, the transport's built-in transcription is used. */
@@ -1386,6 +1390,7 @@ export class VoiceSession {
 					compressionConfig: config.compressionConfig,
 					functionBehavior: config.functionBehavior,
 					mediaResolution: config.mediaResolution,
+					keepaliveIntervalMs: config.keepaliveIntervalMs,
 					inputAudioTranscription: inputTranscription,
 					realtimeInputConfig: this.resolvedRealtimeInputConfig,
 					vadConfig: config.vadConfig,

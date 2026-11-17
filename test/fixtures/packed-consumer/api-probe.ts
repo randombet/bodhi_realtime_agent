@@ -75,6 +75,7 @@ config.onUsageMetadata;
 config.probeState;
 config.shadowSttProvider;
 config.mediaResolution;
+config.keepaliveIntervalMs;
 config.compressionConfig = {};
 // The concrete ClientTransport accepts an application frame without importing a frame type.
 declare const ct: ClientTransport;

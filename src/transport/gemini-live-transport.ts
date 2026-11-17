@@ -155,6 +155,23 @@ export const DEFAULT_GEMINI_REALTIME_INPUT_CONFIG: GeminiRealtimeInputConfig = {
 /** Current default Gemini Live model for bidiGenerateContent sessions. */
 export const DEFAULT_GEMINI_LIVE_MODEL = 'gemini-3.8-live';
 
+/** Default `GeminiTransportOptions.keepaliveIntervalMs`. */
+export const DEFAULT_KEEPALIVE_INTERVAL_MS = 20_000;
+
+/** Length of the silence frame the idle keepalive sends. */
+export const KEEPALIVE_SILENCE_MS = 100;
+
+const INPUT_AUDIO_MIME = 'audio/pcm;rate=16000';
+
+/** `durationMs` of digital silence in `format`, base64-encoded: PCM16 zeros,
+ *  or 0xFF bytes for G.711 μ-law (its encoding of zero). */
+export function silenceFrameBase64(format: AudioFormatSpec, durationMs: number): string {
+	const samples = Math.round((format.inputSampleRate * durationMs) / 1000) * (format.channels || 1);
+	const frame =
+		format.encoding === 'pcmu' ? Buffer.alloc(samples, 0xff) : Buffer.alloc(samples * 2, 0);
+	return frame.toString('base64');
+}
+
 /**
  * `behavior` declared on a function whose tool sets none, when the transport's
  * `functionBehavior` is unset too. Gemini Live models differ when a
@@ -364,6 +381,15 @@ export interface GeminiTransportOptions {
 	 *  and no newer dial has started, the session field is cleared. It does not
 	 *  bound the incumbent's close or the redial. */
 	reconnectTimeoutMs?: number;
+	/** Idle keepalive (default: {@link DEFAULT_KEEPALIVE_INTERVAL_MS}, 20000).
+	 *  Gemini Live closes a session that receives no client input for about two
+	 *  minutes (close code 1008, "client inactivity"). While a connection is set
+	 *  up and no audio has been sent for this many ms, the transport sends
+	 *  {@link KEEPALIVE_SILENCE_MS} ms of digital silence to Gemini only; every
+	 *  `sendAudio` resets the clock. This keeps the connection open in
+	 *  transcription mode (mic audio goes to the transcriber, not the model) and
+	 *  while an app withholds mic audio (pause, hold). `0` disables it. */
+	keepaliveIntervalMs?: number;
 }
 
 /** Token accounting as reported by the Live server.
@@ -634,6 +660,12 @@ export class GeminiLiveTransport implements LLMTransport {
 	private pendingSetup: PendingSetup | null = null;
 	/** The expiry timer of the current dial's credential. */
 	private credentialExpiry: { gen: number; timer: ReturnType<typeof setTimeout> } | null = null;
+	private readonly keepaliveIntervalMs: number;
+	/** The pending idle-keepalive check of dial `gen`. */
+	private keepalive: { gen: number; timer: ReturnType<typeof setTimeout> } | null = null;
+	/** Last time audio went upstream on the current connection (keepalive silence included). */
+	private lastAudioSentAt = 0;
+	private keepaliveSilence: string | null = null;
 	/** Resolves when setupComplete fires — used to make connect() await Gemini readiness. */
 	private setupResolver: (() => void) | null = null;
 	/** Increments per dial and when the current dial fails or is aborted; socket
@@ -850,6 +882,13 @@ export class GeminiLiveTransport implements LLMTransport {
 			);
 		}
 		this.minCredentialLifetimeMs = minLifetimeMs;
+		const keepaliveMs = config.keepaliveIntervalMs ?? DEFAULT_KEEPALIVE_INTERVAL_MS;
+		if (!Number.isFinite(keepaliveMs) || keepaliveMs < 0) {
+			throw new ValidationError(
+				'GeminiLiveTransport: keepaliveIntervalMs must be a finite number of ms, 0 (off) or more.',
+			);
+		}
+		this.keepaliveIntervalMs = keepaliveMs;
 		this.credentialProvider = config.credentialProvider;
 		// With a provider there is no client until a connect has its credential.
 		this.ai = this.credentialProvider ? null : new GoogleGenAI({ apiKey: config.apiKey });
@@ -1016,6 +1055,7 @@ export class GeminiLiveTransport implements LLMTransport {
 		// A newer dial supersedes any credential fetch or expiry still pending.
 		this.cancelCredentialFetch('Gemini dial superseded before setupComplete');
 		this.clearCredentialExpiry();
+		this.clearKeepalive();
 		const gen = ++this.dialGen;
 		// Where a credential-provider attempt is, so a failure can say where it
 		// failed (`ConnectFailure.source`); unused without a provider.
@@ -1104,6 +1144,7 @@ export class GeminiLiveTransport implements LLMTransport {
 					failSetup(error);
 				}
 				this.clearCredentialExpiry(gen);
+				this.clearKeepalive();
 				this.lifecycle.socketClosed(code, reason, failure);
 				this.callbacks.onClose?.(code, reason);
 				if (this.onClose) this.onClose(code, reason);
@@ -1136,6 +1177,9 @@ export class GeminiLiveTransport implements LLMTransport {
 				this.session === dialSession
 			) {
 				this.armCredentialExpiry(gen, attempt.expiresAtMs);
+			}
+			if (gen === this.dialGen && this.session === dialSession) {
+				this.armKeepalive(gen);
 			}
 		} catch (err) {
 			if (gen === this.dialGen) {
@@ -1310,6 +1354,48 @@ export class GeminiLiveTransport implements LLMTransport {
 		if (!expiry || (gen !== undefined && expiry.gen !== gen)) return;
 		clearTimeout(expiry.timer);
 		this.credentialExpiry = null;
+	}
+
+	/** Start dial `gen`'s idle keepalive; its connection just completed setup. */
+	private armKeepalive(gen: number): void {
+		this.clearKeepalive();
+		if (this.keepaliveIntervalMs <= 0) return;
+		this.lastAudioSentAt = Date.now();
+		this.scheduleKeepalive(gen, this.keepaliveIntervalMs);
+	}
+
+	private scheduleKeepalive(gen: number, delayMs: number): void {
+		const timer = setTimeout(() => this.keepaliveTick(gen), delayMs);
+		timer.unref?.();
+		this.keepalive = { gen, timer };
+	}
+
+	private clearKeepalive(): void {
+		if (!this.keepalive) return;
+		clearTimeout(this.keepalive.timer);
+		this.keepalive = null;
+	}
+
+	private keepaliveTick(gen: number): void {
+		this.keepalive = null;
+		const session = this.session;
+		if (gen !== this.dialGen || !session) return;
+		const idleMs = Date.now() - this.lastAudioSentAt;
+		if (idleMs < this.keepaliveIntervalMs) {
+			this.scheduleKeepalive(gen, this.keepaliveIntervalMs - idleMs);
+			return;
+		}
+		this.keepaliveSilence ??= silenceFrameBase64(this.audioFormat, KEEPALIVE_SILENCE_MS);
+		try {
+			// Not counted in `upstream.audio`: those counters describe the app's audio.
+			session.sendRealtimeInput({
+				audio: { data: this.keepaliveSilence, mimeType: INPUT_AUDIO_MIME },
+			});
+		} catch {
+			// A closing socket reports itself through onclose, which stops the keepalive.
+		}
+		this.lastAudioSentAt = Date.now();
+		this.scheduleKeepalive(gen, this.keepaliveIntervalMs);
 	}
 
 	/**
@@ -1497,6 +1583,7 @@ export class GeminiLiveTransport implements LLMTransport {
 		const incumbent = this.session;
 		this.session = null;
 		this.clearCredentialExpiry();
+		this.clearKeepalive();
 		this._firstAudioFired = false;
 		this._cachedGeminiUsage = null;
 		this.resetServerTurnState();
@@ -1575,9 +1662,10 @@ export class GeminiLiveTransport implements LLMTransport {
 		}
 		this.sendTracked(slot, raw, base64Data.length, () =>
 			session.sendRealtimeInput({
-				audio: { data: base64Data, mimeType: 'audio/pcm;rate=16000' },
+				audio: { data: base64Data, mimeType: INPUT_AUDIO_MIME },
 			}),
 		);
+		this.lastAudioSentAt = Date.now();
 	}
 
 	/** Send tool execution results back to Gemini (legacy API). */
@@ -1753,6 +1841,7 @@ export class GeminiLiveTransport implements LLMTransport {
 			this.sendTracked(slot, raw, base64Data.length, () =>
 				session.sendRealtimeInput({ audio: { data: base64Data, mimeType } }),
 			);
+			this.lastAudioSentAt = Date.now();
 			return;
 		}
 		const video = this.upstream.video;
