@@ -1,3 +1,6 @@
+import { OpenAIRealtimeError } from 'openai/realtime/index';
+import { OpenAIRealtimeWS } from 'openai/realtime/ws';
+import type { RealtimeError } from 'openai/resources/realtime/realtime';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import {
@@ -58,6 +61,34 @@ function createMockRt() {
 				}
 			},
 		},
+	};
+}
+
+/**
+ * The error the SDK emits for a server `error` event: the top-level
+ * `event_id` is the server event's own id, and `error.event_id` echoes the
+ * client event that caused it (null when no client event did).
+ */
+function serverError(error: Omit<RealtimeError, 'type'> & { type?: string }): OpenAIRealtimeError {
+	return new OpenAIRealtimeError(error.message, {
+		type: 'error',
+		event_id: 'event_srv_1',
+		error: { type: 'invalid_request_error', ...error },
+	});
+}
+
+/** Answer each session.update for which `reply` returns an error with that
+ *  error instead of session.updated. */
+function replyToSessionUpdates(
+	rt: ReturnType<typeof createMockRt>,
+	reply: (sent: Record<string, unknown>) => OpenAIRealtimeError | undefined,
+) {
+	const origSend = rt.send.bind(rt);
+	rt.send = (m: Record<string, unknown>) => {
+		const error = m.type === 'session.update' ? reply(m) : undefined;
+		if (!error) return origSend(m);
+		rt.sent.push(m);
+		queueMicrotask(() => rt.emit('error', error));
 	};
 }
 
@@ -2321,37 +2352,192 @@ describe('OpenAIRealtimeTransport — Phase 1 features (gpt-realtime-2)', () => 
 				const beforeBaseline = (transport as any).prefixBaselineCanonical;
 				expect(beforeBaseline).toBeDefined();
 
-				// Replace the mock to make the next session.update reject by
-				// emitting an error event with a matching event_id instead of
-				// session.updated.
-				// biome-ignore lint/suspicious/noExplicitAny: deliberate mock override
-				const origSend = (mockRt as any).send.bind(mockRt);
-				// biome-ignore lint/suspicious/noExplicitAny: deliberate mock override
-				(mockRt as any).send = (m: Record<string, unknown>) => {
-					mockRt.sent.push(m);
-					if (
-						m.type === 'session.update' &&
-						(m.session as Record<string, unknown>).instructions === 'rejected'
-					) {
-						queueMicrotask(() =>
-							mockRt.emit('error', {
-								event_id: m.event_id,
-								error: { message: 'simulated server rejection', type: 'invalid_request_error' },
-							}),
-						);
-						return;
-					}
-					origSend(m);
-				};
+				// Make the next session.update reject: the server answers with
+				// an error echoing its event_id instead of session.updated.
+				replyToSessionUpdates(mockRt, (m) =>
+					(m.session as Record<string, unknown>).instructions === 'rejected'
+						? serverError({
+								message: 'simulated server rejection',
+								event_id: m.event_id as string,
+							})
+						: undefined,
+				);
 
 				// Mutate prefix; transferSession path so enforcePrefixStability
 				// allows the change (default allowMutationOnTransfer=true), but
 				// the wire send is rejected by the mock.
-				await expect(transport.transferSession({ instructions: 'rejected' })).rejects.toThrow();
+				await expect(transport.transferSession({ instructions: 'rejected' })).rejects.toThrow(
+					'simulated server rejection',
+				);
 
 				// biome-ignore lint/suspicious/noExplicitAny: test-only hook
 				const afterBaseline = (transport as any).prefixBaselineCanonical;
 				expect(afterBaseline).toBe(beforeBaseline);
+			});
+		});
+
+		// A rejected session.update fails its caller with the server's
+		// message, matched by the client event_id the server echoes in
+		// `error.event_id` — not by the SDK's top-level (server) event_id.
+		describe('session.update rejection matching', () => {
+			const badVoice = (m: Record<string, unknown>) =>
+				serverError({
+					code: 'invalid_value',
+					param: 'session.audio.output.voice',
+					message: "Invalid value: 'not-a-voice'.",
+					event_id: (m.event_id as string | undefined) ?? null,
+				});
+			const cacheKeyRejected = (m: Record<string, unknown>) =>
+				serverError({
+					code: 'unknown_parameter',
+					param: 'session.prompt_cache_key',
+					message: "Unknown parameter: 'session.prompt_cache_key'.",
+					event_id: (m.event_id as string | undefined) ?? null,
+				});
+			const hasCacheKey = (m: Record<string, unknown>) =>
+				(m.session as Record<string, unknown>).prompt_cache_key !== undefined;
+
+			/** Drive the real connect(): OpenAIRealtimeWS.create hands back the
+			 *  mock, which then announces session.created. */
+			function setupForConnect(config: OpenAIRealtimeConfig) {
+				transport = new OpenAIRealtimeTransport(config);
+				mockRt = createMockRt();
+				vi.spyOn(OpenAIRealtimeWS, 'create').mockImplementation(async () => {
+					setTimeout(() => mockRt.emit('session.created', { session: { id: 'sess_test' } }), 0);
+					return mockRt as unknown as OpenAIRealtimeWS;
+				});
+			}
+
+			it('connect() rejects with the server message when the initial session.update is rejected', async () => {
+				setupForConnect({ apiKey: 'test', model: 'gpt-realtime-2', voice: 'not-a-voice' });
+				replyToSessionUpdates(mockRt, badVoice);
+				await expect(transport.connect()).rejects.toThrow("Invalid value: 'not-a-voice'.");
+			});
+
+			it('updateSession() rejects with the server message when the update is rejected', async () => {
+				setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+				replyToSessionUpdates(mockRt, badVoice);
+				await expect(transport.updateSession({ instructions: 'X' })).rejects.toThrow(
+					"Invalid value: 'not-a-voice'.",
+				);
+			});
+
+			it('an error caused by another client event does not settle the pending update', async () => {
+				setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+				const origSend = mockRt.send.bind(mockRt);
+				mockRt.send = (m: Record<string, unknown>) => {
+					if (m.type === 'session.update') {
+						mockRt.emit(
+							'error',
+							serverError({
+								code: 'response_cancel_not_active',
+								message: 'Cancellation failed: no active response found',
+								event_id: 'client_evt_other',
+							}),
+						);
+					}
+					origSend(m);
+				};
+				await expect(transport.updateSession({ instructions: 'X' })).resolves.toBeUndefined();
+			});
+
+			it('an unattributed server error (error.event_id null) does not settle the pending update', async () => {
+				setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+				const origSend = mockRt.send.bind(mockRt);
+				mockRt.send = (m: Record<string, unknown>) => {
+					if (m.type === 'session.update') {
+						mockRt.emit(
+							'error',
+							serverError({
+								type: 'server_error',
+								message: 'The server had an error',
+								event_id: null,
+							}),
+						);
+					}
+					origSend(m);
+				};
+				await expect(transport.updateSession({ instructions: 'X' })).resolves.toBeUndefined();
+			});
+
+			it('a socket-level error (no server payload) fails the pending update', async () => {
+				setup({ apiKey: 'test', model: 'gpt-realtime-2' });
+				mockRt.send = (m: Record<string, unknown>) => {
+					mockRt.sent.push(m);
+					queueMicrotask(() =>
+						mockRt.emit('error', new OpenAIRealtimeError('could not send data', null)),
+					);
+				};
+				await expect(transport.updateSession({ instructions: 'X' })).rejects.toThrow(
+					'could not send data',
+				);
+			});
+
+			it('connect() succeeds when the probe retries a rejected prompt_cache_key under the same event_id', async () => {
+				const { _clearPromptCacheKeyProbeStateForTesting } = await import(
+					'../../src/transport/openai-realtime-transport.js'
+				);
+				_clearPromptCacheKeyProbeStateForTesting();
+				vi.spyOn(console, 'warn').mockImplementation(() => {});
+				setupForConnect({
+					apiKey: 'test',
+					model: 'gpt-realtime-2',
+					cacheConfig: { experimental: { promptCacheKey: 'probe_key' } },
+				});
+				const errors: unknown[] = [];
+				transport.onError = (e) => errors.push(e);
+				replyToSessionUpdates(mockRt, (m) => (hasCacheKey(m) ? cacheKeyRejected(m) : undefined));
+
+				await transport.connect();
+
+				const updates = mockRt.sent.filter((m) => m.type === 'session.update');
+				expect(updates).toHaveLength(2);
+				expect(hasCacheKey(updates[1] as Record<string, unknown>)).toBe(false);
+				expect(updates[1]?.event_id).toBe(updates[0]?.event_id);
+				expect(errors).toEqual([]);
+			});
+
+			it('connect() rejects with the server message when the retry without prompt_cache_key is also rejected', async () => {
+				const { _clearPromptCacheKeyProbeStateForTesting } = await import(
+					'../../src/transport/openai-realtime-transport.js'
+				);
+				_clearPromptCacheKeyProbeStateForTesting();
+				vi.spyOn(console, 'warn').mockImplementation(() => {});
+				setupForConnect({
+					apiKey: 'test',
+					model: 'gpt-realtime-2',
+					voice: 'not-a-voice',
+					cacheConfig: { experimental: { promptCacheKey: 'probe_key' } },
+				});
+				const errors: unknown[] = [];
+				transport.onError = (e) => errors.push(e);
+				replyToSessionUpdates(mockRt, (m) => (hasCacheKey(m) ? cacheKeyRejected(m) : badVoice(m)));
+
+				await expect(transport.connect()).rejects.toThrow("Invalid value: 'not-a-voice'.");
+				// The probe rejection stays suppressed; the retry's failure surfaces.
+				expect(errors).toHaveLength(1);
+			});
+
+			it('connect() rejected for another reason tears down the unsettled probe', async () => {
+				const { _clearPromptCacheKeyProbeStateForTesting } = await import(
+					'../../src/transport/openai-realtime-transport.js'
+				);
+				_clearPromptCacheKeyProbeStateForTesting();
+				setupForConnect({
+					apiKey: 'test',
+					model: 'gpt-realtime-2',
+					voice: 'not-a-voice',
+					cacheConfig: { experimental: { promptCacheKey: 'probe_key' } },
+				});
+				replyToSessionUpdates(mockRt, badVoice);
+
+				await expect(transport.connect()).rejects.toThrow("Invalid value: 'not-a-voice'.");
+				// biome-ignore lint/suspicious/noExplicitAny: test-only hook
+				expect((transport as any)._inFlightProbeScope).toBeNull();
+				// The stale probe no longer answers a later prompt_cache_key rejection.
+				const sentBefore = mockRt.sent.length;
+				mockRt.emit('error', cacheKeyRejected({ event_id: 'sess_upd_9' }));
+				expect(mockRt.sent).toHaveLength(sentBefore);
 			});
 		});
 

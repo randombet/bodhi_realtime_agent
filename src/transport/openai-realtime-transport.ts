@@ -369,9 +369,15 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	private _sessionUpdateQueue: Promise<unknown> = Promise.resolve();
 
 	/** Follow-up fix #1: monotonic event_id counter for session.update payloads.
-	 *  OpenAI errors echo event_id; success acks (session.updated) do not, but
-	 *  single-flight queueing makes the next session.updated unambiguous. */
+	 *  OpenAI errors echo event_id (in `error.event_id`); success acks
+	 *  (session.updated) do not, but single-flight queueing makes the next
+	 *  session.updated unambiguous. */
 	private _sessionUpdateEventIdCounter = 0;
+
+	/** Error events the prompt_cache_key probe answered by resending the
+	 *  session.update without the key. sendSessionUpdateAndWait skips them
+	 *  and settles on the retry instead. */
+	private readonly _probeRetriedErrors = new WeakSet<object>();
 
 	/** Follow-up fix #2: scope of any prompt_cache_key probe currently in
 	 *  flight. The generic error listener consults this to suppress an
@@ -559,14 +565,21 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		// P6: install probe BEFORE the wait so the listener catches an
 		// early `error` event referencing prompt_cache_key. The probe handler
 		// races session.updated vs error events.
-		this.installPromptCacheKeyProbe();
+		const disposeProbe = this.installPromptCacheKeyProbe();
 
 		// Follow-up fix #1: use the queued, ack-correlated helper instead of
 		// fire-and-forget rtSend. The connect-time send goes through the same
 		// queue subsequent updateSession()/transferSession() calls use, so
 		// they serialize correctly even if a caller invokes them
 		// before connect() has fully resolved.
-		await this.sendSessionUpdateAndWait(sessionConfig);
+		try {
+			await this.sendSessionUpdateAndWait(sessionConfig);
+		} catch (err) {
+			// A rejection the probe did not answer leaves it in flight; drop it
+			// so its timer cannot clear a later connect's probe flag.
+			disposeProbe?.();
+			throw err;
+		}
 
 		// P5: capture the prefix baseline AFTER the initial session.update is
 		// acknowledged. Subsequent prefix-mutating sends update this only on
@@ -1186,9 +1199,11 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	 *    session.updated unambiguous).
 	 *  - Resolves on session.updated.
 	 *  - Rejects with the error (also returned to caller) when a matching
-	 *    `error` event arrives. Matching = `event_id` equals the outgoing
-	 *    one, OR (for general failures) the next error event before
-	 *    session.updated.
+	 *    `error` event arrives. A server error matches when its
+	 *    `error.event_id` echoes the outgoing one; a socket-level error (no
+	 *    server payload) matches whichever update is pending. Server errors
+	 *    caused by other client events, or by none (`error.event_id: null`),
+	 *    are left to the generic error listener.
 	 *  - 15s timeout rejects with a Transport-style timeout error.
 	 *
 	 *  Used by connect() (initial), updateSession(), and transferSession()
@@ -1213,11 +1228,13 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 				const onError = (event: unknown) => {
 					// biome-ignore lint/suspicious/noExplicitAny: SDK error event shape varies
 					const e = event as any;
-					const echoedId: string | undefined = e?.event_id ?? e?.error?.event_id;
-					// Match either by echoed event_id (preferred) or by being the
-					// next error before session.updated (fallback for SDKs that
-					// drop the echo).
-					if (echoedId !== undefined && echoedId !== eventId) return;
+					// The probe resent this update without prompt_cache_key under
+					// the same event_id; the retry's outcome settles it.
+					if (this._probeRetriedErrors.has(e)) return;
+					// The SDK's top-level `event_id` is the server event's own id;
+					// the client event that caused the error is echoed in
+					// `error.event_id`. Socket-level errors have no `error` payload.
+					if (e?.error && e.error.event_id !== eventId) return;
 					cleanup();
 					const err = e?.error ?? e;
 					reject(
@@ -1274,8 +1291,10 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 	 *  (b) the probe state for that scope is currently 'unknown'.
 	 *  On rejection: marks scope rejected, suppresses the error from
 	 *  user-facing onError, and resends session.update without the key on
-	 *  the same socket (no full reconnect). */
-	private installPromptCacheKeyProbe(): void {
+	 *  the same socket (no full reconnect).
+	 *  Returns a disposer that drops the probe if it has not settled, or
+	 *  undefined when no probe was installed. */
+	private installPromptCacheKeyProbe(): (() => void) | undefined {
 		const cfg = this.config.cacheConfig?.experimental?.promptCacheKey;
 		if (!cfg || !this.rt) return;
 		const scope = derivePromptCacheKeyProbeScope(
@@ -1310,6 +1329,7 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 				code?: string;
 				message?: string;
 				param?: string;
+				event_id?: string | null;
 			};
 			const isProbeError =
 				err?.param === 'prompt_cache_key' ||
@@ -1324,10 +1344,17 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 			);
 			// Retry the same session.update WITHOUT the key on the same socket.
 			// Build a fresh sessionConfig (which now consults the updated probe
-			// state and omits prompt_cache_key) and send it.
+			// state and omits prompt_cache_key) and send it under the rejected
+			// update's event_id, so the sendSessionUpdateAndWait() waiting on
+			// that id settles on the retry's ack or error.
 			try {
 				const retry = this.buildSessionConfig();
-				this.rtSend({ type: 'session.update', session: retry });
+				this.rtSend({
+					type: 'session.update',
+					session: retry,
+					...(typeof err?.event_id === 'string' ? { event_id: err.event_id } : {}),
+				});
+				if (event && typeof event === 'object') this._probeRetriedErrors.add(event);
 			} catch (retryErr) {
 				// If the retry itself fails, surface to user onError.
 				if (this.onError) {
@@ -1341,14 +1368,17 @@ export class OpenAIRealtimeTransport implements LLMTransport {
 		};
 		rt.once('session.updated', onUpdated);
 		rt.on('error', onError);
-		// Auto-cleanup after 15s in case neither event arrives.
-		setTimeout(() => {
+		const dispose = () => {
+			clearTimeout(timer);
 			if (settled) return;
 			settled = true;
 			rt.off?.('session.updated', onUpdated);
 			rt.off?.('error', onError);
 			finalize();
-		}, 15_000);
+		};
+		// Auto-cleanup after 15s in case neither event arrives.
+		const timer = setTimeout(dispose, 15_000);
+		return dispose;
 	}
 
 	/** P5: compute the canonical prefix snapshot string for a given
