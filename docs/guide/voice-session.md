@@ -747,14 +747,19 @@ await pipeline.drain(5_000);
 
 - The snapshot is built inline when the session dispatches. A throw while
   building it reports `failed_to_start` with `snapshot_failed`.
-- Processors start concurrently in topological order; registration order
-  breaks ties. Each one waits for its `dependsOn` prerequisites.
+- Processors start concurrently in a stable topological order, fixed at
+  `freeze()`: prerequisites first and, among processors whose prerequisites
+  are placed, the earliest registered first. The order of names inside
+  `dependsOn` does not matter. Each one waits for its `dependsOn`
+  prerequisites.
 - A prerequisite that did not complete makes its dependent `skipped`, with
   `detail.reason: 'dependency_failed'` and `detail.dependency`.
 - `shouldRun()` is a synchronous gate. `false` reports `skipped` with
   `shouldRun_false`; a throw reports `failed` with `shouldRun_threw`.
 - A throw from `run()`, synchronous or a rejection, reports `failed` with
-  `error`. A value `run()` returns becomes that result's `detail` and nothing
+  `error`. `error` is always an `Error`: a thrown `Error` is kept, and any
+  other thrown value is wrapped in a new `Error` with the value as its
+  `cause`. A value `run()` returns becomes that result's `detail` and nothing
   else: it is never passed to dependents.
 - One wall-clock budget, `runBudgetMs`, covers the whole run. When it expires,
   bodhi aborts `ctx.signal`. Processors still running report `failed` with
@@ -787,12 +792,16 @@ async run(ctx: PostSessionContext) {
   skipReason: reason }`. bodhi's `reason` and `skipReason` override host keys
   of the same name, and `durationMs` is the time `run()` took.
 - Only a returned skip counts. A thrown value, a skip included, is `failed`.
+  A thrown skip becomes an `Error` that says a skip was thrown; the skip
+  itself never enters the report.
   A skip that settles after the run budget stays `failed` with
   `drain_timeout`.
 - Dependents follow the usual rule: they report `skipped` with
   `dependency_failed`.
 - `postSessionSkip()` throws a `TypeError` for an empty or non-string reason,
-  or a `detail` that is not a plain object; inside `run()` that is `failed`.
+  or a `detail` that is not a plain object (its prototype must be
+  `Object.prototype` or `null`, so an array, a `Date`, a `Map` or a class
+  instance throws); inside `run()` that is `failed`.
   It freezes the value and a shallow copy of `detail` when called.
 - `skipReason` is free text that bodhi never interprets or truncates. Keep it
   short, with no credentials or personal data.
@@ -825,8 +834,8 @@ Admission is decided per run, for the whole pipeline:
 - `events.onProcessed` fires exactly once per dispatch, for every outcome. A
   listener that throws is reported to `onError` and cannot affect the report or
   other listeners; an `onError` that throws is ignored.
-- `results` are in topological order. `failureReason` is set only when the
-  outcome is not `accepted`.
+- `results` are in the same stable topological order the processors start
+  in. `failureReason` is set only when the outcome is not `accepted`.
 - `stats()` counts `skipped` results under `completed`.
 
 ### Snapshot and stores

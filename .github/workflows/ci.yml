@@ -35,3 +35,11 @@ jobs:
 
       - name: Test
         run: pnpm test
+
+      # Packed-consumer gate (scripts/verify-pack.mjs), the one release.yml runs before
+      # publishing: pack, clean --ignore-scripts install, ESM/CJS runtime and declaration
+      # resolution (the packed post-session API probe included) and the node_modules-free
+      # bundle run. Run here too so a PR that breaks the packed declarations fails before
+      # release, not at it. Needs the dist/ that Build produced.
+      - name: Verify pack
+        run: pnpm verify:pack

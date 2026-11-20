@@ -65,6 +65,29 @@ class TestProcessor extends PostSessionProcessor {
 const result = (report: PostSessionReport | undefined, name: string) =>
 	report?.results.find((r) => r.processor === name);
 
+const SKIP_BRAND = Symbol.for('bodhi.post-session.skip');
+
+/** Every object reachable through own properties, enumerable or not (e.g. Error.cause). */
+function reachableFrom(root: unknown): Set<unknown> {
+	const seen = new Set<unknown>();
+	const walk = (value: unknown): void => {
+		if ((typeof value !== 'object' && typeof value !== 'function') || value === null) return;
+		if (seen.has(value)) return;
+		seen.add(value);
+		for (const key of Reflect.ownKeys(value)) {
+			const desc = Object.getOwnPropertyDescriptor(value, key);
+			if (desc && 'value' in desc) walk(desc.value);
+		}
+	};
+	walk(root);
+	return seen;
+}
+
+/** Every own property key of every object reachable from `root`. */
+function reachableKeys(root: unknown): PropertyKey[] {
+	return [...reachableFrom(root)].flatMap((o) => Reflect.ownKeys(o as object));
+}
+
 describe('InMemoryPostSessionPipeline', () => {
 	describe('freeze() validation', () => {
 		it('rejects duplicate names', () => {
@@ -85,6 +108,56 @@ describe('InMemoryPostSessionPipeline', () => {
 			p.register(new TestProcessor('a', async () => {}, ['b']));
 			p.register(new TestProcessor('b', async () => {}, ['a']));
 			expect(() => p.freeze()).toThrow(/cycle/);
+		});
+
+		it('keeps its error messages, and a cycle error names a processor on the cycle', () => {
+			const dup = new InMemoryPostSessionPipeline();
+			dup.register(new TestProcessor('dup', async () => {}));
+			dup.register(new TestProcessor('dup', async () => {}));
+			expect(() => dup.freeze()).toThrow('duplicate post-session processor name: dup');
+
+			const unknown = new InMemoryPostSessionPipeline();
+			unknown.register(new TestProcessor('a', async () => {}, ['ghost']));
+			expect(() => unknown.freeze()).toThrow(
+				'post-session processor "a" depends on unknown "ghost"',
+			);
+
+			const pair = new InMemoryPostSessionPipeline();
+			pair.register(new TestProcessor('a', async () => {}, ['b']));
+			pair.register(new TestProcessor('b', async () => {}, ['a']));
+			expect(() => pair.freeze()).toThrow('post-session dependency cycle at "a"');
+
+			const self = new InMemoryPostSessionPipeline();
+			self.register(new TestProcessor('ok', async () => {}));
+			self.register(new TestProcessor('self', async () => {}, ['self']));
+			expect(() => self.freeze()).toThrow('post-session dependency cycle at "self"');
+
+			// `entry` only leads into the cycle; the error names a member of it.
+			const tail = new InMemoryPostSessionPipeline();
+			tail.register(new TestProcessor('entry', async () => {}, ['x']));
+			tail.register(new TestProcessor('x', async () => {}, ['y']));
+			tail.register(new TestProcessor('y', async () => {}, ['x']));
+			expect(() => tail.freeze()).toThrow('post-session dependency cycle at "x"');
+
+			const required = new InMemoryPostSessionPipeline();
+			required.register(new TestProcessor('opt', async () => {}));
+			required.register(new TestProcessor('req', async () => {}, ['opt'], true));
+			expect(() => required.freeze()).toThrow(
+				'required processor "req" must not depend on optional "opt"',
+			);
+		});
+
+		it('a name listed twice in dependsOn is one prerequisite', async () => {
+			const p = new InMemoryPostSessionPipeline();
+			p.register(new TestProcessor('dependent', async () => {}, ['base', 'base']));
+			p.register(new TestProcessor('base', async () => {}));
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			expect(report.results.map((r) => [r.processor, r.status])).toEqual([
+				['base', 'completed'],
+				['dependent', 'completed'],
+			]);
 		});
 
 		it('rejects required-depends-on-optional', () => {
@@ -140,6 +213,47 @@ describe('InMemoryPostSessionPipeline', () => {
 			p.freeze();
 			await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') }).report;
 			expect(order).toEqual(['summary', 'analytics']);
+		});
+
+		it('orders prerequisites first and breaks ties by registration order (stable topological order)', async () => {
+			// `dependent` is registered first but needs `late`; `earlier` is registered before
+			// `late`. Among processors whose prerequisites are placed, the earliest registered
+			// goes next, so `earlier` precedes `late` even though `dependent` reaches `late`
+			// first.
+			const started: string[] = [];
+			const proc = (name: string, deps: readonly string[] = []) =>
+				new TestProcessor(
+					name,
+					async () => {
+						started.push(name);
+					},
+					deps,
+				);
+			const p = new InMemoryPostSessionPipeline();
+			p.register(proc('dependent', ['late']));
+			p.register(proc('earlier'));
+			p.register(proc('late'));
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			expect(report.results.map((r) => r.processor)).toEqual(['earlier', 'late', 'dependent']);
+			expect(started).toEqual(['earlier', 'late', 'dependent']);
+		});
+
+		it('ignores the order of names inside dependsOn and places a freed processor by its registration index', async () => {
+			// Registered: d (needs a, b), b, a, e (needs b), f.
+			// Ready at start: b, a, f → b; e is now ready, but a (index 2) precedes it; once a
+			// is placed d (index 0) is ready and goes next; then e, then f.
+			const p = new InMemoryPostSessionPipeline();
+			p.register(new TestProcessor('d', async () => {}, ['a', 'b']));
+			p.register(new TestProcessor('b', async () => {}));
+			p.register(new TestProcessor('a', async () => {}));
+			p.register(new TestProcessor('e', async () => {}, ['b']));
+			p.register(new TestProcessor('f', async () => {}));
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			expect(report.results.map((r) => r.processor)).toEqual(['b', 'a', 'd', 'e', 'f']);
 		});
 
 		it('isolates failures — a throwing processor does not abort siblings', async () => {
@@ -730,8 +844,84 @@ describe('InMemoryPostSessionPipeline', () => {
 			expect(dependentRan).toBe(false);
 		});
 
-		it('a thrown skip is failed, not skipped: throw always means failed', async () => {
-			const thrown = postSessionSkip('user opted out');
+		it('a thrown skip is failed with an Error, not skipped, and the skip never enters the report', async () => {
+			const thrown = postSessionSkip('user opted out', { checked: 'consent' });
+			const p = new InMemoryPostSessionPipeline();
+			p.register(
+				new TestProcessor('thrower', async () => {
+					throw thrown;
+				}),
+			);
+			p.register(
+				new TestProcessor('sync-thrower', () => {
+					throw thrown;
+				}),
+			);
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			for (const name of ['thrower', 'sync-thrower']) {
+				const r = result(report, name);
+				expect(r?.status).toBe('failed');
+				expect(r?.error).toBeInstanceOf(Error);
+				expect(r?.error?.message).toMatch(/postSessionSkip/);
+				expect(r?.detail).toBeUndefined();
+			}
+			// Neither the branded value nor its brand is reachable from the report, even
+			// through non-enumerable properties such as Error.cause.
+			expect(reachableFrom(report).has(thrown)).toBe(false);
+			expect(reachableKeys(report)).not.toContain(SKIP_BRAND);
+			expect(JSON.stringify(report)).not.toContain('consent');
+		});
+
+		it('a thrown non-Error value is failed with an Error that keeps the value as its cause', async () => {
+			const p = new InMemoryPostSessionPipeline();
+			p.register(
+				new TestProcessor('string-rejection', async () => {
+					throw 'boom';
+				}),
+			);
+			p.register(new TestProcessor('object-rejection', () => Promise.reject({ code: 42 })));
+			p.register(
+				new TestProcessor('null-prototype', async () => {
+					throw Object.create(null);
+				}),
+			);
+			p.register(
+				new TestProcessor(
+					'gate-throws-string',
+					async () => {},
+					[],
+					false,
+					() => {
+						throw 'gate boom';
+					},
+				),
+			);
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			const stringErr = result(report, 'string-rejection')?.error;
+			expect(result(report, 'string-rejection')?.status).toBe('failed');
+			expect(stringErr).toBeInstanceOf(Error);
+			expect(stringErr?.message).toMatch(/"boom"/);
+			expect(stringErr?.cause).toBe('boom');
+			const objectErr = result(report, 'object-rejection')?.error;
+			expect(result(report, 'object-rejection')?.status).toBe('failed');
+			expect(objectErr).toBeInstanceOf(Error);
+			expect(objectErr?.cause).toEqual({ code: 42 });
+			expect(result(report, 'null-prototype')?.status).toBe('failed');
+			expect(result(report, 'null-prototype')?.error).toBeInstanceOf(Error);
+			expect(result(report, 'gate-throws-string')).toMatchObject({
+				status: 'failed',
+				detail: { reason: 'shouldRun_threw' },
+			});
+			expect(result(report, 'gate-throws-string')?.error).toBeInstanceOf(Error);
+			expect(result(report, 'gate-throws-string')?.error?.cause).toBe('gate boom');
+		});
+
+		it('a thrown Error is reported as that same Error', async () => {
+			const thrown = new RangeError('out of range');
 			const p = new InMemoryPostSessionPipeline();
 			p.register(
 				new TestProcessor('thrower', async () => {
@@ -741,7 +931,6 @@ describe('InMemoryPostSessionPipeline', () => {
 			p.freeze();
 			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
 				.report;
-			expect(result(report, 'thrower')?.status).toBe('failed');
 			expect(result(report, 'thrower')?.error).toBe(thrown);
 		});
 
@@ -812,6 +1001,24 @@ describe('InMemoryPostSessionPipeline', () => {
 			expect(skip.detail?.nested).toBe(nested); // shallow
 			expect(skip.reason).toBe('user opted out');
 			expect('detail' in postSessionSkip('no detail')).toBe(false);
+		});
+
+		it('accepts a detail whose prototype is Object.prototype or null', () => {
+			expect(postSessionSkip('x', { a: 1 }).detail).toEqual({ a: 1 });
+			const bare = Object.assign(Object.create(null) as Record<string, unknown>, { b: 2 });
+			expect(postSessionSkip('x', bare).detail).toEqual({ b: 2 });
+		});
+
+		it('throws TypeError for a detail that is a Date, a Map, a class instance or an array', () => {
+			class Detail {
+				readonly a = 1;
+			}
+			const notPlain: unknown[] = [new Date(0), new Map([['a', 1]]), new Detail(), [1, 2]];
+			for (const detail of notPlain) {
+				const make = () => postSessionSkip('x', detail as Record<string, unknown>);
+				expect(make).toThrow(TypeError);
+				expect(make).toThrow('postSessionSkip: detail must be a plain object when given');
+			}
 		});
 
 		it('throws TypeError for an empty or non-string reason and for a detail that is not an object', () => {

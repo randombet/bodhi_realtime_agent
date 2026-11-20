@@ -141,6 +141,12 @@ export interface PostSessionResult {
 	 */
 	readonly status: 'completed' | 'skipped' | 'failed';
 	readonly durationMs: number;
+	/**
+	 * Set when `shouldRun()` or `run()` threw (`failed`). Always an `Error`: a thrown
+	 * `Error` is kept as is; any other thrown value is wrapped in a new `Error` whose
+	 * `cause` is that value, except a thrown {@link PostSessionSkip}, which is replaced
+	 * by an `Error` that says so and never enters the report.
+	 */
 	readonly error?: Error;
 	/** Optional small, serializable summary / cause for logging/analytics. */
 	readonly detail?: Record<string, unknown>;
@@ -201,7 +207,8 @@ export abstract class PostSessionProcessor {
 	 * skip with `dependency_failed`. Only a returned skip counts.
 	 *
 	 * A throw (synchronous or a rejection) records `failed` with `error`, even when
-	 * the thrown value is a skip. Cancellation is cooperative: when the run budget
+	 * the thrown value is a skip; `error` is always an `Error` (see
+	 * `PostSessionResult.error`). Cancellation is cooperative: when the run budget
 	 * expires or `drain()` cancels, the pipeline aborts `ctx.signal` and stops
 	 * waiting, but the work may continue. `run()` may be called with `ctx.signal`
 	 * already aborted, so check `signal.aborted` before side effects.
@@ -240,19 +247,22 @@ export interface PostSessionSkip {
 
 /**
  * Create a {@link PostSessionSkip} for `run()` to return. The value is frozen, and
- * `detail` is copied (shallow) and frozen now, so a later change to the object
- * passed in cannot change the report. `detail` follows the rule for
- * `PostSessionResult.detail` (small, plain, serializable); bodhi does not check it.
+ * `detail` is copied (shallow, own enumerable keys) and frozen now, so a later change
+ * to the object passed in cannot change the report. `detail` follows the rule for
+ * `PostSessionResult.detail` (small, plain, serializable); bodhi checks only that it is
+ * a plain object, not what it holds.
  *
  * @throws TypeError when `reason` is not a non-empty string, or `detail` is given
- *   and is not a plain object. Inside `run()` that records `failed`.
+ *   and is not a plain object (its prototype must be `Object.prototype` or `null`, so
+ *   an array, a `Date`, a `Map` or a class instance throws). Inside `run()` that
+ *   records `failed`.
  */
 export function postSessionSkip(reason: string, detail?: Record<string, unknown>): PostSessionSkip {
 	if (typeof reason !== 'string' || reason.length === 0) {
 		throw new TypeError('postSessionSkip: reason must be a non-empty string');
 	}
 	if (detail === undefined) return Object.freeze({ [POST_SESSION_SKIP]: true as const, reason });
-	if (typeof detail !== 'object' || detail === null || Array.isArray(detail)) {
+	if (!isPlainObject(detail)) {
 		throw new TypeError('postSessionSkip: detail must be a plain object when given');
 	}
 	return Object.freeze({
@@ -260,6 +270,13 @@ export function postSessionSkip(reason: string, detail?: Record<string, unknown>
 		reason,
 		detail: Object.freeze({ ...detail }),
 	});
+}
+
+/** An object whose prototype is `Object.prototype` or `null`: not an array, `Date`, `Map` or class instance. */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+	if (typeof value !== 'object' || value === null) return false;
+	const proto = Object.getPrototypeOf(value);
+	return proto === Object.prototype || proto === null;
 }
 
 /**
