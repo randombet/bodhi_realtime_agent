@@ -24,6 +24,7 @@ import {
 	type ClientTransportCallbacks,
 	type ClientTransportOptions,
 	type ConnectionLifecycleEvent,
+	type ConversationItem,
 	type ConversationSnapshot,
 	type EchoCheckResult,
 	type EchoEnvEntry,
@@ -33,6 +34,7 @@ import {
 	type HooksManager,
 	type IEventBus,
 	InMemoryPostSessionPipeline,
+	type InputTextReceipt,
 	type KnownSessionEndReason,
 	type LLMTransport,
 	type LiveUsageMetadata,
@@ -322,3 +324,39 @@ class SoftOrderedProcessor extends PostSessionProcessor {
 const softOrdered: PostSessionProcessor = new SoftOrderedProcessor();
 const softAfter: readonly string[] = softOrdered.after;
 const softWait: number | undefined = softOrdered.afterWaitMs;
+// A session passes its own post-session stores. A host declares its own members by merging into
+// the root's PostSessionStores, which must work through the bundled declarations; memory stays
+// wired only through config.memory.
+declare module 'bodhi-realtime-agent' {
+	interface PostSessionStores {
+		readonly probeSessionRecord?: { readonly lines: string[] };
+	}
+}
+const probeRecord = { lines: [] as string[] };
+config.postSessionStores = {
+	probeSessionRecord: probeRecord,
+	analyticsSink: (summary: Record<string, unknown>): void => void summary,
+};
+class RecordingProcessor extends PostSessionProcessor {
+	readonly name = 'recording-processor';
+	async run(ctx: PostSessionContext): Promise<void> {
+		ctx.stores.probeSessionRecord?.lines.push(ctx.sessionId);
+	}
+}
+const recordingProcessor: PostSessionProcessor = new RecordingProcessor();
+const mergedStores: PostSessionStores = { probeSessionRecord: probeRecord };
+// @ts-expect-error memory is wired through VoiceSessionConfig.memory, not postSessionStores
+config.postSessionStores = { memory: undefined };
+// A user item from speech says when its input text arrived, and a transcript sink may take that
+// receipt as a trailing argument.
+declare const spokenItem: ConversationItem;
+const inputReceipt: InputTextReceipt | undefined = spokenItem.inputTextReceived;
+const inputSpanMs: number | undefined = inputReceipt && inputReceipt.lastAt - inputReceipt.firstAt;
+const receiptSink: TranscriptSink = {
+	sendToClient: (msg: Record<string, unknown>): void => void msg,
+	addUserMessage: (text: string, received?: InputTextReceipt): void =>
+		void [text, received?.firstAt],
+	addAssistantMessage: (text: string): void => void text,
+	reserveUserMessage: (text: string, received?: InputTextReceipt): string =>
+		`${text}:${received?.lastAt ?? 0}`,
+};

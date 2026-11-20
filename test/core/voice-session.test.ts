@@ -4,12 +4,18 @@ import { z } from 'zod';
 import { ValidationError } from '../../src/core/errors.js';
 import { VoiceSession, type VoiceSessionConfig } from '../../src/core/voice-session.js';
 import { InMemoryPostSessionPipeline } from '../../src/post-session/pipeline.js';
-import { type PostSessionContext, PostSessionProcessor } from '../../src/post-session/types.js';
+import { AnalyticsProcessor } from '../../src/post-session/processors/analytics.js';
+import {
+	type PostSessionContext,
+	PostSessionProcessor,
+	type PostSessionStores,
+} from '../../src/post-session/types.js';
 import { DirectRtcClientChannel } from '../../src/transport/direct-rtc-client-channel.js';
 import { DEFAULT_GEMINI_REALTIME_INPUT_CONFIG } from '../../src/transport/gemini-live-transport.js';
 import { LazyRtcAudioEngine } from '../../src/transport/lazy-rtc-audio-engine.js';
 import type { MainAgent } from '../../src/types/agent.js';
 import type { EventPayloadMap } from '../../src/types/events.js';
+import type { MemoryStore } from '../../src/types/memory.js';
 import type { RtcAudioEngine, RtcAudioEngineOptions } from '../../src/types/rtc-engine.js';
 import type {
 	AudioFormatSpec,
@@ -23,6 +29,14 @@ declare module '@google/genai' {
 	function _getMessageHandler(): ((message: unknown) => void) | null;
 	function _getMockSession(): Record<string, ReturnType<typeof vi.fn>> | null;
 	function _getLastConnectConfig(): Record<string, unknown> | null;
+}
+
+// A host adds its own per-session stores by declaration merging, as this test does.
+declare module '../../src/post-session/types.js' {
+	interface PostSessionStores {
+		/** Test-only: a per-session record that processors share through ctx.stores. */
+		readonly testSessionRecord?: { readonly lines: string[] };
+	}
 }
 
 // Mock the external deps
@@ -393,6 +407,250 @@ describe('VoiceSession', () => {
 		await session.close();
 
 		expect(captured).toEqual(['echo', 'specialist', 'echo']);
+	});
+
+	describe('postSessionStores (per-session stores)', () => {
+		type SeenStores = { processor: string; stores: PostSessionStores };
+
+		/** An explicit pipeline whose processors record the ctx.stores each one saw. */
+		function capturingPipeline(
+			processors: Array<{
+				name: string;
+				dependsOn?: readonly string[];
+				run?: (ctx: PostSessionContext) => void;
+			}> = [{ name: 'capture' }],
+		): { pipeline: InMemoryPostSessionPipeline; seen: SeenStores[] } {
+			const seen: SeenStores[] = [];
+			const pipeline = new InMemoryPostSessionPipeline();
+			for (const spec of processors) {
+				class Capture extends PostSessionProcessor {
+					readonly name = spec.name;
+					override readonly dependsOn = spec.dependsOn ?? [];
+					async run(ctx: PostSessionContext) {
+						seen.push({ processor: spec.name, stores: ctx.stores });
+						spec.run?.(ctx);
+					}
+				}
+				pipeline.register(new Capture());
+			}
+			pipeline.freeze();
+			return { pipeline, seen };
+		}
+
+		function makeMemoryStore(): MemoryStore {
+			return {
+				addFacts: vi.fn(async () => {}),
+				getAll: vi.fn(async () => []),
+				replaceAll: vi.fn(async () => {}),
+				getDirectives: vi.fn(async () => ({})),
+				setDirectives: vi.fn(async () => {}),
+			};
+		}
+
+		/** No port is bound: the host owns the client sender. */
+		function storesSession(overrides: Partial<VoiceSessionConfig>): VoiceSession {
+			session = new VoiceSession({
+				sessionId: 'sess_stores',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				model: mockModel,
+				clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+				...overrides,
+			});
+			return session;
+		}
+
+		async function startThenClose(s: VoiceSession): Promise<void> {
+			await s.start();
+			await new Promise((r) => setTimeout(r, 50));
+			await s.close();
+		}
+
+		it('without the field, ctx.stores holds exactly the members it held before', async () => {
+			const bare = capturingPipeline();
+			await startThenClose(
+				storesSession({ postSessionPipeline: bare.pipeline, drainPostSession: true }),
+			);
+			expect(bare.seen).toHaveLength(1);
+			expect(Object.keys(bare.seen[0].stores)).toEqual(['memory', 'memoryExtraction']);
+			expect(bare.seen[0].stores.memory).toBeUndefined();
+			expect(bare.seen[0].stores.memoryExtraction).toBeUndefined();
+
+			const memoryStore = makeMemoryStore();
+			const withMemory = capturingPipeline();
+			await startThenClose(
+				storesSession({
+					postSessionPipeline: withMemory.pipeline,
+					drainPostSession: true,
+					memory: { store: memoryStore },
+				}),
+			);
+			expect(Object.keys(withMemory.seen[0].stores)).toEqual(['memory', 'memoryExtraction']);
+			expect(withMemory.seen[0].stores.memory).toBe(memoryStore);
+			expect(typeof withMemory.seen[0].stores.memoryExtraction).toBe('function');
+		});
+
+		it("puts the host's members, by reference, in the one stores object every processor of the run shares", async () => {
+			const analyticsSink = vi.fn();
+			const record = { lines: [] as string[] };
+			const hostStores = { analyticsSink, testSessionRecord: record };
+			let readByDependent: string[] | undefined;
+			const { pipeline, seen } = capturingPipeline([
+				{
+					name: 'writer',
+					run: (ctx) => ctx.stores.testSessionRecord?.lines.push('written by writer'),
+				},
+				{
+					name: 'reader',
+					dependsOn: ['writer'],
+					run: (ctx) => {
+						readByDependent = [...(ctx.stores.testSessionRecord?.lines ?? [])];
+					},
+				},
+			]);
+
+			await startThenClose(
+				storesSession({
+					postSessionPipeline: pipeline,
+					drainPostSession: true,
+					postSessionStores: hostStores,
+				}),
+			);
+
+			expect(seen.map((s) => s.processor)).toEqual(['writer', 'reader']);
+			const [writer, reader] = seen;
+			expect(reader.stores).toBe(writer.stores);
+			expect(writer.stores.analyticsSink).toBe(analyticsSink);
+			expect(writer.stores.testSessionRecord).toBe(record);
+			expect(writer.stores.memory).toBeUndefined();
+			expect(writer.stores.memoryExtraction).toBeUndefined();
+			expect(readByDependent).toEqual(['written by writer']);
+			// bodhi builds its own stores object and leaves the host's untouched.
+			expect(writer.stores).not.toBe(hostStores);
+			expect(Object.keys(hostStores)).toEqual(['analyticsSink', 'testSessionRecord']);
+		});
+
+		it("assigns bodhi's own members last, even when they are undefined", async () => {
+			const hostMemory = makeMemoryStore();
+			const hostExtraction = vi.fn(async () => {});
+			// A host that bypasses the type (which excludes both members).
+			const smuggled = {
+				memory: hostMemory,
+				memoryExtraction: hostExtraction,
+			} as unknown as VoiceSessionConfig['postSessionStores'];
+
+			const noMemory = capturingPipeline();
+			await startThenClose(
+				storesSession({
+					postSessionPipeline: noMemory.pipeline,
+					drainPostSession: true,
+					postSessionStores: smuggled,
+				}),
+			);
+			expect(noMemory.seen[0].stores.memory).toBeUndefined();
+			expect(noMemory.seen[0].stores.memoryExtraction).toBeUndefined();
+
+			const configMemory = makeMemoryStore();
+			const withMemory = capturingPipeline();
+			await startThenClose(
+				storesSession({
+					postSessionPipeline: withMemory.pipeline,
+					drainPostSession: true,
+					memory: { store: configMemory },
+					postSessionStores: smuggled,
+				}),
+			);
+			expect(withMemory.seen[0].stores.memory).toBe(configMemory);
+			expect(withMemory.seen[0].stores.memoryExtraction).not.toBe(hostExtraction);
+			expect(typeof withMemory.seen[0].stores.memoryExtraction).toBe('function');
+			expect(hostExtraction).not.toHaveBeenCalled();
+
+			const typed: VoiceSessionConfig['postSessionStores'] = {
+				analyticsSink: () => {},
+				// @ts-expect-error memory is wired only through VoiceSessionConfig.memory
+				memory: configMemory,
+			};
+			expect(typed).toBeDefined();
+		});
+
+		it('the memory fallback still distills when the host passes stores', async () => {
+			const s = storesSession({
+				memory: { store: makeMemoryStore() },
+				postSessionStores: { analyticsSink: vi.fn() },
+			});
+			const distiller = (s as unknown as { memoryDistiller: { forceExtract: () => Promise<void> } })
+				.memoryDistiller;
+			const forceExtract = vi.spyOn(distiller, 'forceExtract').mockResolvedValue(undefined);
+			await startThenClose(s);
+			expect(forceExtract).toHaveBeenCalledTimes(1);
+		});
+
+		it('is read only when a pipeline builds the snapshot at close, once per session', async () => {
+			let enumerations = 0;
+			const probe = (): VoiceSessionConfig['postSessionStores'] =>
+				new Proxy(
+					{ analyticsSink: () => {} },
+					{
+						ownKeys(target) {
+							enumerations++;
+							return Reflect.ownKeys(target);
+						},
+					},
+				);
+
+			// No pipeline (explicit or the memory fallback): the field has no effect.
+			await startThenClose(storesSession({ postSessionStores: probe() }));
+			expect(enumerations).toBe(0);
+
+			const { pipeline, seen } = capturingPipeline();
+			const s = storesSession({
+				postSessionPipeline: pipeline,
+				drainPostSession: true,
+				postSessionStores: probe(),
+			});
+			await s.start();
+			await new Promise((r) => setTimeout(r, 50));
+			expect(enumerations).toBe(0);
+			await s.close();
+			expect(enumerations).toBe(1);
+			await s.close();
+			expect(enumerations).toBe(1);
+			expect(seen).toHaveLength(1);
+		});
+
+		it('an analyticsSink reaches the AnalyticsProcessor end to end', async () => {
+			const analyticsSink = vi.fn();
+			const pipeline = new InMemoryPostSessionPipeline();
+			pipeline.register(new AnalyticsProcessor());
+			pipeline.freeze();
+			const reports: string[] = [];
+			pipeline.events.onProcessed((report) =>
+				reports.push(...report.results.map((r) => `${r.processor}:${r.status}`)),
+			);
+
+			await startThenClose(
+				storesSession({
+					postSessionPipeline: pipeline,
+					drainPostSession: true,
+					postSessionStores: { analyticsSink },
+				}),
+			);
+
+			expect(reports).toEqual(['analytics:completed']);
+			expect(analyticsSink).toHaveBeenCalledTimes(1);
+			expect(analyticsSink).toHaveBeenCalledWith(
+				expect.objectContaining({
+					sessionId: 'sess_stores',
+					userId: 'user_1',
+					initialAgentName: 'echo',
+					finalAgentName: 'echo',
+					transferPath: ['echo'],
+					turnCount: 0,
+				}),
+			);
+		});
 	});
 
 	it('registers hooks from config', async () => {
@@ -929,6 +1187,48 @@ describe('VoiceSession', () => {
 	// =========================================================================
 
 	describe('transcript buffering', () => {
+		it('a user item from speech carries when its input text arrived; other items do not', async () => {
+			session = new VoiceSession({
+				sessionId: 'sess_receipt',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				model: mockModel,
+				clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			});
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+			const before = Date.now();
+			fire({ serverContent: { inputTranscription: { text: 'search the ' } } });
+			await new Promise((r) => setTimeout(r, 30));
+			fire({ serverContent: { inputTranscription: { text: 'weather' } } });
+			fire({ serverContent: { outputTranscription: { text: 'It is sunny.' } } });
+			fire({ serverContent: { turnComplete: true } });
+			await new Promise((r) => setTimeout(r, 50));
+			await session.injectTranscript('typed by the host');
+
+			const items = session.conversationContext.items;
+			expect(items.map((i) => [i.role, i.content])).toEqual([
+				['user', 'search the weather'],
+				['assistant', 'It is sunny.'],
+				['user', 'typed by the host'],
+			]);
+			const [spoken, assistant, typed] = items;
+			const receipt = spoken.inputTextReceived;
+			expect(receipt).toBeDefined();
+			if (!receipt) return;
+			expect(receipt.firstAt).toBeGreaterThanOrEqual(before);
+			expect(receipt.lastAt - receipt.firstAt).toBeGreaterThanOrEqual(20);
+			expect(receipt.lastAt).toBeLessThanOrEqual(spoken.timestamp);
+			expect('inputTextReceived' in assistant).toBe(false);
+			expect('inputTextReceived' in typed).toBe(false);
+		});
+
 		it('accumulates input transcription chunks and sends partial updates to client', async () => {
 			session = new VoiceSession({
 				sessionId: 'sess_1',
@@ -3369,6 +3669,56 @@ describe('VoiceSession', () => {
 				.map((i) => i.content);
 			expect(userItems).toEqual(['Uh, what time is it?']);
 			expect(session.conversationContext.hasPendingUserMessages).toBe(false);
+		});
+
+		it('a reserved user message carries when its input text arrived; sealing it keeps that', async () => {
+			const stt = createMockSTTProvider();
+			session = new VoiceSession({
+				sessionId: 'sess_stt_receipt',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createToolAgent()],
+				initialAgent: 'tool-agent',
+				model: mockModel,
+				sttProvider: stt,
+				orchestrationMode: 'actor',
+				clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+			const before = Date.now();
+			fire({ serverContent: { inputTranscription: { text: 'What time ' } } });
+			await new Promise((r) => setTimeout(r, 30));
+			fire({ serverContent: { inputTranscription: { text: 'is it?' } } });
+			fire({
+				toolCall: {
+					functionCalls: [{ id: 'tc_1', name: 'get_weather', args: { city: 'SF' } }],
+				},
+			});
+			await new Promise((r) => setTimeout(r, 50));
+
+			// Reserved while only the transport's own transcription had arrived.
+			const reserved = session.conversationContext.items.find((i) => i.role === 'user');
+			expect(reserved?.id).toBeDefined();
+			const receipt = reserved?.inputTextReceived;
+			expect(receipt).toBeDefined();
+			if (!reserved || !receipt) return;
+			expect(receipt.firstAt).toBeGreaterThanOrEqual(before);
+			expect(receipt.lastAt - receipt.firstAt).toBeGreaterThanOrEqual(20);
+			expect(receipt.lastAt).toBeLessThanOrEqual(reserved.timestamp);
+
+			stt.onTranscript?.('Uh, what time is it?', 0);
+			fire({ serverContent: { outputTranscription: { text: 'It is sunny.' } } });
+			fire({ serverContent: { turnComplete: true } });
+			await new Promise((r) => setTimeout(r, 100));
+
+			expect(reserved.content).toBe('Uh, what time is it?');
+			expect(reserved.inputTextReceived).toBe(receipt);
 		});
 
 		it('skips Gemini transcript correction on interrupted turns', async () => {

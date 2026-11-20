@@ -627,6 +627,54 @@ starts one more attempt and is acknowledged with `voice.retryUpstream.ack`
 this command itself; it does not reach `onClientCommand`. While active
 silence owns a recovery, the ladder and the health tick stand down.
 
+## When a spoken user line arrived
+
+A user item's `timestamp` is when it was committed, which is usually when the
+model's turn completed or a tool call arrived, well after the user stopped
+talking. A user item that came from speech also carries
+`inputTextReceived: { firstAt, lastAt }`: when bodhi received the first and the
+last piece of input transcription text that went into it.
+
+```ts
+for (const item of session.conversationContext.items) {
+  const received = item.inputTextReceived;
+  if (item.role !== 'user' || !received) continue;
+  // Text arrives after the speech, so widen the window backwards by your
+  // provider's transcription delay before matching it to other evidence.
+  const window = { from: received.firstAt - transcriptionDelayMs, to: received.lastAt };
+}
+```
+
+- **Receipt times, not speech times.** These are when the text arrived. They
+  run late by the provider's transcription delay and are never earlier than the
+  audio they transcribe. A batch or streaming STT final makes `firstAt` and
+  `lastAt` about equal: the time the final arrived. The `speech.user_started`
+  and `speech.user_ended` events remain the voice-activity facts.
+- **Clock.** Both are `Date.now()` milliseconds, the clock of `timestamp`, and
+  never `nowMs`. The `atMs` of the `speech.user_*` events is on `nowMs`, so do
+  not compare the two when you inject `nowMs`.
+- **What counts.** Every fragment the transcript manager accepts into the
+  utterance: the transport's own input transcription and an external STT
+  transcript, but not streaming partials, blank fragments, or text that arrives
+  after the turn's input is locked. When an external STT transcript replaces the
+  transport's text for the same utterance, `firstAt` stays the earlier time.
+  The display-only text of an interrupted turn counts only when that text is
+  what gets committed. When a new STT turn id ends an utterance, the fragment
+  that ends it belongs to the next one.
+- **Set once.** The field is set when the item is inserted. A reserved item
+  that a late external transcript seals keeps it unchanged: only text received
+  before the commit or reservation counts.
+- **Where it is absent.** Typed text, `injectTranscript`, file uploads, every
+  other role, items from older versions, and loaded items whose store did not
+  keep it.
+- **Invariants.** `firstAt` ≤ `lastAt` ≤ `timestamp`, unless the wall clock
+  steps. It is two plain numbers and no other payload. It is never
+  replayed to the model, and history stores that persist whole items persist it
+  too.
+- **Not guaranteed:** that the field is present, a monotonic clock,
+  speech-level accuracy, or one sentence per item. Without STT turn ids, one
+  item can hold several utterances.
+
 ## Resetting the conversation context
 
 `resetConversationContext(reason)` starts the in-memory conversation over
@@ -913,6 +961,56 @@ Admission is decided per run, for the whole pipeline:
   starts, with no credentials and no live handles.
 - `stores.memoryExtraction` is internal to the memory fallback. Do not call or
   supply it.
+
+### Per-session stores
+
+The pipeline is shared by every session, but a processor often needs something
+that belongs to one session: a record the host kept during it, or a sink bound
+to it. Pass those as `postSessionStores`, a plain object set when the session is
+constructed. Its members reach that session's run as `ctx.stores`:
+
+```ts
+declare module 'bodhi-realtime-agent' {
+  interface PostSessionStores {
+    readonly acmeAuditLog?: AuditLog;
+  }
+}
+
+const session = new VoiceSession({
+  ...config,
+  postSessionPipeline: pipeline,
+  postSessionStores: { acmeAuditLog: auditLogFor(config.sessionId), analyticsSink },
+});
+
+class WriteAudit extends PostSessionProcessor {
+  readonly name = 'write-audit';
+
+  override shouldRun(ctx: PostSessionContext): boolean {
+    return ctx.stores.acmeAuditLog !== undefined;
+  }
+
+  async run(ctx: PostSessionContext) {
+    await ctx.stores.acmeAuditLog?.append(ctx.sessionId, ctx.conversation.items);
+  }
+}
+```
+
+- The field has no effect when no pipeline is active: neither
+  `postSessionPipeline` nor the `memory` fallback.
+- bodhi reads the object's own enumerable members when it builds the snapshot
+  at close, and puts them, by reference, in that run's `ctx.stores`. It never
+  modifies, clones, logs, serializes or reports them. For late binding, pass a
+  function member.
+- `memory` and `memoryExtraction` belong to bodhi. The type excludes them, and
+  bodhi assigns its own values last, even when they are undefined, so memory is
+  wired only through `memory`.
+- Members must stay valid until the run's report settles. Every processor of
+  the run shares one stores object by reference; it is the channel between
+  steps.
+- Add your own members by declaration merging on `PostSessionStores`, as above.
+  Merging applies to the whole program, so give them prefixed names.
+- Stores are not part of the snapshot: the snapshot stays plain data. Put
+  per-session data that must survive serialization in `sessionMetadata`.
 
 ### Processors
 
