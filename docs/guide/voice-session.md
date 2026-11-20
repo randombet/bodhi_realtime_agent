@@ -715,9 +715,11 @@ await pipeline.drain(5_000);
 
 - Construct the pipeline, `register()` any number of processors, then
   `freeze()`. One frozen pipeline serves every session in the process.
-- `freeze()` is idempotent. It throws on a duplicate name, a `dependsOn` name
-  that is not registered, a dependency cycle, or a required processor that
-  depends on an optional one. `register()` after `freeze()` throws.
+- `freeze()` is idempotent. It throws on a duplicate name, a `dependsOn` or
+  `after` name that is not registered, a name in both, a cycle over `dependsOn`
+  and `after` together, a required processor that depends on an optional one,
+  or a non-empty `after` without a valid `afterWaitMs` (see
+  [Soft order](#soft-order-with-after)). `register()` after `freeze()` throws.
 - `dispatch()` before `freeze()` throws, so freeze before the first session can
   close. A `VoiceSession` always runs pre-close finalizers, so its `close()`
   then rejects. A bare `SessionManager` with no finalizers throws from
@@ -747,11 +749,12 @@ await pipeline.drain(5_000);
 
 - The snapshot is built inline when the session dispatches. A throw while
   building it reports `failed_to_start` with `snapshot_failed`.
-- Processors start concurrently in a stable topological order, fixed at
-  `freeze()`: prerequisites first and, among processors whose prerequisites
-  are placed, the earliest registered first. The order of names inside
-  `dependsOn` does not matter. Each one waits for its `dependsOn`
-  prerequisites.
+- Processors start concurrently in a stable topological order over
+  `dependsOn` and `after`, fixed at `freeze()`: prerequisites of both kinds
+  first and, among processors whose prerequisites are placed, the earliest
+  registered first. The order of names inside `dependsOn` or `after` does not
+  matter. Each one waits for its `dependsOn` prerequisites and, up to a bound,
+  for its `after` prerequisites.
 - A prerequisite that did not complete makes its dependent `skipped`, with
   `detail.reason: 'dependency_failed'` and `detail.dependency`.
 - `shouldRun()` is a synchronous gate. `false` reports `skipped` with
@@ -773,6 +776,58 @@ await pipeline.drain(5_000);
 - `drain(timeoutMs)` waits for every outstanding run. By default it then
   cancels what is left, as the budget does; runs still waiting for a slot
   report `dropped` with `required_capacity_timeout`.
+
+### Soft order with `after`
+
+`dependsOn` is a hard edge: a prerequisite that did not complete skips its
+dependent, and a required processor cannot depend on an optional one. `after`
+sets order only. A processor that names others in `after` starts once each of
+them has settled, meaning it has a result of any status and any reason, or once
+`afterWaitMs` has passed, whichever comes first:
+
+```ts
+class NotifyUser extends PostSessionProcessor {
+  readonly name = 'notify-user';
+  override readonly required = true;
+  // Wait for the export while it runs, but never more than 10 s.
+  override readonly after = ['export-conversation'];
+  override readonly afterWaitMs = 10_000;
+
+  async run(ctx: PostSessionContext) {
+    // Data crosses steps through stores or host state, never through a result.
+    const exported = await exportStore.find(ctx.sessionId, { signal: ctx.signal });
+    await notifier.send(ctx.userId, exported ? `Saved: ${exported.url}` : 'Session ended.');
+  }
+}
+```
+
+- `afterWaitMs` is required when `after` is non-empty: a finite number of
+  milliseconds, `0` or more. It counts from the start of the run's processors
+  (after admission), so it overlaps any `dependsOn` wait. `0` never waits; it
+  only orders the results.
+- A soft prerequisite's status never skips or fails its dependent, so a
+  required processor may run after an optional one. A prerequisite still
+  running when the wait ends keeps running and is reported as usual.
+- Precedence: a `dependsOn` prerequisite that did not complete makes the
+  processor `skipped` with `dependency_failed`. Otherwise, if the run's signal
+  is aborted (the budget expired, or `drain()` cancelled, which also ends the
+  wait), it is `failed` with `drain_timeout`, and neither `shouldRun()` nor
+  `run()` is called. Otherwise `shouldRun()` decides as usual.
+- `InMemoryPostSessionPipeline` rejects a required processor whose
+  `afterWaitMs` is not below `runBudgetMs`, so its wait always ends before the
+  budget. An optional processor that is still waiting when the budget expires
+  ends `failed` with `drain_timeout` without running. Any finite
+  `afterWaitMs` or `runBudgetMs` is honoured, even one longer than the
+  longest `setTimeout` delay (2^31 − 1 ms), which a timer alone would fire
+  after about 1 ms.
+- The dependent gets the same `ctx` as every other processor, never a
+  prerequisite's return value or result. If a prerequisite settled within the
+  wait, everything its `run()` did before it settled is visible, within one
+  process. Not guaranteed: that a prerequisite settles at all, whether writes
+  it makes after the wait ended are seen, or anything across processes.
+- `durationMs` is the processor's own time and excludes the wait.
+- A pipeline with no `after` behaves exactly as before: the same validation,
+  order, results, timing and counters.
 
 ### Skipping from `run()`
 
@@ -863,8 +918,8 @@ Admission is decided per run, for the whole pipeline:
 
 - One instance serves many sessions at once: keep it stateless and reentrant,
   with per-session state in locals or `ctx`.
-- `name` is unique within the pipeline and stable. `required` and `dependsOn`
-  must not change after `register()`.
+- `name` is unique within the pipeline and stable. `required`, `dependsOn`,
+  `after` and `afterWaitMs` must not change after `register()`.
 - Idempotency is the processor's job.
 
 Not guaranteed: persistence or resume (runs still unfinished when the process

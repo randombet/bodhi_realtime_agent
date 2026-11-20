@@ -337,6 +337,61 @@ async function main(): Promise<void> {
 		);
 	}
 
+	// ── Scenario 6: soft order (`after`) ────────────────────────────────────
+	console.log('\nScenario 6: soft order (after)');
+	{
+		const order: string[] = [];
+		class OptionalExport extends PostSessionProcessor {
+			readonly name = 'export';
+			async run(): Promise<void> {
+				await new Promise((r) => setTimeout(r, 10));
+				order.push('export');
+				throw new Error('export failed');
+			}
+		}
+		class RequiredNotify extends PostSessionProcessor {
+			readonly name = 'notify';
+			readonly required = true;
+			readonly after = ['export'];
+			readonly afterWaitMs = 1_000;
+			async run() {
+				order.push('notify');
+			}
+		}
+		const pipeline = new InMemoryPostSessionPipeline();
+		pipeline.register(new RequiredNotify());
+		pipeline.register(new OptionalExport());
+		check('a required processor may run after an optional one', !throws(() => pipeline.freeze()));
+		const report = await pipeline.dispatch({
+			sessionId: 's6',
+			reason: 'normal',
+			build: makeBuilder('s6'),
+		}).report;
+		check('notify waited for export to settle', order.join(',') === 'export,notify');
+		check(
+			'a failed soft prerequisite does not skip its dependent',
+			result(report, 'export')?.status === 'failed' &&
+				result(report, 'notify')?.status === 'completed',
+		);
+		check(
+			'results in topological order',
+			report.results.map((r) => r.processor).join(',') === 'export,notify',
+		);
+
+		class Unbounded extends PostSessionProcessor {
+			readonly name = 'unbounded';
+			readonly after = ['export'];
+			async run() {}
+		}
+		const badSoft = new InMemoryPostSessionPipeline();
+		badSoft.register(new OptionalExport());
+		badSoft.register(new Unbounded());
+		check(
+			'after without afterWaitMs rejected at freeze',
+			throws(() => badSoft.freeze()),
+		);
+	}
+
 	console.log('');
 	if (failures > 0) {
 		console.error(`FAILED: ${failures} invariant check(s) failed.`);

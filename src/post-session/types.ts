@@ -133,9 +133,11 @@ export interface PostSessionResult {
 	 *   and `run()` was not called; or `run_skipped`, when `run()` returned a
 	 *   {@link postSessionSkip} value (`detail.skipReason` holds its reason).
 	 * - `failed`: `shouldRun_threw`; `drain_timeout` (the run budget expired or
-	 *   `drain()` cancelled the run while `run()` was pending); or no `detail`, with
-	 *   `error` set, when `run()` threw or rejected, or returned a branded skip that
-	 *   bodhi could not copy (see `error`).
+	 *   `drain()` cancelled the run while `run()` was pending, or, for a processor
+	 *   with a non-empty `after`, before it started, in which case `shouldRun()` and
+	 *   `run()` were not called); or no `detail`, with `error` set, when `run()`
+	 *   threw or rejected, or returned a branded skip that bodhi could not copy (see
+	 *   `error`).
 	 *
 	 * `backpressure_optional_shed` is reserved and never produced: admission
 	 * decides per run, and no single processor is shed.
@@ -170,7 +172,8 @@ export interface PostSessionResult {
  * reentrant — keep all per-session state in locals or in `ctx`, never on the
  * instance.
  *
- * `name`, `required` and `dependsOn` must not change after `register()`.
+ * `name`, `required`, `dependsOn`, `after` and `afterWaitMs` must not change after
+ * `register()`.
  * Idempotency is the processor's job: bodhi never retries a run and does not
  * persist unfinished runs across a process exit.
  */
@@ -183,7 +186,8 @@ export abstract class PostSessionProcessor {
 	 * every run that finds the pipeline at capacity waits (FIFO) for a slot instead
 	 * of being dropped with `queue_overflow`. The run can still be `dropped` with
 	 * `required_capacity_timeout`. No single processor is ever shed. A required
-	 * processor must not depend on an optional one. Default false.
+	 * processor must not list an optional one in `dependsOn`; it may list one in
+	 * {@link PostSessionProcessor.after | after}. Default false.
 	 */
 	readonly required: boolean = false;
 
@@ -193,8 +197,58 @@ export abstract class PostSessionProcessor {
 	 * prerequisites' return values; cross-step data flows through `ctx.stores`.
 	 * If a hard dependency ends `failed` or `skipped`, the dependent is itself
 	 * marked `skipped` (`detail.reason: dependency_failed`) and `run()` is not called.
+	 * For order without that rule, use {@link PostSessionProcessor.after | after}.
 	 */
 	readonly dependsOn: readonly string[] = [];
+
+	/**
+	 * Soft prerequisites (processor names): order only. `shouldRun()` and `run()` are
+	 * called once every listed processor has SETTLED, meaning it has a
+	 * {@link PostSessionResult} of any status and any reason, or once `afterWaitMs`
+	 * has elapsed since the run's processors started (after admission), whichever
+	 * comes first. Default `[]`: no wait, and behaviour exactly as without the member.
+	 *
+	 * Unlike `dependsOn`, a prerequisite's status never skips or fails this
+	 * processor, so a required processor may run after an optional one. Both kinds
+	 * may be combined: `dependsOn` keeps its rule, and the `afterWaitMs` deadline is
+	 * absolute, so the two waits overlap. A prerequisite still running when the wait
+	 * ends keeps running and is reported as usual.
+	 *
+	 * Precedence once the waits end: a `dependsOn` prerequisite that did not complete
+	 * makes this processor `skipped` (`dependency_failed`); otherwise, if the run's
+	 * `signal` is aborted (budget expiry or a `drain()` cancel, which also ends the
+	 * wait early), it is `failed` with `detail.reason: drain_timeout` and neither
+	 * `shouldRun()` nor `run()` is called; otherwise `shouldRun()` decides as usual.
+	 *
+	 * Data rule, as for `dependsOn`: this processor receives the same `ctx` as every
+	 * other and never a prerequisite's return value or result. Data that crosses
+	 * steps goes through `ctx.stores` or host state keyed by `ctx.metadata`. If a
+	 * prerequisite settled within the wait, everything its `run()` did before its
+	 * promise settled is visible (within one process). Not guaranteed: that a
+	 * prerequisite settles at all, whether writes it makes after the wait ended are
+	 * seen, or any order between processors with no edge between them.
+	 *
+	 * `freeze()` rejects an unknown name, a name also in `dependsOn`, and a cycle over
+	 * `dependsOn` and `after` together (a processor naming itself included).
+	 */
+	readonly after: readonly string[] = [];
+
+	/**
+	 * The longest this processor waits for its {@link PostSessionProcessor.after | after}
+	 * prerequisites, in ms, measured from the start of the run's processors (after
+	 * admission), not from when its own wait began. Required when `after` is
+	 * non-empty: `freeze()` throws unless it is a finite number `>= 0`. Read only when
+	 * `after` is non-empty. `0` sets the order of results only and never waits.
+	 *
+	 * The wait also ends when the run's `signal` aborts. `InMemoryPostSessionPipeline`
+	 * rejects, for a required processor, a value that is not below its `runBudgetMs`,
+	 * so a required processor's wait always ends before the budget. An optional
+	 * processor whose wait reaches the budget ends `failed` (`drain_timeout`) without
+	 * running. It honours any finite value, even one longer than the longest
+	 * `setTimeout` delay (2^31 - 1 ms), which a timer alone would fire after about
+	 * 1 ms. The processor's `durationMs` excludes the wait.
+	 */
+	readonly afterWaitMs?: number;
 
 	/**
 	 * Cheap synchronous gate — skip work when not applicable (e.g. errored
@@ -393,8 +447,12 @@ export interface PostSessionPipeline {
 	register(processor: PostSessionProcessor): void;
 
 	/**
-	 * Validate (unique names, no missing deps, no cycles, no `required` processor
-	 * depending on an optional one) and freeze the registry. Idempotent. Call it at
+	 * Validate and freeze the registry: unique names; every `dependsOn` and `after`
+	 * name registered; no name in both; no cycle over `dependsOn` and `after`
+	 * together; no `required` processor listing an optional one in `dependsOn`; a
+	 * finite `afterWaitMs >= 0` wherever `after` is non-empty. A throw names the
+	 * processor. An implementation may add rules (the in-memory pipeline also bounds
+	 * a required processor's `afterWaitMs` by its `runBudgetMs`). Idempotent. Call it at
 	 * startup, before any session can close: `dispatch()` throws before `freeze()`,
 	 * which rejects a VoiceSession's `close()`. After freeze, `dispatch()` never throws.
 	 */

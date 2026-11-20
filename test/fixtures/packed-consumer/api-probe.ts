@@ -311,3 +311,14 @@ const maybeSkip: unknown = returnedSkip;
 if (isPostSessionSkip(maybeSkip)) void maybeSkip.reason;
 // @ts-expect-error a plain object lacks the PostSessionSkip brand
 const unbrandedSkip: PostSessionSkip = { reason: 'consent lookup failed' };
+// Soft order: a processor may run after others with a bound, whatever their status.
+class SoftOrderedProcessor extends PostSessionProcessor {
+	readonly name = 'soft-ordered-processor';
+	override readonly required = true;
+	override readonly after: readonly string[] = ['host-processor'];
+	override readonly afterWaitMs: number = 5_000;
+	async run(): Promise<void> {}
+}
+const softOrdered: PostSessionProcessor = new SoftOrderedProcessor();
+const softAfter: readonly string[] = softOrdered.after;
+const softWait: number | undefined = softOrdered.afterWaitMs;
