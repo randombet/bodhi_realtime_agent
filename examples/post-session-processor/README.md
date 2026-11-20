@@ -29,6 +29,7 @@ invariants (a CI-friendly smoke test):
 | **Reason preservation** — the caller close reason reaches `PostSessionSnapshot.reason` | Reason-preservation invariant |
 | **Backpressure** — at capacity, an optional-only run is `dropped` (`queue_overflow`); a required run **bounded-waits** and either runs when a slot frees or resolves `required_capacity_timeout` | Shedding model |
 | **`freeze()` validation** — missing deps and `required`-depends-on-optional are rejected at boot | Registry validation |
+| **Soft order** — a required `notify` declared `after` an optional `export` waits for `export` to settle, then runs even though `export` failed; `after` without `afterWaitMs` is rejected at boot | `after` / `afterWaitMs` |
 | **Single completion channel** — `pipeline.events.onProcessed` fires once per run (including `dropped` / `failed_to_start`) | One completion channel |
 
 The demo uses a small module-level `summaries` map + `trace` array to hand the summary
