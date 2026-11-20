@@ -3,6 +3,7 @@ import { InMemoryPostSessionPipeline } from '../../src/post-session/pipeline.js'
 import type {
 	PostSessionContext,
 	PostSessionReport,
+	PostSessionRun,
 	PostSessionSnapshot,
 	PostSessionSnapshotBuilder,
 	PostSessionStores,
@@ -408,6 +409,208 @@ describe('InMemoryPostSessionPipeline', () => {
 			resolveHang();
 			const report = await run.report;
 			expect(result(report, 'hang')?.status).toBe('completed'); // finished cleanly, never drain_timeout
+		});
+	});
+
+	describe('public contract: robustness and characterization', () => {
+		it('reports exactly the shapes it always has for completed, failed, gated and dependency-skipped processors', async () => {
+			// Characterization: a pipeline that uses none of the newer features must report
+			// the same objects, keys and order as before the post-session API was exported.
+			const returned = { n: 1 };
+			const p = new InMemoryPostSessionPipeline();
+			p.register(new TestProcessor('done', async () => returned));
+			p.register(
+				new TestProcessor('boom', async () => {
+					throw new Error('boom');
+				}),
+			);
+			p.register(new TestProcessor('after-boom', async () => ({ never: true }), ['boom']));
+			p.register(
+				new TestProcessor(
+					'gated',
+					async () => {},
+					[],
+					false,
+					() => false,
+				),
+			);
+			p.register(new TestProcessor('empty', async () => {}));
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			expect(report).toStrictEqual({
+				sessionId: 's',
+				outcome: 'accepted',
+				results: [
+					{
+						processor: 'done',
+						status: 'completed',
+						durationMs: expect.any(Number),
+						detail: { n: 1 },
+					},
+					{
+						processor: 'boom',
+						status: 'failed',
+						durationMs: expect.any(Number),
+						error: expect.any(Error),
+					},
+					{
+						processor: 'after-boom',
+						status: 'skipped',
+						durationMs: 0,
+						detail: { reason: 'dependency_failed', dependency: 'boom' },
+					},
+					{
+						processor: 'gated',
+						status: 'skipped',
+						durationMs: 0,
+						detail: { reason: 'shouldRun_false' },
+					},
+					{
+						processor: 'empty',
+						status: 'completed',
+						durationMs: expect.any(Number),
+						detail: undefined,
+					},
+				],
+				totalDurationMs: expect.any(Number),
+			});
+			// The returned value is the detail itself, not a copy.
+			expect(result(report, 'done')?.detail).toBe(returned);
+			expect(p.stats()).toEqual({ queued: 0, running: 0, dropped: 0, completed: 4, failed: 1 });
+		});
+
+		it('a synchronous throw from run() is failed: the report resolves, onProcessed fires once, nothing rejects unhandled', async () => {
+			const unhandled: unknown[] = [];
+			const onUnhandled = (reason: unknown) => {
+				unhandled.push(reason);
+			};
+			process.on('unhandledRejection', onUnhandled);
+			try {
+				const emitted: PostSessionReport[] = [];
+				const p = new InMemoryPostSessionPipeline();
+				p.events.onProcessed((r) => emitted.push(r));
+				p.register(
+					new TestProcessor('sync-throw', () => {
+						throw new Error('sync boom');
+					}),
+				);
+				p.register(new TestProcessor('ok', async () => ({ ran: true })));
+				p.freeze();
+				const report = await p.dispatch({
+					sessionId: 's',
+					reason: 'normal',
+					build: makeBuilder('s'),
+				}).report;
+				expect(report.outcome).toBe('accepted');
+				expect(result(report, 'sync-throw')?.status).toBe('failed');
+				expect(result(report, 'sync-throw')?.error?.message).toBe('sync boom');
+				expect(result(report, 'ok')?.status).toBe('completed');
+				expect(emitted).toEqual([report]);
+				expect(p.stats()).toMatchObject({ running: 0, completed: 1, failed: 1 });
+				await new Promise((r) => setTimeout(r, 10));
+				expect(unhandled).toEqual([]);
+			} finally {
+				process.off('unhandledRejection', onUnhandled);
+			}
+		});
+
+		it('a run() that returns a plain value instead of a promise reports that value as its detail', async () => {
+			// A JavaScript host can skip `async`; the pipeline treats the value as resolved.
+			const p = new InMemoryPostSessionPipeline();
+			p.register(new TestProcessor('sync-value', (() => ({ sync: true })) as unknown as ProcRun));
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			expect(result(report, 'sync-value')?.status).toBe('completed');
+			expect(result(report, 'sync-value')?.detail).toEqual({ sync: true });
+		});
+
+		it('an onError that throws cannot reject the report or stop later listeners', async () => {
+			const p = new InMemoryPostSessionPipeline({
+				onError: () => {
+					throw new Error('error sink down');
+				},
+			});
+			const seen: string[] = [];
+			p.events.onProcessed(() => {
+				throw new Error('listener down');
+			});
+			p.events.onProcessed((r) => seen.push(r.outcome));
+			p.register(new TestProcessor('a', async () => {}));
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			expect(report.outcome).toBe('accepted');
+			expect(seen).toEqual(['accepted']);
+		});
+
+		it('an onError that throws cannot make dispatch() throw on the build or overflow paths', async () => {
+			const onError = () => {
+				throw new Error('error sink down');
+			};
+			const built = new InMemoryPostSessionPipeline({ onError });
+			built.register(new TestProcessor('a', async () => {}));
+			built.freeze();
+			let run!: PostSessionRun;
+			expect(() => {
+				run = built.dispatch({
+					sessionId: 's',
+					reason: 'normal',
+					build: makeBuilder('s', { throwOnBuild: true }),
+				});
+			}).not.toThrow();
+			expect((await run.report).failureReason).toBe('snapshot_failed');
+
+			const full = new InMemoryPostSessionPipeline({ onError, maxConcurrentRuns: 0 });
+			full.events.onProcessed(() => {
+				throw new Error('listener down');
+			});
+			full.register(new TestProcessor('a', async () => {}));
+			full.freeze();
+			let dropped!: PostSessionRun;
+			expect(() => {
+				dropped = full.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') });
+			}).not.toThrow();
+			expect((await dropped.report).failureReason).toBe('queue_overflow');
+		});
+
+		it('on budget expiry a running processor is failed (drain_timeout) and its waiting dependent is skipped (dependency_failed)', async () => {
+			let dependentRan = false;
+			const p = new InMemoryPostSessionPipeline({ runBudgetMs: 20 });
+			p.register(new TestProcessor('hang', () => new Promise<void>(() => {})));
+			p.register(
+				new TestProcessor(
+					'next',
+					async () => {
+						dependentRan = true;
+					},
+					['hang'],
+				),
+			);
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			expect(result(report, 'hang')).toMatchObject({
+				status: 'failed',
+				detail: { reason: 'drain_timeout' },
+			});
+			expect(result(report, 'next')).toMatchObject({
+				status: 'skipped',
+				detail: { reason: 'dependency_failed', dependency: 'hang' },
+			});
+			expect(dependentRan).toBe(false);
+		});
+
+		it('run.outcome is the admission decision; report.outcome is the final disposition', async () => {
+			const p = new InMemoryPostSessionPipeline({ maxConcurrentRuns: 0, requiredWaitMs: 10 });
+			p.register(new TestProcessor('needed', async () => {}, [], true));
+			p.freeze();
+			const run = p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') });
+			expect(run.outcome).toBe('accepted');
+			const report = await run.report;
+			expect(report.outcome).toBe('dropped');
+			expect(report.failureReason).toBe('required_capacity_timeout');
 		});
 	});
 });

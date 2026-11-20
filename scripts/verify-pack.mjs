@@ -10,7 +10,9 @@
 //                `"type": "module"` consumer created with mkdtemp
 //   (c) runtime  ESM import and CJS require of the root and the observability subpath, and a
 //                werift_opus DirectRtcClientChannel built from the installed root entry loads
-//                its RTC engine through the package's private #direct-rtc import
+//                its RTC engine through the package's private #direct-rtc import; a processor
+//                subclassed from the root's PostSessionProcessor runs on the root's
+//                InMemoryPostSessionPipeline
 //   (d) types    test/fixtures/packed-consumer/api-probe.ts compiles against the installed
 //                declarations with --module NodeNext (index.d.ts) and, inside a
 //                "type": "commonjs" package, with --module Node16 (index.d.cts)
@@ -22,8 +24,9 @@
 //
 //   node scripts/verify-pack.mjs                      # full gate
 //   node scripts/verify-pack.mjs --skip-declarations  # omit (d) and the (c) checks for
-//                                                     # ClientTransport, CLOSE_CODE_CLIENT_BUSY
-//                                                     # and VoiceSession.RECONNECT_DEADLINE_MS;
+//                                                     # ClientTransport, CLOSE_CODE_CLIENT_BUSY,
+//                                                     # VoiceSession.RECONNECT_DEADLINE_MS and
+//                                                     # the post-session pipeline;
 //                                                     # prepublishOnly and release.yml never
 //                                                     # pass it
 //   node scripts/verify-pack.mjs --keep               # leave the temp directories for inspection
@@ -229,6 +232,43 @@ function runtimeProbeSource(kind) {
 		console.error = consoleError;
 	}
 
+	// The post-session API: a host processor subclassed from the root's base class runs on the
+	// root's pipeline. Older builds that do not export it report null.
+	let postSession = null;
+	if (typeof root.InMemoryPostSessionPipeline === 'function' && typeof root.PostSessionProcessor === 'function') {
+		class PackedProbe extends root.PostSessionProcessor {
+			name = 'packed-probe';
+			async run(ctx) {
+				return { items: ctx.conversation.items.length };
+			}
+		}
+		const pipeline = new root.InMemoryPostSessionPipeline({ runBudgetMs: 5000 });
+		pipeline.register(new PackedProbe());
+		pipeline.freeze();
+		const run = pipeline.dispatch({
+			sessionId: 'packed',
+			reason: 'normal',
+			build: (reason) => ({
+				snapshot: {
+					sessionId: 'packed',
+					userId: 'packed-user',
+					initialAgentName: 'main',
+					finalAgentName: 'main',
+					transferPath: ['main'],
+					reason,
+					startedAt: 0,
+					endedAt: 1,
+					durationMs: 1,
+					conversation: { items: [] },
+					metrics: { turnCount: 0, toolCallCount: 0, agentTransferCount: 0 },
+				},
+				stores: {},
+			}),
+		});
+		const report = await run.report;
+		postSession = report.results.map((r) => r.processor + ':' + r.status).join(',');
+	}
+
 	console.log(JSON.stringify({
 		VoiceSession: typeof root.VoiceSession,
 		observabilityExports: Object.keys(observability).length,
@@ -239,6 +279,7 @@ function runtimeProbeSource(kind) {
 		ClientTransport: typeof root.ClientTransport,
 		CLOSE_CODE_CLIENT_BUSY: root.CLOSE_CODE_CLIENT_BUSY ?? null,
 		RECONNECT_DEADLINE_MS: root.VoiceSession?.RECONNECT_DEADLINE_MS ?? null,
+		postSession,
 	}));
 }
 
@@ -301,14 +342,20 @@ function stepRuntime(consumer) {
 					`${label}: VoiceSession.RECONNECT_DEADLINE_MS is ${result.RECONNECT_DEADLINE_MS}, expected 30000 (VoiceSession must carry the static RECONNECT_DEADLINE_MS)`,
 				);
 			}
+			if (result.postSession !== 'packed-probe:completed') {
+				fail(
+					'c',
+					`${label}: the post-session probe reported ${result.postSession}, expected packed-probe:completed (the root entry must export InMemoryPostSessionPipeline and PostSessionProcessor)`,
+				);
+			}
 		}
 		summaries.push(
 			`${label}: VoiceSession function, observability ${result.observabilityExports} exports, werift_opus DirectRtcClientChannel loaded its engine through #direct-rtc (${reply} to the malformed offer)`,
 		);
 	}
 	const exportChecks = skipDeclarations
-		? 'ClientTransport, CLOSE_CODE_CLIENT_BUSY and RECONNECT_DEADLINE_MS checks skipped'
-		: 'ClientTransport function, CLOSE_CODE_CLIENT_BUSY 4409, RECONNECT_DEADLINE_MS 30000';
+		? 'ClientTransport, CLOSE_CODE_CLIENT_BUSY, RECONNECT_DEADLINE_MS and post-session checks skipped'
+		: 'ClientTransport function, CLOSE_CODE_CLIENT_BUSY 4409, RECONNECT_DEADLINE_MS 30000, post-session probe processor completed';
 	report('c', `runtime: ${summaries.join('; ')}; ${exportChecks}`);
 }
 

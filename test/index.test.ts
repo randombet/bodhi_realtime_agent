@@ -4,19 +4,40 @@ import type {
 	ClientTransportCallbacks,
 	ClientTransportOptions,
 	ConnectionLifecycleEvent,
+	ConversationSnapshot,
 	EchoCheckResult,
 	EchoEnvEntry,
 	EchoGuardConfig,
 	GeminiLiveTranscribeLifecycleEvent,
 	GeminiLiveTranscribeSTTOptions,
 	GeminiLiveTranscribeSTTProviderConfig,
+	KnownSessionEndReason,
 	LiveUsageMetadata,
+	PostSessionCapabilities,
+	PostSessionContext,
+	PostSessionDispatchInput,
+	PostSessionEvents,
+	PostSessionPipeline,
+	PostSessionPipelineOptions,
+	PostSessionReport,
+	PostSessionResult,
+	PostSessionRun,
+	PostSessionSnapshot,
+	PostSessionSnapshotBuilder,
+	PostSessionStats,
+	PostSessionStores,
+	RunFailureReason,
+	RunOutcome,
+	SessionEndReason,
+	SessionMetricsSnapshot,
 	TransportDiagnostics,
 	TransportUsageMetadata,
 	UpstreamCounters,
 	UpstreamSlotCounters,
+	VoiceSessionConfig,
 	VoiceSessionDiagnostics,
 } from '../src/index.js';
+import { InMemoryPostSessionPipeline, PostSessionProcessor } from '../src/index.js';
 
 describe('module smoke test', () => {
 	it('imports without throwing and exports key APIs', async () => {
@@ -147,5 +168,98 @@ describe('module smoke test', () => {
 		};
 		const event: GeminiLiveTranscribeLifecycleEvent = { phase: 'setup-ok', connectionId: 1 };
 		expect([typeof config.credentialProvider, event.phase]).toEqual(['function', 'setup-ok']);
+	});
+
+	it('root-exports the post-session pipeline, the processor base and the post-session types; the default pipeline and built-in processors stay internal', async () => {
+		const mod = await import('../src/index.js');
+		expect(typeof mod.InMemoryPostSessionPipeline).toBe('function');
+		expect(typeof mod.PostSessionProcessor).toBe('function');
+		for (const internal of [
+			'createDefaultPostSessionPipeline',
+			'getDefaultPostSessionPipeline',
+			'MemoryDistillationProcessor',
+			'AnalyticsProcessor',
+		]) {
+			expect(internal in mod, internal).toBe(false);
+		}
+
+		// A host-style processor and pipeline, built only from root names. Type-level: fails
+		// typecheck:tests if any name stops resolving from the root.
+		class CountItems extends PostSessionProcessor {
+			readonly name = 'count-items';
+			override shouldRun(ctx: PostSessionContext): boolean {
+				return ctx.reason !== 'error';
+			}
+			async run(ctx: PostSessionContext): Promise<Record<string, unknown>> {
+				return { items: ctx.conversation.items.length, closed: ctx.signal.aborted };
+			}
+		}
+		const options: PostSessionPipelineOptions = { runBudgetMs: 5_000, maxConcurrentRuns: 4 };
+		const pipeline = new InMemoryPostSessionPipeline(options);
+		pipeline.register(new CountItems());
+		pipeline.freeze();
+		const asContract: PostSessionPipeline = pipeline;
+		const asConfig: VoiceSessionConfig['postSessionPipeline'] = pipeline;
+		const events: PostSessionEvents = asContract.events;
+		const processed: PostSessionReport[] = [];
+		const unsubscribe = events.onProcessed((r) => processed.push(r));
+
+		const known: KnownSessionEndReason = 'user_hangup';
+		const reason: SessionEndReason = 'host_defined_reason';
+		const conversation: ConversationSnapshot = { items: [] };
+		const metrics: SessionMetricsSnapshot = {
+			turnCount: 0,
+			toolCallCount: 0,
+			agentTransferCount: 0,
+		};
+		const stores: PostSessionStores = {};
+		const build: PostSessionSnapshotBuilder = (r) => {
+			const snapshot: PostSessionSnapshot = {
+				sessionId: 'sess_1',
+				userId: 'user_1',
+				initialAgentName: 'main',
+				finalAgentName: 'main',
+				transferPath: ['main'],
+				reason: r,
+				startedAt: 0,
+				endedAt: 1,
+				durationMs: 1,
+				metadata: { tenant: 'example' },
+				conversation,
+				metrics,
+			};
+			return { snapshot, stores };
+		};
+		const input: PostSessionDispatchInput = { sessionId: 'sess_1', reason, build };
+		const run: PostSessionRun = asContract.dispatch(input);
+		const report: PostSessionReport = await run.report;
+		const first: PostSessionResult | undefined = report.results[0];
+		const outcome: RunOutcome = report.outcome;
+		const stats: PostSessionStats = pipeline.stats();
+		unsubscribe();
+
+		expect([known, outcome, first?.status, first?.detail]).toEqual([
+			'user_hangup',
+			'accepted',
+			'completed',
+			{ items: 0, closed: false },
+		]);
+		expect(processed).toEqual([report]);
+		expect(asConfig).toBe(pipeline);
+		expect(stats.completed).toBe(1);
+
+		// Capabilities are the live half of the context; RunFailureReason is open to
+		// reasons a later release adds.
+		const capabilities: PostSessionCapabilities = {
+			stores,
+			signal: new AbortController().signal,
+		};
+		const futureReason: RunFailureReason = 'a_reason_added_later';
+		const knownReason: RunFailureReason = 'queue_overflow';
+		expect([capabilities.signal.aborted, futureReason, knownReason]).toEqual([
+			false,
+			'a_reason_added_later',
+			'queue_overflow',
+		]);
 	});
 });

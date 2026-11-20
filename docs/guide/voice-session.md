@@ -672,6 +672,163 @@ pipeline have already run. Use `recoverUpstream()` under
 `upstreamLossPolicy: 'hold'` to redial without closing, or construct a new
 `VoiceSession`.
 
+## Post-session processing
+
+When a session closes, a post-session pipeline can run host work on what the
+session produced: an export, a summary, an audit record. The pipeline is
+process-scoped: build one at startup, register processors, freeze it, and pass
+it to every session as `postSessionPipeline`.
+
+```ts
+import {
+  InMemoryPostSessionPipeline,
+  PostSessionProcessor,
+  type PostSessionContext,
+} from 'bodhi-realtime-agent';
+
+class ExportConversation extends PostSessionProcessor {
+  readonly name = 'export-conversation';
+
+  override shouldRun(ctx: PostSessionContext): boolean {
+    return ctx.conversation.items.length > 0;
+  }
+
+  async run(ctx: PostSessionContext) {
+    if (ctx.signal.aborted) throw new Error('cancelled before export');
+    await exportStore.write(ctx.sessionId, ctx.conversation.items, { signal: ctx.signal });
+    return { items: ctx.conversation.items.length };
+  }
+}
+
+const pipeline = new InMemoryPostSessionPipeline({ runBudgetMs: 60_000 });
+pipeline.register(new ExportConversation());
+pipeline.freeze();
+pipeline.events.onProcessed((report) => log.info('post-session', report));
+
+const session = new VoiceSession({ ...config, postSessionPipeline: pipeline });
+
+// On graceful shutdown, wait for runs still in flight.
+await pipeline.drain(5_000);
+```
+
+### Lifecycle
+
+- Construct the pipeline, `register()` any number of processors, then
+  `freeze()`. One frozen pipeline serves every session in the process.
+- `freeze()` is idempotent. It throws on a duplicate name, a `dependsOn` name
+  that is not registered, a dependency cycle, or a required processor that
+  depends on an optional one. `register()` after `freeze()` throws.
+- `dispatch()` before `freeze()` throws, so freeze before the first session can
+  close. A `VoiceSession` always runs pre-close finalizers, so its `close()`
+  then rejects. A bare `SessionManager` with no finalizers throws from
+  `closeWithReason()` synchronously. After `freeze()`, `dispatch()` never
+  throws.
+- A session dispatches once per close, after its pre-close finalizers. A host
+  may also call `dispatch()` directly, for work that is not a `VoiceSession`,
+  under the same contract.
+
+### Defaults and the memory fallback
+
+| `InMemoryPostSessionPipeline` option | Default |
+|---|---|
+| `maxConcurrentRuns` | `16` |
+| `requiredWaitMs` | `30_000` |
+| `runBudgetMs` | `30_000` |
+| `onError` | `console.error` |
+
+- With an explicit pipeline, `drainPostSession` defaults to `false`: `close()`
+  does not wait for the run.
+- With no pipeline and `memory` set, a session uses bodhi's internal default
+  pipeline, which runs final memory distillation and drains. **An explicit
+  pipeline replaces that fallback**: final memory distillation does not run for
+  that session. Keep sessions that need it on the default.
+
+### Execution
+
+- The snapshot is built inline when the session dispatches. A throw while
+  building it reports `failed_to_start` with `snapshot_failed`.
+- Processors start concurrently in topological order; registration order
+  breaks ties. Each one waits for its `dependsOn` prerequisites.
+- A prerequisite that did not complete makes its dependent `skipped`, with
+  `detail.reason: 'dependency_failed'` and `detail.dependency`.
+- `shouldRun()` is a synchronous gate. `false` reports `skipped` with
+  `shouldRun_false`; a throw reports `failed` with `shouldRun_threw`.
+- A throw from `run()`, synchronous or a rejection, reports `failed` with
+  `error`. A value `run()` returns becomes that result's `detail` and nothing
+  else: it is never passed to dependents.
+- One wall-clock budget, `runBudgetMs`, covers the whole run. When it expires,
+  bodhi aborts `ctx.signal`. Processors still running report `failed` with
+  `drain_timeout`, and their dependents still waiting report `skipped` with
+  `dependency_failed`. Cancellation is cooperative: bodhi stops waiting, but
+  the work may continue. `run()` may be called with `ctx.signal` already
+  aborted, so check it before side effects.
+- `drain(timeoutMs)` waits for every outstanding run. By default it then
+  cancels what is left, as the budget does; runs still waiting for a slot
+  report `dropped` with `required_capacity_timeout`.
+
+### Admission
+
+Admission is decided per run, for the whole pipeline:
+
+- With a free slot (fewer than `maxConcurrentRuns` runs), the run starts.
+- At capacity, when no registered processor is `required`, the run is dropped
+  at once: `dropped` with `queue_overflow`.
+- At capacity, when any processor is `required`, every run waits for a slot in
+  FIFO order for up to `requiredWaitMs`, then reports `dropped` with
+  `required_capacity_timeout`.
+- No single processor is ever shed.
+
+### Reports
+
+- `dispatch()` returns a handle at once. Its `outcome` is the admission
+  decision; `report.outcome` is the final disposition, so a required run that
+  waited can be `accepted` on the handle and `dropped` in its report.
+- `run.report` never rejects. It settles within `requiredWaitMs` +
+  `runBudgetMs`.
+- `events.onProcessed` fires exactly once per dispatch, for every outcome. A
+  listener that throws is reported to `onError` and cannot affect the report or
+  other listeners; an `onError` that throws is ignored.
+- `results` are in topological order. `failureReason` is set only when the
+  outcome is not `accepted`.
+- `stats()` counts `skipped` results under `completed`.
+
+### Snapshot and stores
+
+- `ctx` is the snapshot plus two live capabilities, `ctx.stores` and
+  `ctx.signal`. Stores stay valid until the report settles.
+- The snapshot is data only, taken after the pre-close finalizers.
+  `conversation.items` is a shallow copy; `metadata` is the session's
+  `sessionMetadata` by reference. Processors must not mutate either; bodhi
+  never does, and does not deep-freeze them.
+- Keep `sessionMetadata` small, serializable and constant after the session
+  starts, with no credentials and no live handles.
+- `stores.memoryExtraction` is internal to the memory fallback. Do not call or
+  supply it.
+
+### Processors
+
+- One instance serves many sessions at once: keep it stateless and reentrant,
+  with per-session state in locals or `ctx`.
+- `name` is unique within the pipeline and stable. `required` and `dependsOn`
+  must not change after `register()`.
+- Idempotency is the processor's job.
+
+Not guaranteed: persistence or resume (runs still unfinished when the process
+exits are lost unless `drain()` waited for them), retries, exactly-once
+delivery, and any order between independent processors or across sessions.
+
+### Stability
+
+- Types a host implements or supplies (`PostSessionPipeline`,
+  `PostSessionProcessor`, `PostSessionSnapshotBuilder` with the
+  `PostSessionSnapshot` and `PostSessionStores` it returns, and
+  `PostSessionPipelineOptions`) gain only optional members in a minor release.
+- Types a host only reads (the context, run, report, result, events and stats
+  types) may gain members in a minor release.
+- `PostSessionResult.status` and `RunOutcome` are closed sets.
+  `RunFailureReason` and `detail.reason` are open: handle values you do not
+  know.
+
 ## Related
 
 - [Agents](/guide/agents)

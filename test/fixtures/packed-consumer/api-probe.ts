@@ -24,6 +24,7 @@ import {
 	type ClientTransportCallbacks,
 	type ClientTransportOptions,
 	type ConnectionLifecycleEvent,
+	type ConversationSnapshot,
 	type EchoCheckResult,
 	type EchoEnvEntry,
 	EchoGuard,
@@ -31,15 +32,35 @@ import {
 	type GeminiBatchSTTProvider,
 	type HooksManager,
 	type IEventBus,
+	InMemoryPostSessionPipeline,
+	type KnownSessionEndReason,
 	type LLMTransport,
 	type LiveUsageMetadata,
 	type OpenAIRealtimeConfig,
+	type PostSessionCapabilities,
+	type PostSessionContext,
+	type PostSessionDispatchInput,
+	type PostSessionEvents,
+	type PostSessionPipeline,
+	type PostSessionPipelineOptions,
+	PostSessionProcessor,
+	type PostSessionReport,
+	type PostSessionResult,
+	type PostSessionRun,
+	type PostSessionSnapshot,
+	type PostSessionSnapshotBuilder,
+	type PostSessionStats,
+	type PostSessionStores,
 	RECOVERY_CAPABILITIES,
 	type RecoverUpstreamArgs,
 	type RecoverUpstreamResult,
 	type RecoveryCapabilities,
+	type RunFailureReason,
+	type RunOutcome,
 	type SendOrQueueOptions,
+	type SessionEndReason,
 	type SessionManager,
+	type SessionMetricsSnapshot,
 	type SessionUpdate,
 	type SubagentConfig,
 	ToolExecutor,
@@ -203,3 +224,70 @@ const legacySubagent: SubagentConfig = { name: 'x', instructions: 'x', tools: {}
 // OpenAI Realtime noise reduction accepts any object and forwards it unchanged.
 const legacyNoiseReduction: Record<string, unknown> = { type: 'far_field' };
 const openaiConfig: OpenAIRealtimeConfig = { apiKey: 'x', noiseReduction: legacyNoiseReduction };
+// Post-session processing: a host subclasses the root's processor base, registers it on the
+// root's pipeline, freezes it and hands it to a session; a host may also implement the
+// pipeline contract itself and dispatch directly.
+class HostProcessor extends PostSessionProcessor {
+	readonly name = 'host-processor';
+	override readonly dependsOn: readonly string[] = [];
+	override shouldRun(ctx: PostSessionContext): boolean {
+		return !ctx.signal.aborted;
+	}
+	async run(ctx: PostSessionContext): Promise<Record<string, unknown>> {
+		return { items: ctx.conversation.items.length };
+	}
+}
+const postSessionOptions: PostSessionPipelineOptions = {
+	runBudgetMs: 60_000,
+	maxConcurrentRuns: 8,
+};
+const postSessionPipeline = new InMemoryPostSessionPipeline(postSessionOptions);
+postSessionPipeline.register(new HostProcessor());
+postSessionPipeline.freeze();
+config.postSessionPipeline = postSessionPipeline;
+const pipelineContract: PostSessionPipeline = postSessionPipeline;
+const postSessionEvents: PostSessionEvents = pipelineContract.events;
+const unsubscribePostSession: () => void = postSessionEvents.onProcessed(
+	(report: PostSessionReport): void => {
+		const first: PostSessionResult | undefined = report.results[0];
+		const runOutcome: RunOutcome = report.outcome;
+		const failure: RunFailureReason | undefined = report.failureReason;
+		void [first?.status, runOutcome, failure];
+	},
+);
+const postSessionStores: PostSessionStores = {};
+const postSessionBuild: PostSessionSnapshotBuilder = (reason: SessionEndReason) => {
+	const knownEnd: KnownSessionEndReason = 'normal';
+	const conversationSnapshot: ConversationSnapshot = { items: [] };
+	const metricsSnapshot: SessionMetricsSnapshot = {
+		turnCount: 0,
+		toolCallCount: 0,
+		agentTransferCount: 0,
+	};
+	const snapshot: PostSessionSnapshot = {
+		sessionId: 's',
+		userId: 'u',
+		initialAgentName: knownEnd,
+		finalAgentName: knownEnd,
+		transferPath: [],
+		reason,
+		startedAt: 0,
+		endedAt: 0,
+		durationMs: 0,
+		conversation: conversationSnapshot,
+		metrics: metricsSnapshot,
+	};
+	return { snapshot, stores: postSessionStores };
+};
+const postSessionInput: PostSessionDispatchInput = {
+	sessionId: 's',
+	reason: 'normal',
+	build: postSessionBuild,
+};
+const postSessionRun: PostSessionRun = pipelineContract.dispatch(postSessionInput);
+const postSessionStats: PostSessionStats = pipelineContract.stats();
+const postSessionCapabilities: PostSessionCapabilities = {
+	stores: postSessionStores,
+	signal: new AbortController().signal,
+};
+const laterFailureReason: RunFailureReason = 'a_reason_added_later';

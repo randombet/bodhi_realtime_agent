@@ -5,10 +5,23 @@ import type { SessionEndReason } from '../types/session.js';
 export type { SessionEndReason, KnownSessionEndReason } from '../types/session.js';
 
 /**
- * Top-level contracts for the post-session processing pipeline.
+ * Top-level contracts for the post-session processing pipeline, exported from the
+ * package root.
  *
- * `ConversationSnapshot`, `SessionMetricsSnapshot`, and `PostSessionStores` are
- * intentionally minimal in v1 — they grow as concrete processors land.
+ * Stability (semver, from the release that exports them):
+ * - Types a host IMPLEMENTS or SUPPLIES may gain only optional members, with
+ *   defaults, in a minor release: {@link PostSessionPipeline},
+ *   {@link PostSessionProcessor}, {@link PostSessionSnapshotBuilder} and the
+ *   {@link PostSessionSnapshot} / {@link PostSessionStores} it returns, and
+ *   `PostSessionPipelineOptions`.
+ * - Types a host only READS may gain members in a minor release:
+ *   {@link PostSessionContext}, {@link PostSessionCapabilities},
+ *   {@link PostSessionRun}, {@link PostSessionReport}, {@link PostSessionResult},
+ *   {@link PostSessionEvents}, {@link PostSessionStats},
+ *   {@link ConversationSnapshot} and {@link SessionMetricsSnapshot}.
+ * - `PostSessionResult.status` and {@link RunOutcome} are closed sets.
+ * - {@link RunFailureReason} and `PostSessionResult.detail.reason` are open: handle
+ *   values you do not know.
  */
 
 /** Finalized, read-only view of the conversation, frozen at close. */
@@ -33,6 +46,9 @@ export interface PostSessionStores {
 	/** Per-user durable memory facts (e.g. for memory distillation). */
 	readonly memory?: MemoryStore;
 	/**
+	 * INTERNAL to VoiceSession's own memory fallback: hosts must not call or supply
+	 * it, and it may be removed in a minor release.
+	 *
 	 * Per-session memory-extraction capability, provided by the snapshot builder.
 	 * v1 bridge: closes over the session's distiller so the process-scoped
 	 * MemoryDistillationProcessor stays reentrant (it holds no session state; the
@@ -45,9 +61,14 @@ export interface PostSessionStores {
 }
 
 /**
- * IMMUTABLE per-session data — frozen at close. Processors MUST NOT mutate it.
- * This is *only* data: no live handles. It is what crosses the dispatch boundary
- * and what a future queue-backed pipeline could serialize.
+ * IMMUTABLE per-session data, taken at close after the session's pre-close
+ * finalizers. Processors MUST NOT mutate it; bodhi never does, but it is not
+ * deep-frozen. This is *only* data: no live handles. It is what crosses the
+ * dispatch boundary and what a future queue-backed pipeline could serialize.
+ *
+ * `conversation.items` is a shallow copy of the session's items. `metadata` is the
+ * host's `sessionMetadata` by reference: keep it small, serializable and constant
+ * after the session starts, with no credentials and no live handles.
  */
 export interface PostSessionSnapshot {
 	readonly sessionId: string;
@@ -105,10 +126,17 @@ export type PostSessionSnapshotBuilder = (reason: SessionEndReason) => {
 export interface PostSessionResult {
 	readonly processor: string;
 	/**
-	 * `skipped` covers `shouldRun()===false`, dependency-failed, and optional
-	 * backpressure shedding — disambiguate via `detail.reason`
-	 * (`dependency_failed` | `backpressure_optional_shed`). `failed` includes
-	 * `run()`/`shouldRun()` throws and `drain_timeout`.
+	 * A closed set. `detail.reason` (an open set) says why, when bodhi decided:
+	 * - `completed`: `run()` resolved; `detail` is its return value, if any.
+	 * - `skipped`: `shouldRun_false` (the gate returned false) or `dependency_failed`
+	 *   (a `dependsOn` prerequisite did not complete; `detail.dependency` names it).
+	 *   `run()` was not called.
+	 * - `failed`: `shouldRun_threw`; `drain_timeout` (the run budget expired or
+	 *   `drain()` cancelled the run while `run()` was pending); or no `detail`, with
+	 *   `error` set, when `run()` threw or rejected.
+	 *
+	 * `backpressure_optional_shed` is reserved and never produced: admission
+	 * decides per run, and no single processor is shed.
 	 */
 	readonly status: 'completed' | 'skipped' | 'failed';
 	readonly durationMs: number;
@@ -124,15 +152,21 @@ export interface PostSessionResult {
  * several ended sessions concurrently. Implementations MUST be stateless /
  * reentrant — keep all per-session state in locals or in `ctx`, never on the
  * instance.
+ *
+ * `name`, `required` and `dependsOn` must not change after `register()`.
+ * Idempotency is the processor's job: bodhi never retries a run and does not
+ * persist unfinished runs across a process exit.
  */
 export abstract class PostSessionProcessor {
-	/** Stable identifier used for ordering, logging, and config. */
+	/** Stable identifier, unique within a pipeline; used for ordering, logging, and config. */
 	abstract readonly name: string;
 
 	/**
-	 * If true, this processor is never *individually* shed under backpressure, and
-	 * its run bounded-waits for admission instead of being dropped outright. The
-	 * run can still fail as `required_capacity_timeout`. Default false.
+	 * Admission, decided per pipeline: when ANY registered processor is required,
+	 * every run that finds the pipeline at capacity waits (FIFO) for a slot instead
+	 * of being dropped with `queue_overflow`. The run can still be `dropped` with
+	 * `required_capacity_timeout`. No single processor is ever shed. A required
+	 * processor must not depend on an optional one. Default false.
 	 */
 	readonly required: boolean = false;
 
@@ -146,9 +180,9 @@ export abstract class PostSessionProcessor {
 	readonly dependsOn: readonly string[] = [];
 
 	/**
-	 * Cheap gate — skip work when not applicable (e.g. errored session). The
-	 * pipeline wraps this call: if it throws, the processor is recorded `failed`
-	 * (it does not abort scheduling of others).
+	 * Cheap synchronous gate — skip work when not applicable (e.g. errored
+	 * session). The pipeline wraps this call: if it throws, the processor is
+	 * recorded `failed` (it does not abort scheduling of others).
 	 */
 	shouldRun(_ctx: PostSessionContext): boolean {
 		return true;
@@ -159,6 +193,12 @@ export abstract class PostSessionProcessor {
 	 * May return a small serializable object, placed in this processor's
 	 * `PostSessionResult.detail`. Returning a value is for reporting ONLY — it is
 	 * never passed to dependent processors (cross-step data flows via `ctx.stores`).
+	 *
+	 * A throw (synchronous or a rejection) records `failed` with `error`. Cancellation
+	 * is cooperative: when the run budget expires or `drain()` cancels, the pipeline
+	 * aborts `ctx.signal` and stops waiting, but the work may continue. `run()` may be
+	 * called with `ctx.signal` already aborted, so check `signal.aborted` before side
+	 * effects.
 	 */
 	// biome-ignore lint/suspicious/noConfusingVoidType: a processor may return a small detail object or nothing.
 	abstract run(ctx: PostSessionContext): Promise<Record<string, unknown> | void>;
@@ -172,16 +212,30 @@ export abstract class PostSessionProcessor {
  */
 export type RunOutcome = 'accepted' | 'dropped' | 'failed_to_start';
 
-/** Run-level cause when `outcome !== 'accepted'`. */
-export type RunFailureReason = 'queue_overflow' | 'required_capacity_timeout' | 'snapshot_failed';
+/**
+ * Run-level cause when `outcome !== 'accepted'`. Open: a later release may add
+ * reasons, so handle values you do not know. `(string & {})` keeps the known
+ * literals for narrowing and completion.
+ */
+export type RunFailureReason =
+	| 'queue_overflow'
+	| 'required_capacity_timeout'
+	| 'snapshot_failed'
+	| (string & {});
 
 /** Handle returned by dispatch — lets callers observe a run without blocking. */
 export interface PostSessionRun {
 	readonly sessionId: string;
+	/**
+	 * The admission decision at dispatch time. A required run that waits for a
+	 * slot is `accepted` here even when its report ends `dropped`
+	 * (`required_capacity_timeout`); `report.outcome` is the final disposition.
+	 */
 	readonly outcome: RunOutcome;
 	/**
 	 * Resolves with the report; never rejects, never hangs — even `dropped` and
-	 * `failed_to_start` resolve with a report carrying that outcome.
+	 * `failed_to_start` resolve with a report carrying that outcome. For the
+	 * in-memory pipeline it settles within `requiredWaitMs` + `runBudgetMs`.
 	 */
 	readonly report: Promise<PostSessionReport>;
 }
@@ -192,9 +246,9 @@ export interface PostSessionRun {
  */
 export interface PostSessionEvents {
 	/**
-	 * Fires once per finished run (any outcome). Returns an unsubscribe. Listener
-	 * exceptions are caught/logged — they cannot reject `run.report` or block
-	 * other listeners.
+	 * Fires exactly once per dispatch, for every outcome. Returns an unsubscribe.
+	 * Listener exceptions go to the pipeline's `onError` — they cannot reject
+	 * `run.report` or block other listeners.
 	 */
 	onProcessed(listener: (report: PostSessionReport) => void): () => void;
 }
@@ -225,8 +279,9 @@ export interface PostSessionPipeline {
 
 	/**
 	 * Validate (unique names, no missing deps, no cycles, no `required` processor
-	 * depending on an optional one) and freeze the registry. Called ONCE at
-	 * startup, before any session can close. After freeze, `dispatch()` never throws.
+	 * depending on an optional one) and freeze the registry. Idempotent. Call it at
+	 * startup, before any session can close: `dispatch()` throws before `freeze()`,
+	 * which rejects a VoiceSession's `close()`. After freeze, `dispatch()` never throws.
 	 */
 	freeze(): void;
 
@@ -234,14 +289,17 @@ export interface PostSessionPipeline {
 	 * Run all applicable processors for one ended session. Returns a handle
 	 * synchronously. The pipeline is the SOLE report emitter: it invokes the
 	 * `build` thunk itself (a build throw → `failed_to_start`), assembles the
-	 * `PostSessionContext`, and runs the processors.
+	 * `PostSessionContext`, and runs the processors. A session calls it once per
+	 * close; a host may also call it directly under the same contract.
 	 */
 	dispatch(input: PostSessionDispatchInput): PostSessionRun;
 
 	/**
 	 * Await all outstanding runs (e.g. on graceful process shutdown).
 	 * `cancelOnTimeout` (default true): on deadline, abort each unfinished run's
-	 * `signal`; timed-out processors appear as `failed` (`detail.reason: drain_timeout`).
+	 * `signal`; timed-out processors appear as `failed` (`detail.reason: drain_timeout`),
+	 * their waiting dependents as `skipped` (`dependency_failed`), and runs still
+	 * waiting for a slot as `dropped` (`required_capacity_timeout`).
 	 */
 	drain(
 		timeoutMs?: number,

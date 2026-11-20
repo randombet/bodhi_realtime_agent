@@ -32,7 +32,11 @@ export interface PostSessionPipelineOptions {
 	 * Default 30_000.
 	 */
 	runBudgetMs?: number;
-	/** Optional error sink for build/listener failures (defaults to console.error). */
+	/**
+	 * Optional error sink for build and `onProcessed` listener failures (defaults to
+	 * console.error). A throw from the sink itself is swallowed: it cannot make
+	 * `dispatch()` throw, reject `run.report` or stop later listeners.
+	 */
 	onError?: (error: unknown, where: string) => void;
 }
 
@@ -125,7 +129,7 @@ export class InMemoryPostSessionPipeline implements PostSessionPipeline {
 		try {
 			built = build(reason);
 		} catch (error) {
-			this.onError(error, `snapshot build for ${sessionId}`);
+			this.reportError(error, `snapshot build for ${sessionId}`);
 			return this.terminalRun(sessionId, 'failed_to_start', 'snapshot_failed', () => {
 				this.counters.failed++;
 			});
@@ -304,8 +308,17 @@ export class InMemoryPostSessionPipeline implements PostSessionPipeline {
 			try {
 				listener(report);
 			} catch (error) {
-				this.onError(error, 'onProcessed listener');
+				this.reportError(error, 'onProcessed listener');
 			}
+		}
+	}
+
+	/** Hand an error to the host's sink; a sink that throws cannot break dispatch or a report. */
+	private reportError(error: unknown, where: string): void {
+		try {
+			this.onError(error, where);
+		} catch {
+			// The sink is the last resort: there is nowhere left to report its own failure.
 		}
 	}
 
@@ -360,8 +373,7 @@ export class InMemoryPostSessionPipeline implements PostSessionPipeline {
 				};
 			}
 			const settled = await Promise.race([
-				p
-					.run(ctx)
+				invokeRun(p, ctx)
 					.then((detail) => ({ ok: true as const, detail: detail ?? undefined }))
 					.catch((error) => ({ ok: false as const, error: error as Error })),
 				deadline,
@@ -412,6 +424,22 @@ export class InMemoryPostSessionPipeline implements PostSessionPipeline {
 		};
 		this.emit(report);
 		return report;
+	}
+}
+
+/**
+ * Call `run()` so that a synchronous throw becomes a rejection and a non-promise return
+ * becomes a resolved value. A native promise is returned as is, so an async processor
+ * settles on exactly the ticks it always has.
+ */
+function invokeRun(
+	p: PostSessionProcessor,
+	ctx: PostSessionContext,
+): ReturnType<PostSessionProcessor['run']> {
+	try {
+		return Promise.resolve(p.run(ctx));
+	} catch (error) {
+		return Promise.reject(error);
 	}
 }
 
