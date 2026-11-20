@@ -1,5 +1,6 @@
 import type {
 	ConversationItem,
+	InputTextReceipt,
 	SubagentContextSnapshot,
 	SubagentTask,
 	ToolCall,
@@ -7,6 +8,11 @@ import type {
 } from '../types/conversation.js';
 import type { MemoryFact } from '../types/memory.js';
 import type { ReplayItem } from '../types/transport.js';
+
+/** A frozen copy of a receipt, so no caller can change an item's receipt after insertion. */
+function frozenReceipt(receipt: InputTextReceipt): InputTextReceipt {
+	return Object.freeze({ firstAt: receipt.firstAt, lastAt: receipt.lastAt });
+}
 
 /**
  * In-memory conversation timeline that tracks all messages, tool calls, and agent transfers.
@@ -47,8 +53,22 @@ export class ConversationContext {
 		return Math.ceil(total);
 	}
 
-	addUserMessage(content: string): void {
-		this._items.push({ role: 'user', content, timestamp: Date.now() });
+	/**
+	 * Append a finalized user message.
+	 *
+	 * @param options.inputTextReceived When the message's input text arrived, for text from
+	 *        speech (see {@link InputTextReceipt}). Stored as a frozen copy of the two numbers,
+	 *        as given. Without it the item has exactly its old keys.
+	 */
+	addUserMessage(
+		content: string,
+		options?: { readonly inputTextReceived?: InputTextReceipt },
+	): void {
+		const item: ConversationItem = { role: 'user', content, timestamp: Date.now() };
+		if (options?.inputTextReceived) {
+			item.inputTextReceived = frozenReceipt(options.inputTextReceived);
+		}
+		this._items.push(item);
 	}
 
 	/**
@@ -61,11 +81,25 @@ export class ConversationContext {
 	 * provisional text, so a persisted record is written once, already correct.
 	 * `toReplayContent()` is unaffected and always reads the current best text.
 	 *
+	 * @param options.inputTextReceived As for `addUserMessage`: stored now, as a frozen
+	 *        copy, and never changed by `sealUserMessage`.
 	 * @returns The id to pass to `sealUserMessage`.
 	 */
-	reserveUserMessage(provisionalContent: string): string {
+	reserveUserMessage(
+		provisionalContent: string,
+		options?: { readonly inputTextReceived?: InputTextReceipt },
+	): string {
 		const id = `u${this.nextReservationId++}`;
-		this._items.push({ role: 'user', content: provisionalContent, timestamp: Date.now(), id });
+		const item: ConversationItem = {
+			role: 'user',
+			content: provisionalContent,
+			timestamp: Date.now(),
+			id,
+		};
+		if (options?.inputTextReceived) {
+			item.inputTextReceived = frozenReceipt(options.inputTextReceived);
+		}
+		this._items.push(item);
 		this.pendingIds.add(id);
 		return id;
 	}

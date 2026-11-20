@@ -17,6 +17,7 @@ export type { AudioFormat, ClientMessage } from './audio.js';
 export type {
 	ConversationItem,
 	ConversationItemRole,
+	InputTextReceipt,
 	SubagentContextSnapshot,
 	SubagentResult,
 	SubagentTask,

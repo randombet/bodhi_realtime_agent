@@ -1187,6 +1187,48 @@ describe('VoiceSession', () => {
 	// =========================================================================
 
 	describe('transcript buffering', () => {
+		it('a user item from speech carries when its input text arrived; other items do not', async () => {
+			session = new VoiceSession({
+				sessionId: 'sess_receipt',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createEchoAgent()],
+				initialAgent: 'echo',
+				model: mockModel,
+				clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			});
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+			const before = Date.now();
+			fire({ serverContent: { inputTranscription: { text: 'search the ' } } });
+			await new Promise((r) => setTimeout(r, 30));
+			fire({ serverContent: { inputTranscription: { text: 'weather' } } });
+			fire({ serverContent: { outputTranscription: { text: 'It is sunny.' } } });
+			fire({ serverContent: { turnComplete: true } });
+			await new Promise((r) => setTimeout(r, 50));
+			await session.injectTranscript('typed by the host');
+
+			const items = session.conversationContext.items;
+			expect(items.map((i) => [i.role, i.content])).toEqual([
+				['user', 'search the weather'],
+				['assistant', 'It is sunny.'],
+				['user', 'typed by the host'],
+			]);
+			const [spoken, assistant, typed] = items;
+			const receipt = spoken.inputTextReceived;
+			expect(receipt).toBeDefined();
+			if (!receipt) return;
+			expect(receipt.firstAt).toBeGreaterThanOrEqual(before);
+			expect(receipt.lastAt - receipt.firstAt).toBeGreaterThanOrEqual(20);
+			expect(receipt.lastAt).toBeLessThanOrEqual(spoken.timestamp);
+			expect('inputTextReceived' in assistant).toBe(false);
+			expect('inputTextReceived' in typed).toBe(false);
+		});
+
 		it('accumulates input transcription chunks and sends partial updates to client', async () => {
 			session = new VoiceSession({
 				sessionId: 'sess_1',
@@ -3627,6 +3669,56 @@ describe('VoiceSession', () => {
 				.map((i) => i.content);
 			expect(userItems).toEqual(['Uh, what time is it?']);
 			expect(session.conversationContext.hasPendingUserMessages).toBe(false);
+		});
+
+		it('a reserved user message carries when its input text arrived; sealing it keeps that', async () => {
+			const stt = createMockSTTProvider();
+			session = new VoiceSession({
+				sessionId: 'sess_stt_receipt',
+				userId: 'user_1',
+				apiKey: 'test-key',
+				agents: [createToolAgent()],
+				initialAgent: 'tool-agent',
+				model: mockModel,
+				sttProvider: stt,
+				orchestrationMode: 'actor',
+				clientSender: { sendAudio: vi.fn(), sendJson: vi.fn() },
+			});
+
+			await session.start();
+			await new Promise((r) => setTimeout(r, 50));
+
+			const { _getMessageHandler } = await import('@google/genai');
+			const fire = (_getMessageHandler as unknown as () => (msg: unknown) => void)();
+
+			const before = Date.now();
+			fire({ serverContent: { inputTranscription: { text: 'What time ' } } });
+			await new Promise((r) => setTimeout(r, 30));
+			fire({ serverContent: { inputTranscription: { text: 'is it?' } } });
+			fire({
+				toolCall: {
+					functionCalls: [{ id: 'tc_1', name: 'get_weather', args: { city: 'SF' } }],
+				},
+			});
+			await new Promise((r) => setTimeout(r, 50));
+
+			// Reserved while only the transport's own transcription had arrived.
+			const reserved = session.conversationContext.items.find((i) => i.role === 'user');
+			expect(reserved?.id).toBeDefined();
+			const receipt = reserved?.inputTextReceived;
+			expect(receipt).toBeDefined();
+			if (!reserved || !receipt) return;
+			expect(receipt.firstAt).toBeGreaterThanOrEqual(before);
+			expect(receipt.lastAt - receipt.firstAt).toBeGreaterThanOrEqual(20);
+			expect(receipt.lastAt).toBeLessThanOrEqual(reserved.timestamp);
+
+			stt.onTranscript?.('Uh, what time is it?', 0);
+			fire({ serverContent: { outputTranscription: { text: 'It is sunny.' } } });
+			fire({ serverContent: { turnComplete: true } });
+			await new Promise((r) => setTimeout(r, 100));
+
+			expect(reserved.content).toBe('Uh, what time is it?');
+			expect(reserved.inputTextReceived).toBe(receipt);
 		});
 
 		it('skips Gemini transcript correction on interrupted turns', async () => {

@@ -627,6 +627,54 @@ starts one more attempt and is acknowledged with `voice.retryUpstream.ack`
 this command itself; it does not reach `onClientCommand`. While active
 silence owns a recovery, the ladder and the health tick stand down.
 
+## When a spoken user line arrived
+
+A user item's `timestamp` is when it was committed, which is usually when the
+model's turn completed or a tool call arrived, well after the user stopped
+talking. A user item that came from speech also carries
+`inputTextReceived: { firstAt, lastAt }`: when bodhi received the first and the
+last piece of input transcription text that went into it.
+
+```ts
+for (const item of session.conversationContext.items) {
+  const received = item.inputTextReceived;
+  if (item.role !== 'user' || !received) continue;
+  // Text arrives after the speech, so widen the window backwards by your
+  // provider's transcription delay before matching it to other evidence.
+  const window = { from: received.firstAt - transcriptionDelayMs, to: received.lastAt };
+}
+```
+
+- **Receipt times, not speech times.** These are when the text arrived. They
+  run late by the provider's transcription delay and are never earlier than the
+  audio they transcribe. A batch or streaming STT final makes `firstAt` and
+  `lastAt` about equal: the time the final arrived. The `speech.user_started`
+  and `speech.user_ended` events remain the voice-activity facts.
+- **Clock.** Both are `Date.now()` milliseconds, the clock of `timestamp`, and
+  never `nowMs`. The `atMs` of the `speech.user_*` events is on `nowMs`, so do
+  not compare the two when you inject `nowMs`.
+- **What counts.** Every fragment the transcript manager accepts into the
+  utterance: the transport's own input transcription and an external STT
+  transcript, but not streaming partials, blank fragments, or text that arrives
+  after the turn's input is locked. When an external STT transcript replaces the
+  transport's text for the same utterance, `firstAt` stays the earlier time.
+  The display-only text of an interrupted turn counts only when that text is
+  what gets committed. When a new STT turn id ends an utterance, the fragment
+  that ends it belongs to the next one.
+- **Set once.** The field is set when the item is inserted. A reserved item
+  that a late external transcript seals keeps it unchanged: only text received
+  before the commit or reservation counts.
+- **Where it is absent.** Typed text, `injectTranscript`, file uploads, every
+  other role, items from older versions, and loaded items whose store did not
+  keep it.
+- **Invariants.** `firstAt` ≤ `lastAt` ≤ `timestamp`, unless the wall clock
+  steps. It is two plain numbers and no other payload. It is never
+  replayed to the model, and history stores that persist whole items persist it
+  too.
+- **Not guaranteed:** that the field is present, a monotonic clock,
+  speech-level accuracy, or one sentence per item. Without STT turn ids, one
+  item can hold several utterances.
+
 ## Resetting the conversation context
 
 `resetConversationContext(reason)` starts the in-memory conversation over

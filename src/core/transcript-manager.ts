@@ -1,4 +1,5 @@
 import type { CoreServerToClientMessage } from '../types/client-protocol.js';
+import type { InputTextReceipt } from '../types/conversation.js';
 
 /** Callbacks fired by TranscriptManager when transcript state changes. */
 export interface TranscriptSink {
@@ -7,14 +8,17 @@ export interface TranscriptSink {
 	 *  `(msg: Record<string, unknown>) => void`: every frame sent is a core
 	 *  frame that is also a plain JSON object, so both shapes are accepted. */
 	sendToClient(msg: CoreServerToClientMessage & Record<string, unknown>): void;
-	/** Record a finalized user message in conversation context. */
-	addUserMessage(text: string): void;
+	/** Record a finalized user message in conversation context. `inputTextReceived` is
+	 *  when the input text that went into it arrived (see `InputTextReceipt`); a sink
+	 *  written against the one-argument form may ignore it. */
+	addUserMessage(text: string, inputTextReceived?: InputTextReceipt): void;
 	/** Record a finalized assistant message in conversation context. */
 	addAssistantMessage(text: string): void;
 	/** Hold an ordered slot for a user message whose authoritative transcript is
 	 *  still in flight; returns the id to seal it with. Optional — sinks without
-	 *  it always get plain `addUserMessage`. */
-	reserveUserMessage?(text: string): string;
+	 *  it always get plain `addUserMessage`. `inputTextReceived` is as for
+	 *  `addUserMessage`; sealing the slot never changes it. */
+	reserveUserMessage?(text: string, inputTextReceived?: InputTextReceipt): string;
 	/** Resolve a reserved slot, replacing its text when `text` is non-empty. */
 	sealUserMessage?(id: string, text?: string): boolean;
 }
@@ -69,6 +73,12 @@ export class TranscriptManager {
 	 *  prior one can be finalized instead of concatenated. `undefined` for
 	 *  id-less providers, which keep the plain-append behavior. */
 	private inputTurnId: number | undefined;
+	/** `Date.now()` receipt times of the first and last fragment `handleInput` or
+	 *  `correctInput` accepted into the current utterance. Cleared with `inputBuffer`. */
+	private inputReceived: InputTextReceipt | undefined;
+	/** The same for the display-only deltas in `interruptedInputDisplay`; used only
+	 *  when that display text is what `finalizeInterruptedInputPartial` commits. */
+	private displayReceived: InputTextReceipt | undefined;
 
 	/**
 	 * Optional callback fired when user input is finalized (committed as a non-partial message).
@@ -98,7 +108,7 @@ export class TranscriptManager {
 	 * authoritative transcript is still in flight (see
 	 * `TranscriptManagerOptions.expectsAuthoritativeInput`).
 	 */
-	private commitUserText(text: string): void {
+	private commitUserText(text: string, received: InputTextReceipt | undefined): void {
 		const turnId = this.options.currentTurnId?.();
 		if (
 			!this.inputAuthoritative &&
@@ -106,11 +116,20 @@ export class TranscriptManager {
 			turnId !== undefined &&
 			this.sink.reserveUserMessage
 		) {
-			this.pendingReservations.set(turnId, this.sink.reserveUserMessage(text));
+			const id = received
+				? this.sink.reserveUserMessage(text, received)
+				: this.sink.reserveUserMessage(text);
+			this.pendingReservations.set(turnId, id);
 			this.onInputReserved?.(turnId);
 			return;
 		}
-		this.sink.addUserMessage(text);
+		if (received) this.sink.addUserMessage(text, received);
+		else this.sink.addUserMessage(text);
+	}
+
+	/** Note that a fragment of the current utterance's input text arrived now. */
+	private noteInputReceived(at: number): void {
+		this.inputReceived = { firstAt: this.inputReceived?.firstAt ?? at, lastAt: at };
 	}
 
 	/**
@@ -178,6 +197,8 @@ export class TranscriptManager {
 	showInterruptedInputPartial(textDelta: string): void {
 		if (this.inputFinalizedThisTurn) return;
 		if (!textDelta.trim()) return;
+		const at = Date.now();
+		this.displayReceived = { firstAt: this.displayReceived?.firstAt ?? at, lastAt: at };
 		this.interruptedInputDisplay += textDelta;
 		this.sink.sendToClient({
 			type: 'transcript',
@@ -207,6 +228,7 @@ export class TranscriptManager {
 		if (!textDelta.trim()) return;
 		if (this.inputFinalizedThisTurn) return;
 		if (this.inputAuthoritative) return;
+		this.noteInputReceived(Date.now());
 		this.correctionBuffer += textDelta;
 		this.inputBuffer = this.correctionBuffer;
 		this.inputFromCorrection = true;
@@ -234,6 +256,7 @@ export class TranscriptManager {
 	handleInput(text: string, turnId?: number): void {
 		if (this.inputFinalizedThisTurn) return;
 		if (!text.trim()) return;
+		const receivedAt = Date.now();
 
 		if (
 			turnId !== undefined &&
@@ -244,6 +267,8 @@ export class TranscriptManager {
 			this.commitInputUtterance();
 		}
 		if (turnId !== undefined) this.inputTurnId = turnId;
+		// After any commit above: this fragment belongs to the utterance it starts.
+		this.noteInputReceived(receivedAt);
 
 		// A batch transcript always carries the whole utterance and is
 		// authoritative, so it replaces provider-correction text rather than
@@ -274,13 +299,14 @@ export class TranscriptManager {
 	private commitInputUtterance(): void {
 		const text = this.inputBuffer.trim();
 		if (!text) return;
-		this.commitUserText(text);
+		this.commitUserText(text, this.inputReceived);
 		this.sink.sendToClient({ type: 'transcript', role: 'user', text, partial: false });
 		this.inputBuffer = '';
 		this.interruptedInputDisplay = '';
 		this.correctionBuffer = '';
 		this.inputFromCorrection = false;
 		this.inputAuthoritative = false;
+		this.clearInputReceived();
 		this.onInputFinalized?.(text);
 	}
 
@@ -296,9 +322,10 @@ export class TranscriptManager {
 	 */
 	finalizeInterruptedInputPartial(): boolean {
 		if (this.inputFinalizedThisTurn) return false;
-		const text = this.inputBuffer.trim() || this.interruptedInputDisplay.trim();
+		const buffered = this.inputBuffer.trim();
+		const text = buffered || this.interruptedInputDisplay.trim();
 		if (!text) return false;
-		this.commitUserText(text);
+		this.commitUserText(text, buffered ? this.inputReceived : this.displayReceived);
 		this.sink.sendToClient({
 			type: 'transcript',
 			role: 'user',
@@ -312,6 +339,7 @@ export class TranscriptManager {
 		this.inputFromCorrection = false;
 		this.inputAuthoritative = false;
 		this.inputTurnId = undefined;
+		this.clearInputReceived();
 		this.inputFinalizedThisTurn = true;
 		this.onInputFinalized?.(text);
 		return true;
@@ -350,7 +378,7 @@ export class TranscriptManager {
 	flushInput(): void {
 		if (this.inputBuffer.trim()) {
 			const text = this.inputBuffer.trim();
-			this.commitUserText(text);
+			this.commitUserText(text, this.inputReceived);
 			this.sink.sendToClient({
 				type: 'transcript',
 				role: 'user',
@@ -366,6 +394,7 @@ export class TranscriptManager {
 		this.inputFromCorrection = false;
 		this.inputAuthoritative = false;
 		this.inputTurnId = undefined;
+		this.clearInputReceived();
 	}
 
 	/** Flush all transcript buffers — finalize user and assistant messages. */
@@ -373,7 +402,7 @@ export class TranscriptManager {
 		this.onBeforeFlush?.();
 		if (!this.inputFinalizedThisTurn && this.inputBuffer.trim()) {
 			const text = this.inputBuffer.trim();
-			this.commitUserText(text);
+			this.commitUserText(text, this.inputReceived);
 			this.sink.sendToClient({
 				type: 'transcript',
 				role: 'user',
@@ -401,6 +430,13 @@ export class TranscriptManager {
 		this.inputFromCorrection = false;
 		this.inputAuthoritative = false;
 		this.inputTurnId = undefined;
+		this.clearInputReceived();
+	}
+
+	/** Forget the receipt times, wherever the input buffer and the display text are cleared. */
+	private clearInputReceived(): void {
+		this.inputReceived = undefined;
+		this.displayReceived = undefined;
 	}
 
 	/**

@@ -379,4 +379,55 @@ describe('ConversationContext', () => {
 			expect(ctx.items.map((i) => i.content)).toEqual(['authoritative']);
 		});
 	});
+
+	describe('inputTextReceived', () => {
+		it('is absent unless given: items keep exactly their old keys', () => {
+			const ctx = new ConversationContext();
+			ctx.addUserMessage('typed');
+			const id = ctx.reserveUserMessage('provisional');
+
+			expect(Object.keys(ctx.items[0])).toEqual(['role', 'content', 'timestamp']);
+			expect(Object.keys(ctx.items[1])).toEqual(['role', 'content', 'timestamp', 'id']);
+			expect(ctx.items[1].id).toBe(id);
+		});
+
+		it('addUserMessage stores a frozen copy of the receipt', () => {
+			const ctx = new ConversationContext();
+			const receipt = { firstAt: 1_000, lastAt: 1_500 };
+			ctx.addUserMessage('spoken', { inputTextReceived: receipt });
+
+			const stored = ctx.items[0].inputTextReceived;
+			expect(stored).toEqual({ firstAt: 1_000, lastAt: 1_500 });
+			expect(stored).not.toBe(receipt);
+			expect(Object.isFrozen(stored)).toBe(true);
+			receipt.firstAt = 0;
+			expect(ctx.items[0].inputTextReceived).toEqual({ firstAt: 1_000, lastAt: 1_500 });
+			expect(JSON.parse(JSON.stringify(ctx.items[0])).inputTextReceived).toEqual({
+				firstAt: 1_000,
+				lastAt: 1_500,
+			});
+		});
+
+		it('a reserved message keeps its receipt when sealed', () => {
+			const ctx = new ConversationContext();
+			const id = ctx.reserveUserMessage('draft', {
+				inputTextReceived: { firstAt: 1_000, lastAt: 1_100 },
+			});
+			const before = ctx.items[0].inputTextReceived;
+
+			expect(ctx.sealUserMessage(id, 'Final text.')).toBe(true);
+			expect(ctx.items[0].content).toBe('Final text.');
+			expect(ctx.items[0].inputTextReceived).toBe(before);
+			expect(ctx.items[0].inputTextReceived).toEqual({ firstAt: 1_000, lastAt: 1_100 });
+		});
+
+		it('is never replayed to the model', () => {
+			const withReceipt = new ConversationContext();
+			withReceipt.addUserMessage('same', { inputTextReceived: { firstAt: 1, lastAt: 2 } });
+			const without = new ConversationContext();
+			without.addUserMessage('same');
+
+			expect(withReceipt.toReplayContent()).toEqual(without.toReplayContent());
+		});
+	});
 });

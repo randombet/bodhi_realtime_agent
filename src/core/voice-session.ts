@@ -1099,9 +1099,12 @@ export class VoiceSession {
 		this.transcriptManager = new TranscriptManager(
 			{
 				sendToClient: (msg) => this.clientTransport.sendJsonToClient(msg),
-				addUserMessage: (text) => this.conversationContext.addUserMessage(text),
+				// Speech-derived user text carries when its input text arrived.
+				addUserMessage: (text, inputTextReceived) =>
+					this.conversationContext.addUserMessage(text, { inputTextReceived }),
 				addAssistantMessage: (text) => this.conversationContext.addAssistantMessage(text),
-				reserveUserMessage: (text) => this.conversationContext.reserveUserMessage(text),
+				reserveUserMessage: (text, inputTextReceived) =>
+					this.conversationContext.reserveUserMessage(text, { inputTextReceived }),
 				sealUserMessage: (id, text) => this.conversationContext.sealUserMessage(id, text),
 			},
 			{

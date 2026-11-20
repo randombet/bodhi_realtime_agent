@@ -1,10 +1,11 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TranscriptManager } from '../../src/core/transcript-manager.js';
 import type { TranscriptSink } from '../../src/core/transcript-manager.js';
 import type {
 	CoreServerToClientMessage,
 	TranscriptMessage,
 } from '../../src/types/client-protocol.js';
+import type { InputTextReceipt } from '../../src/types/conversation.js';
 
 function createSink(): TranscriptSink & {
 	messages: TranscriptMessage[];
@@ -713,6 +714,208 @@ describe('TranscriptManager', () => {
 			mgr.showInterruptedInputPartial('promote me');
 			mgr.finalizeInterruptedInputPartial();
 			expect(finalized).toEqual(['promote me']);
+		});
+	});
+
+	describe('inputTextReceived (receipt times of the input text)', () => {
+		type Committed = {
+			kind: 'add' | 'reserve';
+			text: string;
+			receipt: InputTextReceipt | undefined;
+		};
+
+		/** A sink that records each committed or reserved user message with its receipt. */
+		function createReceiptSink(): TranscriptSink & {
+			committed: Committed[];
+			sealUserMessage: ReturnType<typeof vi.fn>;
+		} {
+			const committed: Committed[] = [];
+			return {
+				committed,
+				sendToClient: () => {},
+				addUserMessage: (text: string, receipt?: InputTextReceipt) =>
+					void committed.push({ kind: 'add', text, receipt }),
+				addAssistantMessage: () => {},
+				reserveUserMessage: (text: string, receipt?: InputTextReceipt) => {
+					committed.push({ kind: 'reserve', text, receipt });
+					return `r${committed.length}`;
+				},
+				sealUserMessage: vi.fn(() => true),
+			};
+		}
+
+		/** Move the wall clock (Date.now) to `ms`; timers stay real. */
+		function at(ms: number): void {
+			vi.setSystemTime(ms);
+		}
+
+		beforeEach(() => {
+			vi.useFakeTimers({ toFake: ['Date'] });
+		});
+
+		afterEach(() => {
+			vi.useRealTimers();
+		});
+
+		it('stamps the first and the last accepted fragment of an utterance, on the Date.now clock', () => {
+			const sink = createReceiptSink();
+			const mgr = new TranscriptManager(sink);
+
+			at(1_000);
+			mgr.handleInput('hello ');
+			at(1_500);
+			mgr.handleInput('world');
+			at(2_000);
+			mgr.flush();
+
+			expect(sink.committed).toEqual([
+				{ kind: 'add', text: 'hello world', receipt: { firstAt: 1_000, lastAt: 1_500 } },
+			]);
+		});
+
+		it('ignores fragments it drops: partials, blank text, and input after the turn is locked', () => {
+			const sink = createReceiptSink();
+			const mgr = new TranscriptManager(sink);
+
+			at(900);
+			mgr.handleInputPartial('a streaming partial');
+			at(950);
+			mgr.handleInput('   ');
+			mgr.correctInput('  ');
+			at(1_000);
+			mgr.handleInput('first');
+			at(1_100);
+			mgr.flushInput(); // a tool call locks the turn's input
+			at(1_200);
+			mgr.handleInput('dropped after the lock');
+			mgr.correctInput('also dropped');
+			at(1_300);
+			mgr.flush();
+			at(2_000);
+			mgr.handleInput('second');
+			at(2_100);
+			mgr.flush();
+
+			expect(sink.committed).toEqual([
+				{ kind: 'add', text: 'first', receipt: { firstAt: 1_000, lastAt: 1_000 } },
+				{ kind: 'add', text: 'second', receipt: { firstAt: 2_000, lastAt: 2_000 } },
+			]);
+		});
+
+		it('counts provider corrections; the authoritative text that replaces them keeps the first time', () => {
+			const sink = createReceiptSink();
+			const mgr = new TranscriptManager(sink);
+
+			at(1_000);
+			mgr.correctInput('hel');
+			at(1_100);
+			mgr.correctInput('lo');
+			at(1_500);
+			mgr.handleInput('Hello.');
+			at(1_600);
+			mgr.correctInput(' ignored once the authoritative text landed');
+			at(2_000);
+			mgr.flush();
+
+			expect(sink.committed).toEqual([
+				{ kind: 'add', text: 'Hello.', receipt: { firstAt: 1_000, lastAt: 1_500 } },
+			]);
+		});
+
+		it('a new STT turn id: the fragment that ends the previous utterance belongs to the next one', () => {
+			const sink = createReceiptSink();
+			const mgr = new TranscriptManager(sink);
+
+			at(1_000);
+			mgr.handleInput('one', 1);
+			at(1_100);
+			mgr.handleInput(' more', 1);
+			at(1_200);
+			mgr.handleInput('two', 2);
+			at(1_300);
+			mgr.flush();
+
+			expect(sink.committed).toEqual([
+				{ kind: 'add', text: 'one more', receipt: { firstAt: 1_000, lastAt: 1_100 } },
+				{ kind: 'add', text: 'two', receipt: { firstAt: 1_200, lastAt: 1_200 } },
+			]);
+		});
+
+		it('display-only deltas count only when their text is the text committed', () => {
+			const sink = createReceiptSink();
+			const mgr = new TranscriptManager(sink);
+
+			// Superseded: the authoritative transcript is committed, so only it counts.
+			at(1_000);
+			mgr.showInterruptedInputPartial('hi');
+			at(1_500);
+			mgr.handleInput('Hi there');
+			at(1_600);
+			mgr.flush();
+
+			// Not committed: flush() never commits display text, and resets its times.
+			at(2_000);
+			mgr.showInterruptedInputPartial('never committed');
+			at(2_100);
+			mgr.flush();
+
+			// Committed: a replayed turn promotes the display text itself.
+			at(3_000);
+			mgr.showInterruptedInputPartial('hel');
+			at(3_100);
+			mgr.showInterruptedInputPartial('lo');
+			at(3_200);
+			expect(mgr.finalizeInterruptedInputPartial()).toBe(true);
+			mgr.flush();
+
+			// A replayed turn with buffered input commits the buffer, with its own times.
+			at(4_000);
+			mgr.showInterruptedInputPartial('display');
+			at(4_100);
+			mgr.handleInput('buffered');
+			at(4_200);
+			expect(mgr.finalizeInterruptedInputPartial()).toBe(true);
+
+			expect(sink.committed).toEqual([
+				{ kind: 'add', text: 'Hi there', receipt: { firstAt: 1_500, lastAt: 1_500 } },
+				{ kind: 'add', text: 'hello', receipt: { firstAt: 3_000, lastAt: 3_100 } },
+				{ kind: 'add', text: 'buffered', receipt: { firstAt: 4_100, lastAt: 4_100 } },
+			]);
+		});
+
+		it('a reservation carries the receipt; the late authoritative transcript does not change it', () => {
+			const sink = createReceiptSink();
+			const mgr = new TranscriptManager(sink, {
+				expectsAuthoritativeInput: true,
+				currentTurnId: () => 7,
+			});
+
+			at(1_000);
+			mgr.correctInput('draft');
+			at(1_100);
+			mgr.flush();
+			at(5_000);
+			expect(mgr.sealReservedInput(7, 'Final text.')).toBe(true);
+
+			expect(sink.committed).toEqual([
+				{ kind: 'reserve', text: 'draft', receipt: { firstAt: 1_000, lastAt: 1_000 } },
+			]);
+			expect(sink.sealUserMessage).toHaveBeenCalledWith('r1', 'Final text.');
+		});
+
+		it('a sink written against the one-argument signature still receives the text', () => {
+			const texts: string[] = [];
+			const legacySink: TranscriptSink = {
+				sendToClient: () => {},
+				addUserMessage: (text: string) => void texts.push(text),
+				addAssistantMessage: () => {},
+			};
+			const mgr = new TranscriptManager(legacySink);
+
+			mgr.handleInput('still works');
+			mgr.flush();
+
+			expect(texts).toEqual(['still works']);
 		});
 	});
 });
