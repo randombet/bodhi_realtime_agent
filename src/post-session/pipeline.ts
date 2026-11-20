@@ -7,6 +7,7 @@ import type {
 	PostSessionReport,
 	PostSessionResult,
 	PostSessionRun,
+	PostSessionSkip,
 	PostSessionSnapshot,
 	PostSessionStats,
 	PostSessionStores,
@@ -398,11 +399,22 @@ export class InMemoryPostSessionPipeline implements PostSessionPipeline {
 				const value = settled.detail;
 				if (isPostSessionSkip(value)) {
 					// A returned skip: report plain data, never the branded value.
+					const detail = skipDetail(value);
+					if (detail === undefined) {
+						return {
+							processor: p.name,
+							status: 'failed',
+							durationMs: Date.now() - t0,
+							error: new Error(
+								'run() returned a postSessionSkip() value that could not be inspected',
+							),
+						};
+					}
 					return {
 						processor: p.name,
 						status: 'skipped',
 						durationMs: Date.now() - t0,
-						detail: { ...value.detail, reason: 'run_skipped', skipReason: value.reason },
+						detail,
 					};
 				}
 				return {
@@ -458,6 +470,24 @@ function invokeRun(
 		return Promise.resolve(p.run(ctx));
 	} catch (error) {
 		return Promise.reject(error);
+	}
+}
+
+/**
+ * The plain `detail` of a skipped result: a copy of the skip's own `detail` keys, then
+ * bodhi's `reason` and `skipReason`. The branded value never enters the report.
+ *
+ * Never throws. A skip made by `postSessionSkip()` is frozen plain data, but `run()` can
+ * return a forged branded object, and its `detail` or `reason` getter, or a getter
+ * inside `detail`, can throw while bodhi copies it. A throw here would reject the
+ * processor's promise and so `run.report`. Then the answer is `undefined`, and the
+ * caller reports `failed` with an `Error` that holds no reference to the value.
+ */
+function skipDetail(skip: PostSessionSkip): Record<string, unknown> | undefined {
+	try {
+		return { ...skip.detail, reason: 'run_skipped', skipReason: skip.reason };
+	} catch {
+		return undefined;
 	}
 }
 

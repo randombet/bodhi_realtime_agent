@@ -1068,6 +1068,104 @@ describe('InMemoryPostSessionPipeline', () => {
 			expect(result(report, 'hostile-detail')?.detail).toBe(returned);
 		});
 
+		it('a returned skip whose reason or detail throws while bodhi copies it is failed with a causeless Error: the report resolves, onProcessed fires once, nothing rejects unhandled', async () => {
+			const unhandled: unknown[] = [];
+			const onUnhandled = (reason: unknown) => {
+				unhandled.push(reason);
+			};
+			process.on('unhandledRejection', onUnhandled);
+			try {
+				// Each value passes the skip check (the brand and a string `reason`), then throws
+				// when bodhi reads `detail`, reads `reason` again, or copies `detail`'s keys.
+				const detailGetter = {
+					[SKIP_BRAND]: true,
+					reason: 'opted out',
+					get detail() {
+						throw new Error('detail getter boom');
+					},
+				};
+				let reasonReads = 0;
+				const reasonGetter = {
+					[SKIP_BRAND]: true,
+					get reason() {
+						reasonReads++;
+						if (reasonReads > 1) throw new Error('reason getter boom');
+						return 'opted out';
+					},
+				};
+				const detailKeyGetter = {
+					[SKIP_BRAND]: true,
+					reason: 'opted out',
+					detail: {
+						get checked() {
+							throw new Error('detail key getter boom');
+						},
+					},
+				};
+				const emitted: PostSessionReport[] = [];
+				const p = new InMemoryPostSessionPipeline();
+				p.events.onProcessed((r) => emitted.push(r));
+				p.register(
+					new TestProcessor(
+						'detail-getter',
+						async () => detailGetter as unknown as PostSessionSkip,
+					),
+				);
+				p.register(
+					new TestProcessor(
+						'reason-getter',
+						async () => reasonGetter as unknown as PostSessionSkip,
+					),
+				);
+				p.register(
+					new TestProcessor(
+						'detail-key-getter',
+						async () => detailKeyGetter as unknown as PostSessionSkip,
+					),
+				);
+				p.register(new TestProcessor('dependent', async () => ({ ran: true }), ['detail-getter']));
+				p.register(new TestProcessor('ok', async () => ({ ran: true })));
+				p.freeze();
+				const report = await p.dispatch({
+					sessionId: 's',
+					reason: 'normal',
+					build: makeBuilder('s'),
+				}).report;
+
+				expect(report.outcome).toBe('accepted');
+				for (const name of ['detail-getter', 'reason-getter', 'detail-key-getter']) {
+					const r = result(report, name);
+					expect(r?.status).toBe('failed');
+					expect(r?.error).toBeInstanceOf(Error);
+					expect(r?.error?.message).toBe(
+						'run() returned a postSessionSkip() value that could not be inspected',
+					);
+					expect(r?.detail).toBeUndefined();
+					// No `cause`: a reference to the value would re-run its getters in every
+					// host that logs the error.
+					expect(Object.hasOwn(r?.error as Error, 'cause')).toBe(false);
+				}
+				expect(result(report, 'dependent')).toMatchObject({
+					status: 'skipped',
+					detail: { reason: 'dependency_failed', dependency: 'detail-getter' },
+				});
+				expect(result(report, 'ok')?.status).toBe('completed');
+
+				const reachable = reachableFrom(report);
+				for (const hostile of [detailGetter, reasonGetter, detailKeyGetter]) {
+					expect(reachable.has(hostile)).toBe(false);
+				}
+				expect(reachable.has(detailKeyGetter.detail)).toBe(false);
+				expect(emitted).toHaveLength(1);
+				expect(emitted[0]).toBe(report);
+				expect(p.stats()).toMatchObject({ running: 0, completed: 2, failed: 3 });
+				await new Promise((r) => setTimeout(r, 10));
+				expect(unhandled).toEqual([]);
+			} finally {
+				process.off('unhandledRejection', onUnhandled);
+			}
+		});
+
 		it('a thrown Error is reported as that same Error', async () => {
 			const thrown = new RangeError('out of range');
 			const p = new InMemoryPostSessionPipeline();

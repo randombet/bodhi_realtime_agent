@@ -799,6 +799,11 @@ async run(ctx: PostSessionContext) {
   itself never enters the report.
   A skip that settles after the run budget stays `failed` with
   `drain_timeout`.
+- A returned branded value that passes the skip check but throws while bodhi
+  copies its `reason` or `detail` (a forged value with a throwing getter;
+  `postSessionSkip()` returns frozen plain data) is `failed` with an `Error`
+  that says the returned skip could not be inspected, with no `cause`. The
+  report still resolves.
 - Dependents follow the usual rule: they report `skipped` with
   `dependency_failed`.
 - `postSessionSkip()` throws a `TypeError` for an empty or non-string reason,

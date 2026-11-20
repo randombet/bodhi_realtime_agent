@@ -134,7 +134,8 @@ export interface PostSessionResult {
 	 *   {@link postSessionSkip} value (`detail.skipReason` holds its reason).
 	 * - `failed`: `shouldRun_threw`; `drain_timeout` (the run budget expired or
 	 *   `drain()` cancelled the run while `run()` was pending); or no `detail`, with
-	 *   `error` set, when `run()` threw or rejected.
+	 *   `error` set, when `run()` threw or rejected, or returned a branded skip that
+	 *   bodhi could not copy (see `error`).
 	 *
 	 * `backpressure_optional_shed` is reserved and never produced: admission
 	 * decides per run, and no single processor is shed.
@@ -148,6 +149,12 @@ export interface PostSessionResult {
 	 * by an `Error` that says so and never enters the report. A thrown value that throws
 	 * while bodhi inspects it (a `Proxy` trap, or a getter on the skip brand or `reason`)
 	 * is replaced by an `Error` whose message says it could not be inspected, with no
+	 * `cause`, so the value never enters the report.
+	 *
+	 * Also set when `run()` returned a branded value that passes the skip check but
+	 * throws while bodhi copies it (a getter on `reason` or `detail`, or one inside
+	 * `detail`). Only a forged value can do that: {@link postSessionSkip} returns frozen
+	 * plain data. The `Error` says the returned skip could not be inspected and has no
 	 * `cause`, so the value never enters the report.
 	 */
 	readonly error?: Error;
