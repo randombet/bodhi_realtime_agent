@@ -4,18 +4,45 @@ import type {
 	ClientTransportCallbacks,
 	ClientTransportOptions,
 	ConnectionLifecycleEvent,
+	ConversationSnapshot,
 	EchoCheckResult,
 	EchoEnvEntry,
 	EchoGuardConfig,
 	GeminiLiveTranscribeLifecycleEvent,
 	GeminiLiveTranscribeSTTOptions,
 	GeminiLiveTranscribeSTTProviderConfig,
+	KnownSessionEndReason,
 	LiveUsageMetadata,
+	PostSessionCapabilities,
+	PostSessionContext,
+	PostSessionDispatchInput,
+	PostSessionEvents,
+	PostSessionPipeline,
+	PostSessionPipelineOptions,
+	PostSessionReport,
+	PostSessionResult,
+	PostSessionRun,
+	PostSessionSkip,
+	PostSessionSnapshot,
+	PostSessionSnapshotBuilder,
+	PostSessionStats,
+	PostSessionStores,
+	RunFailureReason,
+	RunOutcome,
+	SessionEndReason,
+	SessionMetricsSnapshot,
 	TransportDiagnostics,
 	TransportUsageMetadata,
 	UpstreamCounters,
 	UpstreamSlotCounters,
+	VoiceSessionConfig,
 	VoiceSessionDiagnostics,
+} from '../src/index.js';
+import {
+	InMemoryPostSessionPipeline,
+	PostSessionProcessor,
+	isPostSessionSkip,
+	postSessionSkip,
 } from '../src/index.js';
 
 describe('module smoke test', () => {
@@ -147,5 +174,150 @@ describe('module smoke test', () => {
 		};
 		const event: GeminiLiveTranscribeLifecycleEvent = { phase: 'setup-ok', connectionId: 1 };
 		expect([typeof config.credentialProvider, event.phase]).toEqual(['function', 'setup-ok']);
+	});
+
+	it('root-exports the post-session pipeline, the processor base and the post-session types; the default pipeline and built-in processors stay internal', async () => {
+		const mod = await import('../src/index.js');
+		expect(typeof mod.InMemoryPostSessionPipeline).toBe('function');
+		expect(typeof mod.PostSessionProcessor).toBe('function');
+		for (const internal of [
+			'createDefaultPostSessionPipeline',
+			'getDefaultPostSessionPipeline',
+			'MemoryDistillationProcessor',
+			'AnalyticsProcessor',
+		]) {
+			expect(internal in mod, internal).toBe(false);
+		}
+
+		// A host-style processor and pipeline, built only from root names. Type-level: fails
+		// typecheck:tests if any name stops resolving from the root.
+		class CountItems extends PostSessionProcessor {
+			readonly name = 'count-items';
+			override shouldRun(ctx: PostSessionContext): boolean {
+				return ctx.reason !== 'error';
+			}
+			async run(ctx: PostSessionContext): Promise<Record<string, unknown>> {
+				return { items: ctx.conversation.items.length, closed: ctx.signal.aborted };
+			}
+		}
+		const options: PostSessionPipelineOptions = { runBudgetMs: 5_000, maxConcurrentRuns: 4 };
+		const pipeline = new InMemoryPostSessionPipeline(options);
+		pipeline.register(new CountItems());
+		pipeline.freeze();
+		const asContract: PostSessionPipeline = pipeline;
+		const asConfig: VoiceSessionConfig['postSessionPipeline'] = pipeline;
+		const events: PostSessionEvents = asContract.events;
+		const processed: PostSessionReport[] = [];
+		const unsubscribe = events.onProcessed((r) => processed.push(r));
+
+		const known: KnownSessionEndReason = 'user_hangup';
+		const reason: SessionEndReason = 'host_defined_reason';
+		const conversation: ConversationSnapshot = { items: [] };
+		const metrics: SessionMetricsSnapshot = {
+			turnCount: 0,
+			toolCallCount: 0,
+			agentTransferCount: 0,
+		};
+		const stores: PostSessionStores = {};
+		const build: PostSessionSnapshotBuilder = (r) => {
+			const snapshot: PostSessionSnapshot = {
+				sessionId: 'sess_1',
+				userId: 'user_1',
+				initialAgentName: 'main',
+				finalAgentName: 'main',
+				transferPath: ['main'],
+				reason: r,
+				startedAt: 0,
+				endedAt: 1,
+				durationMs: 1,
+				metadata: { tenant: 'example' },
+				conversation,
+				metrics,
+			};
+			return { snapshot, stores };
+		};
+		const input: PostSessionDispatchInput = { sessionId: 'sess_1', reason, build };
+		const run: PostSessionRun = asContract.dispatch(input);
+		const report: PostSessionReport = await run.report;
+		const first: PostSessionResult | undefined = report.results[0];
+		const outcome: RunOutcome = report.outcome;
+		const stats: PostSessionStats = pipeline.stats();
+		unsubscribe();
+
+		expect([known, outcome, first?.status, first?.detail]).toEqual([
+			'user_hangup',
+			'accepted',
+			'completed',
+			{ items: 0, closed: false },
+		]);
+		expect(processed).toEqual([report]);
+		expect(asConfig).toBe(pipeline);
+		expect(stats.completed).toBe(1);
+
+		// Capabilities are the live half of the context; RunFailureReason is open to
+		// reasons a later release adds.
+		const capabilities: PostSessionCapabilities = {
+			stores,
+			signal: new AbortController().signal,
+		};
+		const futureReason: RunFailureReason = 'a_reason_added_later';
+		const knownReason: RunFailureReason = 'queue_overflow';
+		expect([capabilities.signal.aborted, futureReason, knownReason]).toEqual([
+			false,
+			'a_reason_added_later',
+			'queue_overflow',
+		]);
+	});
+
+	it('root-exports postSessionSkip, isPostSessionSkip and the PostSessionSkip type; the brand symbol stays internal', async () => {
+		const mod = await import('../src/index.js');
+		expect(typeof mod.postSessionSkip).toBe('function');
+		expect(typeof mod.isPostSessionSkip).toBe('function');
+		expect('POST_SESSION_SKIP' in mod).toBe(false);
+		// The pipeline's unguarded skip check is internal; hosts get the guarded one.
+		expect('isPostSessionSkipUnguarded' in mod).toBe(false);
+
+		class OptOutAware extends PostSessionProcessor {
+			readonly name = 'opt-out-aware';
+			async run(ctx: PostSessionContext): Promise<Record<string, unknown> | PostSessionSkip> {
+				if (ctx.metadata?.optedOut === true) return postSessionSkip('user opted out');
+				return { exported: true };
+			}
+		}
+		const pipeline = new InMemoryPostSessionPipeline();
+		pipeline.register(new OptOutAware());
+		pipeline.freeze();
+		const report = await pipeline.dispatch({
+			sessionId: 'sess_1',
+			reason: 'normal',
+			build: (reason) => ({
+				snapshot: {
+					sessionId: 'sess_1',
+					userId: 'user_1',
+					initialAgentName: 'main',
+					finalAgentName: 'main',
+					transferPath: ['main'],
+					reason,
+					startedAt: 0,
+					endedAt: 1,
+					durationMs: 1,
+					metadata: { optedOut: true },
+					conversation: { items: [] },
+					metrics: { turnCount: 0, toolCallCount: 0, agentTransferCount: 0 },
+				},
+				stores: {},
+			}),
+		}).report;
+		expect(report.results[0]).toMatchObject({
+			status: 'skipped',
+			detail: { reason: 'run_skipped', skipReason: 'user opted out' },
+		});
+
+		const skip: PostSessionSkip = postSessionSkip('consent lookup failed', { attempt: 1 });
+		expect(isPostSessionSkip(skip)).toBe(true);
+		// Type-level: only postSessionSkip() (or a deliberate cast) produces the branded type.
+		// @ts-expect-error a plain object lacks the brand
+		const plain: PostSessionSkip = { reason: 'consent lookup failed' };
+		expect(isPostSessionSkip(plain)).toBe(false);
 	});
 });

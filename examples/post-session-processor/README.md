@@ -36,6 +36,29 @@ between processors and assert ordering (a demo convenience; production would car
 data on a `PostSessionStores` capability). The `EmailProcessor` takes a `CapturingEmailSender`
 via its constructor (static config → reentrant).
 
+## Skipping from `run()`
+
+`shouldRun()` is a cheap synchronous gate. When the decision needs I/O, for example a
+consent lookup or an opt-out check, make it in `run()` and return
+`postSessionSkip(reason, detail?)` (exported from the package root):
+
+```ts
+import { postSessionSkip, type PostSessionContext } from 'bodhi-realtime-agent';
+
+async run(ctx: PostSessionContext) {
+	const optedOut = await preferences.isOptedOut(ctx.userId, { signal: ctx.signal });
+	if (optedOut) return postSessionSkip('user opted out');
+	await sender.send(/* ... */);
+	return { sent: true };
+}
+```
+
+The processor's result is then `status: 'skipped'` with
+`detail: { reason: 'run_skipped', skipReason: 'user opted out' }`, and its hard dependents
+skip with `dependency_failed`. A thrown value, a skip included, is still `failed`. Keep the
+reason short, with no credentials or personal data. See the "Post-session processing"
+section of [the VoiceSession guide](../../docs/guide/voice-session.md) for the full contract.
+
 ## `email-summary.ts`
 
 A focused example of the **`EmailSender`** capability: an `EmailSummaryProcessor` summarizes a

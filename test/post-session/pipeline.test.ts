@@ -3,11 +3,17 @@ import { InMemoryPostSessionPipeline } from '../../src/post-session/pipeline.js'
 import type {
 	PostSessionContext,
 	PostSessionReport,
+	PostSessionRun,
+	PostSessionSkip,
 	PostSessionSnapshot,
 	PostSessionSnapshotBuilder,
 	PostSessionStores,
 } from '../../src/post-session/types.js';
-import { PostSessionProcessor } from '../../src/post-session/types.js';
+import {
+	PostSessionProcessor,
+	isPostSessionSkip,
+	postSessionSkip,
+} from '../../src/post-session/types.js';
 
 function makeBuilder(
 	sessionId: string,
@@ -34,8 +40,8 @@ function makeBuilder(
 	};
 }
 
-// biome-ignore lint/suspicious/noConfusingVoidType: mirrors PostSessionProcessor.run — returns a detail object or nothing.
-type ProcRun = (ctx: PostSessionContext) => Promise<Record<string, unknown> | void>;
+/** Mirrors PostSessionProcessor.run: a detail object, a skip or nothing. */
+type ProcRun = (ctx: PostSessionContext) => ReturnType<PostSessionProcessor['run']>;
 
 /** Test processor with inline behavior. */
 class TestProcessor extends PostSessionProcessor {
@@ -59,6 +65,29 @@ class TestProcessor extends PostSessionProcessor {
 const result = (report: PostSessionReport | undefined, name: string) =>
 	report?.results.find((r) => r.processor === name);
 
+const SKIP_BRAND = Symbol.for('bodhi.post-session.skip');
+
+/** Every object reachable through own properties, enumerable or not (e.g. Error.cause). */
+function reachableFrom(root: unknown): Set<unknown> {
+	const seen = new Set<unknown>();
+	const walk = (value: unknown): void => {
+		if ((typeof value !== 'object' && typeof value !== 'function') || value === null) return;
+		if (seen.has(value)) return;
+		seen.add(value);
+		for (const key of Reflect.ownKeys(value)) {
+			const desc = Object.getOwnPropertyDescriptor(value, key);
+			if (desc && 'value' in desc) walk(desc.value);
+		}
+	};
+	walk(root);
+	return seen;
+}
+
+/** Every own property key of every object reachable from `root`. */
+function reachableKeys(root: unknown): PropertyKey[] {
+	return [...reachableFrom(root)].flatMap((o) => Reflect.ownKeys(o as object));
+}
+
 describe('InMemoryPostSessionPipeline', () => {
 	describe('freeze() validation', () => {
 		it('rejects duplicate names', () => {
@@ -79,6 +108,56 @@ describe('InMemoryPostSessionPipeline', () => {
 			p.register(new TestProcessor('a', async () => {}, ['b']));
 			p.register(new TestProcessor('b', async () => {}, ['a']));
 			expect(() => p.freeze()).toThrow(/cycle/);
+		});
+
+		it('keeps its error messages, and a cycle error names a processor on the cycle', () => {
+			const dup = new InMemoryPostSessionPipeline();
+			dup.register(new TestProcessor('dup', async () => {}));
+			dup.register(new TestProcessor('dup', async () => {}));
+			expect(() => dup.freeze()).toThrow('duplicate post-session processor name: dup');
+
+			const unknown = new InMemoryPostSessionPipeline();
+			unknown.register(new TestProcessor('a', async () => {}, ['ghost']));
+			expect(() => unknown.freeze()).toThrow(
+				'post-session processor "a" depends on unknown "ghost"',
+			);
+
+			const pair = new InMemoryPostSessionPipeline();
+			pair.register(new TestProcessor('a', async () => {}, ['b']));
+			pair.register(new TestProcessor('b', async () => {}, ['a']));
+			expect(() => pair.freeze()).toThrow('post-session dependency cycle at "a"');
+
+			const self = new InMemoryPostSessionPipeline();
+			self.register(new TestProcessor('ok', async () => {}));
+			self.register(new TestProcessor('self', async () => {}, ['self']));
+			expect(() => self.freeze()).toThrow('post-session dependency cycle at "self"');
+
+			// `entry` only leads into the cycle; the error names a member of it.
+			const tail = new InMemoryPostSessionPipeline();
+			tail.register(new TestProcessor('entry', async () => {}, ['x']));
+			tail.register(new TestProcessor('x', async () => {}, ['y']));
+			tail.register(new TestProcessor('y', async () => {}, ['x']));
+			expect(() => tail.freeze()).toThrow('post-session dependency cycle at "x"');
+
+			const required = new InMemoryPostSessionPipeline();
+			required.register(new TestProcessor('opt', async () => {}));
+			required.register(new TestProcessor('req', async () => {}, ['opt'], true));
+			expect(() => required.freeze()).toThrow(
+				'required processor "req" must not depend on optional "opt"',
+			);
+		});
+
+		it('a name listed twice in dependsOn is one prerequisite', async () => {
+			const p = new InMemoryPostSessionPipeline();
+			p.register(new TestProcessor('dependent', async () => {}, ['base', 'base']));
+			p.register(new TestProcessor('base', async () => {}));
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			expect(report.results.map((r) => [r.processor, r.status])).toEqual([
+				['base', 'completed'],
+				['dependent', 'completed'],
+			]);
 		});
 
 		it('rejects required-depends-on-optional', () => {
@@ -134,6 +213,47 @@ describe('InMemoryPostSessionPipeline', () => {
 			p.freeze();
 			await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') }).report;
 			expect(order).toEqual(['summary', 'analytics']);
+		});
+
+		it('orders prerequisites first and breaks ties by registration order (stable topological order)', async () => {
+			// `dependent` is registered first but needs `late`; `earlier` is registered before
+			// `late`. Among processors whose prerequisites are placed, the earliest registered
+			// goes next, so `earlier` precedes `late` even though `dependent` reaches `late`
+			// first.
+			const started: string[] = [];
+			const proc = (name: string, deps: readonly string[] = []) =>
+				new TestProcessor(
+					name,
+					async () => {
+						started.push(name);
+					},
+					deps,
+				);
+			const p = new InMemoryPostSessionPipeline();
+			p.register(proc('dependent', ['late']));
+			p.register(proc('earlier'));
+			p.register(proc('late'));
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			expect(report.results.map((r) => r.processor)).toEqual(['earlier', 'late', 'dependent']);
+			expect(started).toEqual(['earlier', 'late', 'dependent']);
+		});
+
+		it('ignores the order of names inside dependsOn and places a freed processor by its registration index', async () => {
+			// Registered: d (needs a, b), b, a, e (needs b), f.
+			// Ready at start: b, a, f → b; e is now ready, but a (index 2) precedes it; once a
+			// is placed d (index 0) is ready and goes next; then e, then f.
+			const p = new InMemoryPostSessionPipeline();
+			p.register(new TestProcessor('d', async () => {}, ['a', 'b']));
+			p.register(new TestProcessor('b', async () => {}));
+			p.register(new TestProcessor('a', async () => {}));
+			p.register(new TestProcessor('e', async () => {}, ['b']));
+			p.register(new TestProcessor('f', async () => {}));
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			expect(report.results.map((r) => r.processor)).toEqual(['b', 'a', 'd', 'e', 'f']);
 		});
 
 		it('isolates failures — a throwing processor does not abort siblings', async () => {
@@ -408,6 +528,797 @@ describe('InMemoryPostSessionPipeline', () => {
 			resolveHang();
 			const report = await run.report;
 			expect(result(report, 'hang')?.status).toBe('completed'); // finished cleanly, never drain_timeout
+		});
+	});
+
+	describe('public contract: robustness and characterization', () => {
+		it('reports exactly the shapes it always has for completed, failed, gated and dependency-skipped processors', async () => {
+			// Characterization: a pipeline that uses none of the newer features must report
+			// the same objects, keys and order as before the post-session API was exported.
+			const returned = { n: 1 };
+			const p = new InMemoryPostSessionPipeline();
+			p.register(new TestProcessor('done', async () => returned));
+			p.register(
+				new TestProcessor('boom', async () => {
+					throw new Error('boom');
+				}),
+			);
+			p.register(new TestProcessor('after-boom', async () => ({ never: true }), ['boom']));
+			p.register(
+				new TestProcessor(
+					'gated',
+					async () => {},
+					[],
+					false,
+					() => false,
+				),
+			);
+			p.register(new TestProcessor('empty', async () => {}));
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			expect(report).toStrictEqual({
+				sessionId: 's',
+				outcome: 'accepted',
+				results: [
+					{
+						processor: 'done',
+						status: 'completed',
+						durationMs: expect.any(Number),
+						detail: { n: 1 },
+					},
+					{
+						processor: 'boom',
+						status: 'failed',
+						durationMs: expect.any(Number),
+						error: expect.any(Error),
+					},
+					{
+						processor: 'after-boom',
+						status: 'skipped',
+						durationMs: 0,
+						detail: { reason: 'dependency_failed', dependency: 'boom' },
+					},
+					{
+						processor: 'gated',
+						status: 'skipped',
+						durationMs: 0,
+						detail: { reason: 'shouldRun_false' },
+					},
+					{
+						processor: 'empty',
+						status: 'completed',
+						durationMs: expect.any(Number),
+						detail: undefined,
+					},
+				],
+				totalDurationMs: expect.any(Number),
+			});
+			// The returned value is the detail itself, not a copy.
+			expect(result(report, 'done')?.detail).toBe(returned);
+			expect(p.stats()).toEqual({ queued: 0, running: 0, dropped: 0, completed: 4, failed: 1 });
+		});
+
+		it('a synchronous throw from run() is failed: the report resolves, onProcessed fires once, nothing rejects unhandled', async () => {
+			const unhandled: unknown[] = [];
+			const onUnhandled = (reason: unknown) => {
+				unhandled.push(reason);
+			};
+			process.on('unhandledRejection', onUnhandled);
+			try {
+				const emitted: PostSessionReport[] = [];
+				const p = new InMemoryPostSessionPipeline();
+				p.events.onProcessed((r) => emitted.push(r));
+				p.register(
+					new TestProcessor('sync-throw', () => {
+						throw new Error('sync boom');
+					}),
+				);
+				p.register(new TestProcessor('ok', async () => ({ ran: true })));
+				p.freeze();
+				const report = await p.dispatch({
+					sessionId: 's',
+					reason: 'normal',
+					build: makeBuilder('s'),
+				}).report;
+				expect(report.outcome).toBe('accepted');
+				expect(result(report, 'sync-throw')?.status).toBe('failed');
+				expect(result(report, 'sync-throw')?.error?.message).toBe('sync boom');
+				expect(result(report, 'ok')?.status).toBe('completed');
+				expect(emitted).toEqual([report]);
+				expect(p.stats()).toMatchObject({ running: 0, completed: 1, failed: 1 });
+				await new Promise((r) => setTimeout(r, 10));
+				expect(unhandled).toEqual([]);
+			} finally {
+				process.off('unhandledRejection', onUnhandled);
+			}
+		});
+
+		it('a run() that returns a plain value instead of a promise reports that value as its detail', async () => {
+			// A JavaScript host can skip `async`; the pipeline treats the value as resolved.
+			const p = new InMemoryPostSessionPipeline();
+			p.register(new TestProcessor('sync-value', (() => ({ sync: true })) as unknown as ProcRun));
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			expect(result(report, 'sync-value')?.status).toBe('completed');
+			expect(result(report, 'sync-value')?.detail).toEqual({ sync: true });
+		});
+
+		it('an onError that throws cannot reject the report or stop later listeners', async () => {
+			const p = new InMemoryPostSessionPipeline({
+				onError: () => {
+					throw new Error('error sink down');
+				},
+			});
+			const seen: string[] = [];
+			p.events.onProcessed(() => {
+				throw new Error('listener down');
+			});
+			p.events.onProcessed((r) => seen.push(r.outcome));
+			p.register(new TestProcessor('a', async () => {}));
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			expect(report.outcome).toBe('accepted');
+			expect(seen).toEqual(['accepted']);
+		});
+
+		it('an onError that throws cannot make dispatch() throw on the build or overflow paths', async () => {
+			const onError = () => {
+				throw new Error('error sink down');
+			};
+			const built = new InMemoryPostSessionPipeline({ onError });
+			built.register(new TestProcessor('a', async () => {}));
+			built.freeze();
+			let run!: PostSessionRun;
+			expect(() => {
+				run = built.dispatch({
+					sessionId: 's',
+					reason: 'normal',
+					build: makeBuilder('s', { throwOnBuild: true }),
+				});
+			}).not.toThrow();
+			expect((await run.report).failureReason).toBe('snapshot_failed');
+
+			const full = new InMemoryPostSessionPipeline({ onError, maxConcurrentRuns: 0 });
+			full.events.onProcessed(() => {
+				throw new Error('listener down');
+			});
+			full.register(new TestProcessor('a', async () => {}));
+			full.freeze();
+			let dropped!: PostSessionRun;
+			expect(() => {
+				dropped = full.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') });
+			}).not.toThrow();
+			expect((await dropped.report).failureReason).toBe('queue_overflow');
+		});
+
+		it('on budget expiry a running processor is failed (drain_timeout) and its waiting dependent is skipped (dependency_failed)', async () => {
+			let dependentRan = false;
+			const p = new InMemoryPostSessionPipeline({ runBudgetMs: 20 });
+			p.register(new TestProcessor('hang', () => new Promise<void>(() => {})));
+			p.register(
+				new TestProcessor(
+					'next',
+					async () => {
+						dependentRan = true;
+					},
+					['hang'],
+				),
+			);
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			expect(result(report, 'hang')).toMatchObject({
+				status: 'failed',
+				detail: { reason: 'drain_timeout' },
+			});
+			expect(result(report, 'next')).toMatchObject({
+				status: 'skipped',
+				detail: { reason: 'dependency_failed', dependency: 'hang' },
+			});
+			expect(dependentRan).toBe(false);
+		});
+
+		it('run.outcome is the admission decision; report.outcome is the final disposition', async () => {
+			const p = new InMemoryPostSessionPipeline({ maxConcurrentRuns: 0, requiredWaitMs: 10 });
+			p.register(new TestProcessor('needed', async () => {}, [], true));
+			p.freeze();
+			const run = p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') });
+			expect(run.outcome).toBe('accepted');
+			const report = await run.report;
+			expect(report.outcome).toBe('dropped');
+			expect(report.failureReason).toBe('required_capacity_timeout');
+		});
+	});
+
+	describe('skip from run() (postSessionSkip)', () => {
+		it('a returned skip reports skipped with run_skipped, the skip reason, the host detail and the real duration', async () => {
+			const emitted: PostSessionReport[] = [];
+			const p = new InMemoryPostSessionPipeline();
+			p.events.onProcessed((r) => emitted.push(r));
+			p.register(
+				new TestProcessor('opt-out', async () => {
+					await new Promise((r) => setTimeout(r, 15));
+					return postSessionSkip('user opted out', { checkedBy: 'consent lookup' });
+				}),
+			);
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			const skipped = result(report, 'opt-out');
+			expect(skipped).toStrictEqual({
+				processor: 'opt-out',
+				status: 'skipped',
+				durationMs: expect.any(Number),
+				detail: {
+					checkedBy: 'consent lookup',
+					reason: 'run_skipped',
+					skipReason: 'user opted out',
+				},
+			});
+			expect(skipped?.durationMs).toBeGreaterThanOrEqual(10);
+			expect(emitted).toEqual([report]);
+			// The report stays plain data: the branded value never enters it.
+			expect(Object.getOwnPropertySymbols(skipped?.detail ?? {})).toEqual([]);
+			expect(isPostSessionSkip(skipped?.detail)).toBe(false);
+			expect(JSON.parse(JSON.stringify(skipped))).toEqual(skipped);
+			expect(p.stats()).toMatchObject({ completed: 1, failed: 0 });
+		});
+
+		it('a skip without detail reports only reason and skipReason', async () => {
+			const p = new InMemoryPostSessionPipeline();
+			p.register(new TestProcessor('nothing-to-do', async () => postSessionSkip('nothing to do')));
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			expect(result(report, 'nothing-to-do')?.detail).toStrictEqual({
+				reason: 'run_skipped',
+				skipReason: 'nothing to do',
+			});
+		});
+
+		it("bodhi's reason and skipReason override host detail keys of the same name", async () => {
+			const p = new InMemoryPostSessionPipeline();
+			p.register(
+				new TestProcessor('lookup', async () =>
+					postSessionSkip('consent lookup failed', {
+						reason: 'host reason',
+						skipReason: 'host skip reason',
+						attempt: 2,
+					}),
+				),
+			);
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			expect(result(report, 'lookup')?.detail).toStrictEqual({
+				reason: 'run_skipped',
+				skipReason: 'consent lookup failed',
+				attempt: 2,
+			});
+		});
+
+		it('a mutation of the detail after postSessionSkip() cannot change the report', async () => {
+			const p = new InMemoryPostSessionPipeline();
+			p.register(
+				new TestProcessor('mutating', async () => {
+					const detail: Record<string, unknown> = { attempt: 1 };
+					const skip = postSessionSkip('user opted out', detail);
+					detail.attempt = 2;
+					detail.extra = true;
+					return skip;
+				}),
+			);
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			expect(result(report, 'mutating')?.detail).toStrictEqual({
+				attempt: 1,
+				reason: 'run_skipped',
+				skipReason: 'user opted out',
+			});
+		});
+
+		it('dependents of a skipped processor are skipped with dependency_failed', async () => {
+			let dependentRan = false;
+			const p = new InMemoryPostSessionPipeline();
+			p.register(new TestProcessor('opt-out', async () => postSessionSkip('user opted out')));
+			p.register(
+				new TestProcessor(
+					'after-opt-out',
+					async () => {
+						dependentRan = true;
+					},
+					['opt-out'],
+				),
+			);
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			expect(result(report, 'after-opt-out')).toMatchObject({
+				status: 'skipped',
+				detail: { reason: 'dependency_failed', dependency: 'opt-out' },
+			});
+			expect(dependentRan).toBe(false);
+		});
+
+		it('a thrown skip is failed with an Error, not skipped, and the skip never enters the report', async () => {
+			const thrown = postSessionSkip('user opted out', { checked: 'consent' });
+			const p = new InMemoryPostSessionPipeline();
+			p.register(
+				new TestProcessor('thrower', async () => {
+					throw thrown;
+				}),
+			);
+			p.register(
+				new TestProcessor('sync-thrower', () => {
+					throw thrown;
+				}),
+			);
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			for (const name of ['thrower', 'sync-thrower']) {
+				const r = result(report, name);
+				expect(r?.status).toBe('failed');
+				expect(r?.error).toBeInstanceOf(Error);
+				expect(r?.error?.message).toMatch(/postSessionSkip/);
+				expect(r?.detail).toBeUndefined();
+			}
+			// Neither the branded value nor its brand is reachable from the report, even
+			// through non-enumerable properties such as Error.cause.
+			expect(reachableFrom(report).has(thrown)).toBe(false);
+			expect(reachableKeys(report)).not.toContain(SKIP_BRAND);
+			expect(JSON.stringify(report)).not.toContain('consent');
+		});
+
+		it('a thrown non-Error value is failed with an Error that keeps the value as its cause', async () => {
+			const p = new InMemoryPostSessionPipeline();
+			p.register(
+				new TestProcessor('string-rejection', async () => {
+					throw 'boom';
+				}),
+			);
+			p.register(new TestProcessor('object-rejection', () => Promise.reject({ code: 42 })));
+			p.register(
+				new TestProcessor('null-prototype', async () => {
+					throw Object.create(null);
+				}),
+			);
+			p.register(
+				new TestProcessor(
+					'gate-throws-string',
+					async () => {},
+					[],
+					false,
+					() => {
+						throw 'gate boom';
+					},
+				),
+			);
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			const stringErr = result(report, 'string-rejection')?.error;
+			expect(result(report, 'string-rejection')?.status).toBe('failed');
+			expect(stringErr).toBeInstanceOf(Error);
+			expect(stringErr?.message).toMatch(/"boom"/);
+			expect(stringErr?.cause).toBe('boom');
+			const objectErr = result(report, 'object-rejection')?.error;
+			expect(result(report, 'object-rejection')?.status).toBe('failed');
+			expect(objectErr).toBeInstanceOf(Error);
+			expect(objectErr?.cause).toEqual({ code: 42 });
+			expect(result(report, 'null-prototype')?.status).toBe('failed');
+			expect(result(report, 'null-prototype')?.error).toBeInstanceOf(Error);
+			expect(result(report, 'gate-throws-string')).toMatchObject({
+				status: 'failed',
+				detail: { reason: 'shouldRun_threw' },
+			});
+			expect(result(report, 'gate-throws-string')?.error).toBeInstanceOf(Error);
+			expect(result(report, 'gate-throws-string')?.error?.cause).toBe('gate boom');
+		});
+
+		it('a thrown value that throws when inspected is failed with a causeless Error: the report resolves, onProcessed fires once, nothing rejects unhandled', async () => {
+			const unhandled: unknown[] = [];
+			const onUnhandled = (reason: unknown) => {
+				unhandled.push(reason);
+			};
+			process.on('unhandledRejection', onUnhandled);
+			try {
+				// `instanceof` asks a Proxy for its prototype; the skip check reads the brand
+				// and `reason`. Each of these values throws from one of those reads.
+				const hostileProxy = new Proxy(
+					{},
+					{
+						get() {
+							throw new Error('get trap boom');
+						},
+						getPrototypeOf() {
+							throw new Error('getPrototypeOf trap boom');
+						},
+					},
+				);
+				const brandGetter = {
+					get [SKIP_BRAND]() {
+						throw new Error('brand getter boom');
+					},
+				};
+				const reasonGetter = {
+					[SKIP_BRAND]: true,
+					get reason() {
+						throw new Error('reason getter boom');
+					},
+				};
+				const emitted: PostSessionReport[] = [];
+				const p = new InMemoryPostSessionPipeline();
+				p.events.onProcessed((r) => emitted.push(r));
+				p.register(
+					new TestProcessor('proxy-rejection', async () => {
+						throw hostileProxy;
+					}),
+				);
+				p.register(
+					new TestProcessor('proxy-sync-throw', () => {
+						throw hostileProxy;
+					}),
+				);
+				p.register(new TestProcessor('brand-getter', () => Promise.reject(brandGetter)));
+				p.register(new TestProcessor('reason-getter', () => Promise.reject(reasonGetter)));
+				p.register(
+					new TestProcessor(
+						'gate-throws-proxy',
+						async () => {},
+						[],
+						false,
+						() => {
+							throw hostileProxy;
+						},
+					),
+				);
+				p.register(new TestProcessor('ok', async () => ({ ran: true })));
+				p.freeze();
+				const report = await p.dispatch({
+					sessionId: 's',
+					reason: 'normal',
+					build: makeBuilder('s'),
+				}).report;
+
+				expect(report.outcome).toBe('accepted');
+				for (const name of [
+					'proxy-rejection',
+					'proxy-sync-throw',
+					'brand-getter',
+					'reason-getter',
+				]) {
+					const r = result(report, name);
+					expect(r?.status).toBe('failed');
+					expect(r?.error).toBeInstanceOf(Error);
+					expect(r?.error?.message).toBe('run() threw a value that could not be inspected');
+					expect(r?.detail).toBeUndefined();
+					// No `cause`: a reference to the value would re-run its traps or getters
+					// in every host that logs the error.
+					expect(Object.hasOwn(r?.error as Error, 'cause')).toBe(false);
+				}
+				const gate = result(report, 'gate-throws-proxy');
+				expect(gate).toMatchObject({ status: 'failed', detail: { reason: 'shouldRun_threw' } });
+				expect(gate?.error).toBeInstanceOf(Error);
+				expect(gate?.error?.message).toBe('shouldRun() threw a value that could not be inspected');
+				expect(Object.hasOwn(gate?.error as Error, 'cause')).toBe(false);
+				expect(result(report, 'ok')?.status).toBe('completed');
+
+				const reachable = reachableFrom(report);
+				for (const hostile of [hostileProxy, brandGetter, reasonGetter]) {
+					expect(reachable.has(hostile)).toBe(false);
+				}
+				expect(emitted).toHaveLength(1);
+				expect(emitted[0]).toBe(report);
+				expect(p.stats()).toMatchObject({ running: 0, completed: 1, failed: 5 });
+				await new Promise((r) => setTimeout(r, 10));
+				expect(unhandled).toEqual([]);
+			} finally {
+				process.off('unhandledRejection', onUnhandled);
+			}
+		});
+
+		it('the pending-report cleanup adds no rejection of its own when a report rejects', async () => {
+			// White-box: no processor can make a report reject any more, so drive the private
+			// tracker directly. A cleanup chained with finally() would reject unhandled here.
+			const unhandled: unknown[] = [];
+			const onUnhandled = (reason: unknown) => {
+				unhandled.push(reason);
+			};
+			process.on('unhandledRejection', onUnhandled);
+			try {
+				const p = new InMemoryPostSessionPipeline();
+				const internals = p as unknown as {
+					track(report: Promise<PostSessionReport>): Promise<PostSessionReport>;
+					pendingReports: Set<Promise<PostSessionReport>>;
+				};
+				const rejected = Promise.reject(new Error('report boom'));
+				const tracked = internals.track(rejected);
+				expect(tracked).toBe(rejected);
+				expect(internals.pendingReports.has(rejected)).toBe(true);
+				await expect(tracked).rejects.toThrow('report boom');
+				await new Promise((r) => setTimeout(r, 10));
+				expect(internals.pendingReports.size).toBe(0);
+				expect(unhandled).toEqual([]);
+			} finally {
+				process.off('unhandledRejection', onUnhandled);
+			}
+		});
+
+		it('a returned value whose skip check throws is not a skip: it is the detail of a completed result', async () => {
+			// bodhi reads nothing of a returned detail but the skip check, so a value whose
+			// brand getter throws is reported as is, like any other detail.
+			const returned = {
+				get [SKIP_BRAND]() {
+					throw new Error('brand getter boom');
+				},
+			};
+			const p = new InMemoryPostSessionPipeline();
+			p.register(
+				new TestProcessor('hostile-detail', async () => returned as Record<string, unknown>),
+			);
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			expect(result(report, 'hostile-detail')?.status).toBe('completed');
+			expect(result(report, 'hostile-detail')?.detail).toBe(returned);
+		});
+
+		it('a returned skip whose reason or detail throws while bodhi copies it is failed with a causeless Error: the report resolves, onProcessed fires once, nothing rejects unhandled', async () => {
+			const unhandled: unknown[] = [];
+			const onUnhandled = (reason: unknown) => {
+				unhandled.push(reason);
+			};
+			process.on('unhandledRejection', onUnhandled);
+			try {
+				// Each value passes the skip check (the brand and a string `reason`), then throws
+				// when bodhi reads `detail`, reads `reason` again, or copies `detail`'s keys.
+				const detailGetter = {
+					[SKIP_BRAND]: true,
+					reason: 'opted out',
+					get detail() {
+						throw new Error('detail getter boom');
+					},
+				};
+				let reasonReads = 0;
+				const reasonGetter = {
+					[SKIP_BRAND]: true,
+					get reason() {
+						reasonReads++;
+						if (reasonReads > 1) throw new Error('reason getter boom');
+						return 'opted out';
+					},
+				};
+				const detailKeyGetter = {
+					[SKIP_BRAND]: true,
+					reason: 'opted out',
+					detail: {
+						get checked() {
+							throw new Error('detail key getter boom');
+						},
+					},
+				};
+				const emitted: PostSessionReport[] = [];
+				const p = new InMemoryPostSessionPipeline();
+				p.events.onProcessed((r) => emitted.push(r));
+				p.register(
+					new TestProcessor(
+						'detail-getter',
+						async () => detailGetter as unknown as PostSessionSkip,
+					),
+				);
+				p.register(
+					new TestProcessor(
+						'reason-getter',
+						async () => reasonGetter as unknown as PostSessionSkip,
+					),
+				);
+				p.register(
+					new TestProcessor(
+						'detail-key-getter',
+						async () => detailKeyGetter as unknown as PostSessionSkip,
+					),
+				);
+				p.register(new TestProcessor('dependent', async () => ({ ran: true }), ['detail-getter']));
+				p.register(new TestProcessor('ok', async () => ({ ran: true })));
+				p.freeze();
+				const report = await p.dispatch({
+					sessionId: 's',
+					reason: 'normal',
+					build: makeBuilder('s'),
+				}).report;
+
+				expect(report.outcome).toBe('accepted');
+				for (const name of ['detail-getter', 'reason-getter', 'detail-key-getter']) {
+					const r = result(report, name);
+					expect(r?.status).toBe('failed');
+					expect(r?.error).toBeInstanceOf(Error);
+					expect(r?.error?.message).toBe(
+						'run() returned a postSessionSkip() value that could not be inspected',
+					);
+					expect(r?.detail).toBeUndefined();
+					// No `cause`: a reference to the value would re-run its getters in every
+					// host that logs the error.
+					expect(Object.hasOwn(r?.error as Error, 'cause')).toBe(false);
+				}
+				expect(result(report, 'dependent')).toMatchObject({
+					status: 'skipped',
+					detail: { reason: 'dependency_failed', dependency: 'detail-getter' },
+				});
+				expect(result(report, 'ok')?.status).toBe('completed');
+
+				const reachable = reachableFrom(report);
+				for (const hostile of [detailGetter, reasonGetter, detailKeyGetter]) {
+					expect(reachable.has(hostile)).toBe(false);
+				}
+				expect(reachable.has(detailKeyGetter.detail)).toBe(false);
+				expect(emitted).toHaveLength(1);
+				expect(emitted[0]).toBe(report);
+				expect(p.stats()).toMatchObject({ running: 0, completed: 2, failed: 3 });
+				await new Promise((r) => setTimeout(r, 10));
+				expect(unhandled).toEqual([]);
+			} finally {
+				process.off('unhandledRejection', onUnhandled);
+			}
+		});
+
+		it('a thrown Error is reported as that same Error', async () => {
+			const thrown = new RangeError('out of range');
+			const p = new InMemoryPostSessionPipeline();
+			p.register(
+				new TestProcessor('thrower', async () => {
+					throw thrown;
+				}),
+			);
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			expect(result(report, 'thrower')?.error).toBe(thrown);
+		});
+
+		it('a skip that settles after the run budget stays failed with drain_timeout', async () => {
+			const p = new InMemoryPostSessionPipeline({ runBudgetMs: 10 });
+			p.register(
+				new TestProcessor('late', async () => {
+					await new Promise((r) => setTimeout(r, 40));
+					return postSessionSkip('user opted out');
+				}),
+			);
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			expect(result(report, 'late')).toMatchObject({
+				status: 'failed',
+				detail: { reason: 'drain_timeout' },
+			});
+		});
+
+		it('an empty reason throws a TypeError inside run(), which reports failed', async () => {
+			const p = new InMemoryPostSessionPipeline();
+			p.register(new TestProcessor('bad-skip', async () => postSessionSkip('')));
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			expect(result(report, 'bad-skip')?.status).toBe('failed');
+			expect(result(report, 'bad-skip')?.error).toBeInstanceOf(TypeError);
+		});
+
+		it('a plain object shaped like a skip is an ordinary detail and reports completed', async () => {
+			const plain = { reason: 'user opted out' };
+			const p = new InMemoryPostSessionPipeline();
+			p.register(new TestProcessor('plain', async () => plain));
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			expect(result(report, 'plain')?.status).toBe('completed');
+			expect(result(report, 'plain')?.detail).toBe(plain);
+		});
+
+		it('recognizes a skip made by another copy of the package (the brand is Symbol.for)', async () => {
+			const foreign = {
+				[Symbol.for('bodhi.post-session.skip')]: true,
+				reason: 'user opted out',
+			} as unknown as PostSessionSkip;
+			expect(isPostSessionSkip(foreign)).toBe(true);
+			const p = new InMemoryPostSessionPipeline();
+			p.register(new TestProcessor('foreign', async () => foreign));
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			expect(result(report, 'foreign')?.detail).toStrictEqual({
+				reason: 'run_skipped',
+				skipReason: 'user opted out',
+			});
+		});
+	});
+
+	describe('postSessionSkip() and isPostSessionSkip()', () => {
+		it('returns a frozen value holding a frozen shallow copy of detail', () => {
+			const nested = { a: 1 };
+			const detail = { attempt: 1, nested };
+			const skip = postSessionSkip('user opted out', detail);
+			expect(Object.isFrozen(skip)).toBe(true);
+			expect(Object.isFrozen(skip.detail)).toBe(true);
+			expect(skip.detail).not.toBe(detail);
+			expect(skip.detail?.nested).toBe(nested); // shallow
+			expect(skip.reason).toBe('user opted out');
+			expect('detail' in postSessionSkip('no detail')).toBe(false);
+		});
+
+		it('accepts a detail whose prototype is Object.prototype or null', () => {
+			expect(postSessionSkip('x', { a: 1 }).detail).toEqual({ a: 1 });
+			const bare = Object.assign(Object.create(null) as Record<string, unknown>, { b: 2 });
+			expect(postSessionSkip('x', bare).detail).toEqual({ b: 2 });
+		});
+
+		it('throws TypeError for a detail that is a Date, a Map, a class instance or an array', () => {
+			class Detail {
+				readonly a = 1;
+			}
+			const notPlain: unknown[] = [new Date(0), new Map([['a', 1]]), new Detail(), [1, 2]];
+			for (const detail of notPlain) {
+				const make = () => postSessionSkip('x', detail as Record<string, unknown>);
+				expect(make).toThrow(TypeError);
+				expect(make).toThrow('postSessionSkip: detail must be a plain object when given');
+			}
+		});
+
+		it('throws TypeError for an empty or non-string reason and for a detail that is not an object', () => {
+			expect(() => postSessionSkip('')).toThrow(TypeError);
+			expect(() => postSessionSkip(42 as unknown as string)).toThrow(TypeError);
+			expect(() => postSessionSkip('x', 'detail' as unknown as Record<string, unknown>)).toThrow(
+				TypeError,
+			);
+			expect(() => postSessionSkip('x', null as unknown as Record<string, unknown>)).toThrow(
+				TypeError,
+			);
+			expect(() => postSessionSkip('x', [] as unknown as Record<string, unknown>)).toThrow(
+				TypeError,
+			);
+		});
+
+		it('isPostSessionSkip is true only for branded values with a string reason', () => {
+			expect(isPostSessionSkip(postSessionSkip('x'))).toBe(true);
+			expect(isPostSessionSkip({ reason: 'x' })).toBe(false);
+			expect(isPostSessionSkip({ [Symbol.for('bodhi.post-session.skip')]: true })).toBe(false);
+			expect(isPostSessionSkip({ [Symbol('bodhi.post-session.skip')]: true, reason: 'x' })).toBe(
+				false,
+			);
+			for (const value of [undefined, null, 'x', 1, true]) {
+				expect(isPostSessionSkip(value)).toBe(false);
+			}
+		});
+
+		it('isPostSessionSkip never throws: a value whose inspection throws is not a skip', () => {
+			const throwingProxy = new Proxy(
+				{},
+				{
+					get() {
+						throw new Error('get trap boom');
+					},
+				},
+			);
+			const revoked = Proxy.revocable({}, {});
+			revoked.revoke();
+			const brandGetter = {
+				get [SKIP_BRAND]() {
+					throw new Error('brand getter boom');
+				},
+			};
+			const reasonGetter = {
+				[SKIP_BRAND]: true,
+				get reason() {
+					throw new Error('reason getter boom');
+				},
+			};
+			for (const value of [throwingProxy, revoked.proxy, brandGetter, reasonGetter]) {
+				expect(() => isPostSessionSkip(value)).not.toThrow();
+				expect(isPostSessionSkip(value)).toBe(false);
+			}
 		});
 	});
 });

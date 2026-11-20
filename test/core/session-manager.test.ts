@@ -452,6 +452,18 @@ describe('SessionManager', () => {
 			await mgr.closeWithReason('error'); // no-op
 			expect(reports).toEqual(['accepted']);
 		});
+
+		it('an unfrozen pipeline: closeWithReason throws synchronously without finalizers and rejects with them', async () => {
+			// The documented host duty: freeze the pipeline before the first session can close.
+			const bare = createManager({ pipeline: new InMemoryPostSessionPipeline() }).mgr;
+			bare.registerSnapshotBuilder(snapshotBuilder());
+			expect(() => bare.closeWithReason('normal')).toThrow(/before freeze/);
+
+			const finalized = createManager({ pipeline: new InMemoryPostSessionPipeline() }).mgr;
+			finalized.registerSnapshotBuilder(snapshotBuilder());
+			finalized.registerPreCloseFinalizer(() => {});
+			await expect(finalized.closeWithReason('normal')).rejects.toThrow(/before freeze/);
+		});
 	});
 
 	describe('reset', () => {
