@@ -31,7 +31,8 @@ export interface PostSessionPipelineOptions {
 	/**
 	 * Per-run wall-clock budget (ms). On expiry the run's `signal` is aborted and
 	 * any still-pending processor is recorded `failed` (`detail.reason: drain_timeout`).
-	 * Default 30_000.
+	 * A finite value longer than the longest `setTimeout` delay (2^31 - 1 ms) is
+	 * honoured, not cut to about 1 ms. Default 30_000.
 	 */
 	runBudgetMs?: number;
 	/**
@@ -44,6 +45,29 @@ export interface PostSessionPipelineOptions {
 
 /** Internal sentinel for the deadline branch of a processor race. */
 const TIMED_OUT: unique symbol = Symbol('post-session-timed-out');
+
+/**
+ * The longest delay `setTimeout` honours. Node fires a longer finite delay after
+ * about 1 ms (with a TimeoutOverflowWarning), so longer waits chain timers.
+ */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+/**
+ * Call `fn` once after `ms`, chaining timers of at most {@link MAX_TIMER_DELAY_MS}
+ * when a finite `ms` is longer than that. Any other `ms` goes to `setTimeout` as
+ * is. Returns a function that cancels the call.
+ */
+function setLongTimeout(fn: () => void, ms: number): () => void {
+	let timer: ReturnType<typeof setTimeout>;
+	const arm = (left: number): void => {
+		timer =
+			Number.isFinite(left) && left > MAX_TIMER_DELAY_MS
+				? setTimeout(() => arm(left - MAX_TIMER_DELAY_MS), MAX_TIMER_DELAY_MS)
+				: setTimeout(fn, left);
+	};
+	arm(ms);
+	return () => clearTimeout(timer);
+}
 
 /** A processor's validated soft prerequisites (`after`) and its bound, fixed at freeze. */
 interface SoftOrder {
@@ -398,11 +422,11 @@ export class InMemoryPostSessionPipeline implements PostSessionPipeline {
 		const start = Date.now();
 		const results: PostSessionResult[] = [];
 
-		let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+		let clearDeadline: (() => void) | undefined;
 		const deadline = new Promise<typeof TIMED_OUT>((resolve) => {
 			const onAbort = () => resolve(TIMED_OUT);
 			controller.signal.addEventListener('abort', onAbort, { once: true });
-			deadlineTimer = setTimeout(() => controller.abort(), this.runBudgetMs);
+			clearDeadline = setLongTimeout(() => controller.abort(), this.runBudgetMs);
 		});
 
 		const promiseByName = new Map<string, Promise<PostSessionResult>>();
@@ -410,25 +434,30 @@ export class InMemoryPostSessionPipeline implements PostSessionPipeline {
 		/**
 		 * Wait until every soft prerequisite has a result (any status), the bound passes
 		 * (an absolute deadline from `start`, so it overlaps the hard-dependency wait) or
-		 * the run's signal aborts, whichever comes first. The bound's timer is cleared
-		 * when the wait ends.
+		 * the run's signal aborts, whichever comes first. A bound at or past the run
+		 * budget arms no timer: the budget's abort ends the wait. Any other bound is
+		 * below the budget, and its timer chains when it is longer than setTimeout
+		 * allows. The bound's timer is cleared when the wait ends.
 		 */
 		const waitForSoftOrder = async (order: SoftOrder): Promise<void> => {
 			const remainingMs = start + order.waitMs - Date.now();
 			if (remainingMs <= 0) return;
-			let boundTimer: ReturnType<typeof setTimeout> | undefined;
+			const prerequisites = Promise.allSettled(
+				// Topological order put every prerequisite's promise in the map first.
+				order.names.map((name) => promiseByName.get(name)),
+			);
+			if (order.waitMs >= this.runBudgetMs) {
+				await Promise.race([prerequisites, deadline]);
+				return;
+			}
+			let clearBound: (() => void) | undefined;
 			const bound = new Promise<void>((resolve) => {
-				boundTimer = setTimeout(resolve, remainingMs);
+				clearBound = setLongTimeout(resolve, remainingMs);
 			});
 			try {
-				await Promise.race([
-					// Topological order put every prerequisite's promise in the map first.
-					Promise.allSettled(order.names.map((name) => promiseByName.get(name))),
-					bound,
-					deadline,
-				]);
+				await Promise.race([prerequisites, bound, deadline]);
 			} finally {
-				clearTimeout(boundTimer);
+				clearBound?.();
 			}
 		};
 
@@ -543,7 +572,7 @@ export class InMemoryPostSessionPipeline implements PostSessionPipeline {
 			results.push(await (promiseByName.get(p.name) as Promise<PostSessionResult>));
 		}
 
-		if (deadlineTimer) clearTimeout(deadlineTimer);
+		clearDeadline?.();
 		for (const r of results) {
 			if (r.status === 'failed') this.counters.failed++;
 			else this.counters.completed++;

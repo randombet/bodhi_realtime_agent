@@ -244,7 +244,9 @@ export abstract class PostSessionProcessor {
 	 * rejects, for a required processor, a value that is not below its `runBudgetMs`,
 	 * so a required processor's wait always ends before the budget. An optional
 	 * processor whose wait reaches the budget ends `failed` (`drain_timeout`) without
-	 * running. The processor's `durationMs` excludes the wait.
+	 * running. It honours any finite value, even one longer than the longest
+	 * `setTimeout` delay (2^31 - 1 ms), which a timer alone would fire after about
+	 * 1 ms. The processor's `durationMs` excludes the wait.
 	 */
 	readonly afterWaitMs?: number;
 

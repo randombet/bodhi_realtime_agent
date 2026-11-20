@@ -1177,38 +1177,141 @@ describe('InMemoryPostSessionPipeline', () => {
 			});
 
 			it('the bound is absolute, so it overlaps the wait for hard dependencies', async () => {
+				// `hang` never settles, so only the 20 ms bound ends each soft wait. `early`'s
+				// hard prerequisite completes at 10 ms, so it runs at 20: a scheduler that
+				// ignored `after` runs it at 10, and one that counted the bound from the end of
+				// the hard wait, at 30. `late`'s completes at 40 ms, so it runs at 40, not 60.
+				// Dependents are registered before their prerequisites, so neither
+				// registration order nor a sort that ignored `after` can order them.
 				const log: string[] = [];
+				const begin = Date.now();
+				const logRun = (name: string) => async () => {
+					log.push(`${name}@${Date.now() - begin}`);
+					return { own: name };
+				};
+				const doneAt = (ms: number) => () =>
+					new Promise<Record<string, unknown>>((r) => setTimeout(() => r({}), ms));
 				const p = new InMemoryPostSessionPipeline({ runBudgetMs: 1_000 });
 				p.register(
-					new TestProcessor(
-						'slow',
-						() => new Promise<Record<string, unknown>>((r) => setTimeout(() => r({}), 40)),
-					),
+					new SoftProcessor('early', logRun('early'), {
+						dependsOn: ['fast'],
+						after: ['hang'],
+						afterWaitMs: 20,
+					}),
 				);
-				p.register(new TestProcessor('hang', () => new Promise<void>(() => {})));
 				p.register(
-					new SoftProcessor(
-						'next',
-						async () => {
-							log.push('next:run');
-						},
-						{ dependsOn: ['slow'], after: ['hang'], afterWaitMs: 20 },
-					),
+					new SoftProcessor('late', logRun('late'), {
+						dependsOn: ['slow'],
+						after: ['hang'],
+						afterWaitMs: 20,
+					}),
 				);
+				p.register(new TestProcessor('fast', doneAt(10)));
+				p.register(new TestProcessor('slow', doneAt(40)));
+				p.register(new TestProcessor('hang', () => new Promise<void>(() => {})));
 				p.freeze();
 				const run = watch(
 					p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') }),
 				);
-				await vi.advanceTimersByTimeAsync(39);
-				expect(log).toEqual([]);
-				await vi.advanceTimersByTimeAsync(1);
-				expect(log).toEqual(['next:run']); // at 40 ms, when `slow` completed, not at 60 ms
 				await vi.advanceTimersByTimeAsync(1_000);
+				expect(log).toEqual(['early@20', 'late@40']);
 				expect(run.report?.results.map((r) => `${r.processor}:${r.status}`)).toEqual([
+					'fast:completed',
 					'slow:completed',
 					'hang:failed',
-					'next:completed',
+					'early:completed',
+					'late:completed',
 				]);
+			});
+
+			it.each([Number.MAX_SAFE_INTEGER, 2 ** 31])(
+				'an afterWaitMs of %d, past the longest setTimeout delay, waits until the run budget, not about 1 ms',
+				async (afterWaitMs) => {
+					const calls: string[] = [];
+					const p = new InMemoryPostSessionPipeline({ runBudgetMs: 1_000 });
+					p.register(
+						new SoftProcessor(
+							'next',
+							async () => {
+								calls.push('run');
+							},
+							{
+								after: ['hang'],
+								afterWaitMs,
+								gate: () => {
+									calls.push('gate');
+									return true;
+								},
+							},
+						),
+					);
+					p.register(new TestProcessor('hang', () => new Promise<void>(() => {})));
+					p.freeze();
+					const run = watch(
+						p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') }),
+					);
+					await vi.advanceTimersByTimeAsync(999);
+					expect(calls).toEqual([]);
+					expect(run.report).toBeUndefined();
+					await vi.advanceTimersByTimeAsync(1);
+					expect(run.report?.results).toStrictEqual([
+						{
+							processor: 'hang',
+							status: 'failed',
+							durationMs: 1_000,
+							detail: { reason: 'drain_timeout' },
+						},
+						{
+							processor: 'next',
+							status: 'failed',
+							durationMs: 0,
+							detail: { reason: 'drain_timeout' },
+						},
+					]);
+					expect(calls).toEqual([]);
+					expect(vi.getTimerCount()).toBe(0);
+				},
+			);
+
+			it('a bound and a run budget past the longest setTimeout delay are both honoured', async () => {
+				const longestDelay = 2 ** 31 - 1;
+				const bound = longestDelay + 10;
+				const budget = 2 ** 32;
+				const log: string[] = [];
+				const p = new InMemoryPostSessionPipeline({ runBudgetMs: budget });
+				p.register(
+					new SoftProcessor(
+						'next',
+						async (ctx) => {
+							log.push(`next:run aborted=${ctx.signal.aborted}`);
+							return { own: true };
+						},
+						{ after: ['hang'], afterWaitMs: bound },
+					),
+				);
+				p.register(new TestProcessor('hang', () => new Promise<void>(() => {})));
+				p.freeze();
+				const run = watch(
+					p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') }),
+				);
+				await vi.advanceTimersByTimeAsync(bound - 1);
+				expect(log).toEqual([]);
+				expect(run.report).toBeUndefined();
+				await vi.advanceTimersByTimeAsync(1);
+				expect(log).toEqual(['next:run aborted=false']);
+				await vi.advanceTimersByTimeAsync(budget - bound - 1);
+				expect(run.report).toBeUndefined();
+				await vi.advanceTimersByTimeAsync(1);
+				expect(run.report?.results).toStrictEqual([
+					{
+						processor: 'hang',
+						status: 'failed',
+						durationMs: budget,
+						detail: { reason: 'drain_timeout' },
+					},
+					{ processor: 'next', status: 'completed', durationMs: 0, detail: { own: true } },
+				]);
+				expect(vi.getTimerCount()).toBe(0);
 			});
 
 			it('afterWaitMs 0 sets the order of results only: the dependent does not wait', async () => {
@@ -1319,46 +1422,84 @@ describe('InMemoryPostSessionPipeline', () => {
 			});
 
 			it('a hard dependency that did not complete skips the dependent first (dependency_failed), before the soft wait and the abort guard', async () => {
-				const p = new InMemoryPostSessionPipeline({ runBudgetMs: 100 });
+				// `after-boom`'s hard prerequisite fails at once and its soft one never settles.
+				// Its result must settle at once, not when its 500 ms bound or the 1_000 ms
+				// budget ends the soft wait. `watcher` runs after `after-boom` and a 30 ms
+				// `slow`, so it runs at 30 only when `after-boom` settled by then: a scheduler
+				// that ignored `after` runs it at 0, and one that waited on the soft edge before
+				// checking the hard one, at 500. Dependents are registered before their
+				// prerequisites, so neither registration order nor a sort that ignored `after`
+				// can order them.
+				const log: string[] = [];
+				const begin = Date.now();
+				const gate = (name: string) => () => {
+					log.push(`${name}:gate`);
+					return true;
+				};
+				const p = new InMemoryPostSessionPipeline({ runBudgetMs: 1_000 });
 				p.register(
-					new TestProcessor('boom', async () => {
-						throw new Error('boom');
-					}),
+					new SoftProcessor(
+						'watcher',
+						async () => {
+							log.push(`watcher@${Date.now() - begin}`);
+							return { own: true };
+						},
+						{ after: ['after-boom', 'slow'], afterWaitMs: 900 },
+					),
 				);
-				p.register(new TestProcessor('hang-hard', () => new Promise<void>(() => {})));
-				p.register(new TestProcessor('hang-soft', () => new Promise<void>(() => {})));
 				p.register(
 					new SoftProcessor('after-boom', noop, {
 						dependsOn: ['boom'],
 						after: ['hang-soft'],
-						afterWaitMs: 5_000,
+						afterWaitMs: 500,
+						gate: gate('after-boom'),
 					}),
 				);
 				p.register(
 					new SoftProcessor('after-hang', noop, {
 						dependsOn: ['hang-hard'],
 						after: ['hang-soft'],
-						afterWaitMs: 5_000,
+						afterWaitMs: 500,
+						gate: gate('after-hang'),
 					}),
 				);
+				p.register(
+					new TestProcessor('boom', async () => {
+						throw new Error('boom');
+					}),
+				);
+				p.register(
+					new TestProcessor(
+						'slow',
+						() => new Promise<Record<string, unknown>>((r) => setTimeout(() => r({}), 30)),
+					),
+				);
+				p.register(new TestProcessor('hang-hard', () => new Promise<void>(() => {})));
+				p.register(new TestProcessor('hang-soft', () => new Promise<void>(() => {})));
 				p.freeze();
 				const run = watch(
 					p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') }),
 				);
-				await vi.advanceTimersByTimeAsync(100);
+				await vi.advanceTimersByTimeAsync(999);
+				expect(log).toEqual(['watcher@30']);
+				expect(run.report).toBeUndefined();
+				await vi.advanceTimersByTimeAsync(1);
 				expect(result(run.report, 'after-boom')).toStrictEqual({
 					processor: 'after-boom',
 					status: 'skipped',
 					durationMs: 0,
 					detail: { reason: 'dependency_failed', dependency: 'boom' },
 				});
-				// The budget aborted both waits: the unfinished hard dependency wins.
+				// The budget aborted the run while `after-hang` waited on both edges: the
+				// unfinished hard dependency wins over the abort guard.
 				expect(result(run.report, 'after-hang')).toStrictEqual({
 					processor: 'after-hang',
 					status: 'skipped',
 					durationMs: 0,
 					detail: { reason: 'dependency_failed', dependency: 'hang-hard' },
 				});
+				expect(result(run.report, 'watcher')?.status).toBe('completed');
+				expect(log).toEqual(['watcher@30']);
 			});
 
 			it('results are in topological order over both kinds of edge: an `after` edge puts a later-registered prerequisite first', async () => {

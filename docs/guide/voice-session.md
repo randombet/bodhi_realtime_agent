@@ -816,7 +816,10 @@ class NotifyUser extends PostSessionProcessor {
 - `InMemoryPostSessionPipeline` rejects a required processor whose
   `afterWaitMs` is not below `runBudgetMs`, so its wait always ends before the
   budget. An optional processor that is still waiting when the budget expires
-  ends `failed` with `drain_timeout` without running.
+  ends `failed` with `drain_timeout` without running. Any finite
+  `afterWaitMs` or `runBudgetMs` is honoured, even one longer than the
+  longest `setTimeout` delay (2^31 − 1 ms), which a timer alone would fire
+  after about 1 ms.
 - The dependent gets the same `ctx` as every other processor, never a
   prerequisite's return value or result. If a prerequisite settled within the
   wait, everything its `run()` did before it settled is visible, within one
