@@ -914,6 +914,56 @@ Admission is decided per run, for the whole pipeline:
 - `stores.memoryExtraction` is internal to the memory fallback. Do not call or
   supply it.
 
+### Per-session stores
+
+The pipeline is shared by every session, but a processor often needs something
+that belongs to one session: a record the host kept during it, or a sink bound
+to it. Pass those as `postSessionStores`, a plain object set when the session is
+constructed. Its members reach that session's run as `ctx.stores`:
+
+```ts
+declare module 'bodhi-realtime-agent' {
+  interface PostSessionStores {
+    readonly acmeAuditLog?: AuditLog;
+  }
+}
+
+const session = new VoiceSession({
+  ...config,
+  postSessionPipeline: pipeline,
+  postSessionStores: { acmeAuditLog: auditLogFor(config.sessionId), analyticsSink },
+});
+
+class WriteAudit extends PostSessionProcessor {
+  readonly name = 'write-audit';
+
+  override shouldRun(ctx: PostSessionContext): boolean {
+    return ctx.stores.acmeAuditLog !== undefined;
+  }
+
+  async run(ctx: PostSessionContext) {
+    await ctx.stores.acmeAuditLog?.append(ctx.sessionId, ctx.conversation.items);
+  }
+}
+```
+
+- The field has no effect when no pipeline is active: neither
+  `postSessionPipeline` nor the `memory` fallback.
+- bodhi reads the object's own enumerable members when it builds the snapshot
+  at close, and puts them, by reference, in that run's `ctx.stores`. It never
+  modifies, clones, logs, serializes or reports them. For late binding, pass a
+  function member.
+- `memory` and `memoryExtraction` belong to bodhi. The type excludes them, and
+  bodhi assigns its own values last, even when they are undefined, so memory is
+  wired only through `memory`.
+- Members must stay valid until the run's report settles. Every processor of
+  the run shares one stores object by reference; it is the channel between
+  steps.
+- Add your own members by declaration merging on `PostSessionStores`, as above.
+  Merging applies to the whole program, so give them prefixed names.
+- Stores are not part of the snapshot: the snapshot stays plain data. Put
+  per-session data that must survive serialization in `sessionMetadata`.
+
 ### Processors
 
 - One instance serves many sessions at once: keep it stateless and reentrant,

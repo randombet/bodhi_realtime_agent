@@ -38,9 +38,28 @@ export interface SessionMetricsSnapshot {
 }
 
 /**
- * Durable, process-scoped capabilities processors may write through. Each member
- * is optional so a deployment only wires what its processors need. MUST stay
- * valid until `run.report` settles — do NOT expose session-disposed resources.
+ * Durable capabilities processors may write through, process-scoped or
+ * per-session. Each member is optional so a deployment only wires what its
+ * processors need. MUST stay valid until `run.report` settles — do NOT expose
+ * session-disposed resources.
+ *
+ * Each run gets one stores object, shared by reference by all of its processors;
+ * it is the channel between steps. Stores are live and not serializable: bodhi
+ * never clones, logs, serializes or reports them, and they are not part of the
+ * snapshot.
+ *
+ * A VoiceSession fills `memory` and `memoryExtraction` from its own config and adds
+ * the members of `VoiceSessionConfig.postSessionStores`. A host adds members of its
+ * own by declaration merging on this exported interface; give them prefixed names,
+ * since merging applies to the whole program:
+ *
+ * ```ts
+ * declare module 'bodhi-realtime-agent' {
+ *   interface PostSessionStores {
+ *     readonly acmeAuditLog?: AuditLog;
+ *   }
+ * }
+ * ```
  */
 export interface PostSessionStores {
 	/** Per-user durable memory facts (e.g. for memory distillation). */

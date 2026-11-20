@@ -322,3 +322,26 @@ class SoftOrderedProcessor extends PostSessionProcessor {
 const softOrdered: PostSessionProcessor = new SoftOrderedProcessor();
 const softAfter: readonly string[] = softOrdered.after;
 const softWait: number | undefined = softOrdered.afterWaitMs;
+// A session passes its own post-session stores. A host declares its own members by merging into
+// the root's PostSessionStores, which must work through the bundled declarations; memory stays
+// wired only through config.memory.
+declare module 'bodhi-realtime-agent' {
+	interface PostSessionStores {
+		readonly probeSessionRecord?: { readonly lines: string[] };
+	}
+}
+const probeRecord = { lines: [] as string[] };
+config.postSessionStores = {
+	probeSessionRecord: probeRecord,
+	analyticsSink: (summary: Record<string, unknown>): void => void summary,
+};
+class RecordingProcessor extends PostSessionProcessor {
+	readonly name = 'recording-processor';
+	async run(ctx: PostSessionContext): Promise<void> {
+		ctx.stores.probeSessionRecord?.lines.push(ctx.sessionId);
+	}
+}
+const recordingProcessor: PostSessionProcessor = new RecordingProcessor();
+const mergedStores: PostSessionStores = { probeSessionRecord: probeRecord };
+// @ts-expect-error memory is wired through VoiceSessionConfig.memory, not postSessionStores
+config.postSessionStores = { memory: undefined };

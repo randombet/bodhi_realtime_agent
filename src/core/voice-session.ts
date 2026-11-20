@@ -635,6 +635,23 @@ export interface VoiceSessionOptions {
 	 * once on close. Absent → no post-session processing (unchanged behavior).
 	 */
 	postSessionPipeline?: PostSessionPipeline;
+	/**
+	 * This session's own post-session stores: capabilities its processors reach through
+	 * `ctx.stores` (for example `analyticsSink`, or a member the host declares by merging
+	 * into `PostSessionStores`). Absent → `ctx.stores` holds only bodhi's members, as before.
+	 *
+	 * - It has no effect when no pipeline is active (neither `postSessionPipeline` nor the
+	 *   `memory` fallback).
+	 * - bodhi reads the object's own enumerable members when it builds the snapshot at close,
+	 *   and puts them, by reference, in that run's `ctx.stores`. It never modifies, clones,
+	 *   logs, serializes or reports them. For late binding, pass a function member.
+	 * - `memory` and `memoryExtraction` are bodhi's: the type excludes them, and bodhi assigns
+	 *   its own values last, even when they are undefined. Memory is wired only through
+	 *   `memory`.
+	 * - Members must stay valid until the run's report settles. Every processor of the run
+	 *   shares one stores object by reference.
+	 */
+	postSessionStores?: Omit<PostSessionStores, 'memory' | 'memoryExtraction'>;
 	/** Drain mode: await the post-session run before close() resolves (serverless hosts). */
 	drainPostSession?: boolean;
 	/** When provided, agents/tools can persist artifacts (images, docs, etc.) via session.workspace.saveArtifact(). */
@@ -3157,6 +3174,8 @@ export class VoiceSession {
 	 * Build the immutable post-session snapshot + live stores. Bounded, in-memory:
 	 * copies the conversation timeline and derives metrics from it. Used only when a
 	 * post-session pipeline is wired (see VoiceSessionConfig.postSessionPipeline).
+	 * The stores are the host's `postSessionStores` members, by reference, plus
+	 * bodhi's own members, assigned last.
 	 */
 	private buildPostSessionSnapshot(reason: SessionEndReason): {
 		snapshot: PostSessionSnapshot;
@@ -3200,6 +3219,9 @@ export class VoiceSession {
 		return {
 			snapshot,
 			stores: {
+				// The host's per-session members first. bodhi's own are assigned last, even
+				// when undefined, so memory has one wiring path (config.memory).
+				...this.config.postSessionStores,
 				memory: this.config.memory?.store,
 				// v1 bridge: the MemoryDistillationProcessor invokes this per-session
 				// capability (closing over the session's distiller) instead of the
