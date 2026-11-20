@@ -11,6 +11,7 @@ import type {
 	PostSessionStats,
 	PostSessionStores,
 } from './types.js';
+import { isPostSessionSkip } from './types.js';
 
 /** Tuning knobs for {@link InMemoryPostSessionPipeline}. */
 export interface PostSessionPipelineOptions {
@@ -387,11 +388,21 @@ export class InMemoryPostSessionPipeline implements PostSessionPipeline {
 				};
 			}
 			if (settled.ok) {
+				const value = settled.detail;
+				if (isPostSessionSkip(value)) {
+					// A returned skip: report plain data, never the branded value.
+					return {
+						processor: p.name,
+						status: 'skipped',
+						durationMs: Date.now() - t0,
+						detail: { ...value.detail, reason: 'run_skipped', skipReason: value.reason },
+					};
+				}
 				return {
 					processor: p.name,
 					status: 'completed',
 					durationMs: Date.now() - t0,
-					detail: settled.detail,
+					detail: value,
 				};
 			}
 			return {

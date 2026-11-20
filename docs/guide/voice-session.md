@@ -766,6 +766,43 @@ await pipeline.drain(5_000);
   cancels what is left, as the budget does; runs still waiting for a slot
   report `dropped` with `required_capacity_timeout`.
 
+### Skipping from `run()`
+
+`shouldRun()` is synchronous, so a decision that needs I/O (an opt-out
+lookup, a consent check, a target that may not exist) belongs in `run()`. To
+end the work as skipped there, return `postSessionSkip(reason, detail?)`:
+
+```ts
+import { postSessionSkip, type PostSessionContext } from 'bodhi-realtime-agent';
+
+async run(ctx: PostSessionContext) {
+  const consent = await consentStore.lookup(ctx.userId, { signal: ctx.signal });
+  if (!consent) return postSessionSkip('user opted out', { checked: 'consent' });
+  await exportStore.write(ctx.sessionId, ctx.conversation.items, { signal: ctx.signal });
+  return { items: ctx.conversation.items.length };
+}
+```
+
+- The result is `skipped` with `detail` `{ ...detail, reason: 'run_skipped',
+  skipReason: reason }`. bodhi's `reason` and `skipReason` override host keys
+  of the same name, and `durationMs` is the time `run()` took.
+- Only a returned skip counts. A thrown value, a skip included, is `failed`.
+  A skip that settles after the run budget stays `failed` with
+  `drain_timeout`.
+- Dependents follow the usual rule: they report `skipped` with
+  `dependency_failed`.
+- `postSessionSkip()` throws a `TypeError` for an empty or non-string reason,
+  or a `detail` that is not a plain object; inside `run()` that is `failed`.
+  It freezes the value and a shallow copy of `detail` when called.
+- `skipReason` is free text that bodhi never interprets or truncates. Keep it
+  short, with no credentials or personal data.
+- bodhi does not check that the processor did no work, undoes nothing and
+  never retries.
+- A host that implements `PostSessionPipeline` itself can recognize a skip with
+  `isPostSessionSkip(value)`. The brand is `Symbol.for`, so two copies of this
+  package in one process agree; a pipeline that does not know the brand
+  reports the skip value as an ordinary `completed` detail.
+
 ### Admission
 
 Admission is decided per run, for the whole pipeline:
@@ -825,7 +862,10 @@ delivery, and any order between independent processors or across sessions.
   `PostSessionPipelineOptions`) gain only optional members in a minor release.
 - Types a host only reads (the context, run, report, result, events and stats
   types) may gain members in a minor release.
-- `PostSessionResult.status` and `RunOutcome` are closed sets.
+- `PostSessionResult.status` and `RunOutcome` are closed sets. The
+  `detail.reason` values bodhi produces today are `shouldRun_false`,
+  `dependency_failed` and `run_skipped` (skipped), and `shouldRun_threw` and
+  `drain_timeout` (failed).
   `RunFailureReason` and `detail.reason` are open: handle values you do not
   know.
 

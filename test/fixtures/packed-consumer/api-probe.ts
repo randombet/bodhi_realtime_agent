@@ -47,6 +47,7 @@ import {
 	type PostSessionReport,
 	type PostSessionResult,
 	type PostSessionRun,
+	type PostSessionSkip,
 	type PostSessionSnapshot,
 	type PostSessionSnapshotBuilder,
 	type PostSessionStats,
@@ -74,6 +75,8 @@ import {
 	type VoiceSessionDiagnostics,
 	bestEnvelopeLag,
 	envelopePearson,
+	isPostSessionSkip,
+	postSessionSkip,
 } from 'bodhi-realtime-agent';
 
 declare const session: VoiceSession;
@@ -291,3 +294,20 @@ const postSessionCapabilities: PostSessionCapabilities = {
 	signal: new AbortController().signal,
 };
 const laterFailureReason: RunFailureReason = 'a_reason_added_later';
+// run() may return a skip; the brand survives the published declarations, so a plain object
+// does not pass as one.
+class SkippingProcessor extends PostSessionProcessor {
+	readonly name = 'skipping-processor';
+	async run(ctx: PostSessionContext): Promise<Record<string, unknown> | PostSessionSkip> {
+		if (ctx.metadata?.optedOut === true) return postSessionSkip('user opted out', { checked: 1 });
+		return { done: true };
+	}
+}
+const skippingProcessor: PostSessionProcessor = new SkippingProcessor();
+const returnedSkip: PostSessionSkip = postSessionSkip('consent lookup failed');
+const skipReason: string = returnedSkip.reason;
+const skipDetail: Readonly<Record<string, unknown>> | undefined = returnedSkip.detail;
+const maybeSkip: unknown = returnedSkip;
+if (isPostSessionSkip(maybeSkip)) void maybeSkip.reason;
+// @ts-expect-error a plain object lacks the PostSessionSkip brand
+const unbrandedSkip: PostSessionSkip = { reason: 'consent lookup failed' };

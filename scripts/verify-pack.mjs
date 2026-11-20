@@ -10,9 +10,9 @@
 //                `"type": "module"` consumer created with mkdtemp
 //   (c) runtime  ESM import and CJS require of the root and the observability subpath, and a
 //                werift_opus DirectRtcClientChannel built from the installed root entry loads
-//                its RTC engine through the package's private #direct-rtc import; a processor
-//                subclassed from the root's PostSessionProcessor runs on the root's
-//                InMemoryPostSessionPipeline
+//                its RTC engine through the package's private #direct-rtc import; processors
+//                subclassed from the root's PostSessionProcessor run on the root's
+//                InMemoryPostSessionPipeline, one of them returning the root's postSessionSkip
 //   (d) types    test/fixtures/packed-consumer/api-probe.ts compiles against the installed
 //                declarations with --module NodeNext (index.d.ts) and, inside a
 //                "type": "commonjs" package, with --module Node16 (index.d.cts)
@@ -232,18 +232,30 @@ function runtimeProbeSource(kind) {
 		console.error = consoleError;
 	}
 
-	// The post-session API: a host processor subclassed from the root's base class runs on the
-	// root's pipeline. Older builds that do not export it report null.
+	// The post-session API: host processors subclassed from the root's base class run on the
+	// root's pipeline, and one returns the root's skip. Older builds that do not export it
+	// report null.
 	let postSession = null;
-	if (typeof root.InMemoryPostSessionPipeline === 'function' && typeof root.PostSessionProcessor === 'function') {
+	if (
+		typeof root.InMemoryPostSessionPipeline === 'function' &&
+		typeof root.PostSessionProcessor === 'function' &&
+		typeof root.postSessionSkip === 'function'
+	) {
 		class PackedProbe extends root.PostSessionProcessor {
 			name = 'packed-probe';
 			async run(ctx) {
 				return { items: ctx.conversation.items.length };
 			}
 		}
+		class PackedSkip extends root.PostSessionProcessor {
+			name = 'packed-skip';
+			async run() {
+				return root.postSessionSkip('packed probe');
+			}
+		}
 		const pipeline = new root.InMemoryPostSessionPipeline({ runBudgetMs: 5000 });
 		pipeline.register(new PackedProbe());
+		pipeline.register(new PackedSkip());
 		pipeline.freeze();
 		const run = pipeline.dispatch({
 			sessionId: 'packed',
@@ -342,10 +354,10 @@ function stepRuntime(consumer) {
 					`${label}: VoiceSession.RECONNECT_DEADLINE_MS is ${result.RECONNECT_DEADLINE_MS}, expected 30000 (VoiceSession must carry the static RECONNECT_DEADLINE_MS)`,
 				);
 			}
-			if (result.postSession !== 'packed-probe:completed') {
+			if (result.postSession !== 'packed-probe:completed,packed-skip:skipped') {
 				fail(
 					'c',
-					`${label}: the post-session probe reported ${result.postSession}, expected packed-probe:completed (the root entry must export InMemoryPostSessionPipeline and PostSessionProcessor)`,
+					`${label}: the post-session probe reported ${result.postSession}, expected packed-probe:completed,packed-skip:skipped (the root entry must export InMemoryPostSessionPipeline, PostSessionProcessor and postSessionSkip)`,
 				);
 			}
 		}
@@ -355,7 +367,7 @@ function stepRuntime(consumer) {
 	}
 	const exportChecks = skipDeclarations
 		? 'ClientTransport, CLOSE_CODE_CLIENT_BUSY, RECONNECT_DEADLINE_MS and post-session checks skipped'
-		: 'ClientTransport function, CLOSE_CODE_CLIENT_BUSY 4409, RECONNECT_DEADLINE_MS 30000, post-session probe processor completed';
+		: 'ClientTransport function, CLOSE_CODE_CLIENT_BUSY 4409, RECONNECT_DEADLINE_MS 30000, post-session probe processors completed and skipped';
 	report('c', `runtime: ${summaries.join('; ')}; ${exportChecks}`);
 }
 

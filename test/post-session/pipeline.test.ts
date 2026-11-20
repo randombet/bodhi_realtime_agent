@@ -4,11 +4,16 @@ import type {
 	PostSessionContext,
 	PostSessionReport,
 	PostSessionRun,
+	PostSessionSkip,
 	PostSessionSnapshot,
 	PostSessionSnapshotBuilder,
 	PostSessionStores,
 } from '../../src/post-session/types.js';
-import { PostSessionProcessor } from '../../src/post-session/types.js';
+import {
+	PostSessionProcessor,
+	isPostSessionSkip,
+	postSessionSkip,
+} from '../../src/post-session/types.js';
 
 function makeBuilder(
 	sessionId: string,
@@ -35,8 +40,8 @@ function makeBuilder(
 	};
 }
 
-// biome-ignore lint/suspicious/noConfusingVoidType: mirrors PostSessionProcessor.run — returns a detail object or nothing.
-type ProcRun = (ctx: PostSessionContext) => Promise<Record<string, unknown> | void>;
+/** Mirrors PostSessionProcessor.run: a detail object, a skip or nothing. */
+type ProcRun = (ctx: PostSessionContext) => ReturnType<PostSessionProcessor['run']>;
 
 /** Test processor with inline behavior. */
 class TestProcessor extends PostSessionProcessor {
@@ -611,6 +616,228 @@ describe('InMemoryPostSessionPipeline', () => {
 			const report = await run.report;
 			expect(report.outcome).toBe('dropped');
 			expect(report.failureReason).toBe('required_capacity_timeout');
+		});
+	});
+
+	describe('skip from run() (postSessionSkip)', () => {
+		it('a returned skip reports skipped with run_skipped, the skip reason, the host detail and the real duration', async () => {
+			const emitted: PostSessionReport[] = [];
+			const p = new InMemoryPostSessionPipeline();
+			p.events.onProcessed((r) => emitted.push(r));
+			p.register(
+				new TestProcessor('opt-out', async () => {
+					await new Promise((r) => setTimeout(r, 15));
+					return postSessionSkip('user opted out', { checkedBy: 'consent lookup' });
+				}),
+			);
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			const skipped = result(report, 'opt-out');
+			expect(skipped).toStrictEqual({
+				processor: 'opt-out',
+				status: 'skipped',
+				durationMs: expect.any(Number),
+				detail: {
+					checkedBy: 'consent lookup',
+					reason: 'run_skipped',
+					skipReason: 'user opted out',
+				},
+			});
+			expect(skipped?.durationMs).toBeGreaterThanOrEqual(10);
+			expect(emitted).toEqual([report]);
+			// The report stays plain data: the branded value never enters it.
+			expect(Object.getOwnPropertySymbols(skipped?.detail ?? {})).toEqual([]);
+			expect(isPostSessionSkip(skipped?.detail)).toBe(false);
+			expect(JSON.parse(JSON.stringify(skipped))).toEqual(skipped);
+			expect(p.stats()).toMatchObject({ completed: 1, failed: 0 });
+		});
+
+		it('a skip without detail reports only reason and skipReason', async () => {
+			const p = new InMemoryPostSessionPipeline();
+			p.register(new TestProcessor('nothing-to-do', async () => postSessionSkip('nothing to do')));
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			expect(result(report, 'nothing-to-do')?.detail).toStrictEqual({
+				reason: 'run_skipped',
+				skipReason: 'nothing to do',
+			});
+		});
+
+		it("bodhi's reason and skipReason override host detail keys of the same name", async () => {
+			const p = new InMemoryPostSessionPipeline();
+			p.register(
+				new TestProcessor('lookup', async () =>
+					postSessionSkip('consent lookup failed', {
+						reason: 'host reason',
+						skipReason: 'host skip reason',
+						attempt: 2,
+					}),
+				),
+			);
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			expect(result(report, 'lookup')?.detail).toStrictEqual({
+				reason: 'run_skipped',
+				skipReason: 'consent lookup failed',
+				attempt: 2,
+			});
+		});
+
+		it('a mutation of the detail after postSessionSkip() cannot change the report', async () => {
+			const p = new InMemoryPostSessionPipeline();
+			p.register(
+				new TestProcessor('mutating', async () => {
+					const detail: Record<string, unknown> = { attempt: 1 };
+					const skip = postSessionSkip('user opted out', detail);
+					detail.attempt = 2;
+					detail.extra = true;
+					return skip;
+				}),
+			);
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			expect(result(report, 'mutating')?.detail).toStrictEqual({
+				attempt: 1,
+				reason: 'run_skipped',
+				skipReason: 'user opted out',
+			});
+		});
+
+		it('dependents of a skipped processor are skipped with dependency_failed', async () => {
+			let dependentRan = false;
+			const p = new InMemoryPostSessionPipeline();
+			p.register(new TestProcessor('opt-out', async () => postSessionSkip('user opted out')));
+			p.register(
+				new TestProcessor(
+					'after-opt-out',
+					async () => {
+						dependentRan = true;
+					},
+					['opt-out'],
+				),
+			);
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			expect(result(report, 'after-opt-out')).toMatchObject({
+				status: 'skipped',
+				detail: { reason: 'dependency_failed', dependency: 'opt-out' },
+			});
+			expect(dependentRan).toBe(false);
+		});
+
+		it('a thrown skip is failed, not skipped: throw always means failed', async () => {
+			const thrown = postSessionSkip('user opted out');
+			const p = new InMemoryPostSessionPipeline();
+			p.register(
+				new TestProcessor('thrower', async () => {
+					throw thrown;
+				}),
+			);
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			expect(result(report, 'thrower')?.status).toBe('failed');
+			expect(result(report, 'thrower')?.error).toBe(thrown);
+		});
+
+		it('a skip that settles after the run budget stays failed with drain_timeout', async () => {
+			const p = new InMemoryPostSessionPipeline({ runBudgetMs: 10 });
+			p.register(
+				new TestProcessor('late', async () => {
+					await new Promise((r) => setTimeout(r, 40));
+					return postSessionSkip('user opted out');
+				}),
+			);
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			expect(result(report, 'late')).toMatchObject({
+				status: 'failed',
+				detail: { reason: 'drain_timeout' },
+			});
+		});
+
+		it('an empty reason throws a TypeError inside run(), which reports failed', async () => {
+			const p = new InMemoryPostSessionPipeline();
+			p.register(new TestProcessor('bad-skip', async () => postSessionSkip('')));
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			expect(result(report, 'bad-skip')?.status).toBe('failed');
+			expect(result(report, 'bad-skip')?.error).toBeInstanceOf(TypeError);
+		});
+
+		it('a plain object shaped like a skip is an ordinary detail and reports completed', async () => {
+			const plain = { reason: 'user opted out' };
+			const p = new InMemoryPostSessionPipeline();
+			p.register(new TestProcessor('plain', async () => plain));
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			expect(result(report, 'plain')?.status).toBe('completed');
+			expect(result(report, 'plain')?.detail).toBe(plain);
+		});
+
+		it('recognizes a skip made by another copy of the package (the brand is Symbol.for)', async () => {
+			const foreign = {
+				[Symbol.for('bodhi.post-session.skip')]: true,
+				reason: 'user opted out',
+			} as unknown as PostSessionSkip;
+			expect(isPostSessionSkip(foreign)).toBe(true);
+			const p = new InMemoryPostSessionPipeline();
+			p.register(new TestProcessor('foreign', async () => foreign));
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			expect(result(report, 'foreign')?.detail).toStrictEqual({
+				reason: 'run_skipped',
+				skipReason: 'user opted out',
+			});
+		});
+	});
+
+	describe('postSessionSkip() and isPostSessionSkip()', () => {
+		it('returns a frozen value holding a frozen shallow copy of detail', () => {
+			const nested = { a: 1 };
+			const detail = { attempt: 1, nested };
+			const skip = postSessionSkip('user opted out', detail);
+			expect(Object.isFrozen(skip)).toBe(true);
+			expect(Object.isFrozen(skip.detail)).toBe(true);
+			expect(skip.detail).not.toBe(detail);
+			expect(skip.detail?.nested).toBe(nested); // shallow
+			expect(skip.reason).toBe('user opted out');
+			expect('detail' in postSessionSkip('no detail')).toBe(false);
+		});
+
+		it('throws TypeError for an empty or non-string reason and for a detail that is not an object', () => {
+			expect(() => postSessionSkip('')).toThrow(TypeError);
+			expect(() => postSessionSkip(42 as unknown as string)).toThrow(TypeError);
+			expect(() => postSessionSkip('x', 'detail' as unknown as Record<string, unknown>)).toThrow(
+				TypeError,
+			);
+			expect(() => postSessionSkip('x', null as unknown as Record<string, unknown>)).toThrow(
+				TypeError,
+			);
+			expect(() => postSessionSkip('x', [] as unknown as Record<string, unknown>)).toThrow(
+				TypeError,
+			);
+		});
+
+		it('isPostSessionSkip is true only for branded values with a string reason', () => {
+			expect(isPostSessionSkip(postSessionSkip('x'))).toBe(true);
+			expect(isPostSessionSkip({ reason: 'x' })).toBe(false);
+			expect(isPostSessionSkip({ [Symbol.for('bodhi.post-session.skip')]: true })).toBe(false);
+			expect(isPostSessionSkip({ [Symbol('bodhi.post-session.skip')]: true, reason: 'x' })).toBe(
+				false,
+			);
+			for (const value of [undefined, null, 'x', 1, true]) {
+				expect(isPostSessionSkip(value)).toBe(false);
+			}
 		});
 	});
 });

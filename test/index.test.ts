@@ -22,6 +22,7 @@ import type {
 	PostSessionReport,
 	PostSessionResult,
 	PostSessionRun,
+	PostSessionSkip,
 	PostSessionSnapshot,
 	PostSessionSnapshotBuilder,
 	PostSessionStats,
@@ -37,7 +38,12 @@ import type {
 	VoiceSessionConfig,
 	VoiceSessionDiagnostics,
 } from '../src/index.js';
-import { InMemoryPostSessionPipeline, PostSessionProcessor } from '../src/index.js';
+import {
+	InMemoryPostSessionPipeline,
+	PostSessionProcessor,
+	isPostSessionSkip,
+	postSessionSkip,
+} from '../src/index.js';
 
 describe('module smoke test', () => {
 	it('imports without throwing and exports key APIs', async () => {
@@ -261,5 +267,55 @@ describe('module smoke test', () => {
 			'a_reason_added_later',
 			'queue_overflow',
 		]);
+	});
+
+	it('root-exports postSessionSkip, isPostSessionSkip and the PostSessionSkip type; the brand symbol stays internal', async () => {
+		const mod = await import('../src/index.js');
+		expect(typeof mod.postSessionSkip).toBe('function');
+		expect(typeof mod.isPostSessionSkip).toBe('function');
+		expect('POST_SESSION_SKIP' in mod).toBe(false);
+
+		class OptOutAware extends PostSessionProcessor {
+			readonly name = 'opt-out-aware';
+			async run(ctx: PostSessionContext): Promise<Record<string, unknown> | PostSessionSkip> {
+				if (ctx.metadata?.optedOut === true) return postSessionSkip('user opted out');
+				return { exported: true };
+			}
+		}
+		const pipeline = new InMemoryPostSessionPipeline();
+		pipeline.register(new OptOutAware());
+		pipeline.freeze();
+		const report = await pipeline.dispatch({
+			sessionId: 'sess_1',
+			reason: 'normal',
+			build: (reason) => ({
+				snapshot: {
+					sessionId: 'sess_1',
+					userId: 'user_1',
+					initialAgentName: 'main',
+					finalAgentName: 'main',
+					transferPath: ['main'],
+					reason,
+					startedAt: 0,
+					endedAt: 1,
+					durationMs: 1,
+					metadata: { optedOut: true },
+					conversation: { items: [] },
+					metrics: { turnCount: 0, toolCallCount: 0, agentTransferCount: 0 },
+				},
+				stores: {},
+			}),
+		}).report;
+		expect(report.results[0]).toMatchObject({
+			status: 'skipped',
+			detail: { reason: 'run_skipped', skipReason: 'user opted out' },
+		});
+
+		const skip: PostSessionSkip = postSessionSkip('consent lookup failed', { attempt: 1 });
+		expect(isPostSessionSkip(skip)).toBe(true);
+		// Type-level: only postSessionSkip() (or a deliberate cast) produces the branded type.
+		// @ts-expect-error a plain object lacks the brand
+		const plain: PostSessionSkip = { reason: 'consent lookup failed' };
+		expect(isPostSessionSkip(plain)).toBe(false);
 	});
 });

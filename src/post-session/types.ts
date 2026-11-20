@@ -129,8 +129,9 @@ export interface PostSessionResult {
 	 * A closed set. `detail.reason` (an open set) says why, when bodhi decided:
 	 * - `completed`: `run()` resolved; `detail` is its return value, if any.
 	 * - `skipped`: `shouldRun_false` (the gate returned false) or `dependency_failed`
-	 *   (a `dependsOn` prerequisite did not complete; `detail.dependency` names it).
-	 *   `run()` was not called.
+	 *   (a `dependsOn` prerequisite did not complete; `detail.dependency` names it),
+	 *   and `run()` was not called; or `run_skipped`, when `run()` returned a
+	 *   {@link postSessionSkip} value (`detail.skipReason` holds its reason).
 	 * - `failed`: `shouldRun_threw`; `drain_timeout` (the run budget expired or
 	 *   `drain()` cancelled the run while `run()` was pending); or no `detail`, with
 	 *   `error` set, when `run()` threw or rejected.
@@ -194,14 +195,84 @@ export abstract class PostSessionProcessor {
 	 * `PostSessionResult.detail`. Returning a value is for reporting ONLY — it is
 	 * never passed to dependent processors (cross-step data flows via `ctx.stores`).
 	 *
-	 * A throw (synchronous or a rejection) records `failed` with `error`. Cancellation
-	 * is cooperative: when the run budget expires or `drain()` cancels, the pipeline
-	 * aborts `ctx.signal` and stops waiting, but the work may continue. `run()` may be
-	 * called with `ctx.signal` already aborted, so check `signal.aborted` before side
-	 * effects.
+	 * To end the work as skipped after deciding inside `run()` (an opt-out or a lookup
+	 * that found nothing to do), RETURN `postSessionSkip(reason, detail?)`: the
+	 * result is `skipped` with `detail.reason: 'run_skipped'`, and hard dependents
+	 * skip with `dependency_failed`. Only a returned skip counts.
+	 *
+	 * A throw (synchronous or a rejection) records `failed` with `error`, even when
+	 * the thrown value is a skip. Cancellation is cooperative: when the run budget
+	 * expires or `drain()` cancels, the pipeline aborts `ctx.signal` and stops
+	 * waiting, but the work may continue. `run()` may be called with `ctx.signal`
+	 * already aborted, so check `signal.aborted` before side effects.
 	 */
-	// biome-ignore lint/suspicious/noConfusingVoidType: a processor may return a small detail object or nothing.
-	abstract run(ctx: PostSessionContext): Promise<Record<string, unknown> | void>;
+	// biome-ignore lint/suspicious/noConfusingVoidType: a processor may return a small detail object, a skip or nothing.
+	abstract run(ctx: PostSessionContext): Promise<Record<string, unknown> | PostSessionSkip | void>;
+}
+
+/**
+ * The brand of a {@link PostSessionSkip}. `Symbol.for`, so two copies of this
+ * package loaded in one process recognize each other's skips. Not exported from the
+ * package root: create skips with {@link postSessionSkip}.
+ */
+export const POST_SESSION_SKIP: unique symbol = Symbol.for('bodhi.post-session.skip');
+
+/**
+ * A value `run()` may RETURN to end its processor's work as `skipped`. The pipeline
+ * reports `detail: { ...detail, reason: 'run_skipped', skipReason: reason }`; the
+ * branded value itself never enters the report. Create it with
+ * {@link postSessionSkip}: the brand keeps a plain `{ reason }` object from passing
+ * as a skip.
+ */
+export interface PostSessionSkip {
+	readonly [POST_SESSION_SKIP]: true;
+	/**
+	 * Why the work was skipped. Free text that bodhi never interprets or truncates;
+	 * keep it short, with no credentials or personal data (it is logged like `detail`).
+	 */
+	readonly reason: string;
+	/**
+	 * Optional small, serializable detail, copied into the result's `detail`. bodhi's
+	 * `reason` and `skipReason` keys override host keys of the same name.
+	 */
+	readonly detail?: Readonly<Record<string, unknown>>;
+}
+
+/**
+ * Create a {@link PostSessionSkip} for `run()` to return. The value is frozen, and
+ * `detail` is copied (shallow) and frozen now, so a later change to the object
+ * passed in cannot change the report. `detail` follows the rule for
+ * `PostSessionResult.detail` (small, plain, serializable); bodhi does not check it.
+ *
+ * @throws TypeError when `reason` is not a non-empty string, or `detail` is given
+ *   and is not a plain object. Inside `run()` that records `failed`.
+ */
+export function postSessionSkip(reason: string, detail?: Record<string, unknown>): PostSessionSkip {
+	if (typeof reason !== 'string' || reason.length === 0) {
+		throw new TypeError('postSessionSkip: reason must be a non-empty string');
+	}
+	if (detail === undefined) return Object.freeze({ [POST_SESSION_SKIP]: true as const, reason });
+	if (typeof detail !== 'object' || detail === null || Array.isArray(detail)) {
+		throw new TypeError('postSessionSkip: detail must be a plain object when given');
+	}
+	return Object.freeze({
+		[POST_SESSION_SKIP]: true as const,
+		reason,
+		detail: Object.freeze({ ...detail }),
+	});
+}
+
+/**
+ * True when `value` is a {@link PostSessionSkip}: it carries the brand and a string
+ * `reason`. For hosts that implement {@link PostSessionPipeline} themselves.
+ */
+export function isPostSessionSkip(value: unknown): value is PostSessionSkip {
+	return (
+		typeof value === 'object' &&
+		value !== null &&
+		(value as { readonly [POST_SESSION_SKIP]?: unknown })[POST_SESSION_SKIP] === true &&
+		typeof (value as { readonly reason?: unknown }).reason === 'string'
+	);
 }
 
 /**

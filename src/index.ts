@@ -7,7 +7,12 @@ export * from './knowledge/index.js';
 export * from './memory/index.js';
 // Post-session processing: an explicit list. The default pipeline factories and the built-in
 // processors stay internal (VoiceSession's memory fallback uses them).
-export { InMemoryPostSessionPipeline, PostSessionProcessor } from './post-session/index.js';
+export {
+	InMemoryPostSessionPipeline,
+	PostSessionProcessor,
+	isPostSessionSkip,
+	postSessionSkip,
+} from './post-session/index.js';
 export type {
 	ConversationSnapshot,
 	KnownSessionEndReason,
@@ -20,6 +25,7 @@ export type {
 	PostSessionReport,
 	PostSessionResult,
 	PostSessionRun,
+	PostSessionSkip,
 	PostSessionSnapshot,
 	PostSessionSnapshotBuilder,
 	PostSessionStats,
