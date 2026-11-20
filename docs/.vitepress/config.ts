@@ -57,6 +57,10 @@ export default withMermaid(
 							{ text: 'Known Issues', link: '/guide/known-issues' },
 						],
 					},
+					{
+						text: 'Releases',
+						items: [{ text: 'Changelog', link: '/guide/changelog' }],
+					},
 				],
 				'/advanced/': [
 					{
