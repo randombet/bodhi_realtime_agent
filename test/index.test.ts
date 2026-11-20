@@ -274,6 +274,8 @@ describe('module smoke test', () => {
 		expect(typeof mod.postSessionSkip).toBe('function');
 		expect(typeof mod.isPostSessionSkip).toBe('function');
 		expect('POST_SESSION_SKIP' in mod).toBe(false);
+		// The pipeline's unguarded skip check is internal; hosts get the guarded one.
+		expect('isPostSessionSkipUnguarded' in mod).toBe(false);
 
 		class OptOutAware extends PostSessionProcessor {
 			readonly name = 'opt-out-aware';

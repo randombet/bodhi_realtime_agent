@@ -920,6 +920,154 @@ describe('InMemoryPostSessionPipeline', () => {
 			expect(result(report, 'gate-throws-string')?.error?.cause).toBe('gate boom');
 		});
 
+		it('a thrown value that throws when inspected is failed with a causeless Error: the report resolves, onProcessed fires once, nothing rejects unhandled', async () => {
+			const unhandled: unknown[] = [];
+			const onUnhandled = (reason: unknown) => {
+				unhandled.push(reason);
+			};
+			process.on('unhandledRejection', onUnhandled);
+			try {
+				// `instanceof` asks a Proxy for its prototype; the skip check reads the brand
+				// and `reason`. Each of these values throws from one of those reads.
+				const hostileProxy = new Proxy(
+					{},
+					{
+						get() {
+							throw new Error('get trap boom');
+						},
+						getPrototypeOf() {
+							throw new Error('getPrototypeOf trap boom');
+						},
+					},
+				);
+				const brandGetter = {
+					get [SKIP_BRAND]() {
+						throw new Error('brand getter boom');
+					},
+				};
+				const reasonGetter = {
+					[SKIP_BRAND]: true,
+					get reason() {
+						throw new Error('reason getter boom');
+					},
+				};
+				const emitted: PostSessionReport[] = [];
+				const p = new InMemoryPostSessionPipeline();
+				p.events.onProcessed((r) => emitted.push(r));
+				p.register(
+					new TestProcessor('proxy-rejection', async () => {
+						throw hostileProxy;
+					}),
+				);
+				p.register(
+					new TestProcessor('proxy-sync-throw', () => {
+						throw hostileProxy;
+					}),
+				);
+				p.register(new TestProcessor('brand-getter', () => Promise.reject(brandGetter)));
+				p.register(new TestProcessor('reason-getter', () => Promise.reject(reasonGetter)));
+				p.register(
+					new TestProcessor(
+						'gate-throws-proxy',
+						async () => {},
+						[],
+						false,
+						() => {
+							throw hostileProxy;
+						},
+					),
+				);
+				p.register(new TestProcessor('ok', async () => ({ ran: true })));
+				p.freeze();
+				const report = await p.dispatch({
+					sessionId: 's',
+					reason: 'normal',
+					build: makeBuilder('s'),
+				}).report;
+
+				expect(report.outcome).toBe('accepted');
+				for (const name of [
+					'proxy-rejection',
+					'proxy-sync-throw',
+					'brand-getter',
+					'reason-getter',
+				]) {
+					const r = result(report, name);
+					expect(r?.status).toBe('failed');
+					expect(r?.error).toBeInstanceOf(Error);
+					expect(r?.error?.message).toBe('run() threw a value that could not be inspected');
+					expect(r?.detail).toBeUndefined();
+					// No `cause`: a reference to the value would re-run its traps or getters
+					// in every host that logs the error.
+					expect(Object.hasOwn(r?.error as Error, 'cause')).toBe(false);
+				}
+				const gate = result(report, 'gate-throws-proxy');
+				expect(gate).toMatchObject({ status: 'failed', detail: { reason: 'shouldRun_threw' } });
+				expect(gate?.error).toBeInstanceOf(Error);
+				expect(gate?.error?.message).toBe('shouldRun() threw a value that could not be inspected');
+				expect(Object.hasOwn(gate?.error as Error, 'cause')).toBe(false);
+				expect(result(report, 'ok')?.status).toBe('completed');
+
+				const reachable = reachableFrom(report);
+				for (const hostile of [hostileProxy, brandGetter, reasonGetter]) {
+					expect(reachable.has(hostile)).toBe(false);
+				}
+				expect(emitted).toHaveLength(1);
+				expect(emitted[0]).toBe(report);
+				expect(p.stats()).toMatchObject({ running: 0, completed: 1, failed: 5 });
+				await new Promise((r) => setTimeout(r, 10));
+				expect(unhandled).toEqual([]);
+			} finally {
+				process.off('unhandledRejection', onUnhandled);
+			}
+		});
+
+		it('the pending-report cleanup adds no rejection of its own when a report rejects', async () => {
+			// White-box: no processor can make a report reject any more, so drive the private
+			// tracker directly. A cleanup chained with finally() would reject unhandled here.
+			const unhandled: unknown[] = [];
+			const onUnhandled = (reason: unknown) => {
+				unhandled.push(reason);
+			};
+			process.on('unhandledRejection', onUnhandled);
+			try {
+				const p = new InMemoryPostSessionPipeline();
+				const internals = p as unknown as {
+					track(report: Promise<PostSessionReport>): Promise<PostSessionReport>;
+					pendingReports: Set<Promise<PostSessionReport>>;
+				};
+				const rejected = Promise.reject(new Error('report boom'));
+				const tracked = internals.track(rejected);
+				expect(tracked).toBe(rejected);
+				expect(internals.pendingReports.has(rejected)).toBe(true);
+				await expect(tracked).rejects.toThrow('report boom');
+				await new Promise((r) => setTimeout(r, 10));
+				expect(internals.pendingReports.size).toBe(0);
+				expect(unhandled).toEqual([]);
+			} finally {
+				process.off('unhandledRejection', onUnhandled);
+			}
+		});
+
+		it('a returned value whose skip check throws is not a skip: it is the detail of a completed result', async () => {
+			// bodhi reads nothing of a returned detail but the skip check, so a value whose
+			// brand getter throws is reported as is, like any other detail.
+			const returned = {
+				get [SKIP_BRAND]() {
+					throw new Error('brand getter boom');
+				},
+			};
+			const p = new InMemoryPostSessionPipeline();
+			p.register(
+				new TestProcessor('hostile-detail', async () => returned as Record<string, unknown>),
+			);
+			p.freeze();
+			const report = await p.dispatch({ sessionId: 's', reason: 'normal', build: makeBuilder('s') })
+				.report;
+			expect(result(report, 'hostile-detail')?.status).toBe('completed');
+			expect(result(report, 'hostile-detail')?.detail).toBe(returned);
+		});
+
 		it('a thrown Error is reported as that same Error', async () => {
 			const thrown = new RangeError('out of range');
 			const p = new InMemoryPostSessionPipeline();
@@ -1043,6 +1191,34 @@ describe('InMemoryPostSessionPipeline', () => {
 				false,
 			);
 			for (const value of [undefined, null, 'x', 1, true]) {
+				expect(isPostSessionSkip(value)).toBe(false);
+			}
+		});
+
+		it('isPostSessionSkip never throws: a value whose inspection throws is not a skip', () => {
+			const throwingProxy = new Proxy(
+				{},
+				{
+					get() {
+						throw new Error('get trap boom');
+					},
+				},
+			);
+			const revoked = Proxy.revocable({}, {});
+			revoked.revoke();
+			const brandGetter = {
+				get [SKIP_BRAND]() {
+					throw new Error('brand getter boom');
+				},
+			};
+			const reasonGetter = {
+				[SKIP_BRAND]: true,
+				get reason() {
+					throw new Error('reason getter boom');
+				},
+			};
+			for (const value of [throwingProxy, revoked.proxy, brandGetter, reasonGetter]) {
+				expect(() => isPostSessionSkip(value)).not.toThrow();
 				expect(isPostSessionSkip(value)).toBe(false);
 			}
 		});

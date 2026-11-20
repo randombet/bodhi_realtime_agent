@@ -145,7 +145,10 @@ export interface PostSessionResult {
 	 * Set when `shouldRun()` or `run()` threw (`failed`). Always an `Error`: a thrown
 	 * `Error` is kept as is; any other thrown value is wrapped in a new `Error` whose
 	 * `cause` is that value, except a thrown {@link PostSessionSkip}, which is replaced
-	 * by an `Error` that says so and never enters the report.
+	 * by an `Error` that says so and never enters the report. A thrown value that throws
+	 * while bodhi inspects it (a `Proxy` trap, or a getter on the skip brand or `reason`)
+	 * is replaced by an `Error` whose message says it could not be inspected, with no
+	 * `cause`, so the value never enters the report.
 	 */
 	readonly error?: Error;
 	/** Optional small, serializable summary / cause for logging/analytics. */
@@ -282,8 +285,25 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 /**
  * True when `value` is a {@link PostSessionSkip}: it carries the brand and a string
  * `reason`. For hosts that implement {@link PostSessionPipeline} themselves.
+ *
+ * Never throws. The check reads the brand and `reason`, and a `Proxy` trap or a getter
+ * can throw from either read; a value whose inspection throws is not a skip, so the
+ * answer is `false`.
  */
 export function isPostSessionSkip(value: unknown): value is PostSessionSkip {
+	try {
+		return isPostSessionSkipUnguarded(value);
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * {@link isPostSessionSkip} without its guard: a throw from a `Proxy` trap or a getter
+ * reaches the caller. Not exported from the package root. The pipeline uses it on a
+ * thrown value, where "could not be inspected" and "not a skip" are reported differently.
+ */
+export function isPostSessionSkipUnguarded(value: unknown): value is PostSessionSkip {
 	return (
 		typeof value === 'object' &&
 		value !== null &&

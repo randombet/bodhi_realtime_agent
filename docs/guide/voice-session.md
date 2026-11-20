@@ -759,8 +759,11 @@ await pipeline.drain(5_000);
 - A throw from `run()`, synchronous or a rejection, reports `failed` with
   `error`. `error` is always an `Error`: a thrown `Error` is kept, and any
   other thrown value is wrapped in a new `Error` with the value as its
-  `cause`. A value `run()` returns becomes that result's `detail` and nothing
-  else: it is never passed to dependents.
+  `cause`. A thrown value that throws while bodhi inspects it (a `Proxy`
+  trap, or a getter on the skip brand or `reason`) becomes an `Error` that
+  says it could not be inspected, with no `cause`; the report still resolves.
+  A value `run()` returns becomes that result's `detail` and nothing else: it
+  is never passed to dependents.
 - One wall-clock budget, `runBudgetMs`, covers the whole run. When it expires,
   bodhi aborts `ctx.signal`. Processors still running report `failed` with
   `drain_timeout`, and their dependents still waiting report `skipped` with

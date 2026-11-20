@@ -11,7 +11,7 @@ import type {
 	PostSessionStats,
 	PostSessionStores,
 } from './types.js';
-import { isPostSessionSkip } from './types.js';
+import { isPostSessionSkip, isPostSessionSkipUnguarded } from './types.js';
 
 /** Tuning knobs for {@link InMemoryPostSessionPipeline}. */
 export interface PostSessionPipelineOptions {
@@ -174,10 +174,17 @@ export class InMemoryPostSessionPipeline implements PostSessionPipeline {
 		return { sessionId, outcome: 'accepted', report: this.track(report) };
 	}
 
-	/** Add a run's report to the pending set (for drain) until it settles. */
+	/**
+	 * Add a run's report to the pending set (for drain) until it settles. The cleanup
+	 * handles both outcomes: a `finally()` chain here would be a second promise that
+	 * nobody awaits, and it would reject unhandled whenever the report rejects.
+	 */
 	private track(report: Promise<PostSessionReport>): Promise<PostSessionReport> {
 		this.pendingReports.add(report);
-		report.finally(() => this.pendingReports.delete(report));
+		const forget = (): void => {
+			this.pendingReports.delete(report);
+		};
+		report.then(forget, forget);
 		return report;
 	}
 
@@ -459,15 +466,28 @@ function invokeRun(
  * `Error` is kept as is. A `PostSessionSkip` is replaced by a new `Error` that says
  * a skip was thrown: the branded value never enters a report. Any other value is wrapped
  * in a new `Error` whose `cause` is that value. A value is never converted to a string
- * (no `toString()`), so a hostile or null-prototype object cannot throw here.
+ * (no `toString()`), so a null-prototype object cannot throw here.
+ *
+ * Never throws: it runs inside the processor's catch handler, so a throw here would
+ * reject `run.report`. Sorting the value inspects it (`instanceof` asks a `Proxy` for
+ * its prototype; the skip check reads the brand and `reason`), and a hostile value can
+ * throw from any of those reads. Then the result is a new `Error` that says the value
+ * could not be inspected, with no `cause`: a reference to the value would hand its
+ * throwing traps or getters to every host that logs the error.
  */
 function toError(thrown: unknown, where: string): Error {
-	if (thrown instanceof Error) return thrown;
-	if (isPostSessionSkip(thrown)) {
-		return new Error(
-			`${where} threw a postSessionSkip() value (skip reason: ${JSON.stringify(thrown.reason)}); only a skip that run() returns reports skipped`,
-		);
+	try {
+		if (thrown instanceof Error) return thrown;
+		if (isPostSessionSkipUnguarded(thrown)) {
+			return new Error(
+				`${where} threw a postSessionSkip() value (skip reason: ${JSON.stringify(thrown.reason)}); only a skip that run() returns reports skipped`,
+			);
+		}
+	} catch {
+		return new Error(`${where} threw a value that could not be inspected`);
 	}
+	// describeThrown() uses only `typeof` on an object, and `new Error()` reads nothing
+	// of its cause, so this line cannot throw.
 	return new Error(`${where} threw a non-Error value: ${describeThrown(thrown)}`, {
 		cause: thrown,
 	});
